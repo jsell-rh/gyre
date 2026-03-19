@@ -40,6 +40,14 @@ pub struct AgentResponse {
     pub last_heartbeat: Option<u64>,
 }
 
+/// Returned only from POST /api/v1/agents — includes a one-time auth token.
+#[derive(Serialize)]
+pub struct RegisterAgentResponse {
+    #[serde(flatten)]
+    pub agent: AgentResponse,
+    pub auth_token: String,
+}
+
 impl From<Agent> for AgentResponse {
     fn from(a: Agent) -> Self {
         Self {
@@ -68,12 +76,26 @@ fn parse_agent_status(s: &str) -> Result<AgentStatus, ApiError> {
 pub async fn create_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAgentRequest>,
-) -> Result<(StatusCode, Json<AgentResponse>), ApiError> {
+) -> Result<(StatusCode, Json<RegisterAgentResponse>), ApiError> {
     let now = now_secs();
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     state.agents.create(&agent).await?;
-    Ok((StatusCode::CREATED, Json(AgentResponse::from(agent))))
+
+    let token = uuid::Uuid::new_v4().to_string();
+    state
+        .agent_tokens
+        .lock()
+        .await
+        .insert(agent.id.to_string(), token.clone());
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterAgentResponse {
+            agent: AgentResponse::from(agent),
+            auth_token: token,
+        }),
+    ))
 }
 
 pub async fn list_agents(
@@ -165,9 +187,31 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         let id = json["id"].as_str().unwrap().to_string();
         (app, id)
+    }
+
+    #[tokio::test]
+    async fn create_agent_returns_auth_token() {
+        let app = app();
+        let body = serde_json::json!({ "name": "token-agent" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(json["auth_token"].as_str().is_some());
+        assert!(!json["auth_token"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
