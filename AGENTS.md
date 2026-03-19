@@ -156,6 +156,21 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change |
 | `POST` | `/api/v1/repos/{id}/jj/undo` | Undo the last jj operation |
 | `POST` | `/api/v1/repos/{id}/jj/bookmark` | Create a jj bookmark (branch) pointing to a change |
+| `GET` | `/healthz` | Liveness probe — `{status, checks}` JSON |
+| `GET` | `/readyz` | Readiness probe — `{status, checks}` JSON |
+| `POST` | `/api/v1/analytics/events` | Record an analytics event |
+| `GET` | `/api/v1/analytics/events` | Query analytics events (`?event_name=&agent_id=&since=`) |
+| `GET` | `/api/v1/analytics/count` | Count events by name (aggregated) |
+| `GET` | `/api/v1/analytics/daily` | Daily event counts (time-series) |
+| `POST` | `/api/v1/costs` | Record a cost entry (agent_id, task_id, cost_type, amount) |
+| `GET` | `/api/v1/costs` | Query cost entries (`?agent_id=&task_id=&since=`) |
+| `GET` | `/api/v1/costs/summary` | Aggregated cost totals by agent |
+| `POST` | `/api/v1/admin/jobs/{name}/run` | Manually trigger a named background job (Admin only) |
+| `POST` | `/api/v1/admin/snapshot` | Create point-in-time DB snapshot (Admin only) |
+| `GET` | `/api/v1/admin/snapshots` | List all snapshots (Admin only) |
+| `POST` | `/api/v1/admin/restore` | Restore DB from a named snapshot (Admin only) |
+| `DELETE` | `/api/v1/admin/snapshots/{id}` | Delete a snapshot (Admin only) |
+| `GET` | `/api/v1/admin/export` | Export all entities as JSON (Admin only) |
 
 ### Authentication
 
@@ -200,6 +215,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL, e.g. `http://keycloak:8080/realms/gyre` — enables JWT auth (M4.2) |
 | `GYRE_OIDC_AUDIENCE` | _(none)_ | Optional JWT audience claim for Keycloak token validation (M4.2) |
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
+| `GYRE_SNAPSHOT_PATH` | `./snapshots/` | Directory for DB snapshot files (`POST /api/v1/admin/snapshot`) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
@@ -371,7 +387,7 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4 + M4.3 + M5)
+### Dashboard (M3.4 + M4.3 + M5 + M6)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
@@ -387,6 +403,9 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **MCP Tool Catalog** (M5.1, sidebar: "MCP Tools"): lists all 8 MCP tools available on `/mcp`, with per-tool schema details.
 - **Compose View** (M5.2, sidebar: "Compose"): paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states, and teardown the session.
 - **Agent Card Panel** (M5.2): per-agent panel to view and edit the agent's A2A AgentCard (capabilities, protocols, endpoint).
+- **Analytics View** (M6.1): event counts bar chart and recent events list with property drill-down. Tracks auto-emitted events: `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`, `merge_queue.processed`.
+- **Cost View** (M6.1): agent cost breakdown table with total display and per-agent detail drill-down.
+- **Admin Panel — M6 additions** (M6.2): snapshot create/restore/delete controls, job history table with Run Now button, retention policy editor, full data export download.
 
 ---
 
