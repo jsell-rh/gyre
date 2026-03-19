@@ -7,6 +7,7 @@ pub mod merge_queue;
 pub mod merge_requests;
 pub mod projects;
 pub mod repos;
+pub mod spawn;
 pub mod tasks;
 pub mod version;
 
@@ -66,12 +67,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/agents",
             post(agents::create_agent).get(agents::list_agents),
         )
+        .route("/api/v1/agents/spawn", post(spawn::spawn_agent))
         .route("/api/v1/agents/:id", get(agents::get_agent))
         .route(
             "/api/v1/agents/:id/status",
             put(agents::update_agent_status),
         )
         .route("/api/v1/agents/:id/heartbeat", put(agents::agent_heartbeat))
+        .route("/api/v1/agents/:id/complete", post(spawn::complete_agent))
         .route(
             "/api/v1/agents/:id/messages",
             get(agent_messages::get_messages).post(agent_messages::send_message),

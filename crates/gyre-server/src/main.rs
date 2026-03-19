@@ -28,6 +28,8 @@ use tracing::info;
 #[derive(Clone)]
 pub struct AppState {
     pub auth_token: String,
+    /// Base URL for building clone URLs, e.g. "http://localhost:3000".
+    pub base_url: String,
     pub projects: Arc<dyn ProjectRepository>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
@@ -90,9 +92,13 @@ async fn main() -> Result<()> {
     let auth_token =
         std::env::var("GYRE_AUTH_TOKEN").unwrap_or_else(|_| "gyre-dev-token".to_string());
 
+    let base_url =
+        std::env::var("GYRE_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
+
     let (broadcast_tx, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
         auth_token,
+        base_url,
         projects: Arc::new(mem::MemProjectRepository::default()),
         repos: Arc::new(mem::MemRepoRepository::default()),
         agents: Arc::new(mem::MemAgentRepository::default()),
@@ -128,6 +134,10 @@ async fn main() -> Result<()> {
 }
 
 /// Periodically scan for agents that have stopped sending heartbeats and mark them Dead.
+/// When an agent is marked Dead:
+///   - Its worktrees are cleaned up (git remove + DB delete)
+///   - Its assigned task (if any) is transitioned to Blocked
+///   - An ActivityEvent is recorded
 fn spawn_stale_agent_detector(state: Arc<AppState>) {
     const CHECK_INTERVAL_SECS: u64 = 30;
     const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
@@ -152,6 +162,51 @@ fn spawn_stale_agent_detector(state: Arc<AppState>) {
                                   "marking stale agent as dead");
                             let _ = agent.transition_status(AgentStatus::Dead);
                             let _ = state.agents.update(&agent).await;
+
+                            // Clean up worktrees
+                            if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+                                for wt in worktrees {
+                                    if let Ok(Some(repo)) =
+                                        state.repos.find_by_id(&wt.repository_id).await
+                                    {
+                                        if let Err(e) = state
+                                            .git_ops
+                                            .remove_worktree(&repo.path, &wt.path)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "remove_worktree failed for agent {}: {e}",
+                                                agent.id
+                                            );
+                                        }
+                                    }
+                                    let _ = state.worktrees.delete(&wt.id).await;
+                                }
+                            }
+
+                            // Block the assigned task
+                            if let Some(task_id) = &agent.current_task_id {
+                                if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+                                    use gyre_domain::TaskStatus;
+                                    if task.status == TaskStatus::InProgress {
+                                        let _ = task.transition_status(TaskStatus::Blocked);
+                                        task.updated_at = now;
+                                        let _ = state.tasks.update(&task).await;
+                                    }
+                                }
+                            }
+
+                            // Record ActivityEvent
+                            state.activity_store.record(ActivityEventData {
+                                event_id: uuid::Uuid::new_v4().to_string(),
+                                agent_id: agent.id.to_string(),
+                                event_type: "agent.dead".to_string(),
+                                description: format!(
+                                    "Agent {} marked dead (no heartbeat)",
+                                    agent.name
+                                ),
+                                timestamp: now,
+                            });
                         }
                     }
                 }
