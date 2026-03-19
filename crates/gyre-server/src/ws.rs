@@ -282,7 +282,7 @@ mod tests {
         let event = WsMessage::ActivityEvent {
             event_id: "ev1".to_string(),
             agent_id: "agent1".to_string(),
-            event_type: "TEST".to_string(),
+            event_type: gyre_common::AgEventType::RunStarted,
             description: "test description".to_string(),
             timestamp: 1000,
         };
@@ -347,7 +347,7 @@ mod tests {
         let event = WsMessage::ActivityEvent {
             event_id: "broadcast-ev".to_string(),
             agent_id: "agentA".to_string(),
-            event_type: "IMPLEMENT".to_string(),
+            event_type: gyre_common::AgEventType::TextMessageContent,
             description: "broadcast test".to_string(),
             timestamp: 2000,
         };
