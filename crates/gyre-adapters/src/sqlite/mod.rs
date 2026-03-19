@@ -7,6 +7,7 @@ use tracing::instrument;
 pub mod activity;
 pub mod agent;
 pub mod agent_commit;
+pub mod analytics;
 pub mod merge_queue;
 pub mod merge_request;
 mod migrations;
@@ -92,6 +93,8 @@ mod tests {
             "agent_worktrees",
             "users",
             "api_keys",
+            "analytics_events",
+            "cost_entries",
         ];
         for table in &tables {
             let count: i64 = conn

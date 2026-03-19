@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{Task, TaskPriority, TaskStatus};
+use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -217,8 +217,23 @@ pub async fn transition_task_status(
     let new_status = parse_task_status(&req.status)?;
     task.transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
-    task.updated_at = now_secs();
+    let ts = now_secs();
+    task.updated_at = ts;
     state.tasks.update(&task).await?;
+
+    // Auto-track status transition as analytics event
+    let event = AnalyticsEvent::new(
+        new_id(),
+        "task.status_changed",
+        task.assigned_to.as_ref().map(|id| id.to_string()),
+        serde_json::json!({
+            "task_id": task.id.to_string(),
+            "new_status": req.status,
+        }),
+        ts,
+    );
+    let _ = state.analytics.record(&event).await;
+
     Ok(Json(TaskResponse::from(task)))
 }
 
