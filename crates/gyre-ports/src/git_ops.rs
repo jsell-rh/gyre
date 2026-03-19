@@ -23,4 +23,18 @@ pub trait GitOpsPort: Send + Sync {
 
     /// Check if a path is a valid git repository.
     async fn is_repo(&self, path: &str) -> Result<bool>;
+
+    /// Add a git worktree at `worktree_path` checked out to `branch`.
+    async fn create_worktree(
+        &self,
+        repo_path: &str,
+        worktree_path: &str,
+        branch: &str,
+    ) -> Result<()>;
+
+    /// Remove a git worktree at `worktree_path`.
+    async fn remove_worktree(&self, repo_path: &str, worktree_path: &str) -> Result<()>;
+
+    /// List paths of all registered worktrees for the repository.
+    async fn list_worktrees(&self, repo_path: &str) -> Result<Vec<String>>;
 }

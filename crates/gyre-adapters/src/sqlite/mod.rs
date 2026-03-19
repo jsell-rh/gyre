@@ -6,11 +6,13 @@ use tracing::instrument;
 
 pub mod activity;
 pub mod agent;
+pub mod agent_commit;
 pub mod merge_request;
 mod migrations;
 pub mod project;
 pub mod repository;
 pub mod task;
+pub mod worktree;
 
 /// SQLite-backed storage adapter.
 /// Implements all port traits for local/development deployments.
@@ -83,6 +85,8 @@ mod tests {
             "tasks",
             "merge_requests",
             "activity_events",
+            "agent_commits",
+            "agent_worktrees",
         ];
         for table in &tables {
             let count: i64 = conn

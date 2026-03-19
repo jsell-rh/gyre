@@ -11,8 +11,8 @@ use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
 use gyre_domain::AgentStatus;
 use gyre_ports::{
-    AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository, RepoRepository,
-    TaskRepository,
+    AgentCommitRepository, AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository,
+    RepoRepository, TaskRepository, WorktreeRepository,
 };
 use messages::AgentMessage;
 use std::collections::{HashMap, VecDeque};
@@ -30,6 +30,8 @@ pub struct AppState {
     pub tasks: Arc<dyn TaskRepository>,
     pub merge_requests: Arc<dyn MergeRequestRepository>,
     pub git_ops: Arc<dyn GitOpsPort>,
+    pub agent_commits: Arc<dyn AgentCommitRepository>,
+    pub worktrees: Arc<dyn WorktreeRepository>,
     pub activity_store: activity::ActivityStore,
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
     /// Per-agent message inboxes: agent_id → queued messages.
@@ -76,6 +78,8 @@ async fn main() -> Result<()> {
         tasks: Arc::new(mem::MemTaskRepository::default()),
         merge_requests: Arc::new(mem::MemMrRepository::default()),
         git_ops: Arc::new(gyre_adapters::Git2OpsAdapter::new()),
+        agent_commits: Arc::new(mem::MemAgentCommitRepository::default()),
+        worktrees: Arc::new(mem::MemWorktreeRepository::default()),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
