@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod admin;
 pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
@@ -121,6 +122,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
         // Auth / API keys
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
+        // Admin (Admin role required)
+        .route("/api/v1/admin/health", get(admin::admin_health))
+        .route("/api/v1/admin/jobs", get(admin::admin_jobs))
+        .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route(
+            "/api/v1/admin/agents/:id/kill",
+            post(admin::admin_kill_agent),
+        )
+        .route(
+            "/api/v1/admin/agents/:id/reassign",
+            post(admin::admin_reassign_agent),
+        )
 }
 
 pub(crate) fn now_secs() -> u64 {

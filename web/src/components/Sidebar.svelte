@@ -7,6 +7,7 @@
     { id: 'tasks',       label: 'Tasks',       icon: '📋' },
     { id: 'projects',    label: 'Projects',    icon: '📁' },
     { id: 'merge-queue', label: 'Merge Queue', icon: '⚙' },
+    { id: 'admin',       label: 'Admin',       icon: '🛡' },
     { id: 'settings',    label: 'Settings',    icon: '⚙️' },
   ];
 </script>

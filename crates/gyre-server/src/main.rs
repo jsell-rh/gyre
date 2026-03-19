@@ -1,7 +1,8 @@
 use anyhow::Result;
 use gyre_server::{
-    build_router, build_state, merge_processor, spawn_stale_agent_detector, telemetry,
+    build_router, build_state, merge_processor, spawn_stale_agent_detector, telemetry, JwtConfig,
 };
+use std::sync::Arc;
 use tracing::info;
 
 #[tokio::main]
@@ -22,7 +23,12 @@ async fn main() -> Result<()> {
     let base_url =
         std::env::var("GYRE_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
 
-    let state = build_state(&auth_token, &base_url);
+    let jwt_config = std::env::var("GYRE_OIDC_ISSUER").ok().map(|issuer| {
+        let audience = std::env::var("GYRE_OIDC_AUDIENCE").ok();
+        Arc::new(JwtConfig::new(issuer, audience))
+    });
+
+    let state = build_state(&auth_token, &base_url, jwt_config);
 
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
