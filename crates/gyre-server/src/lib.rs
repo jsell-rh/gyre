@@ -4,6 +4,7 @@ pub(crate) mod auth;
 pub(crate) mod git_http;
 pub(crate) mod health;
 pub(crate) mod mem;
+pub(crate) mod mcp;
 pub mod merge_processor;
 pub(crate) mod messages;
 pub mod metrics;
@@ -14,7 +15,7 @@ pub mod telemetry;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
-use gyre_common::ActivityEventData;
+use gyre_common::{AgEventType, ActivityEventData};
 use gyre_domain::AgentStatus;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, MergeQueueRepository,
@@ -110,6 +111,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/git/:project/:repo/git-receive-pack",
             post(git_http::git_receive_pack),
         )
+        // MCP (Model Context Protocol) endpoints
+        .route("/mcp", post(mcp::mcp_handler))
+        .route("/mcp/sse", get(mcp::mcp_sse_handler))
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
         .merge(api::api_router())
@@ -226,7 +230,7 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
                             state.activity_store.record(ActivityEventData {
                                 event_id: uuid::Uuid::new_v4().to_string(),
                                 agent_id: agent.id.to_string(),
-                                event_type: "agent.dead".to_string(),
+                                event_type: AgEventType::StateChanged,
                                 description: format!(
                                     "Agent {} marked dead (no heartbeat)",
                                     agent.name

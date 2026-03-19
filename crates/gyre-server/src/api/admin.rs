@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use gyre_common::Id;
+use gyre_common::{AgEventType, Id};
 use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -104,7 +104,7 @@ pub async fn admin_audit(
         .into_iter()
         .filter(|e| {
             q.agent_id.as_deref().is_none_or(|id| e.agent_id == id)
-                && q.event_type.as_deref().is_none_or(|et| e.event_type == et)
+                && q.event_type.as_deref().is_none_or(|et| e.event_type.as_str() == et)
         })
         .collect();
 
@@ -162,7 +162,7 @@ pub async fn admin_kill_agent(
     state.activity_store.record(gyre_common::ActivityEventData {
         event_id: uuid::Uuid::new_v4().to_string(),
         agent_id: agent.id.to_string(),
-        event_type: "agent.killed".to_string(),
+        event_type: AgEventType::StateChanged,
         description: format!("Agent {} force-killed by admin", agent.name),
         timestamp: now,
     });
@@ -209,7 +209,7 @@ pub async fn admin_reassign_agent(
     state.activity_store.record(gyre_common::ActivityEventData {
         event_id: uuid::Uuid::new_v4().to_string(),
         agent_id: agent.id.to_string(),
-        event_type: "agent.reassigned".to_string(),
+        event_type: AgEventType::StateChanged,
         description: format!("Agent {} tasks reassigned to {}", agent.name, target.name),
         timestamp: now,
     });
@@ -372,7 +372,7 @@ mod tests {
         state.activity_store.record(gyre_common::ActivityEventData {
             event_id: "test-event-1".to_string(),
             agent_id: "agent-1".to_string(),
-            event_type: "test.event".to_string(),
+            event_type: gyre_common::AgEventType::StateChanged,
             description: "Test event".to_string(),
             timestamp: 1000,
         });
@@ -400,14 +400,14 @@ mod tests {
         state.activity_store.record(gyre_common::ActivityEventData {
             event_id: "e1".to_string(),
             agent_id: "agent-x".to_string(),
-            event_type: "test".to_string(),
+            event_type: gyre_common::AgEventType::RunStarted,
             description: "From agent-x".to_string(),
             timestamp: 1000,
         });
         state.activity_store.record(gyre_common::ActivityEventData {
             event_id: "e2".to_string(),
             agent_id: "agent-y".to_string(),
-            event_type: "test".to_string(),
+            event_type: gyre_common::AgEventType::RunStarted,
             description: "From agent-y".to_string(),
             timestamp: 2000,
         });

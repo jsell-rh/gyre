@@ -57,7 +57,7 @@ mod tests {
         ActivityEventData {
             event_id: id.to_string(),
             agent_id: "agent1".to_string(),
-            event_type: "TEST".to_string(),
+            event_type: gyre_common::AgEventType::StateChanged,
             description: "test event".to_string(),
             timestamp: ts,
         }
