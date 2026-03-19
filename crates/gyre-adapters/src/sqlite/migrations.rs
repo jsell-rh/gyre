@@ -80,7 +80,36 @@ CREATE INDEX IF NOT EXISTS idx_mr_repo ON merge_requests(repository_id);
 CREATE INDEX IF NOT EXISTS idx_repos_project ON repositories(project_id);
 ";
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001)];
+const MIGRATION_002: &str = "
+ALTER TABLE merge_requests ADD COLUMN diff_files_changed INTEGER;
+ALTER TABLE merge_requests ADD COLUMN diff_insertions INTEGER;
+ALTER TABLE merge_requests ADD COLUMN diff_deletions INTEGER;
+ALTER TABLE merge_requests ADD COLUMN has_conflicts INTEGER;
+
+CREATE TABLE IF NOT EXISTS review_comments (
+    id TEXT PRIMARY KEY,
+    merge_request_id TEXT NOT NULL REFERENCES merge_requests(id) ON DELETE CASCADE,
+    author_agent_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    file_path TEXT,
+    line_number INTEGER,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id TEXT PRIMARY KEY,
+    merge_request_id TEXT NOT NULL REFERENCES merge_requests(id) ON DELETE CASCADE,
+    reviewer_agent_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    body TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_comments_mr ON review_comments(merge_request_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_mr ON reviews(merge_request_id);
+";
+
+const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002)];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(

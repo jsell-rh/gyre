@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::{MergeRequest, MrStatus};
+use gyre_domain::{DiffStats, MergeRequest, MrStatus};
 use gyre_ports::MergeRequestRepository;
 
 use super::{open_conn, SqliteStorage};
@@ -29,6 +29,18 @@ fn row_to_mr(row: &rusqlite::Row<'_>) -> Result<MergeRequest> {
     let status_str: String = row.get(5)?;
     let reviewers_json: String = row.get(7)?;
     let reviewer_strs: Vec<String> = serde_json::from_str(&reviewers_json).unwrap_or_default();
+    let diff_files: Option<i64> = row.get(10)?;
+    let diff_ins: Option<i64> = row.get(11)?;
+    let diff_del: Option<i64> = row.get(12)?;
+    let diff_stats = match (diff_files, diff_ins, diff_del) {
+        (Some(f), Some(i), Some(d)) => Some(DiffStats {
+            files_changed: f as usize,
+            insertions: i as usize,
+            deletions: d as usize,
+        }),
+        _ => None,
+    };
+    let has_conflicts: Option<i64> = row.get(13)?;
     Ok(MergeRequest {
         id: Id::new(row.get::<_, String>(0)?),
         repository_id: Id::new(row.get::<_, String>(1)?),
@@ -38,6 +50,8 @@ fn row_to_mr(row: &rusqlite::Row<'_>) -> Result<MergeRequest> {
         status: str_to_status(&status_str)?,
         author_agent_id: row.get::<_, Option<String>>(6)?.map(Id::new),
         reviewers: reviewer_strs.into_iter().map(Id::new).collect(),
+        diff_stats,
+        has_conflicts: has_conflicts.map(|v| v != 0),
         created_at: row.get::<_, i64>(8)? as u64,
         updated_at: row.get::<_, i64>(9)? as u64,
     })
@@ -52,10 +66,15 @@ impl MergeRequestRepository for SqliteStorage {
             let reviewer_ids: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_ids)?;
             let conn = open_conn(&path)?;
+            let diff_files = m.diff_stats.as_ref().map(|d| d.files_changed as i64);
+            let diff_ins = m.diff_stats.as_ref().map(|d| d.insertions as i64);
+            let diff_del = m.diff_stats.as_ref().map(|d| d.deletions as i64);
+            let conflicts = m.has_conflicts.map(|v| if v { 1i64 } else { 0i64 });
             conn.execute(
                 "INSERT INTO merge_requests (id, repository_id, title, source_branch, target_branch,
-                                             status, author_agent_id, reviewers, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                             status, author_agent_id, reviewers, created_at, updated_at,
+                                             diff_files_changed, diff_insertions, diff_deletions, has_conflicts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 rusqlite::params![
                     m.id.as_str(),
                     m.repository_id.as_str(),
@@ -67,6 +86,10 @@ impl MergeRequestRepository for SqliteStorage {
                     reviewers_json,
                     m.created_at as i64,
                     m.updated_at as i64,
+                    diff_files,
+                    diff_ins,
+                    diff_del,
+                    conflicts,
                 ],
             )
             .context("insert merge_request")?;
@@ -82,7 +105,8 @@ impl MergeRequestRepository for SqliteStorage {
             let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT id, repository_id, title, source_branch, target_branch,
-                        status, author_agent_id, reviewers, created_at, updated_at
+                        status, author_agent_id, reviewers, created_at, updated_at,
+                        diff_files_changed, diff_insertions, diff_deletions, has_conflicts
                  FROM merge_requests WHERE id = ?1",
             )?;
             let mut rows = stmt.query([id.as_str()])?;
@@ -101,7 +125,8 @@ impl MergeRequestRepository for SqliteStorage {
             let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT id, repository_id, title, source_branch, target_branch,
-                        status, author_agent_id, reviewers, created_at, updated_at
+                        status, author_agent_id, reviewers, created_at, updated_at,
+                        diff_files_changed, diff_insertions, diff_deletions, has_conflicts
                  FROM merge_requests ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], |row| Ok(row_to_mr(row).unwrap()))?;
@@ -117,7 +142,8 @@ impl MergeRequestRepository for SqliteStorage {
             let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT id, repository_id, title, source_branch, target_branch,
-                        status, author_agent_id, reviewers, created_at, updated_at
+                        status, author_agent_id, reviewers, created_at, updated_at,
+                        diff_files_changed, diff_insertions, diff_deletions, has_conflicts
                  FROM merge_requests WHERE status = ?1 ORDER BY created_at",
             )?;
             let rows = stmt.query_map([&status_str], |row| Ok(row_to_mr(row).unwrap()))?;
@@ -133,7 +159,8 @@ impl MergeRequestRepository for SqliteStorage {
             let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT id, repository_id, title, source_branch, target_branch,
-                        status, author_agent_id, reviewers, created_at, updated_at
+                        status, author_agent_id, reviewers, created_at, updated_at,
+                        diff_files_changed, diff_insertions, diff_deletions, has_conflicts
                  FROM merge_requests WHERE repository_id = ?1 ORDER BY created_at",
             )?;
             let rows = stmt.query_map([repo_id.as_str()], |row| Ok(row_to_mr(row).unwrap()))?;
@@ -149,10 +176,16 @@ impl MergeRequestRepository for SqliteStorage {
             let reviewer_ids: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_ids)?;
             let conn = open_conn(&path)?;
+            let diff_files = m.diff_stats.as_ref().map(|d| d.files_changed as i64);
+            let diff_ins = m.diff_stats.as_ref().map(|d| d.insertions as i64);
+            let diff_del = m.diff_stats.as_ref().map(|d| d.deletions as i64);
+            let conflicts = m.has_conflicts.map(|v| if v { 1i64 } else { 0i64 });
             conn.execute(
                 "UPDATE merge_requests SET title=?1, source_branch=?2, target_branch=?3,
-                          status=?4, author_agent_id=?5, reviewers=?6, updated_at=?7
-                 WHERE id=?8",
+                          status=?4, author_agent_id=?5, reviewers=?6, updated_at=?7,
+                          diff_files_changed=?8, diff_insertions=?9, diff_deletions=?10,
+                          has_conflicts=?11
+                 WHERE id=?12",
                 rusqlite::params![
                     m.title,
                     m.source_branch,
@@ -161,6 +194,10 @@ impl MergeRequestRepository for SqliteStorage {
                     m.author_agent_id.as_ref().map(|id| id.as_str()),
                     reviewers_json,
                     m.updated_at as i64,
+                    diff_files,
+                    diff_ins,
+                    diff_del,
+                    conflicts,
                     m.id.as_str(),
                 ],
             )

@@ -17,6 +17,13 @@ pub enum MrStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffStats {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeRequest {
     pub id: Id,
     pub repository_id: Id,
@@ -26,6 +33,8 @@ pub struct MergeRequest {
     pub status: MrStatus,
     pub author_agent_id: Option<Id>,
     pub reviewers: Vec<Id>,
+    pub diff_stats: Option<DiffStats>,
+    pub has_conflicts: Option<bool>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -48,6 +57,8 @@ impl MergeRequest {
             status: MrStatus::Open,
             author_agent_id: None,
             reviewers: Vec::new(),
+            diff_stats: None,
+            has_conflicts: None,
             created_at,
             updated_at: created_at,
         }
