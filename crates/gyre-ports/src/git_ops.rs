@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use gyre_domain::{BranchInfo, CommitInfo, DiffResult};
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 
 #[async_trait]
 pub trait GitOpsPort: Send + Sync {
@@ -26,4 +26,12 @@ pub trait GitOpsPort: Send + Sync {
 
     /// Check if source branch can be merged into target without conflicts.
     async fn can_merge(&self, repo_path: &str, source: &str, target: &str) -> Result<bool>;
+
+    /// Merge source branch into target branch. Returns success with merge commit SHA or conflict info.
+    async fn merge_branches(
+        &self,
+        repo_path: &str,
+        source: &str,
+        target: &str,
+    ) -> Result<MergeResult>;
 }
