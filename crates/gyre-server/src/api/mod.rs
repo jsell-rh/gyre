@@ -7,6 +7,7 @@ pub mod auth;
 pub mod compose;
 pub mod discover;
 pub mod error;
+pub mod jj;
 pub mod merge_queue;
 pub mod merge_requests;
 pub mod projects;
@@ -68,6 +69,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/worktrees/:wt_id",
             delete(agent_tracking::delete_worktree),
         )
+        // jj VCS integration
+        .route("/api/v1/repos/:id/jj/init", post(jj::jj_init))
+        .route("/api/v1/repos/:id/jj/log", get(jj::jj_log))
+        .route("/api/v1/repos/:id/jj/new", post(jj::jj_new))
+        .route("/api/v1/repos/:id/jj/squash", post(jj::jj_squash))
+        .route("/api/v1/repos/:id/jj/undo", post(jj::jj_undo))
+        .route("/api/v1/repos/:id/jj/bookmark", post(jj::jj_bookmark))
         // Agents
         .route(
             "/api/v1/agents",

@@ -10,6 +10,8 @@
   import MergeRequestDetail from './components/MergeRequestDetail.svelte';
   import MergeQueueView from './components/MergeQueueView.svelte';
   import AdminPanel from './components/AdminPanel.svelte';
+  import McpCatalog from './components/McpCatalog.svelte';
+  import ComposeView from './components/ComposeView.svelte';
 
   let currentView = $state('activity');
   let selectedRepo = $state(null);
@@ -40,6 +42,8 @@
     'repo-detail': 'Repository',
     'mr-detail': 'Merge Request',
     'merge-queue': 'Merge Queue',
+    'mcp-catalog': 'MCP Tool Catalog',
+    compose: 'Agent Compose',
     admin: 'Admin Panel',
     settings: 'Settings',
   };
@@ -83,6 +87,10 @@
         />
       {:else if currentView === 'merge-queue'}
         <MergeQueueView />
+      {:else if currentView === 'mcp-catalog'}
+        <McpCatalog />
+      {:else if currentView === 'compose'}
+        <ComposeView />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}

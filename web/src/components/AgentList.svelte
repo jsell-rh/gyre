@@ -1,6 +1,7 @@
 <script>
   import { api } from '../lib/api.js';
   import StatusBadge from './StatusBadge.svelte';
+  import AgentCardPanel from './AgentCardPanel.svelte';
 
   let agents = $state([]);
   let repos = $state([]);
@@ -182,6 +183,7 @@
             <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
             <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
           </dl>
+          <AgentCardPanel agentId={selected.id} />
         </div>
       {/if}
     </div>
