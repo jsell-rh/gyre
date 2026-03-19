@@ -12,6 +12,13 @@
   let error = $state(null);
   let cloneCopied = $state(false);
 
+  // jj state
+  let jjChanges = $state([]);
+  let jjLoading = $state(false);
+  let jjError = $state(null);
+  let jjInitLoading = $state(false);
+  let jjInitMsg = $state(null);
+
   // Build clone URL from current window location
   const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
 
@@ -31,6 +38,34 @@
   $effect(() => {
     if (tab === 'commits') loadCommits(selectedBranch);
   });
+
+  $effect(() => {
+    if (tab === 'jj') loadJjLog();
+  });
+
+  async function loadJjLog() {
+    jjLoading = true; jjError = null;
+    try {
+      jjChanges = await api.jjLog(repo.id);
+    } catch (e) {
+      jjError = e.message;
+    } finally {
+      jjLoading = false;
+    }
+  }
+
+  async function initJj() {
+    jjInitLoading = true; jjInitMsg = null; jjError = null;
+    try {
+      await api.jjInit(repo.id);
+      jjInitMsg = 'jj initialized successfully.';
+      await loadJjLog();
+    } catch (e) {
+      jjError = e.message;
+    } finally {
+      jjInitLoading = false;
+    }
+  }
 
   async function loadBranches() {
     loading = true; error = null;
@@ -102,6 +137,9 @@
     <button class="tab" class:active={tab === 'mrs'} onclick={() => (tab = 'mrs')}>
       Merge Requests {mrs.length ? `(${mrs.length})` : ''}
     </button>
+    <button class="tab" class:active={tab === 'jj'} onclick={() => (tab = 'jj')}>
+      jj
+    </button>
   </div>
 
   <div class="content">
@@ -165,6 +203,33 @@
                   <span class="status-badge" style:color={statusColors[mr.status] ?? 'var(--text-muted)'}>{mr.status}</span>
                 </div>
               </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {:else if tab === 'jj'}
+      <div class="jj-toolbar">
+        <button class="jj-init-btn" onclick={initJj} disabled={jjInitLoading}>
+          {jjInitLoading ? 'Initializing…' : 'Init jj'}
+        </button>
+        <button class="jj-refresh-btn" onclick={loadJjLog} disabled={jjLoading}>Refresh</button>
+        {#if jjInitMsg}
+          <span class="jj-success">{jjInitMsg}</span>
+        {/if}
+      </div>
+      {#if jjError}
+        <p class="state-msg error">{jjError}</p>
+      {:else if jjLoading}
+        <p class="state-msg">Loading jj changes…</p>
+      {:else if jjChanges.length === 0}
+        <p class="state-msg muted">No jj changes found. Initialize jj first.</p>
+      {:else}
+        <ul class="list commits">
+          {#each jjChanges as c (c.change_id)}
+            <li class="list-item commit-item">
+              <code class="sha">{c.change_id.slice(0, 8)}</code>
+              <span class="commit-msg">{c.description || '(no description)'}</span>
+              <span class="commit-meta">{c.author}{c.bookmarks.length ? ' · ' + c.bookmarks.join(', ') : ''}</span>
             </li>
           {/each}
         </ul>
@@ -261,4 +326,16 @@
   .state-msg { padding: 2rem; color: var(--text-dim); text-align: center; }
   .state-msg.error { color: #f87171; }
   .state-msg.muted { font-style: italic; }
+
+  .jj-toolbar {
+    display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;
+  }
+  .jj-init-btn, .jj-refresh-btn {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-size: 0.82rem; padding: 0.3rem 0.7rem; cursor: pointer;
+  }
+  .jj-init-btn { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .jj-init-btn:hover { opacity: 0.88; }
+  .jj-init-btn:disabled, .jj-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .jj-success { font-size: 0.82rem; color: #4ade80; }
 </style>
