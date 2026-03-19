@@ -190,7 +190,11 @@ async fn main() -> Result<()> {
             tui::run(server, token).await?;
         }
 
-        Commands::Init { server, name, token } => {
+        Commands::Init {
+            server,
+            name,
+            token,
+        } => {
             let api = client::GyreClient::new(server.clone(), token);
             println!("Registering agent '{name}' with {server}...");
             let resp = api.register_agent(&name).await?;
@@ -272,12 +276,13 @@ async fn main() -> Result<()> {
         }
 
         Commands::Mr {
-            command: MrCommands::Create {
-                title,
-                target,
-                repo_id,
-                source,
-            },
+            command:
+                MrCommands::Create {
+                    title,
+                    target,
+                    repo_id,
+                    source,
+                },
         } => {
             let cfg = config::Config::load()?;
             let token = cfg.require_token()?;
@@ -323,7 +328,7 @@ async fn main() -> Result<()> {
             if tasks.is_empty() {
                 println!("No tasks found.");
             } else {
-                println!("{:<20} {:<12} {:<10} {}", "ID", "STATUS", "PRIORITY", "TITLE");
+                println!("{:<20} {:<12} {:<10} TITLE", "ID", "STATUS", "PRIORITY");
                 println!("{}", "-".repeat(70));
                 for t in &tasks {
                     println!(
@@ -442,7 +447,12 @@ mod tests {
             "ralph",
         ]);
         assert!(args.is_ok());
-        if let Commands::Init { server, name, token } = args.unwrap().command {
+        if let Commands::Init {
+            server,
+            name,
+            token,
+        } = args.unwrap().command
+        {
             assert_eq!(server, "http://localhost:3333");
             assert_eq!(name, "ralph");
             assert_eq!(token, DEFAULT_TOKEN);
@@ -465,8 +475,7 @@ mod tests {
 
     #[test]
     fn cli_clone_with_dir_parses() {
-        let args =
-            Cli::try_parse_from(["gyre", "clone", "proj/repo", "--dir", "/tmp/myrepo"]);
+        let args = Cli::try_parse_from(["gyre", "clone", "proj/repo", "--dir", "/tmp/myrepo"]);
         assert!(args.is_ok());
     }
 
@@ -500,12 +509,13 @@ mod tests {
         ]);
         assert!(args.is_ok());
         if let Commands::Mr {
-            command: MrCommands::Create {
-                title,
-                target,
-                repo_id,
-                source,
-            },
+            command:
+                MrCommands::Create {
+                    title,
+                    target,
+                    repo_id,
+                    source,
+                },
         } = args.unwrap().command
         {
             assert_eq!(title, "My PR");
