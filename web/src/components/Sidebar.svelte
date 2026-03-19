@@ -9,6 +9,8 @@
     { id: 'merge-queue', label: 'Merge Queue', icon: '⚙' },
     { id: 'mcp-catalog', label: 'MCP Tools',   icon: '🔧' },
     { id: 'compose',     label: 'Compose',     icon: '🎛' },
+    { id: 'analytics',   label: 'Analytics',   icon: '📊' },
+    { id: 'costs',       label: 'Costs',       icon: '💰' },
     { id: 'admin',       label: 'Admin',       icon: '🛡' },
     { id: 'settings',    label: 'Settings',    icon: '⚙️' },
   ];

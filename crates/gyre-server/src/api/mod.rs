@@ -3,6 +3,7 @@ pub mod admin;
 pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
+pub mod analytics;
 pub mod auth;
 pub mod compose;
 pub mod discover;
@@ -140,6 +141,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
         // Auth / API keys
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
+        // Analytics
+        .route(
+            "/api/v1/analytics/events",
+            post(analytics::record_event).get(analytics::query_events),
+        )
+        .route("/api/v1/analytics/count", get(analytics::count_events))
+        .route("/api/v1/analytics/daily", get(analytics::daily_events))
+        // Costs
+        .route(
+            "/api/v1/costs",
+            post(analytics::record_cost).get(analytics::query_costs),
+        )
+        .route("/api/v1/costs/summary", get(analytics::cost_summary))
         // Admin (Admin role required)
         .route("/api/v1/admin/health", get(admin::admin_health))
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))

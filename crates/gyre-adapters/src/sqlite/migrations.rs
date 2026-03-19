@@ -170,11 +170,39 @@ CREATE INDEX IF NOT EXISTS idx_users_external_id ON users(external_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
 ";
 
+const MIGRATION_005: &str = "
+CREATE TABLE IF NOT EXISTS analytics_events (
+    id TEXT PRIMARY KEY,
+    event_name TEXT NOT NULL,
+    agent_id TEXT,
+    properties TEXT NOT NULL DEFAULT '{}',
+    timestamp INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cost_entries (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    task_id TEXT,
+    cost_type TEXT NOT NULL,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_analytics_event_name ON analytics_events(event_name);
+CREATE INDEX IF NOT EXISTS idx_analytics_agent_id ON analytics_events(agent_id);
+CREATE INDEX IF NOT EXISTS idx_cost_timestamp ON cost_entries(timestamp);
+CREATE INDEX IF NOT EXISTS idx_cost_agent_id ON cost_entries(agent_id);
+CREATE INDEX IF NOT EXISTS idx_cost_task_id ON cost_entries(task_id);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
     (3, MIGRATION_003),
     (4, MIGRATION_004),
+    (5, MIGRATION_005),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
