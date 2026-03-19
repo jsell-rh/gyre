@@ -47,6 +47,7 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M1: Domain Foundation | Done | 6-entity domain model, full CRUD REST API, Svelte dashboard, agent lifecycle |
 | M2: Source Control | Done | Git forge, MR workflow + reviews, merge queue, agent-commit tracking, worktrees |
 | M3: Agent Orchestration | Done | Smart HTTP git, agent spawn API, CLI client, end-to-end Ralph loop |
+| M4: Identity & Observability | Planning | Keycloak SSO, RBAC, OpenTelemetry tracing, admin panel |
 
 256 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
