@@ -79,6 +79,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/merge-requests/:id/status",
             put(merge_requests::transition_mr_status),
         )
+        .route(
+            "/api/v1/merge-requests/:id/comments",
+            post(merge_requests::add_comment).get(merge_requests::list_comments),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/reviews",
+            post(merge_requests::submit_review).get(merge_requests::list_reviews),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/diff",
+            get(merge_requests::get_diff),
+        )
 }
 
 pub(crate) fn now_secs() -> u64 {
