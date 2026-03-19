@@ -102,6 +102,16 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=`) |
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
+| `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
+| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
+| `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
+| `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue |
+| `GET` | `/api/v1/merge-queue` | List merge queue entries (priority ordered) |
+| `DELETE` | `/api/v1/merge-queue/{id}` | Cancel queued entry |
+| `POST` | `/api/v1/repos/{id}/commits/record` | Record agent-commit mapping |
+| `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
+| `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees |
+| `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 
 ### Server Environment Variables
