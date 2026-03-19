@@ -281,7 +281,7 @@ mod tests {
         CostEntry::new(
             Id::new(id),
             Id::new(agent_id),
-            task_id.map(|t| Id::new(t)),
+            task_id.map(Id::new),
             "llm_tokens",
             amount,
             "tokens",
