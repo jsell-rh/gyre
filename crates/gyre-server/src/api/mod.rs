@@ -4,6 +4,8 @@ pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod auth;
+pub mod compose;
+pub mod discover;
 pub mod error;
 pub mod merge_queue;
 pub mod merge_requests;
@@ -17,6 +19,8 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use compose::{compose_apply, compose_status, compose_teardown};
+use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
 
@@ -70,6 +74,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(agents::create_agent).get(agents::list_agents),
         )
         .route("/api/v1/agents/spawn", post(spawn::spawn_agent))
+        .route("/api/v1/agents/discover", get(discover_agents))
         .route("/api/v1/agents/:id", get(agents::get_agent))
         .route(
             "/api/v1/agents/:id/status",
@@ -77,10 +82,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/agents/:id/heartbeat", put(agents::agent_heartbeat))
         .route("/api/v1/agents/:id/complete", post(spawn::complete_agent))
+        .route("/api/v1/agents/:id/card", put(update_agent_card))
         .route(
             "/api/v1/agents/:id/messages",
             get(agent_messages::get_messages).post(agent_messages::send_message),
         )
+        // Compose
+        .route("/api/v1/compose/apply", post(compose_apply))
+        .route("/api/v1/compose/status", get(compose_status))
+        .route("/api/v1/compose/teardown", post(compose_teardown))
         // Tasks
         .route(
             "/api/v1/tasks",

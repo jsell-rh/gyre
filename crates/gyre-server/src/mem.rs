@@ -698,5 +698,7 @@ pub fn test_state() -> Arc<crate::AppState> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        agent_cards: Arc::new(Mutex::new(HashMap::new())),
+        compose_sessions: Arc::new(Mutex::new(HashMap::new())),
     })
 }
