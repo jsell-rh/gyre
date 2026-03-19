@@ -170,8 +170,7 @@ mod tests {
                     .uri("/api/v1/agents/ghost/messages")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({"from":"x","content":"y"}))
-                            .unwrap(),
+                        serde_json::to_vec(&serde_json::json!({"from":"x","content":"y"})).unwrap(),
                     ))
                     .unwrap(),
             )
