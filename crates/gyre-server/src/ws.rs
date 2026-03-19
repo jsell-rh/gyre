@@ -73,12 +73,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         description,
                                         timestamp,
                                     };
-                                    state.activity.record(event.clone());
+                                    state.activity_store.record(event.clone());
                                     // Broadcast; ignore send errors (no subscribers is fine).
                                     let _ = state.broadcast_tx.send(event);
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
-                                    let events = state.activity.query(since, limit);
+                                    let events = state.activity_store.query(since, limit);
                                     let response = WsMessage::ActivityResponse { events };
                                     let payload = serde_json::to_string(&response).unwrap();
                                     if sender.send(Message::Text(payload)).await.is_err() {
@@ -164,18 +164,14 @@ async fn authenticate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{activity::ActivityStore, build_router};
+    use crate::build_router;
     use futures_util::{SinkExt, StreamExt};
-    use tokio::sync::broadcast;
     use tokio_tungstenite::tungstenite;
 
     async fn start_test_server(auth_token: &str) -> (String, Arc<AppState>) {
-        let (broadcast_tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState {
-            auth_token: auth_token.to_string(),
-            activity: ActivityStore::new(),
-            broadcast_tx,
-        });
+        let mut state = (*crate::mem::test_state()).clone();
+        state.auth_token = auth_token.to_string();
+        let state = Arc::new(state);
         let app = build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -306,7 +302,7 @@ mod tests {
         }
 
         // Verify via store
-        let events = state.activity.query(None, None);
+        let events = state.activity_store.query(None, None);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id, "ev1");
 
