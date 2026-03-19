@@ -24,12 +24,12 @@ async fn spawn_mock_server() -> String {
                             message: "OK".to_string(),
                         };
                         let json = serde_json::to_string(&resp).unwrap();
-                        ws.send(Message::Text(json.into())).await.unwrap();
+                        ws.send(Message::Text(json)).await.unwrap();
                     }
                     WsMessage::Ping { timestamp } => {
                         let resp = WsMessage::Pong { timestamp };
                         let json = serde_json::to_string(&resp).unwrap();
-                        ws.send(Message::Text(json.into())).await.unwrap();
+                        ws.send(Message::Text(json)).await.unwrap();
                     }
                     _ => {}
                 }
@@ -50,7 +50,7 @@ async fn test_auth_and_ping_roundtrip() {
     let auth = WsMessage::Auth {
         token: "test-token".to_string(),
     };
-    ws.send(Message::Text(serde_json::to_string(&auth).unwrap().into()))
+    ws.send(Message::Text(serde_json::to_string(&auth).unwrap()))
         .await
         .unwrap();
 
@@ -67,7 +67,7 @@ async fn test_auth_and_ping_roundtrip() {
     // Send Ping
     let ts = 12345u64;
     let ping = WsMessage::Ping { timestamp: ts };
-    ws.send(Message::Text(serde_json::to_string(&ping).unwrap().into()))
+    ws.send(Message::Text(serde_json::to_string(&ping).unwrap()))
         .await
         .unwrap();
 
