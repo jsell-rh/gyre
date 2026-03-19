@@ -82,9 +82,25 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 |--------|------|-------------|
 | `GET` | `/health` | Returns `{"status":"ok","version":"0.1.0"}` |
 | `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
-| `GET` | `/api/v1/activity` | Query activity log (params: `since=<unix_ms>`, `limit=<n>`) |
 | `GET` | `/api/v1/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
-| `GET` | `/*` | Svelte SPA static files (served from `web/dist/`) |
+| `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
+| `POST/GET` | `/api/v1/projects` | Create / list projects |
+| `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
+| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`) |
+| `GET` | `/api/v1/repos/{id}` | Get repository |
+| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
+| `GET` | `/api/v1/agents/{id}` | Get agent |
+| `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
+| `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat |
+| `POST/GET` | `/api/v1/agents/{id}/messages` | Send/poll agent messages |
+| `PUT` | `/api/v1/agents/{id}/messages/{msg_id}/ack` | Acknowledge message |
+| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`) |
+| `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
+| `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
+| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=`) |
+| `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
+| `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
+| `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 
 ### Server Environment Variables
 

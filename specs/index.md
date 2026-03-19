@@ -62,6 +62,7 @@ How Gyre gets built - process and standards for the agent team.
 |---|---|---|
 | M0: Walking Skeleton | [`milestones/m0-walking-skeleton.md`](milestones/m0-walking-skeleton.md) | First vertical slice - server, CLI, one Ralph loop |
 | M1: Domain Foundation | [`milestones/m1-domain-foundation.md`](milestones/m1-domain-foundation.md) | Core domain model, persistence, REST API, dashboard |
+| M2: Source Control | [`milestones/m2-source-control.md`](milestones/m2-source-control.md) | Git forge, merge requests, merge queue, agent-commit tracking |
 
 ## Open Questions
 
