@@ -137,6 +137,11 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
+| `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
+| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor + stale agent detector (Admin only) |
+| `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
+| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, clean worktrees, block assigned task (Admin only) |
+| `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 
 ### Authentication
@@ -167,7 +172,7 @@ Four auth mechanisms are accepted (checked in priority order):
 
 The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyre clone` / `gyre push` can use the per-agent token stored in `~/.gyre/config`.
 
-> **Note (M4.2):** JWT/OIDC auth is implemented but requires `GYRE_OIDC_ISSUER` env var wiring in `main.rs` to activate in production — see `crates/gyre-server/src/auth.rs`. Until that env var is wired, the server falls back to agent-token auth only.
+**RBAC enforcement (M4.3):** Role-checking axum extractors (`RequireDeveloper`, `RequireAgent`, `RequireReadOnly`) enforce role hierarchy Admin > Developer > Agent > ReadOnly. Returns `403 {"error":"insufficient permissions"}` on failure. Admin-only endpoints additionally use the `AdminOnly` extractor.
 
 ### Server Environment Variables
 
@@ -179,6 +184,8 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_BASE_URL` | `http://localhost:<port>` | Public base URL (used in clone URLs returned by spawn API) |
 | `GYRE_LOG_FORMAT` | _(human-readable)_ | Set to `json` for structured JSON log output (M4.1) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(disabled)_ | OTLP/gRPC collector URL, e.g. `http://otel-collector:4317` (M4.1) |
+| `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL, e.g. `http://keycloak:8080/realms/gyre` — enables JWT auth (M4.2) |
+| `GYRE_OIDC_AUDIENCE` | _(none)_ | Optional JWT audience claim for Keycloak token validation (M4.2) |
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
@@ -248,14 +255,19 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4)
+### Dashboard (M3.4 + M4.3)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
 - **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, branch dropdowns). On success, displays the agent token and clone URL for use by the spawned agent.
 - **Repo Detail**: shows a clone URL bar with one-click copy, pre-filled with the correct `Authorization: Bearer` git credential command.
+- **Admin Panel** (M4.3, Admin role required): accessible via sidebar. Shows:
+  - Health cards: uptime, agent count, task count, project count
+  - Background jobs table: merge processor + stale agent detector status
+  - Audit log: searchable activity feed with agent_id / event_type filters
+  - Agent management: Kill and Reassign action buttons per agent
 
-Access at `http://localhost:3000` after starting the server.
+Access at `http://localhost:3000` after starting the server. Admin Panel requires `Admin` role via Keycloak JWT (`GYRE_OIDC_ISSUER`) or the global `GYRE_AUTH_TOKEN`.
 
 ---
 
