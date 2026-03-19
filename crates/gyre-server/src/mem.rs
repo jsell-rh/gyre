@@ -736,8 +736,8 @@ impl AnalyticsRepository for MemAnalyticsRepository {
         let mut events: Vec<AnalyticsEvent> = store
             .iter()
             .filter(|e| {
-                event_name.map_or(true, |n| e.event_name == n)
-                    && since.map_or(true, |s| e.timestamp >= s)
+                event_name.is_none_or(|n| e.event_name == n)
+                    && since.is_none_or(|s| e.timestamp >= s)
             })
             .cloned()
             .collect();
@@ -780,7 +780,7 @@ impl AnalyticsRepository for MemAnalyticsRepository {
 
 fn epoch_days_to_date(days: i64) -> String {
     // Simplified Gregorian calendar calculation
-    let mut n = days + 719468;
+    let n = days + 719468;
     let era = if n >= 0 { n } else { n - 146096 } / 146097;
     let doe = n - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
@@ -810,7 +810,7 @@ impl CostRepository for MemCostRepository {
         let mut entries: Vec<CostEntry> = store
             .iter()
             .filter(|e| {
-                e.agent_id.as_str() == agent_id.as_str() && since.map_or(true, |s| e.timestamp >= s)
+                e.agent_id.as_str() == agent_id.as_str() && since.is_none_or(|s| e.timestamp >= s)
             })
             .cloned()
             .collect();
