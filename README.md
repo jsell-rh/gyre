@@ -49,8 +49,9 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M3: Agent Orchestration | Done | Smart HTTP git, agent spawn API, CLI client, end-to-end Ralph loop |
 | M4: Identity & Observability | Done | Keycloak SSO + JWT auth, RBAC roles, OpenTelemetry tracing, Prometheus metrics |
 | M5: Agent Protocols | Done | MCP server, A2A protocol, AG-UI events, jj VCS, agent compose spec, M5 dashboard |
-| M6: Infrastructure & Operations | Planned | Product analytics, cost tracking, BCP snapshot/restore, background job framework |
+| M6: Infrastructure & Operations | Done | Product analytics, cost tracking, BCP snapshot/restore, background job framework, M6 dashboard |
+| M7: Production Hardening | Planned | eBPF audit, SIEM forwarding, WireGuard mesh, remote compute provisioning |
 
-256 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+300 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications.
