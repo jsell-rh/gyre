@@ -2,7 +2,7 @@ use axum::{response::IntoResponse, Json};
 use serde_json::json;
 use tracing::instrument;
 
-/// GET /api/version - returns gyre server version info.
+/// GET /api/v1/version - returns gyre server version info.
 #[instrument]
 pub async fn version_handler() -> impl IntoResponse {
     Json(json!({
@@ -21,11 +21,11 @@ mod tests {
 
     #[tokio::test]
     async fn version_returns_200() {
-        let app = Router::new().route("/api/version", get(version_handler));
+        let app = Router::new().route("/api/v1/version", get(version_handler));
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/version")
+                    .uri("/api/v1/version")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -36,11 +36,11 @@ mod tests {
 
     #[tokio::test]
     async fn version_returns_correct_json() {
-        let app = Router::new().route("/api/version", get(version_handler));
+        let app = Router::new().route("/api/v1/version", get(version_handler));
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/version")
+                    .uri("/api/v1/version")
                     .body(Body::empty())
                     .unwrap(),
             )
