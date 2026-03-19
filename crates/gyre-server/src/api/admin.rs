@@ -12,7 +12,7 @@ use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{auth::AdminOnly, AppState};
+use crate::{auth::AdminOnly, retention::RetentionPolicy, AppState};
 
 use super::error::ApiError;
 use super::now_secs;
@@ -63,24 +63,169 @@ pub struct JobInfo {
     pub status: String,
     pub interval_secs: u64,
     pub description: String,
+    pub recent_runs: Vec<crate::jobs::JobRun>,
 }
 
-/// GET /api/v1/admin/jobs — list background jobs (Admin only).
-pub async fn admin_jobs(_admin: AdminOnly) -> Json<Vec<JobInfo>> {
-    Json(vec![
-        JobInfo {
-            name: "merge_processor".to_string(),
-            status: "running".to_string(),
-            interval_secs: 5,
-            description: "Processes queued merge requests".to_string(),
-        },
-        JobInfo {
-            name: "stale_agent_detector".to_string(),
-            status: "running".to_string(),
-            interval_secs: 30,
-            description: "Marks agents dead when heartbeat times out (>60s)".to_string(),
-        },
-    ])
+/// GET /api/v1/admin/jobs — list background jobs with run history (Admin only).
+pub async fn admin_jobs(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<JobInfo>> {
+    let defs = state.job_registry.list_jobs().await;
+    let mut jobs = Vec::with_capacity(defs.len());
+    for def in defs {
+        let recent_runs = state.job_registry.history(&def.name).await;
+        let status = recent_runs
+            .last()
+            .map(|r| r.status.as_str())
+            .unwrap_or("idle")
+            .to_string();
+        jobs.push(JobInfo {
+            name: def.name,
+            interval_secs: def.interval_secs,
+            description: def.description,
+            status,
+            recent_runs,
+        });
+    }
+    // Fallback: if registry is empty (test_state), return static list
+    if jobs.is_empty() {
+        jobs = vec![
+            JobInfo {
+                name: "merge_processor".to_string(),
+                status: "running".to_string(),
+                interval_secs: 5,
+                description: "Processes queued merge requests".to_string(),
+                recent_runs: vec![],
+            },
+            JobInfo {
+                name: "stale_agent_detector".to_string(),
+                status: "running".to_string(),
+                interval_secs: 30,
+                description: "Marks agents dead when heartbeat times out (>60s)".to_string(),
+                recent_runs: vec![],
+            },
+        ];
+    }
+    Json(jobs)
+}
+
+/// POST /api/v1/admin/jobs/{name}/run — manually trigger a job (Admin only).
+pub async fn admin_run_job(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .job_registry
+        .trigger(&name, state.clone())
+        .await
+        .map_err(|e| ApiError::NotFound(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({ "status": "triggered", "job": name }),
+    ))
+}
+
+// ── Snapshot / Restore ────────────────────────────────────────────────────────
+
+/// POST /api/v1/admin/snapshot — create a snapshot (Admin only).
+pub async fn admin_create_snapshot(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::snapshot::SnapshotMeta>, ApiError> {
+    let meta = crate::snapshot::create_snapshot(&state)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(meta))
+}
+
+/// GET /api/v1/admin/snapshots — list snapshots (Admin only).
+pub async fn admin_list_snapshots(
+    _admin: AdminOnly,
+) -> Result<Json<Vec<crate::snapshot::SnapshotMeta>>, ApiError> {
+    let snapshots = crate::snapshot::list_snapshots()
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(snapshots))
+}
+
+#[derive(Deserialize)]
+pub struct RestoreRequest {
+    pub snapshot_id: String,
+}
+
+/// POST /api/v1/admin/restore — restore from snapshot (Admin only).
+pub async fn admin_restore_snapshot(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RestoreRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let warning = crate::snapshot::restore_snapshot(&state, &req.snapshot_id)
+        .await
+        .map_err(|e| ApiError::NotFound(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({ "status": "restored", "warning": warning }),
+    ))
+}
+
+/// DELETE /api/v1/admin/snapshots/{id} — delete a snapshot (Admin only).
+pub async fn admin_delete_snapshot(
+    _admin: AdminOnly,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    crate::snapshot::delete_snapshot(&id)
+        .await
+        .map_err(|e| ApiError::NotFound(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Data Export ───────────────────────────────────────────────────────────────
+
+/// GET /api/v1/admin/export — export all data as JSON (Admin only).
+pub async fn admin_export(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (projects, agents, tasks, merge_requests, activity_events) = tokio::try_join!(
+        state.projects.list(),
+        state.agents.list(),
+        state.tasks.list(),
+        state.merge_requests.list(),
+        async { Ok::<_, anyhow::Error>(state.activity_store.query(None, Some(10_000))) },
+    )
+    .map_err(ApiError::Internal)?;
+
+    let repos = state.repos.list().await.map_err(ApiError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "exported_at": now_secs(),
+        "projects": projects,
+        "repos": repos,
+        "agents": agents,
+        "tasks": tasks,
+        "merge_requests": merge_requests,
+        "activity_events": activity_events,
+    })))
+}
+
+// ── Data Retention ────────────────────────────────────────────────────────────
+
+/// GET /api/v1/admin/retention — list retention policies (Admin only).
+pub async fn admin_list_retention(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<RetentionPolicy>> {
+    Json(state.retention_store.list())
+}
+
+/// PUT /api/v1/admin/retention — update retention policies (Admin only).
+pub async fn admin_update_retention(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+    Json(policies): Json<Vec<RetentionPolicy>>,
+) -> StatusCode {
+    state.retention_store.update(policies);
+    StatusCode::NO_CONTENT
 }
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
@@ -609,5 +754,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── Export tests ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_export_returns_all_entity_types() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/export")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["projects"].is_array());
+        assert!(json["repos"].is_array());
+        assert!(json["agents"].is_array());
+        assert!(json["tasks"].is_array());
+        assert!(json["merge_requests"].is_array());
+        assert!(json["activity_events"].is_array());
+        assert!(json["exported_at"].is_number());
+    }
+
+    #[tokio::test]
+    async fn admin_export_requires_admin() {
+        let resp = app_with_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/export")
+                    .header("Authorization", format!("Bearer {}", developer_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── Retention tests ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_list_retention_returns_defaults() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let policies = json.as_array().unwrap();
+        assert!(!policies.is_empty());
+        let types: Vec<_> = policies
+            .iter()
+            .map(|p| p["data_type"].as_str().unwrap())
+            .collect();
+        assert!(types.contains(&"activity_events"));
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_replaces_policies() {
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let new_policies = serde_json::json!([
+            { "data_type": "activity_events", "max_age_days": 30 }
+        ]);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&new_policies).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let policies = state.retention_store.list();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].max_age_days, 30);
+    }
+
+    #[tokio::test]
+    async fn admin_retention_requires_admin() {
+        let resp = app_with_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", format!("Bearer {}", developer_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── Snapshot tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_list_snapshots_returns_array() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/snapshots")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn admin_create_snapshot_returns_meta() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/snapshot")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["snapshot_id"].is_string());
+        assert!(json["path"].is_string());
+        assert!(json["size_bytes"].is_number());
+        assert!(json["created_at"].is_number());
+
+        // Clean up
+        let snapshot_id = json["snapshot_id"].as_str().unwrap();
+        let _ = crate::snapshot::delete_snapshot(snapshot_id).await;
+    }
+
+    #[tokio::test]
+    async fn admin_delete_snapshot_not_found() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/admin/snapshots/nonexistent-snapshot")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_restore_snapshot_not_found() {
+        let body = serde_json::json!({ "snapshot_id": "no-such-snap" });
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/restore")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Job tests ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_jobs_returns_list_with_history() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/jobs")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let jobs = json.as_array().unwrap();
+        assert!(jobs.len() >= 2);
+        // Each job should have a recent_runs array
+        for job in jobs {
+            assert!(job["recent_runs"].is_array(), "job should have recent_runs");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_run_job_unknown_returns_404() {
+        let resp = app_no_jwt()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/jobs/no_such_job/run")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -5,6 +5,8 @@
   let jobs = $state([]);
   let auditEvents = $state([]);
   let agents = $state([]);
+  let snapshots = $state([]);
+  let retention = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let activeSection = $state('health');
@@ -19,6 +21,14 @@
   let actionError = $state(null);
   let actionLoading = $state(false);
 
+  // Snapshot/export state
+  let snapshotLoading = $state(false);
+  let snapshotError = $state(null);
+  let exportLoading = $state(false);
+
+  // Job trigger state
+  let triggerLoading = $state({});
+
   $effect(() => {
     loadAll();
   });
@@ -27,16 +37,20 @@
     loading = true;
     error = null;
     try {
-      const [h, j, a, ag] = await Promise.all([
+      const [h, j, a, ag, snaps, ret] = await Promise.all([
         api.adminHealth(),
         api.adminJobs(),
         api.adminAudit(),
         api.agents(),
+        api.adminListSnapshots().catch(() => []),
+        api.adminRetention().catch(() => []),
       ]);
       health = h;
       jobs = j;
       auditEvents = a.events ?? [];
       agents = ag;
+      snapshots = snaps;
+      retention = ret;
     } catch (e) {
       error = e.message;
     } finally {
@@ -104,6 +118,84 @@
     }
   }
 
+  async function createSnapshot() {
+    snapshotLoading = true;
+    snapshotError = null;
+    try {
+      await api.adminCreateSnapshot();
+      snapshots = await api.adminListSnapshots();
+    } catch (e) {
+      snapshotError = e.message;
+    } finally {
+      snapshotLoading = false;
+    }
+  }
+
+  async function deleteSnapshot(id) {
+    snapshotLoading = true;
+    snapshotError = null;
+    try {
+      await api.adminDeleteSnapshot(id);
+      snapshots = await api.adminListSnapshots();
+    } catch (e) {
+      snapshotError = e.message;
+    } finally {
+      snapshotLoading = false;
+    }
+  }
+
+  async function restoreSnapshot(id) {
+    if (!confirm(`Restore snapshot ${id}? The server will need a restart for full effect.`)) return;
+    snapshotLoading = true;
+    snapshotError = null;
+    try {
+      const result = await api.adminRestoreSnapshot(id);
+      alert(result.warning ?? 'Restored.');
+    } catch (e) {
+      snapshotError = e.message;
+    } finally {
+      snapshotLoading = false;
+    }
+  }
+
+  async function downloadExport() {
+    exportLoading = true;
+    try {
+      const data = await api.adminExport();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `gyre-export-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      error = e.message;
+    } finally {
+      exportLoading = false;
+    }
+  }
+
+  async function triggerJob(name) {
+    triggerLoading = { ...triggerLoading, [name]: true };
+    try {
+      await api.adminRunJob(name);
+      jobs = await api.adminJobs();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      triggerLoading = { ...triggerLoading, [name]: false };
+    }
+  }
+
+  async function saveRetention() {
+    try {
+      await api.adminUpdateRetention(retention);
+    } catch (e) {
+      error = e.message;
+    }
+  }
+
   function formatTime(ts) {
     if (!ts) return '—';
     return new Date(ts * 1000).toLocaleString([], {
@@ -121,9 +213,18 @@
     return `${s}s`;
   }
 
+  function formatBytes(bytes) {
+    if (bytes == null) return '—';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   const sections = [
     { id: 'health', label: 'System Health' },
     { id: 'jobs', label: 'Background Jobs' },
+    { id: 'snapshots', label: 'Snapshots' },
+    { id: 'retention', label: 'Retention' },
     { id: 'audit', label: 'Audit Log' },
     { id: 'agents', label: 'Agent Management' },
   ];
@@ -205,9 +306,10 @@
                 <thead>
                   <tr>
                     <th>Name</th>
-                    <th>Status</th>
+                    <th>Last Status</th>
                     <th>Interval</th>
                     <th>Description</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -215,10 +317,132 @@
                     <tr>
                       <td class="name mono">{job.name}</td>
                       <td>
-                        <span class="badge running">{job.status}</span>
+                        <span class="badge {job.status === 'success' ? 'running' : job.status === 'failed' ? 'dead' : 'idle'}">{job.status}</span>
                       </td>
                       <td class="dim">{job.interval_secs}s</td>
                       <td class="dim">{job.description}</td>
+                      <td>
+                        <button
+                          class="action-btn reassign"
+                          onclick={() => triggerJob(job.name)}
+                          disabled={triggerLoading[job.name]}
+                        >
+                          {triggerLoading[job.name] ? 'Running…' : 'Run Now'}
+                        </button>
+                      </td>
+                    </tr>
+                    {#if job.recent_runs && job.recent_runs.length > 0}
+                      <tr class="history-row">
+                        <td colspan="5">
+                          <div class="run-history">
+                            <span class="history-label">Recent runs:</span>
+                            {#each job.recent_runs.slice(-5).reverse() as run}
+                              <span class="run-badge {run.status}">
+                                {formatTime(run.started_at)} — {run.status}
+                                {#if run.error}<span class="run-error" title={run.error}> ⚠</span>{/if}
+                              </span>
+                            {/each}
+                          </div>
+                        </td>
+                      </tr>
+                    {/if}
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+
+        {:else if activeSection === 'snapshots'}
+          <div class="section">
+            <div class="section-header">
+              <h3>Snapshots</h3>
+              <div class="section-actions">
+                <button
+                  class="action-primary"
+                  onclick={createSnapshot}
+                  disabled={snapshotLoading}
+                >
+                  {snapshotLoading ? 'Working…' : '+ Create Snapshot'}
+                </button>
+                <button
+                  class="action-secondary"
+                  onclick={downloadExport}
+                  disabled={exportLoading}
+                >
+                  {exportLoading ? 'Exporting…' : '⬇ Export All Data'}
+                </button>
+              </div>
+            </div>
+            {#if snapshotError}
+              <p class="form-error">{snapshotError}</p>
+            {/if}
+            {#if snapshots.length === 0}
+              <p class="state-msg muted">No snapshots yet. Create one to preserve current state.</p>
+            {:else}
+              <table>
+                <thead>
+                  <tr>
+                    <th>Snapshot ID</th>
+                    <th>Created</th>
+                    <th>Size</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each snapshots as snap}
+                    <tr>
+                      <td class="mono dim">{snap.snapshot_id}</td>
+                      <td class="dim">{formatTime(snap.created_at)}</td>
+                      <td class="dim">{formatBytes(snap.size_bytes)}</td>
+                      <td class="actions">
+                        <button
+                          class="action-btn reassign"
+                          onclick={() => restoreSnapshot(snap.snapshot_id)}
+                          disabled={snapshotLoading}
+                        >Restore</button>
+                        <button
+                          class="action-btn kill"
+                          onclick={() => deleteSnapshot(snap.snapshot_id)}
+                          disabled={snapshotLoading}
+                        >Delete</button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+
+        {:else if activeSection === 'retention'}
+          <div class="section">
+            <div class="section-header">
+              <h3>Retention Policies</h3>
+              <button class="action-primary" onclick={saveRetention}>Save</button>
+            </div>
+            <p class="section-desc">Configure how long data is retained before automatic cleanup.</p>
+            {#if retention.length === 0}
+              <p class="state-msg muted">No policies loaded.</p>
+            {:else}
+              <table>
+                <thead>
+                  <tr>
+                    <th>Data Type</th>
+                    <th>Max Age (days)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each retention as policy, i}
+                    <tr>
+                      <td class="mono">{policy.data_type}</td>
+                      <td>
+                        <input
+                          type="number"
+                          class="age-input"
+                          bind:value={retention[i].max_age_days}
+                          min="1"
+                          max="3650"
+                        />
+                      </td>
                     </tr>
                   {/each}
                 </tbody>
@@ -492,4 +716,48 @@
   .state-msg { padding: 2rem; color: var(--text-dim); text-align: center; }
   .state-msg.error { color: #f87171; }
   .state-msg.muted { font-style: italic; }
+
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;
+  }
+  .section-header h3 { margin: 0; }
+  .section-actions { display: flex; gap: 0.5rem; }
+  .section-desc { font-size: 0.82rem; color: var(--text-muted); margin: -0.5rem 0 1rem; }
+
+  .action-primary {
+    background: var(--accent); color: #fff; border: none; border-radius: 4px;
+    padding: 0.35rem 0.85rem; font-size: 0.82rem; cursor: pointer;
+  }
+  .action-primary:hover { opacity: 0.88; }
+  .action-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .action-secondary {
+    background: var(--surface-hover); color: var(--text-muted); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.35rem 0.75rem; font-size: 0.82rem; cursor: pointer;
+  }
+  .action-secondary:hover { color: var(--text); }
+  .action-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .history-row td { padding: 0 0.6rem 0.5rem; border-bottom: 1px solid var(--border-subtle); }
+
+  .run-history {
+    display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+    padding: 0.25rem 0;
+  }
+  .history-label { font-size: 0.75rem; color: var(--text-dim); }
+
+  .run-badge {
+    font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 3px;
+    background: var(--surface-hover); color: var(--text-muted);
+  }
+  .run-badge.success { background: #14532d44; color: #4ade80; }
+  .run-badge.failed  { background: #3f161644; color: #f87171; }
+  .run-badge.running { background: #1e3a5f44; color: #60a5fa; }
+
+  .run-error { cursor: help; }
+
+  .age-input {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.82rem; width: 80px;
+  }
 </style>
