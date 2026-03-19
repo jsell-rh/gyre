@@ -11,6 +11,10 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
+rusqlite = { workspace = true }
 gyre-common = { workspace = true }
 gyre-ports = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

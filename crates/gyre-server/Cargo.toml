@@ -16,7 +16,18 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+futures-util = { workspace = true }
 gyre-common = { workspace = true }
 gyre-ports = { workspace = true }
 gyre-domain = { workspace = true }
 gyre-adapters = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+http = "1"
+tower = { workspace = true, features = ["util"] }

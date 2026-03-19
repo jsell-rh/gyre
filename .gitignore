@@ -24,3 +24,6 @@ Cargo.lock
 *.db
 *.sqlite
 *.sqlite3
+
+# Web app
+web/node_modules/
