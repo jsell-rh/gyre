@@ -9,3 +9,4 @@
 //! Domain logic MUST NOT import this crate.
 
 pub mod sqlite;
+pub use sqlite::SqliteStorage;
