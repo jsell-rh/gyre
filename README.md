@@ -48,7 +48,8 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M2: Source Control | Done | Git forge, MR workflow + reviews, merge queue, agent-commit tracking, worktrees |
 | M3: Agent Orchestration | Done | Smart HTTP git, agent spawn API, CLI client, end-to-end Ralph loop |
 | M4: Identity & Observability | Done | Keycloak SSO + JWT auth, RBAC roles, OpenTelemetry tracing, Prometheus metrics |
-| M5: Agent Protocols | Planned | MCP server, A2A protocol, AG-UI events, jj VCS, agent compose spec |
+| M5: Agent Protocols | Done | MCP server, A2A protocol, AG-UI events, jj VCS, agent compose spec, M5 dashboard |
+| M6: Infrastructure & Operations | Planned | Product analytics, cost tracking, BCP snapshot/restore, background job framework |
 
 256 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
