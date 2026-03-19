@@ -112,6 +112,11 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees |
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
+| `POST` | `/api/v1/agents/spawn` | Spawn agent: create agent + token + worktree + assign task (requires Bearer auth) |
+| `POST` | `/api/v1/agents/{id}/complete` | Agent completion: create MR, transition task to Review, agent to Idle |
+| `GET` | `/git/:project/:repo/info/refs` | Smart HTTP git — advertisement (requires Bearer auth) |
+| `POST` | `/git/:project/:repo/git-upload-pack` | Smart HTTP git — clone/fetch (requires Bearer auth) |
+| `POST` | `/git/:project/:repo/git-receive-pack` | Smart HTTP git — push (requires Bearer auth) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 
 ### Server Environment Variables

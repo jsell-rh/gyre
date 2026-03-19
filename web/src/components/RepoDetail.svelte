@@ -10,6 +10,18 @@
   let selectedBranch = $state(repo.default_branch || 'main');
   let loading = $state(false);
   let error = $state(null);
+  let cloneCopied = $state(false);
+
+  // Build clone URL from current window location
+  const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
+
+  async function copyCloneUrl() {
+    try {
+      await navigator.clipboard.writeText(cloneUrl);
+      cloneCopied = true;
+      setTimeout(() => { cloneCopied = false; }, 2000);
+    } catch { /* clipboard not available */ }
+  }
 
   $effect(() => {
     loadBranches();
@@ -72,6 +84,12 @@
       <span class="repo-name">{repo.name}</span>
     </div>
     <span class="default-branch">default: {repo.default_branch}</span>
+  </div>
+
+  <div class="clone-bar">
+    <span class="clone-label">Clone</span>
+    <code class="clone-url-text">{cloneUrl}</code>
+    <button class="copy-btn" onclick={copyCloneUrl}>{cloneCopied ? 'Copied!' : 'Copy'}</button>
   </div>
 
   <div class="tabs">
@@ -172,6 +190,23 @@
   .sep { color: var(--text-dim); }
   .repo-name { font-weight: 600; color: var(--text); font-size: 0.95rem; }
   .default-branch { font-size: 0.78rem; color: var(--text-dim); }
+
+  .clone-bar {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 1.25rem; background: var(--surface); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .clone-label { font-size: 0.75rem; color: var(--text-dim); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .clone-url-text {
+    flex: 1; font-family: 'Courier New', monospace; font-size: 0.78rem; color: var(--text-muted);
+    background: var(--bg); border: 1px solid var(--border-subtle); border-radius: 3px;
+    padding: 0.2rem 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .copy-btn {
+    background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--accent);
+    font-size: 0.75rem; padding: 0.2rem 0.6rem; cursor: pointer; white-space: nowrap;
+  }
+  .copy-btn:hover { background: var(--surface-hover); }
 
   .tabs {
     display: flex; gap: 0; border-bottom: 1px solid var(--border);
