@@ -1,0 +1,143 @@
+use gyre_common::Id;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MrError {
+    #[error("invalid status transition from {from:?} to {to:?}")]
+    InvalidTransition { from: MrStatus, to: MrStatus },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MrStatus {
+    Open,
+    Approved,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeRequest {
+    pub id: Id,
+    pub repository_id: Id,
+    pub title: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub status: MrStatus,
+    pub author_agent_id: Option<Id>,
+    pub reviewers: Vec<Id>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl MergeRequest {
+    pub fn new(
+        id: Id,
+        repository_id: Id,
+        title: impl Into<String>,
+        source_branch: impl Into<String>,
+        target_branch: impl Into<String>,
+        created_at: u64,
+    ) -> Self {
+        Self {
+            id,
+            repository_id,
+            title: title.into(),
+            source_branch: source_branch.into(),
+            target_branch: target_branch.into(),
+            status: MrStatus::Open,
+            author_agent_id: None,
+            reviewers: Vec::new(),
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    /// Valid transitions:
+    /// Open → Approved | Closed
+    /// Approved → Merged | Closed
+    /// Merged and Closed are terminal
+    pub fn transition_status(&mut self, new_status: MrStatus) -> Result<(), MrError> {
+        let valid = matches!(
+            (&self.status, &new_status),
+            (MrStatus::Open, MrStatus::Approved)
+                | (MrStatus::Open, MrStatus::Closed)
+                | (MrStatus::Approved, MrStatus::Merged)
+                | (MrStatus::Approved, MrStatus::Closed)
+        );
+        if valid {
+            self.status = new_status;
+            Ok(())
+        } else {
+            Err(MrError::InvalidTransition {
+                from: self.status.clone(),
+                to: new_status,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_mr() -> MergeRequest {
+        MergeRequest::new(
+            Id::new("mr1"),
+            Id::new("repo1"),
+            "Add feature",
+            "feat/thing",
+            "main",
+            1000,
+        )
+    }
+
+    #[test]
+    fn test_new_mr_is_open() {
+        let mr = make_mr();
+        assert_eq!(mr.status, MrStatus::Open);
+        assert!(mr.author_agent_id.is_none());
+        assert!(mr.reviewers.is_empty());
+    }
+
+    #[test]
+    fn test_open_to_approved() {
+        let mut mr = make_mr();
+        assert!(mr.transition_status(MrStatus::Approved).is_ok());
+        assert_eq!(mr.status, MrStatus::Approved);
+    }
+
+    #[test]
+    fn test_open_to_closed() {
+        let mut mr = make_mr();
+        assert!(mr.transition_status(MrStatus::Closed).is_ok());
+    }
+
+    #[test]
+    fn test_approved_to_merged() {
+        let mut mr = make_mr();
+        mr.transition_status(MrStatus::Approved).unwrap();
+        assert!(mr.transition_status(MrStatus::Merged).is_ok());
+    }
+
+    #[test]
+    fn test_approved_to_closed() {
+        let mut mr = make_mr();
+        mr.transition_status(MrStatus::Approved).unwrap();
+        assert!(mr.transition_status(MrStatus::Closed).is_ok());
+    }
+
+    #[test]
+    fn test_merged_is_terminal() {
+        let mut mr = make_mr();
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        assert!(mr.transition_status(MrStatus::Closed).is_err());
+    }
+
+    #[test]
+    fn test_open_to_merged_invalid() {
+        let mut mr = make_mr();
+        assert!(mr.transition_status(MrStatus::Merged).is_err());
+    }
+}
