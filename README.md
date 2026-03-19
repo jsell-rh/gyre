@@ -41,4 +41,13 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 
 ## Current Status
 
-**Pre-Milestone 0** - see [`specs/milestones/m0-walking-skeleton.md`](specs/milestones/m0-walking-skeleton.md)
+**Milestone 0 (Walking Skeleton) - In Progress**
+
+| Deliverable | Status |
+|---|---|
+| M0.1 Repo Scaffold | Done (PR #1 merged) |
+| M0.2 Server Boots | In Progress |
+| M0.3 CLI Connects | In Progress |
+| M0.4 One Ralph Loop | Backlog |
+
+See [`specs/milestones/m0-walking-skeleton.md`](specs/milestones/m0-walking-skeleton.md) for full spec.
