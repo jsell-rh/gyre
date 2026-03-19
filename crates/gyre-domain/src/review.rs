@@ -73,13 +73,8 @@ mod tests {
 
     #[test]
     fn test_review_comment_new() {
-        let comment = ReviewComment::new(
-            Id::new("c1"),
-            Id::new("mr1"),
-            "agent-1",
-            "Looks good",
-            1000,
-        );
+        let comment =
+            ReviewComment::new(Id::new("c1"), Id::new("mr1"), "agent-1", "Looks good", 1000);
         assert_eq!(comment.body, "Looks good");
         assert!(comment.file_path.is_none());
         assert!(comment.line_number.is_none());

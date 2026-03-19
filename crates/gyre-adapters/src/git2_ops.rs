@@ -161,7 +161,6 @@ impl GitOpsPort for Git2OpsAdapter {
         tokio::task::spawn_blocking(move || Ok(Repository::open(&path).is_ok())).await?
     }
 
-
     async fn can_merge(&self, repo_path: &str, source: &str, target: &str) -> Result<bool> {
         let repo_path = repo_path.to_string();
         let source = source.to_string();
@@ -335,7 +334,6 @@ impl GitOpsPort for Git2OpsAdapter {
         .await?
     }
 }
-
 
 #[cfg(test)]
 mod tests {

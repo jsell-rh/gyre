@@ -324,7 +324,9 @@ pub async fn list_comments(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
     let comments = state.reviews.list_comments(&mr_id).await?;
-    Ok(Json(comments.into_iter().map(CommentResponse::from).collect()))
+    Ok(Json(
+        comments.into_iter().map(CommentResponse::from).collect(),
+    ))
 }
 
 pub async fn submit_review(
@@ -359,7 +361,9 @@ pub async fn list_reviews(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
     let reviews = state.reviews.list_reviews(&mr_id).await?;
-    Ok(Json(reviews.into_iter().map(ReviewResponse::from).collect()))
+    Ok(Json(
+        reviews.into_iter().map(ReviewResponse::from).collect(),
+    ))
 }
 
 pub async fn get_diff(
@@ -376,9 +380,7 @@ pub async fn get_diff(
         .repos
         .find_by_id(&mr.repository_id)
         .await?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("repository {} not found", mr.repository_id))
-        })?;
+        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
 
     let diff = state
         .git_ops
@@ -737,8 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_on_missing_mr_returns_404() {
-        let body =
-            serde_json::json!({ "reviewer_agent_id": "a1", "decision": "approved" });
+        let body = serde_json::json!({ "reviewer_agent_id": "a1", "decision": "approved" });
         let resp = app()
             .oneshot(
                 Request::builder()
