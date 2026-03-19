@@ -10,6 +10,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod agent_tracking;
 pub mod git_types;
 pub mod merge_queue;
 pub mod merge_request;
@@ -20,6 +21,7 @@ pub mod task;
 
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
+pub use agent_tracking::{AgentCommit, AgentWorktree};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
