@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::Repository;
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, Repository};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use super::{new_id, now_secs};
 pub struct CreateRepoRequest {
     pub project_id: String,
     pub name: String,
-    pub path: String,
+    pub path: Option<String>,
     pub default_branch: Option<String>,
 }
 
@@ -49,16 +49,45 @@ impl From<Repository> for RepoResponse {
     }
 }
 
+#[derive(Deserialize)]
+pub struct CommitLogQuery {
+    pub branch: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct DiffQuery {
+    pub from: String,
+    pub to: String,
+}
+
 pub async fn create_repo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRepoRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
+    let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
+    let repo_path = req
+        .path
+        .unwrap_or_else(|| format!("{}/{}/{}.git", repos_root, req.project_id, req.name));
+
     let now = now_secs();
-    let mut repo = Repository::new(new_id(), Id::new(req.project_id), req.name, req.path, now);
+    let mut repo = Repository::new(
+        new_id(),
+        Id::new(req.project_id),
+        req.name,
+        repo_path.clone(),
+        now,
+    );
     if let Some(branch) = req.default_branch {
         repo.default_branch = branch;
     }
     state.repos.create(&repo).await?;
+
+    // Initialize the bare git repository; log on failure but don't block the response.
+    if let Err(e) = state.git_ops.init_bare(&repo_path).await {
+        tracing::warn!("init_bare failed for {repo_path}: {e}");
+    }
+
     Ok((StatusCode::CREATED, Json(RepoResponse::from(repo))))
 }
 
@@ -86,6 +115,52 @@ pub async fn get_repo(
     Ok(Json(RepoResponse::from(repo)))
 }
 
+pub async fn list_branches(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<BranchInfo>>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    let branches = state.git_ops.list_branches(&repo.path).await?;
+    Ok(Json(branches))
+}
+
+pub async fn commit_log(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<CommitLogQuery>,
+) -> Result<Json<Vec<CommitInfo>>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    let branch = params.branch.unwrap_or_else(|| repo.default_branch.clone());
+    let limit = params.limit.unwrap_or(50);
+    let commits = state.git_ops.commit_log(&repo.path, &branch, limit).await?;
+    Ok(Json(commits))
+}
+
+pub async fn diff(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<DiffQuery>,
+) -> Result<Json<DiffResult>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    let result = state
+        .git_ops
+        .diff(&repo.path, &params.from, &params.to)
+        .await?;
+    Ok(Json(result))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;
@@ -109,8 +184,7 @@ mod tests {
         let app = app();
         let body = serde_json::json!({
             "project_id": "proj-1",
-            "name": "gyre",
-            "path": "/code/gyre"
+            "name": "gyre"
         });
         let create_resp = app
             .clone()
@@ -142,12 +216,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_repo_auto_generates_path() {
+        let body = serde_json::json!({
+            "project_id": "proj-99",
+            "name": "my-svc"
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let path = json["path"].as_str().unwrap();
+        assert!(path.contains("proj-99"));
+        assert!(path.contains("my-svc"));
+        assert!(path.ends_with(".git"));
+    }
+
+    #[tokio::test]
+    async fn create_repo_custom_path() {
+        let body = serde_json::json!({
+            "project_id": "proj-1",
+            "name": "gyre",
+            "path": "/custom/path/gyre.git"
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["path"], "/custom/path/gyre.git");
+    }
+
+    #[tokio::test]
     async fn list_repos_by_project() {
         let app = app();
         let body = serde_json::json!({
             "project_id": "proj-42",
-            "name": "my-repo",
-            "path": "/repos/my-repo"
+            "name": "my-repo"
         });
         app.clone()
             .oneshot(
@@ -187,5 +308,86 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_branches_returns_empty_for_noop() {
+        let app = app();
+        // Create a repo first
+        let body = serde_json::json!({"project_id": "proj-1", "name": "test"});
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{id}/branches"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_branches_not_found() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/no-such/branches")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn commit_log_returns_empty_for_noop() {
+        let app = app();
+        let body = serde_json::json!({"project_id": "proj-1", "name": "test2"});
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{id}/commits"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.as_array().unwrap().is_empty());
     }
 }
