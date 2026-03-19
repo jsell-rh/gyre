@@ -82,8 +82,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 |--------|------|-------------|
 | `GET` | `/health` | Returns `{"status":"ok","version":"0.1.0"}` |
 | `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
-| `GET` | `/api/activity` | Query activity log (params: `since=<unix_ms>`, `limit=<n>`) |
-| `GET` | `/api/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
+| `GET` | `/api/v1/activity` | Query activity log (params: `since=<unix_ms>`, `limit=<n>`) |
+| `GET` | `/api/v1/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
 | `GET` | `/*` | Svelte SPA static files (served from `web/dist/`) |
 
 ### Server Environment Variables
@@ -118,7 +118,7 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 ```
 
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
-The same events are also queryable via `GET /api/activity?since=<ts>&limit=<n>`.
+The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n>`.
 
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
