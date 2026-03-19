@@ -600,6 +600,7 @@ pub fn test_state() -> Arc<crate::AppState> {
     use tokio::sync::{broadcast, Mutex};
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
+        base_url: "http://localhost:3000".to_string(),
         projects: Arc::new(MemProjectRepository::default()),
         repos: Arc::new(MemRepoRepository::default()),
         agents: Arc::new(MemAgentRepository::default()),
