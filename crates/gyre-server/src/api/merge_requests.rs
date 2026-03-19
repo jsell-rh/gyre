@@ -7,6 +7,7 @@ use gyre_common::Id;
 use gyre_domain::{MergeRequest, MrStatus, Review, ReviewComment, ReviewDecision};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::AppState;
 
@@ -199,6 +200,7 @@ fn parse_review_decision(s: &str) -> Result<ReviewDecision, ApiError> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+#[instrument(skip(state, req), fields(source = %req.source_branch, target = %req.target_branch))]
 pub async fn create_mr(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateMrRequest>,
@@ -268,6 +270,7 @@ pub async fn get_mr(
     Ok(Json(MrResponse::from(mr)))
 }
 
+#[instrument(skip(state, req), fields(mr_id = %id, new_status = %req.status))]
 pub async fn transition_mr_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -329,6 +332,7 @@ pub async fn list_comments(
     ))
 }
 
+#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

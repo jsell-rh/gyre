@@ -615,5 +615,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         broadcast_tx: broadcast::channel(16).0,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        metrics: Arc::new(crate::metrics::Metrics::new().expect("test metrics")),
     })
 }

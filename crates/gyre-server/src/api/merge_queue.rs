@@ -7,6 +7,7 @@ use gyre_common::Id;
 use gyre_domain::{MergeQueueEntry, MergeQueueEntryStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::AppState;
 
@@ -55,6 +56,7 @@ fn status_str(s: &MergeQueueEntryStatus) -> String {
     .to_string()
 }
 
+#[instrument(skip(state, req), fields(mr_id = %req.merge_request_id))]
 pub async fn enqueue(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EnqueueRequest>,
