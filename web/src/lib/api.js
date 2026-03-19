@@ -49,4 +49,18 @@ export const api = {
     }),
   cancelQueueEntry: (id) =>
     request(`/merge-queue/${id}`, { method: 'DELETE' }),
+  // Admin (requires Admin role)
+  adminHealth: () => request('/admin/health'),
+  adminJobs: () => request('/admin/jobs'),
+  adminAudit: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/admin/audit${qs ? '?' + qs : ''}`);
+  },
+  adminKillAgent: (id) =>
+    request(`/admin/agents/${id}/kill`, { method: 'POST' }),
+  adminReassignAgent: (id, targetAgentId) =>
+    request(`/admin/agents/${id}/reassign`, {
+      method: 'POST',
+      body: JSON.stringify({ target_agent_id: targetAgentId }),
+    }),
 };

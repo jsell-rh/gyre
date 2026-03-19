@@ -9,6 +9,7 @@
   import RepoDetail from './components/RepoDetail.svelte';
   import MergeRequestDetail from './components/MergeRequestDetail.svelte';
   import MergeQueueView from './components/MergeQueueView.svelte';
+  import AdminPanel from './components/AdminPanel.svelte';
 
   let currentView = $state('activity');
   let selectedRepo = $state(null);
@@ -39,6 +40,7 @@
     'repo-detail': 'Repository',
     'mr-detail': 'Merge Request',
     'merge-queue': 'Merge Queue',
+    admin: 'Admin Panel',
     settings: 'Settings',
   };
 </script>
@@ -81,6 +83,8 @@
         />
       {:else if currentView === 'merge-queue'}
         <MergeQueueView />
+      {:else if currentView === 'admin'}
+        <AdminPanel />
       {:else}
         <Settings {wsStatus} />
       {/if}

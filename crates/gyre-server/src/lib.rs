@@ -8,6 +8,7 @@ pub mod merge_processor;
 pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
+pub(crate) mod rbac;
 pub(crate) mod spa;
 pub mod telemetry;
 pub(crate) mod ws;
@@ -84,6 +85,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Prometheus metrics.
     pub metrics: Arc<metrics::Metrics>,
+    /// Server start time as Unix epoch seconds (for uptime calculation).
+    pub started_at_secs: u64,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -119,9 +122,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 /// Build application state with in-memory repositories and real git operations.
 /// Used by both production (main) and integration tests.
-pub fn build_state(auth_token: &str, base_url: &str) -> Arc<AppState> {
+pub fn build_state(
+    auth_token: &str,
+    base_url: &str,
+    jwt_config: Option<Arc<JwtConfig>>,
+) -> Arc<AppState> {
     let (broadcast_tx, _) = broadcast::channel(256);
     let metrics = Arc::new(metrics::Metrics::new().expect("failed to create Prometheus metrics"));
+    let started_at_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -141,9 +152,10 @@ pub fn build_state(auth_token: &str, base_url: &str) -> Arc<AppState> {
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
         users: Arc::new(mem::MemUserRepository::default()),
         api_keys: Arc::new(mem::MemApiKeyRepository::default()),
-        jwt_config: None,
+        jwt_config,
         http_client: reqwest::Client::new(),
         metrics,
+        started_at_secs,
     })
 }
 

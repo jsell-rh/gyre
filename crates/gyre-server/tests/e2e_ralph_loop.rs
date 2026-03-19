@@ -50,7 +50,7 @@ async fn full_ralph_loop_via_gyre() {
     let base_url = format!("http://127.0.0.1:{port}");
     let auth_token = "e2e-ralph-token";
 
-    let state = build_state(auth_token, &base_url);
+    let state = build_state(auth_token, &base_url, None);
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);
