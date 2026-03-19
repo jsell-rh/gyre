@@ -62,6 +62,58 @@ cargo watch -x "test --all"
 
 ---
 
+## Running the Server
+
+```bash
+# Dev mode (defaults: port 3000, token gyre-dev-token, db gyre.db)
+cargo run -p gyre-server
+
+# With custom settings
+GYRE_PORT=8080 GYRE_AUTH_TOKEN=my-token GYRE_DB_PATH=/tmp/gyre.db RUST_LOG=debug \
+  cargo run -p gyre-server
+
+# Release build
+cargo build --release -p gyre-server && ./target/release/gyre-server
+```
+
+### Server Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Returns `{"status":"ok","version":"0.1.0"}` |
+| `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
+| `GET` | `/*` | Svelte SPA static files (served from `web/dist/`) |
+
+### Server Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GYRE_PORT` | `3000` | TCP port to listen on |
+| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Token clients must send in the WS `Auth` message |
+| `GYRE_DB_PATH` | `gyre.db` | SQLite database file path |
+| `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
+
+### WebSocket Protocol (`gyre-common::WsMessage`)
+
+All WS messages are JSON with a `"type"` discriminant. Auth must be the first message:
+
+```json
+// Client sends first:
+{"type":"Auth","token":"gyre-dev-token"}
+// Server replies:
+{"type":"AuthResult","success":true,"message":"authenticated"}
+
+// Liveness probe:
+{"type":"Ping","timestamp":1234567890}
+// Server echoes:
+{"type":"Pong","timestamp":1234567890}
+```
+
+> `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
+> time. Agents and CI do not need Node installed to build or run `gyre-server`.
+
+---
+
 ## Branching Convention
 
 | Branch pattern | Purpose |
