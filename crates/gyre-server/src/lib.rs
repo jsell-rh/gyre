@@ -16,7 +16,7 @@ pub(crate) mod ws;
 
 use axum::{routing::get, Router};
 use gyre_common::{AgEventType, ActivityEventData};
-use gyre_domain::AgentStatus;
+use gyre_domain::{AgentCard, AgentStatus};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, MergeQueueRepository,
     MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
@@ -88,6 +88,10 @@ pub struct AppState {
     pub metrics: Arc<metrics::Metrics>,
     /// Server start time as Unix epoch seconds (for uptime calculation).
     pub started_at_secs: u64,
+    /// A2A Agent Cards: agent_id -> AgentCard for discovery.
+    pub agent_cards: Arc<Mutex<HashMap<String, AgentCard>>>,
+    /// Compose sessions: compose_id -> list of agent_ids.
+    pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -160,6 +164,8 @@ pub fn build_state(
         http_client: reqwest::Client::new(),
         metrics,
         started_at_secs,
+        agent_cards: Arc::new(Mutex::new(HashMap::new())),
+        compose_sessions: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

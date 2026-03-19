@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
+use gyre_domain::MessageType;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -17,9 +18,11 @@ use super::{new_id, now_secs};
 pub struct SendMessageRequest {
     pub from: String,
     pub content: serde_json::Value,
+    /// Optional typed message variant.
+    pub message_type: Option<MessageType>,
 }
 
-/// GET /api/v1/agents/{id}/messages — drain and return pending messages.
+/// GET /api/v1/agents/{id}/messages -- drain and return pending messages.
 pub async fn get_messages(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -38,7 +41,7 @@ pub async fn get_messages(
     Ok(Json(messages))
 }
 
-/// POST /api/v1/agents/{id}/messages — deliver a message to an agent's inbox.
+/// POST /api/v1/agents/{id}/messages -- deliver a message to an agent's inbox.
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -54,6 +57,7 @@ pub async fn send_message(
         id: new_id().to_string(),
         from: req.from,
         content: req.content,
+        message_type: req.message_type,
         created_at: now_secs(),
     };
 
@@ -110,7 +114,6 @@ mod tests {
         let app = app();
         let (app, id) = create_agent(app, "msg-agent").await;
 
-        // Send a message
         let body = serde_json::json!({ "from": "CEO", "content": "hello agent" });
         let resp = app
             .clone()
@@ -129,7 +132,7 @@ mod tests {
         assert_eq!(json["from"], "CEO");
         assert_eq!(json["content"], "hello agent");
 
-        // Poll messages — should drain the inbox
+        // Poll -- should drain
         let resp = app
             .clone()
             .oneshot(
@@ -142,11 +145,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        let msgs = json.as_array().unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["from"], "CEO");
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["from"], "CEO");
 
-        // Second poll — inbox should be empty
+        // Second poll -- inbox empty
         let resp = app
             .oneshot(
                 Request::builder()
@@ -157,8 +159,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_typed_task_assignment_message() {
+        let app = app();
+        let (app, id) = create_agent(app, "typed-agent").await;
+
+        let body = serde_json::json!({
+            "from": "CEO",
+            "content": "assign task",
+            "message_type": {
+                "type": "task_assignment",
+                "task_id": "task-42",
+                "spec_ref": "specs/foo.md"
+            }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
-        assert_eq!(json.as_array().unwrap().len(), 0);
+        assert_eq!(json["message_type"]["type"], "task_assignment");
+        assert_eq!(json["message_type"]["task_id"], "task-42");
+
+        // Poll and verify typed message
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/agents/{id}/messages"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let msgs = body_json(resp).await;
+        let msgs = msgs.as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["message_type"]["type"], "task_assignment");
+    }
+
+    #[tokio::test]
+    async fn send_typed_review_request_message() {
+        let app = app();
+        let (app, id) = create_agent(app, "review-agent").await;
+
+        let body = serde_json::json!({
+            "from": "CEO",
+            "content": "please review",
+            "message_type": {
+                "type": "review_request",
+                "mr_id": "mr-7"
+            }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["message_type"]["type"], "review_request");
+        assert_eq!(json["message_type"]["mr_id"], "mr-7");
     }
 
     #[tokio::test]
