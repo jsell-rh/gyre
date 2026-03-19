@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Nix build outputs
+/result
+/result-*
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Pre-commit cache
+.pre-commit-cache/
+
+# SQLite databases (development)
+*.db
+*.sqlite
+*.sqlite3
