@@ -148,7 +148,34 @@ CREATE INDEX IF NOT EXISTS idx_agent_worktrees_agent ON agent_worktrees(agent_id
 CREATE INDEX IF NOT EXISTS idx_agent_worktrees_repo ON agent_worktrees(repository_id);
 ";
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002), (3, MIGRATION_003)];
+const MIGRATION_004: &str = "
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    external_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    email TEXT,
+    roles TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    key TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_external_id ON users(external_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+";
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, MIGRATION_001),
+    (2, MIGRATION_002),
+    (3, MIGRATION_003),
+    (4, MIGRATION_004),
+];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(

@@ -14,6 +14,7 @@ pub mod repository;
 pub mod review;
 pub mod storage;
 pub mod task;
+pub mod user;
 
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
@@ -26,3 +27,4 @@ pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use storage::StoragePort;
 pub use task::TaskRepository;
+pub use user::{ApiKeyRepository, UserRepository};
