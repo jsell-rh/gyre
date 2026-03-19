@@ -3,10 +3,22 @@
   import StatusBadge from './StatusBadge.svelte';
 
   let agents = $state([]);
+  let repos = $state([]);
+  let tasks = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let filter = $state('');
   let selected = $state(null);
+  let showSpawnModal = $state(false);
+  let spawnResult = $state(null);
+  let spawnError = $state(null);
+  let spawnLoading = $state(false);
+
+  // Spawn form fields
+  let spawnName = $state('');
+  let spawnRepoId = $state('');
+  let spawnTaskId = $state('');
+  let spawnBranch = $state('');
 
   const statuses = ['Idle', 'Active', 'Blocked', 'Error', 'Dead'];
   const filtered = $derived(filter ? agents.filter((a) => a.status === filter) : agents);
@@ -20,10 +32,36 @@
     api.agents()
       .then((data) => { agents = data; loading = false; })
       .catch((err) => { error = err.message; loading = false; });
+    api.allRepos().then((data) => { repos = data; }).catch(() => {});
+    api.tasks().then((data) => { tasks = data; }).catch(() => {});
   });
 
   function selectAgent(a) {
     selected = selected?.id === a.id ? null : a;
+  }
+
+  function openSpawnModal() {
+    spawnName = ''; spawnRepoId = ''; spawnTaskId = ''; spawnBranch = '';
+    spawnResult = null; spawnError = null;
+    showSpawnModal = true;
+  }
+
+  function closeSpawnModal() { showSpawnModal = false; }
+
+  async function doSpawn() {
+    if (!spawnName || !spawnRepoId || !spawnTaskId || !spawnBranch) {
+      spawnError = 'All fields are required.';
+      return;
+    }
+    spawnLoading = true; spawnError = null; spawnResult = null;
+    try {
+      spawnResult = await api.spawnAgent({ name: spawnName, repo_id: spawnRepoId, task_id: spawnTaskId, branch: spawnBranch });
+      agents = await api.agents();
+    } catch (e) {
+      spawnError = e.message;
+    } finally {
+      spawnLoading = false;
+    }
   }
 </script>
 
@@ -37,8 +75,69 @@
           <option value={s}>{s}</option>
         {/each}
       </select>
+      <button class="spawn-btn" onclick={openSpawnModal}>+ Spawn Agent</button>
     </div>
   </div>
+
+  {#if showSpawnModal}
+    <div class="modal-backdrop" onclick={closeSpawnModal}>
+      <div class="modal" onclick={(e) => e.stopPropagation()}>
+        <h3>Spawn Agent</h3>
+
+        {#if spawnResult}
+          <div class="spawn-success">
+            <p class="success-msg">Agent spawned successfully.</p>
+            <dl>
+              <dt>Agent ID</dt><dd>{spawnResult.agent.id}</dd>
+              <dt>Token</dt><dd class="token">{spawnResult.token}</dd>
+              <dt>Clone URL</dt><dd class="clone-url">{spawnResult.clone_url}</dd>
+              <dt>Worktree</dt><dd>{spawnResult.worktree_path}</dd>
+              <dt>Branch</dt><dd>{spawnResult.branch}</dd>
+            </dl>
+            <button class="modal-btn" onclick={closeSpawnModal}>Close</button>
+          </div>
+        {:else}
+          <div class="form">
+            <label>
+              Name
+              <input bind:value={spawnName} placeholder="worker-1" />
+            </label>
+            <label>
+              Repository
+              <select bind:value={spawnRepoId}>
+                <option value="">Select repo...</option>
+                {#each repos as r}
+                  <option value={r.id}>{r.name}</option>
+                {/each}
+              </select>
+            </label>
+            <label>
+              Task
+              <select bind:value={spawnTaskId}>
+                <option value="">Select task...</option>
+                {#each tasks as t}
+                  <option value={t.id}>{t.title}</option>
+                {/each}
+              </select>
+            </label>
+            <label>
+              Branch
+              <input bind:value={spawnBranch} placeholder="feat/my-feature" />
+            </label>
+            {#if spawnError}
+              <p class="form-error">{spawnError}</p>
+            {/if}
+            <div class="form-actions">
+              <button class="modal-btn secondary" onclick={closeSpawnModal}>Cancel</button>
+              <button class="modal-btn primary" onclick={doSpawn} disabled={spawnLoading}>
+                {spawnLoading ? 'Spawning...' : 'Spawn'}
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 
   {#if loading}
     <p class="state-msg">Loading…</p>
@@ -104,6 +203,57 @@
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
     border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.82rem; cursor: pointer;
   }
+
+  .spawn-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 4px;
+    padding: 0.3rem 0.75rem; font-size: 0.82rem; cursor: pointer; font-weight: 600;
+  }
+  .spawn-btn:hover { opacity: 0.88; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .modal {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.5rem; min-width: 360px; max-width: 480px; width: 100%;
+  }
+
+  .form { display: flex; flex-direction: column; gap: 0.75rem; }
+
+  .form label {
+    display: flex; flex-direction: column; gap: 0.25rem;
+    font-size: 0.82rem; color: var(--text-dim);
+  }
+
+  .form input, .form select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.4rem 0.6rem; font-size: 0.85rem;
+  }
+
+  .form-error { color: #f87171; font-size: 0.82rem; margin: 0; }
+
+  .form-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.25rem; }
+
+  .modal-btn {
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.9rem;
+    font-size: 0.82rem; cursor: pointer; background: var(--surface); color: var(--text);
+  }
+  .modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .modal-btn.primary:hover { opacity: 0.88; }
+  .modal-btn.secondary:hover { background: var(--surface-hover); }
+  .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .spawn-success dl {
+    display: grid; grid-template-columns: 7rem 1fr; gap: 0.4rem 0.5rem;
+    font-size: 0.82rem; margin: 0.75rem 0 1rem;
+  }
+  .spawn-success dt { color: var(--text-dim); }
+  .spawn-success dd { margin: 0; color: var(--text-muted); word-break: break-all; }
+  .spawn-success .token { font-family: monospace; font-size: 0.75rem; }
+  .spawn-success .clone-url { font-family: monospace; font-size: 0.75rem; }
+  .success-msg { color: #4ade80; font-size: 0.85rem; margin: 0 0 0.5rem; }
 
   .scroll { flex: 1; overflow-y: auto; padding: 0.75rem 1.25rem; }
 
