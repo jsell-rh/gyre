@@ -31,6 +31,22 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# HTTP server
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Static asset embedding
+rust-embed = "8"
+mime_guess = "2"
+
+# Async utilities
+futures-util = "0.3"
+async-trait = "0.1"
+
 # Internal crates
 gyre-common = { path = "crates/gyre-common" }
 gyre-ports = { path = "crates/gyre-ports" }
