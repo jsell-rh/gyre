@@ -1,5 +1,7 @@
 mod activity;
 mod api;
+mod auth;
+mod git_http;
 mod health;
 mod mem;
 mod merge_processor;
@@ -46,9 +48,24 @@ pub struct AppState {
 
 /// Build the axum Router (extracted for testability).
 pub fn build_router(state: Arc<AppState>) -> Router {
+    use axum::routing::post;
+
     Router::new()
         .route("/health", get(health::health_handler))
         .route("/ws", get(ws::ws_handler))
+        // Git smart HTTP — auth enforced per-handler via AuthenticatedAgent extractor.
+        .route(
+            "/git/:project/:repo/info/refs",
+            get(git_http::git_info_refs),
+        )
+        .route(
+            "/git/:project/:repo/git-upload-pack",
+            post(git_http::git_upload_pack),
+        )
+        .route(
+            "/git/:project/:repo/git-receive-pack",
+            post(git_http::git_receive_pack),
+        )
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
         .merge(api::api_router())
