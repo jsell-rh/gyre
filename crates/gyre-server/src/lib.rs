@@ -3,8 +3,8 @@ pub mod api;
 pub(crate) mod auth;
 pub(crate) mod git_http;
 pub(crate) mod health;
-pub(crate) mod mem;
 pub(crate) mod mcp;
+pub(crate) mod mem;
 pub mod merge_processor;
 pub(crate) mod messages;
 pub mod metrics;
@@ -15,7 +15,7 @@ pub mod telemetry;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
-use gyre_common::{AgEventType, ActivityEventData};
+use gyre_common::{ActivityEventData, AgEventType};
 use gyre_domain::{AgentCard, AgentStatus};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, MergeQueueRepository,

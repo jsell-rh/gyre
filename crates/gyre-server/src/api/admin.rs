@@ -104,7 +104,9 @@ pub async fn admin_audit(
         .into_iter()
         .filter(|e| {
             q.agent_id.as_deref().is_none_or(|id| e.agent_id == id)
-                && q.event_type.as_deref().is_none_or(|et| e.event_type.as_str() == et)
+                && q.event_type
+                    .as_deref()
+                    .is_none_or(|et| e.event_type.as_str() == et)
         })
         .collect();
 

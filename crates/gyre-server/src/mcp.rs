@@ -15,7 +15,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_common::{AgEventType, ActivityEventData, Id};
+use gyre_common::{ActivityEventData, AgEventType, Id};
 use gyre_domain::{MergeRequest, Task, TaskPriority, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -230,7 +230,11 @@ fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 
 fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, JsonRpcResponse> {
     get_str(args, key).ok_or_else(|| {
-        JsonRpcResponse::err(None, INVALID_PARAMS, format!("missing required field: {key}"))
+        JsonRpcResponse::err(
+            None,
+            INVALID_PARAMS,
+            format!("missing required field: {key}"),
+        )
     })
 }
 
@@ -298,11 +302,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
             .collect();
     }
     match state.tasks.create(&task).await {
-        Ok(()) => tool_result(format!(
-            "Created task {} (id: {})",
-            task.title,
-            task.id
-        )),
+        Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
     }
 }
@@ -418,10 +418,7 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
 
 async fn handle_list_mrs(state: &AppState, args: &Value) -> Value {
     let mrs = if let Some(repo_id) = get_str(args, "repository_id") {
-        state
-            .merge_requests
-            .list_by_repo(&Id::new(repo_id))
-            .await
+        state.merge_requests.list_by_repo(&Id::new(repo_id)).await
     } else {
         state.merge_requests.list().await
     };
@@ -550,10 +547,7 @@ pub async fn mcp_handler(
         "tools/list" => JsonRpcResponse::ok(id, tool_definitions()),
         "tools/call" => {
             let params = req.params.unwrap_or(json!({}));
-            let tool_name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             let result = match tool_name {
                 "gyre_create_task" => handle_create_task(&state, &args).await,
@@ -568,20 +562,14 @@ pub async fn mcp_handler(
             };
             JsonRpcResponse::ok(id, result)
         }
-        other => JsonRpcResponse::err(
-            id,
-            METHOD_NOT_FOUND,
-            format!("Method not found: {other}"),
-        ),
+        other => JsonRpcResponse::err(id, METHOD_NOT_FOUND, format!("Method not found: {other}")),
     };
     Json(response)
 }
 
 /// GET /mcp/sse — SSE stream for server→client notifications.
 /// Returns an open SSE connection; events are emitted as activity broadcasts arrive.
-pub async fn mcp_sse_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn mcp_sse_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rx = state.broadcast_tx.subscribe();
     let event_stream = stream::unfold(rx, |mut rx| async move {
         loop {
@@ -595,9 +583,7 @@ pub async fn mcp_sse_handler(
                         "timestamp": event.timestamp,
                     }))
                     .unwrap_or_default();
-                    let sse_event = Event::default()
-                        .event("activity")
-                        .data(data);
+                    let sse_event = Event::default().event("activity").data(data);
                     return Some((Ok::<Event, std::convert::Infallible>(sse_event), rx));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -676,10 +662,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let tools = json["result"]["tools"].as_array().unwrap();
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"gyre_create_task"));
         assert!(names.contains(&"gyre_list_tasks"));
         assert!(names.contains(&"gyre_update_task"));
