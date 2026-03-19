@@ -12,7 +12,7 @@ use gyre_common::ActivityEventData;
 use gyre_domain::AgentStatus;
 use gyre_ports::{
     AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository, RepoRepository,
-    TaskRepository,
+    ReviewRepository, TaskRepository,
 };
 use messages::AgentMessage;
 use std::collections::{HashMap, VecDeque};
@@ -29,6 +29,7 @@ pub struct AppState {
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
     pub merge_requests: Arc<dyn MergeRequestRepository>,
+    pub reviews: Arc<dyn ReviewRepository>,
     pub git_ops: Arc<dyn GitOpsPort>,
     pub activity_store: activity::ActivityStore,
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
@@ -75,6 +76,7 @@ async fn main() -> Result<()> {
         agents: Arc::new(mem::MemAgentRepository::default()),
         tasks: Arc::new(mem::MemTaskRepository::default()),
         merge_requests: Arc::new(mem::MemMrRepository::default()),
+        reviews: Arc::new(mem::MemReviewRepository::default()),
         git_ops: Arc::new(gyre_adapters::Git2OpsAdapter::new()),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,

@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentStatus, BranchInfo, CommitInfo, DiffResult, MergeRequest, MrStatus, Project,
-    Repository, Task, TaskStatus,
+    Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
 };
 use gyre_ports::{
     AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository, RepoRepository,
-    TaskRepository,
+    ReviewRepository, TaskRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,6 +49,10 @@ impl GitOpsPort for NoopGitOps {
 
     async fn is_repo(&self, _path: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    async fn can_merge(&self, _repo_path: &str, _source: &str, _target: &str) -> Result<bool> {
+        Ok(true)
     }
 }
 
@@ -326,6 +330,71 @@ impl MergeRequestRepository for MemMrRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemReviewRepository {
+    comments: Arc<Mutex<HashMap<String, ReviewComment>>>,
+    reviews: Arc<Mutex<HashMap<String, Review>>>,
+}
+
+#[async_trait]
+impl ReviewRepository for MemReviewRepository {
+    async fn add_comment(&self, comment: &ReviewComment) -> Result<()> {
+        self.comments
+            .lock()
+            .await
+            .insert(comment.id.to_string(), comment.clone());
+        Ok(())
+    }
+
+    async fn list_comments(&self, mr_id: &Id) -> Result<Vec<ReviewComment>> {
+        let mut comments: Vec<ReviewComment> = self
+            .comments
+            .lock()
+            .await
+            .values()
+            .filter(|c| c.merge_request_id.as_str() == mr_id.as_str())
+            .cloned()
+            .collect();
+        comments.sort_by_key(|c| c.created_at);
+        Ok(comments)
+    }
+
+    async fn submit_review(&self, review: &Review) -> Result<()> {
+        self.reviews
+            .lock()
+            .await
+            .insert(review.id.to_string(), review.clone());
+        Ok(())
+    }
+
+    async fn list_reviews(&self, mr_id: &Id) -> Result<Vec<Review>> {
+        let mut reviews: Vec<Review> = self
+            .reviews
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.merge_request_id.as_str() == mr_id.as_str())
+            .cloned()
+            .collect();
+        reviews.sort_by_key(|r| r.created_at);
+        Ok(reviews)
+    }
+
+    async fn is_approved(&self, mr_id: &Id) -> Result<bool> {
+        let reviews = self.list_reviews(mr_id).await?;
+        if reviews.is_empty() {
+            return Ok(false);
+        }
+        let has_changes_requested = reviews
+            .iter()
+            .any(|r| r.decision == ReviewDecision::ChangesRequested);
+        if has_changes_requested {
+            return Ok(false);
+        }
+        Ok(reviews.iter().any(|r| r.decision == ReviewDecision::Approved))
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -338,6 +407,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         agents: Arc::new(MemAgentRepository::default()),
         tasks: Arc::new(MemTaskRepository::default()),
         merge_requests: Arc::new(MemMrRepository::default()),
+        reviews: Arc::new(MemReviewRepository::default()),
         git_ops: Arc::new(NoopGitOps),
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,

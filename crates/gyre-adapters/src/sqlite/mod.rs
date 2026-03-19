@@ -10,6 +10,7 @@ pub mod merge_request;
 mod migrations;
 pub mod project;
 pub mod repository;
+pub mod review;
 pub mod task;
 
 /// SQLite-backed storage adapter.

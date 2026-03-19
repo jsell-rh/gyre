@@ -23,4 +23,7 @@ pub trait GitOpsPort: Send + Sync {
 
     /// Check if a path is a valid git repository.
     async fn is_repo(&self, path: &str) -> Result<bool>;
+
+    /// Check if source branch can be merged into target without conflicts.
+    async fn can_merge(&self, repo_path: &str, source: &str, target: &str) -> Result<bool>;
 }

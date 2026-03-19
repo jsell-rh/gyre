@@ -14,12 +14,14 @@ pub mod git_types;
 pub mod merge_request;
 pub mod project;
 pub mod repository;
+pub mod review;
 pub mod task;
 
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff};
-pub use merge_request::{MergeRequest, MrError, MrStatus};
+pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use project::Project;
 pub use repository::Repository;
+pub use review::{Review, ReviewComment, ReviewDecision};
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
