@@ -143,6 +143,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Admin (Admin role required)
         .route("/api/v1/admin/health", get(admin::admin_health))
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
+        .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
         .route(
             "/api/v1/admin/agents/:id/kill",
@@ -151,6 +152,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/admin/agents/:id/reassign",
             post(admin::admin_reassign_agent),
+        )
+        // Snapshot / Restore
+        .route("/api/v1/admin/snapshot", post(admin::admin_create_snapshot))
+        .route("/api/v1/admin/snapshots", get(admin::admin_list_snapshots))
+        .route("/api/v1/admin/restore", post(admin::admin_restore_snapshot))
+        .route(
+            "/api/v1/admin/snapshots/:id",
+            delete(admin::admin_delete_snapshot),
+        )
+        // Data Export
+        .route("/api/v1/admin/export", get(admin::admin_export))
+        // Retention Policies
+        .route(
+            "/api/v1/admin/retention",
+            get(admin::admin_list_retention).put(admin::admin_update_retention),
         )
 }
 

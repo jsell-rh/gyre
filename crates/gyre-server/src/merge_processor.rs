@@ -17,6 +17,11 @@ pub fn spawn_merge_processor(state: Arc<AppState>) {
     });
 }
 
+/// Run one merge-processor cycle. Used by the job framework for manual triggering.
+pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
+    process_next(state).await
+}
+
 async fn process_next(state: &AppState) -> anyhow::Result<()> {
     let entry = match state.merge_queue.next_pending().await? {
         Some(e) => e,
