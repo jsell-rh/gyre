@@ -18,9 +18,9 @@ use axum::{routing::get, Router};
 use gyre_common::{ActivityEventData, AgEventType};
 use gyre_domain::{AgentCard, AgentStatus};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, MergeQueueRepository,
-    MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
-    UserRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, JjOpsPort,
+    MergeQueueRepository, MergeRequestRepository, ProjectRepository, RepoRepository,
+    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 use messages::AgentMessage;
 use std::collections::{HashMap, VecDeque};
@@ -68,6 +68,7 @@ pub struct AppState {
     pub reviews: Arc<dyn ReviewRepository>,
     pub merge_queue: Arc<dyn MergeQueueRepository>,
     pub git_ops: Arc<dyn GitOpsPort>,
+    pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
     pub activity_store: activity::ActivityStore,
@@ -152,6 +153,7 @@ pub fn build_state(
         reviews: Arc::new(mem::MemReviewRepository::default()),
         merge_queue: Arc::new(mem::MemMergeQueueRepository::default()),
         git_ops: Arc::new(gyre_adapters::Git2OpsAdapter::new()),
+        jj_ops: Arc::new(gyre_adapters::JjOpsAdapter::new()),
         agent_commits: Arc::new(mem::MemAgentCommitRepository::default()),
         worktrees: Arc::new(mem::MemWorktreeRepository::default()),
         activity_store: activity::ActivityStore::new(),
