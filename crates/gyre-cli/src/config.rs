@@ -41,8 +41,7 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, text)
-            .with_context(|| format!("writing {}", path.display()))?;
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 

@@ -17,11 +17,14 @@ export const api = {
   activity: (limit = 100) => request(`/activity?limit=${limit}`),
   agents: () => request('/agents'),
   agent: (id) => request(`/agents/${id}`),
+  spawnAgent: (data) =>
+    request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
   tasks: () => request('/tasks'),
   task: (id) => request(`/tasks/${id}`),
   projects: () => request('/projects'),
   project: (id) => request(`/projects/${id}`),
   repos: (projectId) => request(`/projects/${projectId}/repos`),
+  allRepos: () => request('/repos'),
   repoBranches: (id) => request(`/repos/${id}/branches`),
   repoCommits: (id, branch, limit = 50) =>
     request(`/repos/${id}/commits?branch=${encodeURIComponent(branch)}&limit=${limit}`),
