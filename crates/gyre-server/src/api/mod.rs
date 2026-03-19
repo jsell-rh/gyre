@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod agent_messages;
 pub mod agents;
 pub mod error;
 pub mod merge_requests;
@@ -48,6 +49,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             put(agents::update_agent_status),
         )
         .route("/api/v1/agents/:id/heartbeat", put(agents::agent_heartbeat))
+        .route(
+            "/api/v1/agents/:id/messages",
+            get(agent_messages::get_messages).post(agent_messages::send_message),
+        )
         // Tasks
         .route(
             "/api/v1/tasks",
