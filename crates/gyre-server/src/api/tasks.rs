@@ -7,6 +7,7 @@ use gyre_common::Id;
 use gyre_domain::{Task, TaskPriority, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::AppState;
 
@@ -202,6 +203,7 @@ pub async fn update_task(
     Ok(Json(TaskResponse::from(task)))
 }
 
+#[instrument(skip(state, req), fields(task_id = %id, new_status = %req.status))]
 pub async fn transition_task_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

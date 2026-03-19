@@ -1,15 +1,14 @@
 use anyhow::Result;
-use gyre_server::{build_router, build_state, merge_processor, spawn_stale_agent_detector};
+use gyre_server::{
+    build_router, build_state, merge_processor, spawn_stale_agent_detector, telemetry,
+};
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize OTel tracing + structured logging.
+    // Guard is held until end of main so spans are flushed on shutdown.
+    let _telemetry_guard = telemetry::init_telemetry();
 
     info!("gyre-server starting");
 
@@ -40,6 +39,7 @@ async fn main() -> Result<()> {
         .await?;
 
     info!("gyre-server stopped");
+    // _telemetry_guard drops here, flushing buffered OTel spans.
     Ok(())
 }
 
