@@ -18,6 +18,7 @@ pub mod project;
 pub mod repository;
 pub mod review;
 pub mod task;
+pub mod user;
 
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
@@ -29,3 +30,4 @@ pub use project::Project;
 pub use repository::Repository;
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
+pub use user::{User, UserRole};
