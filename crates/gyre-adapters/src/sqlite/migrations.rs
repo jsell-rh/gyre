@@ -148,11 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_worktrees_agent ON agent_worktrees(agent_id
 CREATE INDEX IF NOT EXISTS idx_agent_worktrees_repo ON agent_worktrees(repository_id);
 ";
 
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, MIGRATION_001),
-    (2, MIGRATION_002),
-    (3, MIGRATION_003),
-];
+const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002), (3, MIGRATION_003)];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(

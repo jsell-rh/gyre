@@ -82,9 +82,7 @@ impl ReviewRepository for SqliteStorage {
                         created_at
                  FROM review_comments WHERE merge_request_id = ?1 ORDER BY created_at",
             )?;
-            let rows = stmt.query_map([mr_id.as_str()], |row| {
-                Ok(row_to_comment(row).unwrap())
-            })?;
+            let rows = stmt.query_map([mr_id.as_str()], |row| Ok(row_to_comment(row).unwrap()))?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await?
@@ -123,8 +121,7 @@ impl ReviewRepository for SqliteStorage {
                 "SELECT id, merge_request_id, reviewer_agent_id, decision, body, created_at
                  FROM reviews WHERE merge_request_id = ?1 ORDER BY created_at",
             )?;
-            let rows =
-                stmt.query_map([mr_id.as_str()], |row| Ok(row_to_review(row).unwrap()))?;
+            let rows = stmt.query_map([mr_id.as_str()], |row| Ok(row_to_review(row).unwrap()))?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await?
@@ -185,13 +182,7 @@ mod tests {
     }
 
     fn make_comment(id: &str, mr_id: &str) -> ReviewComment {
-        ReviewComment::new(
-            Id::new(id),
-            Id::new(mr_id),
-            "agent-1",
-            "Looks good",
-            1000,
-        )
+        ReviewComment::new(Id::new(id), Id::new(mr_id), "agent-1", "Looks good", 1000)
     }
 
     fn make_review(id: &str, mr_id: &str, decision: ReviewDecision) -> Review {
@@ -290,12 +281,9 @@ mod tests {
     async fn approval_blocked_by_changes_requested() {
         let (_tmp, s) = setup();
         seed_mr(&s, "mr1").await;
-        ReviewRepository::submit_review(
-            &s,
-            &make_review("r1", "mr1", ReviewDecision::Approved),
-        )
-        .await
-        .unwrap();
+        ReviewRepository::submit_review(&s, &make_review("r1", "mr1", ReviewDecision::Approved))
+            .await
+            .unwrap();
         ReviewRepository::submit_review(
             &s,
             &make_review("r2", "mr1", ReviewDecision::ChangesRequested),

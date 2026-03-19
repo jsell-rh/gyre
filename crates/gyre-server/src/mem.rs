@@ -509,7 +509,9 @@ impl ReviewRepository for MemReviewRepository {
         if has_changes_requested {
             return Ok(false);
         }
-        Ok(reviews.iter().any(|r| r.decision == ReviewDecision::Approved))
+        Ok(reviews
+            .iter()
+            .any(|r| r.decision == ReviewDecision::Approved))
     }
 }
 
