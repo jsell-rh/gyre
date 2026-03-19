@@ -160,6 +160,31 @@ impl GitOpsPort for Git2OpsAdapter {
         let path = path.to_string();
         tokio::task::spawn_blocking(move || Ok(Repository::open(&path).is_ok())).await?
     }
+
+    async fn can_merge(&self, repo_path: &str, source: &str, target: &str) -> Result<bool> {
+        let repo_path = repo_path.to_string();
+        let source = source.to_string();
+        let target = target.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+            let source_commit = repo
+                .revparse_single(&source)
+                .context("failed to resolve source ref")?
+                .peel_to_commit()
+                .context("source is not a commit")?;
+            let target_commit = repo
+                .revparse_single(&target)
+                .context("failed to resolve target ref")?
+                .peel_to_commit()
+                .context("target is not a commit")?;
+            // merge_commits performs an in-memory merge; no working tree is modified
+            let merge_index = repo
+                .merge_commits(&target_commit, &source_commit, None)
+                .context("merge_commits failed")?;
+            Ok(!merge_index.has_conflicts())
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
