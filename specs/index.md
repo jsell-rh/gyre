@@ -66,7 +66,7 @@ How Gyre gets built - process and standards for the agent team.
 
 | Question | Status |
 |---|---|
-| SPIFFE integration details | Open - Loom's SVID pattern is strong reference |
+| SPIFFE integration details | **Resolved** - 3-layer stack: SPIFFE (workload attestation) + Gyre as OIDC provider (agent permissions) + Sigstore/Fulcio (keyless commit signing). Federated via standard protocols. |
 | jj (Jujutsu) vs. Git | **Resolved** - jj adds value for agent workflows (atomic changes, auto-rebase, undo) |
 | Agent collaboration model (hierarchy + ?) | Open |
 | Coordination primitives (blackboard vs. event stream vs. persistent work chains) | Open |
