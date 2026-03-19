@@ -5,6 +5,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod agent_tracking;
 pub mod git_ops;
 pub mod merge_queue;
 pub mod merge_request;
@@ -16,6 +17,7 @@ pub mod task;
 
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
+pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use git_ops::GitOpsPort;
 pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;

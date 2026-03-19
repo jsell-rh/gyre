@@ -121,7 +121,38 @@ CREATE INDEX IF NOT EXISTS idx_mq_status ON merge_queue(status);
 CREATE INDEX IF NOT EXISTS idx_mq_priority_enqueued ON merge_queue(priority DESC, enqueued_at ASC);
 ";
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002)];
+const MIGRATION_003: &str = "
+CREATE TABLE IF NOT EXISTS agent_commits (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_worktrees (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    task_id TEXT,
+    branch TEXT NOT NULL,
+    path TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_commits_agent ON agent_commits(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_commits_repo ON agent_commits(repository_id);
+CREATE INDEX IF NOT EXISTS idx_agent_commits_sha ON agent_commits(commit_sha);
+CREATE INDEX IF NOT EXISTS idx_agent_worktrees_agent ON agent_worktrees(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_worktrees_repo ON agent_worktrees(repository_id);
+";
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, MIGRATION_001),
+    (2, MIGRATION_002),
+    (3, MIGRATION_003),
+];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(

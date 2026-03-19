@@ -34,4 +34,18 @@ pub trait GitOpsPort: Send + Sync {
         source: &str,
         target: &str,
     ) -> Result<MergeResult>;
+
+    /// Add a git worktree at `worktree_path` checked out to `branch`.
+    async fn create_worktree(
+        &self,
+        repo_path: &str,
+        worktree_path: &str,
+        branch: &str,
+    ) -> Result<()>;
+
+    /// Remove a git worktree at `worktree_path`.
+    async fn remove_worktree(&self, repo_path: &str, worktree_path: &str) -> Result<()>;
+
+    /// List paths of all registered worktrees for the repository.
+    async fn list_worktrees(&self, repo_path: &str) -> Result<Vec<String>>;
 }

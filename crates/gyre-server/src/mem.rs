@@ -4,13 +4,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentStatus, BranchInfo, CommitInfo, DiffResult, MergeQueueEntry, MergeQueueEntryStatus,
-    MergeRequest, MergeResult, MrStatus, Project, Repository, Review, ReviewComment,
-    ReviewDecision, Task, TaskStatus,
+    Agent, AgentCommit, AgentStatus, AgentWorktree, BranchInfo, CommitInfo, DiffResult,
+    MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MergeResult, MrStatus, Project,
+    Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
 };
 use gyre_ports::{
-    AgentRepository, GitOpsPort, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
-    RepoRepository, ReviewRepository, TaskRepository,
+    AgentCommitRepository, AgentRepository, GitOpsPort, MergeQueueRepository,
+    MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
+    WorktreeRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,6 +66,111 @@ impl GitOpsPort for NoopGitOps {
         Ok(MergeResult::Success {
             merge_commit_sha: "0000000000000000000000000000000000000000".to_string(),
         })
+    }
+
+    async fn create_worktree(
+        &self,
+        _repo_path: &str,
+        _worktree_path: &str,
+        _branch: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+#[derive(Default)]
+pub struct MemAgentCommitRepository {
+    store: Arc<Mutex<Vec<AgentCommit>>>,
+}
+
+#[async_trait]
+impl AgentCommitRepository for MemAgentCommitRepository {
+    async fn record(&self, mapping: &AgentCommit) -> Result<()> {
+        self.store.lock().await.push(mapping.clone());
+        Ok(())
+    }
+
+    async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<AgentCommit>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| ac.agent_id.as_str() == agent_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_repo(&self, repo_id: &Id) -> Result<Vec<AgentCommit>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| ac.repository_id.as_str() == repo_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_commit(&self, sha: &str) -> Result<Option<AgentCommit>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|ac| ac.commit_sha == sha)
+            .cloned())
+    }
+}
+
+#[derive(Default)]
+pub struct MemWorktreeRepository {
+    store: Arc<Mutex<HashMap<String, AgentWorktree>>>,
+}
+
+#[async_trait]
+impl WorktreeRepository for MemWorktreeRepository {
+    async fn create(&self, worktree: &AgentWorktree) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(worktree.id.to_string(), worktree.clone());
+        Ok(())
+    }
+
+    async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<AgentWorktree>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|wt| wt.agent_id.as_str() == agent_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_repo(&self, repo_id: &Id) -> Result<Vec<AgentWorktree>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|wt| wt.repository_id.as_str() == repo_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
     }
 }
 
@@ -495,6 +601,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         reviews: Arc::new(MemReviewRepository::default()),
         merge_queue: Arc::new(MemMergeQueueRepository::default()),
         git_ops: Arc::new(NoopGitOps),
+        agent_commits: Arc::new(MemAgentCommitRepository::default()),
+        worktrees: Arc::new(MemWorktreeRepository::default()),
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
