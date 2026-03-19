@@ -160,6 +160,77 @@ impl GitOpsPort for Git2OpsAdapter {
         let path = path.to_string();
         tokio::task::spawn_blocking(move || Ok(Repository::open(&path).is_ok())).await?
     }
+
+    async fn create_worktree(
+        &self,
+        repo_path: &str,
+        worktree_path: &str,
+        branch: &str,
+    ) -> Result<()> {
+        let repo_path = repo_path.to_string();
+        let worktree_path = worktree_path.to_string();
+        let branch = branch.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &repo_path,
+                    "worktree",
+                    "add",
+                    "--checkout",
+                    &worktree_path,
+                    &branch,
+                ])
+                .output()
+                .context("failed to run git worktree add")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git worktree add failed: {stderr}");
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn remove_worktree(&self, repo_path: &str, worktree_path: &str) -> Result<()> {
+        let repo_path = repo_path.to_string();
+        let worktree_path = worktree_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("git")
+                .args(["-C", &repo_path, "worktree", "remove", &worktree_path])
+                .output()
+                .context("failed to run git worktree remove")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git worktree remove failed: {stderr}");
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn list_worktrees(&self, repo_path: &str) -> Result<Vec<String>> {
+        let repo_path = repo_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("git")
+                .args(["-C", &repo_path, "worktree", "list", "--porcelain"])
+                .output()
+                .context("failed to run git worktree list")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git worktree list failed: {stderr}");
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Porcelain output: blocks separated by blank lines, each starting with "worktree <path>"
+            let paths = stdout
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(str::to_string)
+                .collect();
+            Ok(paths)
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]

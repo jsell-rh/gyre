@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod agent_messages;
+pub mod agent_tracking;
 pub mod agents;
 pub mod error;
 pub mod merge_requests;
@@ -9,7 +10,7 @@ pub mod tasks;
 pub mod version;
 
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use gyre_common::Id;
@@ -41,6 +42,24 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/branches", get(repos::list_branches))
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
+        // Agent-commit tracking
+        .route(
+            "/api/v1/repos/:id/commits/record",
+            post(agent_tracking::record_commit),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-commits",
+            get(agent_tracking::list_commits),
+        )
+        // Worktree management
+        .route(
+            "/api/v1/repos/:id/worktrees",
+            post(agent_tracking::create_worktree).get(agent_tracking::list_worktrees),
+        )
+        .route(
+            "/api/v1/repos/:id/worktrees/:wt_id",
+            delete(agent_tracking::delete_worktree),
+        )
         // Agents
         .route(
             "/api/v1/agents",
