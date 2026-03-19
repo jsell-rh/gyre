@@ -1,18 +1,28 @@
+mod activity;
 mod health;
 mod spa;
 mod ws;
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{
+    extract::{Query, State},
+    routing::get,
+    Json, Router,
+};
 use gyre_adapters::sqlite::SqliteStorage;
+use gyre_common::ActivityEventData;
 use gyre_ports::storage::StoragePort;
+use serde::Deserialize;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::info;
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub auth_token: String,
+    pub activity: activity::ActivityStore,
+    pub broadcast_tx: broadcast::Sender<ActivityEventData>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -20,9 +30,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health_handler))
         .route("/ws", get(ws::ws_handler))
+        .route("/api/activity", get(activity_query_handler))
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct ActivityQueryParams {
+    since: Option<u64>,
+    limit: Option<usize>,
+}
+
+async fn activity_query_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ActivityQueryParams>,
+) -> Json<Vec<ActivityEventData>> {
+    Json(state.activity.query(params.since, params.limit))
 }
 
 #[tokio::main]
@@ -50,7 +74,12 @@ async fn main() -> Result<()> {
     storage.health_check().await?;
     info!("storage healthy");
 
-    let state = Arc::new(AppState { auth_token });
+    let (broadcast_tx, _) = broadcast::channel(256);
+    let state = Arc::new(AppState {
+        auth_token,
+        activity: activity::ActivityStore::new(),
+        broadcast_tx,
+    });
     let app = build_router(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -100,8 +129,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
+        let (broadcast_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
             auth_token: "test-token".to_string(),
+            activity: activity::ActivityStore::new(),
+            broadcast_tx,
         });
         build_router(state)
     }
