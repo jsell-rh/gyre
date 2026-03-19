@@ -606,6 +606,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "gyre-common",
+ "gyre-domain",
  "gyre-ports",
  "rusqlite",
  "serde",
@@ -652,7 +653,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gyre-common",
- "gyre-ports",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -664,6 +664,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "gyre-common",
+ "gyre-domain",
  "serde",
  "tokio",
 ]

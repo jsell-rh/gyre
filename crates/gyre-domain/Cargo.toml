@@ -13,4 +13,3 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 gyre-common = { workspace = true }
-gyre-ports = { workspace = true }
