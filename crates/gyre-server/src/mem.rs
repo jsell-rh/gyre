@@ -4,14 +4,53 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentStatus, MergeRequest, MrStatus, Project, Repository, Task, TaskStatus,
+    Agent, AgentStatus, BranchInfo, CommitInfo, DiffResult, MergeRequest, MrStatus, Project,
+    Repository, Task, TaskStatus,
 };
 use gyre_ports::{
-    AgentRepository, MergeRequestRepository, ProjectRepository, RepoRepository, TaskRepository,
+    AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository, RepoRepository,
+    TaskRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// No-op git operations adapter for tests (never touches the filesystem).
+#[derive(Default)]
+pub struct NoopGitOps;
+
+#[async_trait]
+impl GitOpsPort for NoopGitOps {
+    async fn init_bare(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_branches(&self, _repo_path: &str) -> Result<Vec<BranchInfo>> {
+        Ok(vec![])
+    }
+
+    async fn commit_log(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        Ok(vec![])
+    }
+
+    async fn diff(&self, _repo_path: &str, _from: &str, _to: &str) -> Result<DiffResult> {
+        Ok(DiffResult {
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+            patches: vec![],
+        })
+    }
+
+    async fn is_repo(&self, _path: &str) -> Result<bool> {
+        Ok(false)
+    }
+}
 
 #[derive(Default)]
 pub struct MemProjectRepository {
@@ -299,6 +338,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         agents: Arc::new(MemAgentRepository::default()),
         tasks: Arc::new(MemTaskRepository::default()),
         merge_requests: Arc::new(MemMrRepository::default()),
+        git_ops: Arc::new(NoopGitOps),
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
