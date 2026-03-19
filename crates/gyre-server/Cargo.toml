@@ -26,6 +26,8 @@ gyre-common = { workspace = true }
 gyre-ports = { workspace = true }
 gyre-domain = { workspace = true }
 gyre-adapters = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

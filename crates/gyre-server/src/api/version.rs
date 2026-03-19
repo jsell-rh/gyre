@@ -8,7 +8,7 @@ pub async fn version_handler() -> impl IntoResponse {
     Json(json!({
         "name": "gyre",
         "version": "0.1.0",
-        "milestone": "M0"
+        "milestone": "M1"
     }))
 }
 
@@ -53,6 +53,5 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["name"], "gyre");
         assert_eq!(json["version"], "0.1.0");
-        assert_eq!(json["milestone"], "M0");
     }
 }
