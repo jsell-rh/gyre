@@ -294,7 +294,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
     if let Some(p) = get_str(args, "priority") {
         task.priority = parse_priority(p);
     }
-    task.parent_task_id = get_str(args, "parent_task_id").map(|s| Id::new(s));
+    task.parent_task_id = get_str(args, "parent_task_id").map(Id::new);
     if let Some(labels) = args.get("labels").and_then(|v| v.as_array()) {
         task.labels = labels
             .iter()
