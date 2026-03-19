@@ -58,7 +58,25 @@ cargo fmt --all
 
 # Watch mode (requires cargo-watch)
 cargo watch -x "test --all"
+
+# Run the E2E Ralph loop integration test (requires git on PATH)
+cargo test -p gyre-server --test e2e_ralph_loop
 ```
+
+### E2E Integration Test (`e2e_ralph_loop`)
+
+`crates/gyre-server/tests/e2e_ralph_loop.rs` is a 338-line integration test that proves the full Ralph loop works end-to-end via real HTTP and git operations:
+
+1. Spawns a live `gyre-server` on a random port
+2. Creates a project, repo, and task via REST API
+3. Calls `POST /api/v1/agents/spawn` to get a per-agent token + worktree
+4. Clones the repo over Smart HTTP (`/git/...`) using the agent token
+5. Creates a commit and pushes it back via Smart HTTP
+6. Calls `POST /api/v1/agents/{id}/complete` to open a MR and transition to review
+7. Enqueues the MR and waits for the merge processor to auto-merge
+8. Verifies the commit appears on the target branch
+
+Requires `git` on `PATH`. Test binds to `127.0.0.1:0` (random port) so runs safely in parallel.
 
 ---
 
@@ -212,6 +230,15 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
+### Dashboard (M3.4)
+
+The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
+
+- **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, branch dropdowns). On success, displays the agent token and clone URL for use by the spawned agent.
+- **Repo Detail**: shows a clone URL bar with one-click copy, pre-filled with the correct `Authorization: Bearer` git credential command.
+
+Access at `http://localhost:3000` after starting the server.
+
 ---
 
 ## CLI Usage
@@ -351,6 +378,7 @@ Key specs to read before making changes:
 | M1 milestone deliverables | [specs/milestones/m1-domain-foundation.md](specs/milestones/m1-domain-foundation.md) |
 | M2 milestone deliverables | [specs/milestones/m2-source-control.md](specs/milestones/m2-source-control.md) |
 | M3 milestone deliverables | [specs/milestones/m3-agent-orchestration.md](specs/milestones/m3-agent-orchestration.md) |
+| M4 milestone deliverables | [specs/milestones/m4-identity-observability.md](specs/milestones/m4-identity-observability.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
