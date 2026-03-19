@@ -1,19 +1,16 @@
 mod activity;
+mod api;
 mod health;
+mod mem;
 mod spa;
-mod version;
 mod ws;
 
 use anyhow::Result;
-use axum::{
-    extract::{Query, State},
-    routing::get,
-    Json, Router,
-};
-use gyre_adapters::sqlite::SqliteStorage;
+use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
-use gyre_ports::storage::StoragePort;
-use serde::Deserialize;
+use gyre_ports::{
+    AgentRepository, MergeRequestRepository, ProjectRepository, RepoRepository, TaskRepository,
+};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -22,7 +19,12 @@ use tracing::info;
 #[derive(Clone)]
 pub struct AppState {
     pub auth_token: String,
-    pub activity: activity::ActivityStore,
+    pub projects: Arc<dyn ProjectRepository>,
+    pub repos: Arc<dyn RepoRepository>,
+    pub agents: Arc<dyn AgentRepository>,
+    pub tasks: Arc<dyn TaskRepository>,
+    pub merge_requests: Arc<dyn MergeRequestRepository>,
+    pub activity_store: activity::ActivityStore,
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
 }
 
@@ -31,24 +33,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health_handler))
         .route("/ws", get(ws::ws_handler))
-        .route("/api/v1/version", get(version::version_handler))
-        .route("/api/v1/activity", get(activity_query_handler))
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
+        .merge(api::api_router())
         .with_state(state)
-}
-
-#[derive(Deserialize)]
-struct ActivityQueryParams {
-    since: Option<u64>,
-    limit: Option<usize>,
-}
-
-async fn activity_query_handler(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<ActivityQueryParams>,
-) -> Json<Vec<ActivityEventData>> {
-    Json(state.activity.query(params.since, params.limit))
 }
 
 #[tokio::main]
@@ -69,17 +57,15 @@ async fn main() -> Result<()> {
     let auth_token =
         std::env::var("GYRE_AUTH_TOKEN").unwrap_or_else(|_| "gyre-dev-token".to_string());
 
-    let db_path = std::env::var("GYRE_DB_PATH").unwrap_or_else(|_| "gyre.db".to_string());
-
-    // Initialize SQLite storage and verify connectivity.
-    let storage = tokio::task::spawn_blocking(move || SqliteStorage::new(&db_path)).await??;
-    storage.health_check().await?;
-    info!("storage healthy");
-
     let (broadcast_tx, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
         auth_token,
-        activity: activity::ActivityStore::new(),
+        projects: Arc::new(mem::MemProjectRepository::default()),
+        repos: Arc::new(mem::MemRepoRepository::default()),
+        agents: Arc::new(mem::MemAgentRepository::default()),
+        tasks: Arc::new(mem::MemTaskRepository::default()),
+        merge_requests: Arc::new(mem::MemMrRepository::default()),
+        activity_store: activity::ActivityStore::new(),
         broadcast_tx,
     });
     let app = build_router(state);
@@ -131,13 +117,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
-        let (broadcast_tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState {
-            auth_token: "test-token".to_string(),
-            activity: activity::ActivityStore::new(),
-            broadcast_tx,
-        });
-        build_router(state)
+        build_router(mem::test_state())
     }
 
     #[tokio::test]
