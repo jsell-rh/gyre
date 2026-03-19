@@ -4,4 +4,4 @@ pub mod protocol;
 
 pub use error::GyreError;
 pub use id::Id;
-pub use protocol::WsMessage;
+pub use protocol::{ActivityEventData, WsMessage};

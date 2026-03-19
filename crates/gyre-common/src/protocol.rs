@@ -1,13 +1,46 @@
 use serde::{Deserialize, Serialize};
 
+/// Activity event data shared between server and CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEventData {
+    pub event_id: String,
+    pub agent_id: String,
+    pub event_type: String,
+    pub description: String,
+    pub timestamp: u64,
+}
+
 /// WebSocket message types shared between server and CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsMessage {
-    Ping { timestamp: u64 },
-    Pong { timestamp: u64 },
-    Auth { token: String },
-    AuthResult { success: bool, message: String },
+    Ping {
+        timestamp: u64,
+    },
+    Pong {
+        timestamp: u64,
+    },
+    Auth {
+        token: String,
+    },
+    AuthResult {
+        success: bool,
+        message: String,
+    },
+    ActivityEvent {
+        event_id: String,
+        agent_id: String,
+        event_type: String,
+        description: String,
+        timestamp: u64,
+    },
+    ActivityQuery {
+        since: Option<u64>,
+        limit: Option<usize>,
+    },
+    ActivityResponse {
+        events: Vec<ActivityEventData>,
+    },
 }
 
 #[cfg(test)]
