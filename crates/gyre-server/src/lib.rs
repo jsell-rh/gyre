@@ -18,9 +18,9 @@ use axum::{routing::get, Router};
 use gyre_common::{ActivityEventData, AgEventType};
 use gyre_domain::{AgentCard, AgentStatus};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, JjOpsPort,
-    MergeQueueRepository, MergeRequestRepository, ProjectRepository, RepoRepository,
-    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, CostRepository,
+    GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
+    RepoRepository, ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 use messages::AgentMessage;
 use std::collections::{HashMap, VecDeque};
@@ -93,6 +93,10 @@ pub struct AppState {
     pub agent_cards: Arc<Mutex<HashMap<String, AgentCard>>>,
     /// Compose sessions: compose_id -> list of agent_ids.
     pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Product analytics event store.
+    pub analytics: Arc<dyn AnalyticsRepository>,
+    /// Cost tracking store.
+    pub costs: Arc<dyn CostRepository>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -168,6 +172,8 @@ pub fn build_state(
         started_at_secs,
         agent_cards: Arc::new(Mutex::new(HashMap::new())),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        analytics: Arc::new(mem::MemAnalyticsRepository::default()),
+        costs: Arc::new(mem::MemCostRepository::default()),
     })
 }
 

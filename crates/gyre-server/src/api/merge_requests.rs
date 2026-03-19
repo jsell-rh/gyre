@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{MergeRequest, MrStatus, Review, ReviewComment, ReviewDecision};
+use gyre_domain::{AnalyticsEvent, MergeRequest, MrStatus, Review, ReviewComment, ReviewDecision};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -282,10 +282,25 @@ pub async fn transition_mr_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let new_status = parse_mr_status(&req.status)?;
+    let is_merge = matches!(new_status, MrStatus::Merged);
     mr.transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
-    mr.updated_at = now_secs();
+    let ts = now_secs();
+    mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
+
+    // Auto-track mr.merged analytics event
+    if is_merge {
+        let ev = AnalyticsEvent::new(
+            new_id(),
+            "mr.merged",
+            mr.author_agent_id.as_ref().map(|id| id.to_string()),
+            serde_json::json!({ "mr_id": mr.id.to_string() }),
+            ts,
+        );
+        let _ = state.analytics.record(&ev).await;
+    }
+
     Ok(Json(MrResponse::from(mr)))
 }
 

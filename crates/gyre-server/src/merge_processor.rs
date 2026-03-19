@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use gyre_domain::{MergeQueueEntryStatus, MergeResult, MrStatus};
+use gyre_common::Id;
+use gyre_domain::{AnalyticsEvent, MergeQueueEntryStatus, MergeResult, MrStatus};
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -99,6 +101,20 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .merge_queue
                 .update_status(&entry.id, MergeQueueEntryStatus::Merged, None)
                 .await?;
+
+            // Auto-track merge_queue.processed analytics event
+            let ev = AnalyticsEvent::new(
+                Id::new(Uuid::new_v4().to_string()),
+                "merge_queue.processed",
+                updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                serde_json::json!({
+                    "entry_id": entry.id.to_string(),
+                    "mr_id": updated_mr.id.to_string(),
+                    "result": "merged",
+                }),
+                now,
+            );
+            let _ = state.analytics.record(&ev).await;
         }
         Ok(MergeResult::Conflict { message }) => {
             warn!(entry_id = %entry.id, reason = %message, "merge conflict");
