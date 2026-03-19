@@ -1,6 +1,7 @@
 mod activity;
 mod health;
 mod spa;
+mod version;
 mod ws;
 
 use anyhow::Result;
@@ -30,6 +31,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health_handler))
         .route("/ws", get(ws::ws_handler))
+        .route("/api/version", get(version::version_handler))
         .route("/api/activity", get(activity_query_handler))
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
