@@ -10,13 +10,13 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
-#[cfg(test)]
-use gyre_ports::GitOpsPort;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, ApiKeyRepository, MergeQueueRepository,
     MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
     UserRepository, WorktreeRepository,
 };
+#[cfg(test)]
+use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -25,6 +25,11 @@ use tokio::sync::Mutex;
 #[cfg(test)]
 #[derive(Default)]
 pub struct NoopGitOps;
+
+/// No-op jj operations adapter for tests (always succeeds with empty results).
+#[cfg(test)]
+#[derive(Default)]
+pub struct NoopJjOps;
 
 #[cfg(test)]
 #[async_trait]
@@ -89,6 +94,48 @@ impl GitOpsPort for NoopGitOps {
 
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl JjOpsPort for NoopJjOps {
+    async fn jj_init(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
+        Ok("noop-change-id".to_string())
+    }
+
+    async fn jj_describe(
+        &self,
+        _repo_path: &str,
+        _change_id: &str,
+        _description: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_log(&self, _repo_path: &str, _limit: usize) -> Result<Vec<JjChange>> {
+        Ok(vec![])
+    }
+
+    async fn jj_squash(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_bookmark_create(
+        &self,
+        _repo_path: &str,
+        _name: &str,
+        _change_id: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_undo(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -683,6 +730,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         reviews: Arc::new(MemReviewRepository::default()),
         merge_queue: Arc::new(MemMergeQueueRepository::default()),
         git_ops: Arc::new(NoopGitOps),
+        jj_ops: Arc::new(NoopJjOps),
         agent_commits: Arc::new(MemAgentCommitRepository::default()),
         worktrees: Arc::new(MemWorktreeRepository::default()),
         activity_store: crate::activity::ActivityStore::new(),

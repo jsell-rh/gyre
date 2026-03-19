@@ -49,6 +49,51 @@ export const api = {
     }),
   cancelQueueEntry: (id) =>
     request(`/merge-queue/${id}`, { method: 'DELETE' }),
+  // jj VCS operations
+  jjInit: (repoId) =>
+    request(`/repos/${repoId}/jj/init`, { method: 'POST' }),
+  jjLog: (repoId, limit = 20) =>
+    request(`/repos/${repoId}/jj/log?limit=${limit}`),
+  jjNew: (repoId, description) =>
+    request(`/repos/${repoId}/jj/new`, {
+      method: 'POST',
+      body: JSON.stringify({ description }),
+    }),
+  jjSquash: (repoId) =>
+    request(`/repos/${repoId}/jj/squash`, { method: 'POST' }),
+  jjUndo: (repoId) =>
+    request(`/repos/${repoId}/jj/undo`, { method: 'POST' }),
+  jjBookmark: (repoId, name, change_id) =>
+    request(`/repos/${repoId}/jj/bookmark`, {
+      method: 'POST',
+      body: JSON.stringify({ name, change_id }),
+    }),
+  // MCP tools catalog (endpoint is /mcp, not under /api/v1/)
+  mcpTools: async () => {
+    const res = await fetch('/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+        params: {},
+      }),
+    });
+    if (!res.ok) throw new Error(`MCP tools/list: ${res.status}`);
+    const json = await res.json();
+    return json.result?.tools ?? [];
+  },
+  // Agent card
+  updateAgentCard: (agentId, card) =>
+    request(`/agents/${agentId}/card`, { method: 'PUT', body: JSON.stringify(card) }),
+  // Compose
+  composeApply: (spec) =>
+    request('/compose/apply', { method: 'POST', body: JSON.stringify(spec) }),
+  composeStatus: (composeId) =>
+    request(`/compose/status?compose_id=${encodeURIComponent(composeId)}`),
+  composeTeardown: (composeId) =>
+    request('/compose/teardown', { method: 'POST', body: JSON.stringify({ compose_id: composeId }) }),
   // Admin (requires Admin role)
   adminHealth: () => request('/admin/health'),
   adminJobs: () => request('/admin/jobs'),
