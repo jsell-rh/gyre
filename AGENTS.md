@@ -62,6 +62,89 @@ cargo watch -x "test --all"
 
 ---
 
+## Running the Server
+
+```bash
+# Dev mode (defaults: port 3000, token gyre-dev-token, db gyre.db)
+cargo run -p gyre-server
+
+# With custom settings
+GYRE_PORT=8080 GYRE_AUTH_TOKEN=my-token GYRE_DB_PATH=/tmp/gyre.db RUST_LOG=debug \
+  cargo run -p gyre-server
+
+# Release build
+cargo build --release -p gyre-server && ./target/release/gyre-server
+```
+
+### Server Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Returns `{"status":"ok","version":"0.1.0"}` |
+| `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
+| `GET` | `/api/activity` | Query activity log (params: `since=<unix_ms>`, `limit=<n>`) |
+| `GET` | `/*` | Svelte SPA static files (served from `web/dist/`) |
+
+### Server Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GYRE_PORT` | `3000` | TCP port to listen on |
+| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Token clients must send in the WS `Auth` message |
+| `GYRE_DB_PATH` | `gyre.db` | SQLite database file path |
+| `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
+
+### WebSocket Protocol (`gyre-common::WsMessage`)
+
+All WS messages are JSON with a `"type"` discriminant. Auth must be the first message.
+See `crates/gyre-common/src/protocol.rs` for the full type definitions.
+
+```json
+// 1. Auth handshake (required first):
+{"type":"Auth","token":"gyre-dev-token"}
+{"type":"AuthResult","success":true,"message":"authenticated"}
+
+// 2. Liveness probe:
+{"type":"Ping","timestamp":1234567890}
+{"type":"Pong","timestamp":1234567890}
+
+// 3. Record an activity event (server stores + broadcasts to all clients):
+{"type":"ActivityEvent","event_id":"abc","agent_id":"server","event_type":"task.started","description":"Task started","timestamp":1234567890}
+
+// 4. Query activity log over WebSocket:
+{"type":"ActivityQuery","since":1234567800,"limit":50}
+{"type":"ActivityResponse","events":[...]}
+```
+
+The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
+The same events are also queryable via `GET /api/activity?since=<ts>&limit=<n>`.
+
+> `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
+> time. Agents and CI do not need Node installed to build or run `gyre-server`.
+
+---
+
+## CLI Usage
+
+```bash
+# Connect to a running gyre-server (interactive session)
+gyre connect --server ws://localhost:3000/ws --token gyre-dev-token
+
+# Ping the server and measure round-trip time
+gyre ping --server ws://localhost:3000/ws --token gyre-dev-token
+
+# Check server health via HTTP
+gyre health --server http://localhost:3000
+
+# Launch the TUI dashboard (exits on 'q')
+gyre tui --server ws://localhost:3000/ws --token gyre-dev-token
+```
+
+Default `--server` is `ws://localhost:3000/ws` and default `--token` is `gyre-dev-token`
+(matches server defaults, so bare `gyre ping` works against a local dev server).
+
+---
+
 ## Branching Convention
 
 | Branch pattern | Purpose |
