@@ -4,16 +4,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentCommit, AgentStatus, AgentWorktree, MergeQueueEntry, MergeQueueEntryStatus,
-    MergeRequest, MrStatus, Project, Repository, Review, ReviewComment, ReviewDecision, Task,
-    TaskStatus, User,
+    Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, CostEntry, MergeQueueEntry,
+    MergeQueueEntryStatus, MergeRequest, MrStatus, Project, Repository, Review, ReviewComment,
+    ReviewDecision, Task, TaskStatus, User,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, ApiKeyRepository, MergeQueueRepository,
-    MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
-    UserRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, CostRepository,
+    MergeQueueRepository, MergeRequestRepository, ProjectRepository, RepoRepository,
+    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -714,6 +714,140 @@ impl ApiKeyRepository for MemApiKeyRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemAnalyticsRepository {
+    store: Arc<Mutex<Vec<AnalyticsEvent>>>,
+}
+
+#[async_trait]
+impl AnalyticsRepository for MemAnalyticsRepository {
+    async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
+        self.store.lock().await.push(event.clone());
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        event_name: Option<&str>,
+        since: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<AnalyticsEvent>> {
+        let store = self.store.lock().await;
+        let mut events: Vec<AnalyticsEvent> = store
+            .iter()
+            .filter(|e| {
+                event_name.is_none_or(|n| e.event_name == n)
+                    && since.is_none_or(|s| e.timestamp >= s)
+            })
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64> {
+        let store = self.store.lock().await;
+        let count = store
+            .iter()
+            .filter(|e| e.event_name == event_name && e.timestamp >= since && e.timestamp <= until)
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn aggregate_by_day(
+        &self,
+        event_name: &str,
+        since: u64,
+        until: u64,
+    ) -> Result<Vec<(String, u64)>> {
+        use std::collections::BTreeMap;
+        let store = self.store.lock().await;
+        let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
+        for e in store.iter() {
+            if e.event_name == event_name && e.timestamp >= since && e.timestamp <= until {
+                // Simple day bucketing: seconds / 86400 -> day number, format as YYYY-MM-DD
+                let secs = e.timestamp as i64;
+                let days_since_epoch = secs / 86400;
+                // Use a simple date calculation
+                let day_str = epoch_days_to_date(days_since_epoch);
+                *by_day.entry(day_str).or_insert(0) += 1;
+            }
+        }
+        Ok(by_day.into_iter().collect())
+    }
+}
+
+fn epoch_days_to_date(days: i64) -> String {
+    // Simplified Gregorian calendar calculation
+    let n = days + 719468;
+    let era = if n >= 0 { n } else { n - 146096 } / 146097;
+    let doe = n - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+#[derive(Default)]
+pub struct MemCostRepository {
+    store: Arc<Mutex<Vec<CostEntry>>>,
+}
+
+#[async_trait]
+impl CostRepository for MemCostRepository {
+    async fn record(&self, entry: &CostEntry) -> Result<()> {
+        self.store.lock().await.push(entry.clone());
+        Ok(())
+    }
+
+    async fn query_by_agent(&self, agent_id: &Id, since: Option<u64>) -> Result<Vec<CostEntry>> {
+        let store = self.store.lock().await;
+        let mut entries: Vec<CostEntry> = store
+            .iter()
+            .filter(|e| {
+                e.agent_id.as_str() == agent_id.as_str() && since.is_none_or(|s| e.timestamp >= s)
+            })
+            .cloned()
+            .collect();
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(entries)
+    }
+
+    async fn query_by_task(&self, task_id: &Id) -> Result<Vec<CostEntry>> {
+        let store = self.store.lock().await;
+        let mut entries: Vec<CostEntry> = store
+            .iter()
+            .filter(|e| e.task_id.as_ref().map(|id| id.as_str()) == Some(task_id.as_str()))
+            .cloned()
+            .collect();
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(entries)
+    }
+
+    async fn total_by_agent(&self, agent_id: &Id) -> Result<f64> {
+        let store = self.store.lock().await;
+        Ok(store
+            .iter()
+            .filter(|e| e.agent_id.as_str() == agent_id.as_str())
+            .map(|e| e.amount)
+            .sum())
+    }
+
+    async fn total_by_period(&self, since: u64, until: u64) -> Result<f64> {
+        let store = self.store.lock().await;
+        Ok(store
+            .iter()
+            .filter(|e| e.timestamp >= since && e.timestamp <= until)
+            .map(|e| e.amount)
+            .sum())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -750,5 +884,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
+        analytics: Arc::new(MemAnalyticsRepository::default()),
+        costs: Arc::new(MemCostRepository::default()),
     })
 }

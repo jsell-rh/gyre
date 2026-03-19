@@ -6,6 +6,7 @@
 pub mod activity;
 pub mod agent;
 pub mod agent_tracking;
+pub mod analytics;
 pub mod git_ops;
 pub mod jj_ops;
 pub mod merge_queue;
@@ -20,6 +21,7 @@ pub mod user;
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
+pub use analytics::{AnalyticsRepository, CostRepository};
 pub use git_ops::GitOpsPort;
 pub use jj_ops::{JjChange, JjOpsPort};
 pub use merge_queue::MergeQueueRepository;

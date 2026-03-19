@@ -22,9 +22,9 @@ use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
 use gyre_domain::AgentCard;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, JjOpsPort,
-    MergeQueueRepository, MergeRequestRepository, ProjectRepository, RepoRepository,
-    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, CostRepository,
+    GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
+    RepoRepository, ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -102,6 +102,10 @@ pub struct AppState {
     pub retention_store: RetentionStore,
     /// Background job registry.
     pub job_registry: Arc<JobRegistry>,
+    /// Product analytics event store.
+    pub analytics: Arc<dyn AnalyticsRepository>,
+    /// Cost tracking store.
+    pub costs: Arc<dyn CostRepository>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -181,6 +185,8 @@ pub fn build_state(
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
+        analytics: Arc::new(mem::MemAnalyticsRepository::default()),
+        costs: Arc::new(mem::MemCostRepository::default()),
     })
 }
 

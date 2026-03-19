@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{Agent, AgentStatus, AgentWorktree, MergeRequest, TaskStatus};
+use gyre_domain::{Agent, AgentStatus, AgentWorktree, AnalyticsEvent, MergeRequest, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -128,6 +128,16 @@ pub async fn spawn_agent(
     // Build clone URL: {base_url}/git/{project_id}/{repo_name}
     let clone_url = format!("{}/git/{}/{}", state.base_url, repo.project_id, repo.name);
 
+    // Auto-track agent spawn
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.spawned",
+        Some(agent.id.to_string()),
+        serde_json::json!({ "task_id": req.task_id }),
+        now,
+    );
+    let _ = state.analytics.record(&ev).await;
+
     Ok((
         StatusCode::CREATED,
         Json(SpawnAgentResponse {
@@ -197,6 +207,26 @@ pub async fn complete_agent(
     // Transition agent to Idle
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
+
+    // Auto-track agent completion
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.completed",
+        Some(agent.id.to_string()),
+        serde_json::json!({ "mr_id": mr.id.to_string() }),
+        now,
+    );
+    let _ = state.analytics.record(&ev).await;
+
+    // Auto-track MR creation
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "mr.created",
+        Some(agent.id.to_string()),
+        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
+        now,
+    );
+    let _ = state.analytics.record(&ev).await;
 
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }

@@ -12,6 +12,8 @@
   import AdminPanel from './components/AdminPanel.svelte';
   import McpCatalog from './components/McpCatalog.svelte';
   import ComposeView from './components/ComposeView.svelte';
+  import AnalyticsView from './components/AnalyticsView.svelte';
+  import CostView from './components/CostView.svelte';
 
   let currentView = $state('activity');
   let selectedRepo = $state(null);
@@ -44,6 +46,8 @@
     'merge-queue': 'Merge Queue',
     'mcp-catalog': 'MCP Tool Catalog',
     compose: 'Agent Compose',
+    analytics: 'Analytics',
+    costs: 'Cost Tracking',
     admin: 'Admin Panel',
     settings: 'Settings',
   };
@@ -91,6 +95,10 @@
         <McpCatalog />
       {:else if currentView === 'compose'}
         <ComposeView />
+      {:else if currentView === 'analytics'}
+        <AnalyticsView />
+      {:else if currentView === 'costs'}
+        <CostView />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}
