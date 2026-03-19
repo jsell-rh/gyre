@@ -7,6 +7,7 @@ use gyre_common::Id;
 use gyre_domain::{Agent, AgentStatus, AgentWorktree, MergeRequest, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
@@ -52,6 +53,7 @@ pub struct CompleteAgentRequest {
 /// 3. Creates a git worktree on the repo for the agent's branch
 /// 4. Assigns the task to the agent, advances task to InProgress
 /// 5. Records the worktree in DB (linked to agent + task)
+#[instrument(skip(state, _auth, req), fields(agent_name = %req.name, branch = %req.branch))]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedAgent,
@@ -144,6 +146,7 @@ pub async fn spawn_agent(
 /// 1. Creates a MergeRequest (source->target)
 /// 2. Transitions task status to Review
 /// 3. Transitions agent status to Idle
+#[instrument(skip(state, req), fields(agent_id = %id, branch = %req.branch))]
 pub async fn complete_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

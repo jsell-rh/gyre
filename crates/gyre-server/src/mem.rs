@@ -693,5 +693,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         api_keys: Arc::new(MemApiKeyRepository::default()),
         jwt_config: None,
         http_client: reqwest::Client::new(),
+        metrics: Arc::new(crate::metrics::Metrics::new().expect("test metrics")),
     })
 }

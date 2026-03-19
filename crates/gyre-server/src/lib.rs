@@ -6,7 +6,10 @@ pub(crate) mod health;
 pub(crate) mod mem;
 pub mod merge_processor;
 pub(crate) mod messages;
+pub mod metrics;
+pub mod middleware;
 pub(crate) mod spa;
+pub mod telemetry;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -79,6 +82,8 @@ pub struct AppState {
     pub jwt_config: Option<Arc<JwtConfig>>,
     /// HTTP client for OIDC JWKS fetching.
     pub http_client: reqwest::Client,
+    /// Prometheus metrics.
+    pub metrics: Arc<metrics::Metrics>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -87,6 +92,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health::health_handler))
+        .route("/metrics", get(metrics::metrics_handler))
         .route("/ws", get(ws::ws_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
         .route(
@@ -104,6 +110,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
         .merge(api::api_router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::request_tracing,
+        ))
         .with_state(state)
 }
 
@@ -111,6 +121,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// Used by both production (main) and integration tests.
 pub fn build_state(auth_token: &str, base_url: &str) -> Arc<AppState> {
     let (broadcast_tx, _) = broadcast::channel(256);
+    let metrics = Arc::new(metrics::Metrics::new().expect("failed to create Prometheus metrics"));
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -132,6 +143,7 @@ pub fn build_state(auth_token: &str, base_url: &str) -> Arc<AppState> {
         api_keys: Arc::new(mem::MemApiKeyRepository::default()),
         jwt_config: None,
         http_client: reqwest::Client::new(),
+        metrics,
     })
 }
 
