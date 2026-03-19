@@ -112,14 +112,35 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees |
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
+| `GET` | `/git/{project}/{repo}/info/refs?service=git-upload-pack` | Smart HTTP clone/fetch capability advertisement |
+| `GET` | `/git/{project}/{repo}/info/refs?service=git-receive-pack` | Smart HTTP push capability advertisement |
+| `POST` | `/git/{project}/{repo}/git-upload-pack` | Git clone / fetch data |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Git push data (triggers post-receive: records agent-commit mapping) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
+
+### HTTP Bearer Token Auth (Git endpoints)
+
+All `/git/` endpoints require `Authorization: Bearer <token>`. Two valid token types:
+
+| Token | How to get | Who uses it |
+|-------|-----------|-------------|
+| Global token | `GYRE_AUTH_TOKEN` env var (default: `gyre-dev-token`) | System/dev use |
+| Per-agent token | Returned in body of `POST /api/v1/agents` registration | Agent use — preferred |
+
+```bash
+# Clone a repo as an agent
+git clone http://localhost:3000/git/my-project/my-repo.git
+# Git will prompt for credentials — use any username, token as password
+# Or embed in URL:
+git clone http://agent-token@localhost:3000/git/my-project/my-repo.git
+```
 
 ### Server Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GYRE_PORT` | `3000` | TCP port to listen on |
-| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Token clients must send in the WS `Auth` message |
+| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Global auth token (WS `Auth` handshake + git HTTP Bearer) |
 | `GYRE_DB_PATH` | `gyre.db` | SQLite database file path |
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
 
