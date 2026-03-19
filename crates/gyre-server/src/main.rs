@@ -2,17 +2,21 @@ mod activity;
 mod api;
 mod health;
 mod mem;
+mod messages;
 mod spa;
 mod ws;
 
 use anyhow::Result;
 use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
+use gyre_domain::AgentStatus;
 use gyre_ports::{
     AgentRepository, MergeRequestRepository, ProjectRepository, RepoRepository, TaskRepository,
 };
+use messages::AgentMessage;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tracing::info;
 
 /// Shared application state available to all handlers.
@@ -26,6 +30,10 @@ pub struct AppState {
     pub merge_requests: Arc<dyn MergeRequestRepository>,
     pub activity_store: activity::ActivityStore,
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
+    /// Per-agent message inboxes: agent_id → queued messages.
+    pub agent_messages: Arc<Mutex<HashMap<String, VecDeque<AgentMessage>>>>,
+    /// Auth tokens issued on agent registration: agent_id → token.
+    pub agent_tokens: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -67,7 +75,13 @@ async fn main() -> Result<()> {
         merge_requests: Arc::new(mem::MemMrRepository::default()),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
+        agent_messages: Arc::new(Mutex::new(HashMap::new())),
+        agent_tokens: Arc::new(Mutex::new(HashMap::new())),
     });
+
+    // Background task: mark agents dead if they miss heartbeats.
+    spawn_stale_agent_detector(state.clone());
+
     let app = build_router(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -80,6 +94,42 @@ async fn main() -> Result<()> {
 
     info!("gyre-server stopped");
     Ok(())
+}
+
+/// Periodically scan for agents that have stopped sending heartbeats and mark them Dead.
+fn spawn_stale_agent_detector(state: Arc<AppState>) {
+    const CHECK_INTERVAL_SECS: u64 = 30;
+    const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            match state.agents.list().await {
+                Ok(agents) => {
+                    for mut agent in agents {
+                        if agent.status != AgentStatus::Dead
+                            && !agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS)
+                        {
+                            info!(agent_id = %agent.id, agent_name = %agent.name,
+                                  "marking stale agent as dead");
+                            let _ = agent.transition_status(AgentStatus::Dead);
+                            let _ = state.agents.update(&agent).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("stale agent check failed: {e}");
+                }
+            }
+        }
+    });
 }
 
 /// Wait for SIGINT or SIGTERM.
