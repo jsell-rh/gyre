@@ -1,0 +1,13 @@
+[package]
+name = "gyre-ports"
+description = "Port traits (interfaces) for the Gyre platform - hexagonal architecture boundary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1"
+gyre-common = { workspace = true }

@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gyre-server",
+    "crates/gyre-cli",
+    "crates/gyre-domain",
+    "crates/gyre-ports",
+    "crates/gyre-adapters",
+    "crates/gyre-common",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jsell-rh/gyre"
+
+[workspace.dependencies]
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Tracing / observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Internal crates
+gyre-common = { path = "crates/gyre-common" }
+gyre-ports = { path = "crates/gyre-ports" }
+gyre-domain = { path = "crates/gyre-domain" }
+gyre-adapters = { path = "crates/gyre-adapters" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

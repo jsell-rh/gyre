@@ -1,0 +1,16 @@
+[package]
+name = "gyre-domain"
+description = "Pure domain logic for the Gyre platform - no infrastructure dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# INVARIANT: gyre-domain MUST NOT depend on gyre-adapters or any infrastructure crate.
+# Domain depends only on gyre-ports and gyre-common.
+# This is enforced by the architecture lint in scripts/check-arch.sh and CI.
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+gyre-common = { workspace = true }
+gyre-ports = { workspace = true }
