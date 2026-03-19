@@ -112,14 +112,36 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees |
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
+| `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task |
+| `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree |
+| `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
+| `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
+
+### Authentication
+
+All REST and git HTTP endpoints require a Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <token>
+```
+
+Two token types are accepted:
+
+| Token source | How to obtain | Scope |
+|---|---|---|
+| `GYRE_AUTH_TOKEN` env var | Server config (default: `gyre-dev-token`) | Global admin — all endpoints |
+| Per-agent token | Returned by `POST /api/v1/agents` or `POST /api/v1/agents/spawn` | Agent-scoped operations |
+
+The git HTTP endpoints (`/git/...`) accept both token types so that `gyre clone` / `gyre push` can use the per-agent token stored in `~/.gyre/config`.
 
 ### Server Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GYRE_PORT` | `3000` | TCP port to listen on |
-| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Token clients must send in the WS `Auth` message |
+| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Bearer token clients must send to authenticate |
 | `GYRE_DB_PATH` | `gyre.db` | SQLite database file path |
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
 
@@ -148,12 +170,103 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
 The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n>`.
 
+### Agent Spawn / Complete API (M3.2)
+
+`POST /api/v1/agents/spawn` -- single-call agent provisioning:
+
+```json
+// Request
+{
+  "name": "worker-1",
+  "repo_id": "<repo-uuid>",
+  "task_id": "<task-uuid>",
+  "branch": "feat/my-feature",
+  "parent_id": "<orchestrator-agent-uuid>"   // optional
+}
+
+// Response 201
+{
+  "agent": { "id": "...", "name": "worker-1", "status": "Active", ... },
+  "token": "<per-agent-bearer-token>",
+  "worktree_path": "/path/to/worktree",
+  "clone_url": "http://localhost:3000/git/project/repo.git",
+  "branch": "feat/my-feature"
+}
+```
+
+`POST /api/v1/agents/{id}/complete` -- teardown after work is done:
+
+```json
+// Request
+{
+  "branch": "feat/my-feature",
+  "title": "Add my feature",
+  "target_branch": "main"
+}
+
+// Response 200 -- returns the opened MergeRequest
+```
+
+The server automatically: opens the MR, marks the task done, removes the git worktree, and marks the agent Idle.
+
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
 ---
 
 ## CLI Usage
+
+### Setup (M3.3)
+
+```bash
+# Register this CLI instance as a named agent; saves token + agent ID to ~/.gyre/config
+gyre init --server http://localhost:3000 --name my-agent --token gyre-dev-token
+
+# Clone a Gyre-hosted repository (uses token from ~/.gyre/config)
+gyre clone myproject/myrepo            # clones into ./myrepo/
+gyre clone myproject/myrepo --dir /tmp/work
+
+# Push current branch (uses token from ~/.gyre/config)
+gyre push                              # pushes to origin
+gyre push --remote gyre
+```
+
+Config file is stored at `~/.gyre/config` (TOML):
+
+```toml
+server = "http://localhost:3000"
+token = "<per-agent-auth-token>"
+agent_id = "<uuid>"
+agent_name = "my-agent"
+```
+
+### Agent Operations (M3.3)
+
+```bash
+# Show this agent's registered status and current task
+gyre status
+
+# List tasks (optional filters)
+gyre tasks list
+gyre tasks list --status in_progress
+gyre tasks list --mine                 # only tasks assigned to this agent
+
+# Assign a task to this agent and mark it in_progress
+gyre tasks take <task-id>
+```
+
+### Merge Requests (M3.3)
+
+```bash
+# Create a merge request for the current branch
+gyre mr create --title "My feature" --repo-id <repo-uuid>
+
+# Custom source/target branches
+gyre mr create --title "Fix bug" --repo-id <repo-uuid> \
+  --source fix/my-bug --target main
+```
+
+### Connection / Diagnostics
 
 ```bash
 # Connect to a running gyre-server (interactive session)
