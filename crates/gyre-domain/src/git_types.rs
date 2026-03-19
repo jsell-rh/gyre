@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MergeResult {
+    Success { merge_commit_sha: String },
+    Conflict { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub name: String,
     pub head_sha: String,

@@ -11,6 +11,7 @@
 pub mod activity;
 pub mod agent;
 pub mod git_types;
+pub mod merge_queue;
 pub mod merge_request;
 pub mod project;
 pub mod repository;
@@ -18,7 +19,8 @@ pub mod task;
 
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
-pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff};
+pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
+pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{MergeRequest, MrError, MrStatus};
 pub use project::Project;
 pub use repository::Repository;
