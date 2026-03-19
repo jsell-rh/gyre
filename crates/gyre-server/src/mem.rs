@@ -4,23 +4,28 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentCommit, AgentStatus, AgentWorktree, BranchInfo, CommitInfo, DiffResult,
-    MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MergeResult, MrStatus, Project,
-    Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
+    Agent, AgentCommit, AgentStatus, AgentWorktree, MergeQueueEntry, MergeQueueEntryStatus,
+    MergeRequest, MrStatus, Project, Repository, Review, ReviewComment, ReviewDecision, Task,
+    TaskStatus,
 };
+#[cfg(test)]
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
+#[cfg(test)]
+use gyre_ports::GitOpsPort;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, GitOpsPort, MergeQueueRepository,
-    MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
-    WorktreeRepository,
+    AgentCommitRepository, AgentRepository, MergeQueueRepository, MergeRequestRepository,
+    ProjectRepository, RepoRepository, ReviewRepository, TaskRepository, WorktreeRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// No-op git operations adapter for tests (never touches the filesystem).
+#[cfg(test)]
 #[derive(Default)]
 pub struct NoopGitOps;
 
+#[cfg(test)]
 #[async_trait]
 impl GitOpsPort for NoopGitOps {
     async fn init_bare(&self, _path: &str) -> Result<()> {
