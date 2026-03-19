@@ -8,11 +8,11 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult};
+#[cfg(test)]
+use gyre_ports::GitOpsPort;
 use gyre_ports::{
     AgentRepository, MergeRequestRepository, ProjectRepository, RepoRepository, TaskRepository,
 };
-#[cfg(test)]
-use gyre_ports::GitOpsPort;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
