@@ -8,5 +8,8 @@
 //! Adapters depend on ports, not the other way around.
 //! Domain logic MUST NOT import this crate.
 
+pub mod git2_ops;
 pub mod sqlite;
+
+pub use git2_ops::Git2OpsAdapter;
 pub use sqlite::SqliteStorage;
