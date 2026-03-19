@@ -33,3 +33,4 @@ uuid = { workspace = true }
 tokio-tungstenite = "0.24"
 http = "1"
 tower = { workspace = true, features = ["util"] }
+tempfile = "3"
