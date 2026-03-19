@@ -235,6 +235,9 @@ Key specs to read before making changes:
 | Tech stack + hexagonal invariants | [specs/development/architecture.md](specs/development/architecture.md) |
 | Design principles (invariants) | [specs/system/design-principles.md](specs/system/design-principles.md) |
 | M0 milestone deliverables | [specs/milestones/m0-walking-skeleton.md](specs/milestones/m0-walking-skeleton.md) |
+| M1 milestone deliverables | [specs/milestones/m1-domain-foundation.md](specs/milestones/m1-domain-foundation.md) |
+| M2 milestone deliverables | [specs/milestones/m2-source-control.md](specs/milestones/m2-source-control.md) |
+| M3 milestone deliverables | [specs/milestones/m3-agent-orchestration.md](specs/milestones/m3-agent-orchestration.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 

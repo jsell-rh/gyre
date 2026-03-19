@@ -41,15 +41,13 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 
 ## Current Status
 
-**Milestone 0 (Walking Skeleton) - Complete**
+| Milestone | Status | Summary |
+|---|---|---|
+| M0: Walking Skeleton | Done | axum server, SQLite, Svelte SPA, WebSocket, CLI, one Ralph loop |
+| M1: Domain Foundation | Done | 6-entity domain model, full CRUD REST API, Svelte dashboard, agent lifecycle |
+| M2: Source Control | Done | Git forge, MR workflow + reviews, merge queue, agent-commit tracking, worktrees |
+| M3: Agent Orchestration | In Progress | Smart HTTP git, agent spawn API, CLI client, end-to-end Ralph loop |
 
-| Deliverable | Status |
-|---|---|
-| M0.1 Repo Scaffold | Done - Cargo workspace, Nix flake, CI, pre-commit hooks |
-| M0.2 Server Boots | Done - axum HTTP/WS, SQLite, Svelte SPA, OTel tracing |
-| M0.3 CLI Connects | Done - clap CLI, WebSocket client, ratatui TUI |
-| M0.4 One Ralph Loop | Done - Activity log, full Ralph loop with activity trail |
+203 tests passing. Hexagonal architecture enforced mechanically.
 
-26 tests passing. Hexagonal architecture enforced mechanically.
-
-See [`specs/milestones/m0-walking-skeleton.md`](specs/milestones/m0-walking-skeleton.md) for full spec.
+See [`specs/`](specs/index.md) for full specifications.
