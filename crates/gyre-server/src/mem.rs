@@ -694,5 +694,9 @@ pub fn test_state() -> Arc<crate::AppState> {
         jwt_config: None,
         http_client: reqwest::Client::new(),
         metrics: Arc::new(crate::metrics::Metrics::new().expect("test metrics")),
+        started_at_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     })
 }
