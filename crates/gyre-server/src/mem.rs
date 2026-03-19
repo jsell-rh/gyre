@@ -290,7 +290,8 @@ impl MergeRequestRepository for MemMrRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    use tokio::sync::broadcast;
+    use std::collections::HashMap;
+    use tokio::sync::{broadcast, Mutex};
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         projects: Arc::new(MemProjectRepository::default()),
@@ -300,5 +301,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         merge_requests: Arc::new(MemMrRepository::default()),
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,
+        agent_messages: Arc::new(Mutex::new(HashMap::new())),
+        agent_tokens: Arc::new(Mutex::new(HashMap::new())),
     })
 }
