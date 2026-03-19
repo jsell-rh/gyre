@@ -6,8 +6,13 @@
   import TaskBoard from './components/TaskBoard.svelte';
   import ProjectList from './components/ProjectList.svelte';
   import Settings from './components/Settings.svelte';
+  import RepoDetail from './components/RepoDetail.svelte';
+  import MergeRequestDetail from './components/MergeRequestDetail.svelte';
+  import MergeQueueView from './components/MergeQueueView.svelte';
 
   let currentView = $state('activity');
+  let selectedRepo = $state(null);
+  let selectedMr = $state(null);
   let wsStatus = $state('disconnected');
   let wsStore = $state(null);
 
@@ -19,6 +24,23 @@
       wsStore.destroy();
     };
   });
+
+  function navigate(view, ctx = {}) {
+    currentView = view;
+    if (ctx.repo !== undefined) selectedRepo = ctx.repo;
+    if (ctx.mr !== undefined) selectedMr = ctx.mr;
+  }
+
+  const viewTitles = {
+    activity: 'Activity Feed',
+    agents: 'Agents',
+    tasks: 'Task Board',
+    projects: 'Projects',
+    'repo-detail': 'Repository',
+    'mr-detail': 'Merge Request',
+    'merge-queue': 'Merge Queue',
+    settings: 'Settings',
+  };
 </script>
 
 <div class="app">
@@ -26,14 +48,7 @@
 
   <div class="main">
     <header class="topbar">
-      <span class="topbar-title">
-        {#if currentView === 'activity'}Activity Feed
-        {:else if currentView === 'agents'}Agents
-        {:else if currentView === 'tasks'}Task Board
-        {:else if currentView === 'projects'}Projects
-        {:else}Settings
-        {/if}
-      </span>
+      <span class="topbar-title">{viewTitles[currentView] ?? 'Gyre'}</span>
       <div class="topbar-right">
         <span class="ws-indicator {wsStatus}" title="WebSocket: {wsStatus}">
           <span class="ws-dot"></span>
@@ -51,7 +66,21 @@
       {:else if currentView === 'tasks'}
         <TaskBoard />
       {:else if currentView === 'projects'}
-        <ProjectList />
+        <ProjectList onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
+      {:else if currentView === 'repo-detail' && selectedRepo}
+        <RepoDetail
+          repo={selectedRepo}
+          onBack={() => navigate('projects')}
+          onSelectMr={(mr) => navigate('mr-detail', { mr })}
+        />
+      {:else if currentView === 'mr-detail' && selectedMr}
+        <MergeRequestDetail
+          mr={selectedMr}
+          repo={selectedRepo}
+          onBack={() => navigate('repo-detail')}
+        />
+      {:else if currentView === 'merge-queue'}
+        <MergeQueueView />
       {:else}
         <Settings {wsStatus} />
       {/if}
