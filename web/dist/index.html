@@ -4,31 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gyre</title>
-    <style>
-      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; text-align: center; }
-      h1 { font-size: 3rem; font-weight: 700; }
-      .status { color: #f97316; }
-      .version { color: #999; font-size: 0.9rem; margin-top: 2rem; }
-    </style>
+    <script type="module" crossorigin src="/assets/index-D1OQjn6A.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CnapOh-u.css">
   </head>
   <body>
-    <h1>Gyre</h1>
-    <p>Connection: <span class="status">disconnected</span></p>
-    <p class="version">v0.1.0</p>
-    <script>
-      // Minimal WS client (stub build — run `npm run build` in web/ for the full app)
-      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${location.host}/ws`);
-      const statusEl = document.querySelector('.status');
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'Auth', token: 'gyre-dev-token' }));
-      ws.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'AuthResult') {
-          statusEl.textContent = msg.success ? 'connected' : 'auth-failed';
-          statusEl.style.color = msg.success ? '#22c55e' : '#ef4444';
-        }
-      };
-      ws.onclose = () => { statusEl.textContent = 'disconnected'; };
-    </script>
+    <div id="app"></div>
   </body>
 </html>
