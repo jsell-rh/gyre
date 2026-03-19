@@ -6,15 +6,16 @@ use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, MergeQueueEntry, MergeQueueEntryStatus,
     MergeRequest, MrStatus, Project, Repository, Review, ReviewComment, ReviewDecision, Task,
-    TaskStatus,
+    TaskStatus, User,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 #[cfg(test)]
 use gyre_ports::GitOpsPort;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, MergeQueueRepository, MergeRequestRepository,
-    ProjectRepository, RepoRepository, ReviewRepository, TaskRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, ApiKeyRepository, MergeQueueRepository,
+    MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
+    UserRepository, WorktreeRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -593,6 +594,79 @@ impl MergeQueueRepository for MemMergeQueueRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemUserRepository {
+    store: Arc<Mutex<HashMap<String, User>>>,
+}
+
+#[async_trait]
+impl UserRepository for MemUserRepository {
+    async fn create(&self, user: &User) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(user.id.to_string(), user.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<User>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_external_id(&self, external_id: &str) -> Result<Option<User>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|u| u.external_id == external_id)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<User>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn update(&self, user: &User) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(user.id.to_string(), user.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemApiKeyRepository {
+    /// key -> (user_id, name)
+    store: Arc<Mutex<HashMap<String, Id>>>,
+}
+
+#[async_trait]
+impl ApiKeyRepository for MemApiKeyRepository {
+    async fn create(&self, key: &str, user_id: &Id, _name: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(key.to_string(), user_id.clone());
+        Ok(())
+    }
+
+    async fn find_user_id(&self, key: &str) -> Result<Option<Id>> {
+        Ok(self.store.lock().await.get(key).cloned())
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.store.lock().await.remove(key);
+        Ok(())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -615,5 +689,9 @@ pub fn test_state() -> Arc<crate::AppState> {
         broadcast_tx: broadcast::channel(16).0,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        users: Arc::new(MemUserRepository::default()),
+        api_keys: Arc::new(MemApiKeyRepository::default()),
+        jwt_config: None,
+        http_client: reqwest::Client::new(),
     })
 }
