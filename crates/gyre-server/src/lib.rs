@@ -3,6 +3,7 @@ pub mod api;
 pub(crate) mod auth;
 pub(crate) mod git_http;
 pub(crate) mod health;
+pub mod jobs;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -10,23 +11,27 @@ pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub(crate) mod rbac;
+pub mod retention;
+pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
-use gyre_common::{ActivityEventData, AgEventType};
-use gyre_domain::{AgentCard, AgentStatus};
+use gyre_common::ActivityEventData;
+use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, JjOpsPort,
     MergeQueueRepository, MergeRequestRepository, ProjectRepository, RepoRepository,
     ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
+use jobs::JobRegistry;
 use messages::AgentMessage;
+use retention::RetentionStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
-use tracing::info;
 
 /// Configuration for OIDC/JWT validation.
 #[derive(Clone)]
@@ -93,6 +98,10 @@ pub struct AppState {
     pub agent_cards: Arc<Mutex<HashMap<String, AgentCard>>>,
     /// Compose sessions: compose_id -> list of agent_ids.
     pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Data retention policies.
+    pub retention_store: RetentionStore,
+    /// Background job registry.
+    pub job_registry: Arc<JobRegistry>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -101,6 +110,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health::health_handler))
+        .route("/healthz", get(health::healthz_handler))
+        .route("/readyz", get(health::readyz_handler))
         .route("/metrics", get(metrics::metrics_handler))
         .route("/ws", get(ws::ws_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
@@ -168,92 +179,14 @@ pub fn build_state(
         started_at_secs,
         agent_cards: Arc::new(Mutex::new(HashMap::new())),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        retention_store: RetentionStore::new(),
+        job_registry: Arc::new(JobRegistry::new()),
     })
 }
 
-/// Periodically scan for agents that have stopped sending heartbeats and mark them Dead.
-/// When an agent is marked Dead:
-///   - Its worktrees are cleaned up (git remove + DB delete)
-///   - Its assigned task (if any) is transitioned to Blocked
-///   - An ActivityEvent is recorded
+/// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
 pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
-    const CHECK_INTERVAL_SECS: u64 = 30;
-    const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
-
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS));
-        loop {
-            interval.tick().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            match state.agents.list().await {
-                Ok(agents) => {
-                    for mut agent in agents {
-                        if agent.status != AgentStatus::Dead
-                            && !agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS)
-                        {
-                            info!(agent_id = %agent.id, agent_name = %agent.name,
-                                  "marking stale agent as dead");
-                            let _ = agent.transition_status(AgentStatus::Dead);
-                            let _ = state.agents.update(&agent).await;
-
-                            // Clean up worktrees
-                            if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-                                for wt in worktrees {
-                                    if let Ok(Some(repo)) =
-                                        state.repos.find_by_id(&wt.repository_id).await
-                                    {
-                                        if let Err(e) = state
-                                            .git_ops
-                                            .remove_worktree(&repo.path, &wt.path)
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                "remove_worktree failed for agent {}: {e}",
-                                                agent.id
-                                            );
-                                        }
-                                    }
-                                    let _ = state.worktrees.delete(&wt.id).await;
-                                }
-                            }
-
-                            // Block the assigned task
-                            if let Some(task_id) = &agent.current_task_id {
-                                if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
-                                    use gyre_domain::TaskStatus;
-                                    if task.status == TaskStatus::InProgress {
-                                        let _ = task.transition_status(TaskStatus::Blocked);
-                                        task.updated_at = now;
-                                        let _ = state.tasks.update(&task).await;
-                                    }
-                                }
-                            }
-
-                            // Record ActivityEvent
-                            state.activity_store.record(ActivityEventData {
-                                event_id: uuid::Uuid::new_v4().to_string(),
-                                agent_id: agent.id.to_string(),
-                                event_type: AgEventType::StateChanged,
-                                description: format!(
-                                    "Agent {} marked dead (no heartbeat)",
-                                    agent.name
-                                ),
-                                timestamp: now,
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("stale agent check failed: {e}");
-                }
-            }
-        }
-    });
+    stale_agents::spawn_stale_agent_detector(state);
 }
 
 #[cfg(test)]
@@ -287,5 +220,46 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
         assert_eq!(json["version"], "0.1.0");
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_ok() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json["checks"].is_object());
     }
 }
