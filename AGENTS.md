@@ -135,6 +135,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
 | `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook |
+| `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key) |
+| `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 
 ### Authentication
@@ -145,14 +147,27 @@ All REST and git HTTP endpoints require a Bearer token in the `Authorization` he
 Authorization: Bearer <token>
 ```
 
-Two token types are accepted:
+Four auth mechanisms are accepted (checked in priority order):
 
-| Token source | How to obtain | Scope |
+| Mechanism | How to obtain | Scope |
 |---|---|---|
 | `GYRE_AUTH_TOKEN` env var | Server config (default: `gyre-dev-token`) | Global admin — all endpoints |
 | Per-agent token | Returned by `POST /api/v1/agents` or `POST /api/v1/agents/spawn` | Agent-scoped operations |
+| API key (`gyre_<uuid>`) | `POST /api/v1/auth/api-keys` (Admin only) | Same as the user's role |
+| JWT (Keycloak OIDC) | Keycloak token exchange | Role from `realm_access` JWT claim |
 
-The git HTTP endpoints (`/git/...`) accept both token types so that `gyre clone` / `gyre push` can use the per-agent token stored in `~/.gyre/config`.
+**User roles** (M4.2, populated from Keycloak `realm_access.roles` JWT claim):
+
+| Role | Permissions |
+|---|---|
+| `Admin` | All operations including API key creation and user management |
+| `Developer` | Full CRUD on projects, repos, tasks, MRs |
+| `Agent` | Spawn/complete agent ops, task assignment, git push |
+| `ReadOnly` | GET-only access |
+
+The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyre clone` / `gyre push` can use the per-agent token stored in `~/.gyre/config`.
+
+> **Note (M4.2):** JWT/OIDC auth is implemented but requires `GYRE_OIDC_ISSUER` env var wiring in `main.rs` to activate in production — see `crates/gyre-server/src/auth.rs`. Until that env var is wired, the server falls back to agent-token auth only.
 
 ### Server Environment Variables
 
@@ -161,6 +176,9 @@ The git HTTP endpoints (`/git/...`) accept both token types so that `gyre clone`
 | `GYRE_PORT` | `3000` | TCP port to listen on |
 | `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Bearer token clients must send to authenticate |
 | `GYRE_DB_PATH` | `gyre.db` | SQLite database file path |
+| `GYRE_BASE_URL` | `http://localhost:<port>` | Public base URL (used in clone URLs returned by spawn API) |
+| `GYRE_LOG_FORMAT` | _(human-readable)_ | Set to `json` for structured JSON log output (M4.1) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(disabled)_ | OTLP/gRPC collector URL, e.g. `http://otel-collector:4317` (M4.1) |
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
