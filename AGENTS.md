@@ -150,6 +150,12 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/compose/apply` | Apply agent-compose spec (JSON or YAML), creates agent tree in dependency order |
 | `GET` | `/api/v1/compose/status` | Get current compose session: agent states |
 | `POST` | `/api/v1/compose/teardown` | Stop all compose agents and remove session |
+| `POST` | `/api/v1/repos/{id}/jj/init` | Initialize jj (Jujutsu) in colocated mode on a repo |
+| `GET` | `/api/v1/repos/{id}/jj/log` | List recent jj changes (`?limit=N`) |
+| `POST` | `/api/v1/repos/{id}/jj/new` | Create a new anonymous jj change (WIP commit) |
+| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change |
+| `POST` | `/api/v1/repos/{id}/jj/undo` | Undo the last jj operation |
+| `POST` | `/api/v1/repos/{id}/jj/bookmark` | Create a jj bookmark (branch) pointing to a change |
 
 ### Authentication
 
@@ -365,7 +371,7 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4 + M4.3)
+### Dashboard (M3.4 + M4.3 + M5)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
@@ -378,6 +384,9 @@ The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
   - Agent management: Kill and Reassign action buttons per agent
 
 Access at `http://localhost:3000` after starting the server. Admin Panel requires `Admin` role via Keycloak JWT (`GYRE_OIDC_ISSUER`) or the global `GYRE_AUTH_TOKEN`.
+- **MCP Tool Catalog** (M5.1, sidebar: "MCP Tools"): lists all 8 MCP tools available on `/mcp`, with per-tool schema details.
+- **Compose View** (M5.2, sidebar: "Compose"): paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states, and teardown the session.
+- **Agent Card Panel** (M5.2): per-agent panel to view and edit the agent's A2A AgentCard (capabilities, protocols, endpoint).
 
 ---
 
