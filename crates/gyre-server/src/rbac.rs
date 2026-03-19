@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
+#[allow(dead_code)]
 fn forbidden() -> Response {
     (
         StatusCode::FORBIDDEN,
