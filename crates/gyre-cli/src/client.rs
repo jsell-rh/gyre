@@ -156,10 +156,7 @@ impl GyreClient {
         let body = serde_json::json!({ "status": new_status });
         let resp = self
             .client
-            .put(format!(
-                "{}/api/v1/tasks/{task_id}/status",
-                self.base_url
-            ))
+            .put(format!("{}/api/v1/tasks/{task_id}/status", self.base_url))
             .header("Authorization", self.auth_header())
             .json(&body)
             .send()
