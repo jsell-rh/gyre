@@ -65,6 +65,8 @@ How Gyre gets built - process and standards for the agent team.
 | M2: Source Control | [`milestones/m2-source-control.md`](milestones/m2-source-control.md) | Git forge, merge requests, merge queue, agent-commit tracking |
 | M3: Agent Orchestration | [`milestones/m3-agent-orchestration.md`](milestones/m3-agent-orchestration.md) | Smart HTTP git, agent spawn, CLI client, end-to-end Ralph loop |
 | M4: Identity & Observability | [`milestones/m4-identity-observability.md`](milestones/m4-identity-observability.md) | Keycloak SSO, RBAC, OpenTelemetry, admin panel |
+| M5: Agent Protocols | [`milestones/m5-agent-protocols.md`](milestones/m5-agent-protocols.md) | MCP server, A2A discovery, AG-UI events, jj, agent-compose |
+| M6: Infrastructure | [`milestones/m6-infrastructure.md`](milestones/m6-infrastructure.md) | Analytics, BCP, cost tracking, job framework |
 
 ## Open Questions
 
