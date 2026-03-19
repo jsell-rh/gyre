@@ -83,6 +83,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/health` | Returns `{"status":"ok","version":"0.1.0"}` |
 | `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
 | `GET` | `/api/activity` | Query activity log (params: `since=<unix_ms>`, `limit=<n>`) |
+| `GET` | `/api/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
 | `GET` | `/*` | Svelte SPA static files (served from `web/dist/`) |
 
 ### Server Environment Variables

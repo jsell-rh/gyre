@@ -41,13 +41,15 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 
 ## Current Status
 
-**Milestone 0 (Walking Skeleton) - In Progress**
+**Milestone 0 (Walking Skeleton) - Complete**
 
 | Deliverable | Status |
 |---|---|
-| M0.1 Repo Scaffold | Done (PR #1 merged) |
-| M0.2 Server Boots | In Progress |
-| M0.3 CLI Connects | In Progress |
-| M0.4 One Ralph Loop | Backlog |
+| M0.1 Repo Scaffold | Done - Cargo workspace, Nix flake, CI, pre-commit hooks |
+| M0.2 Server Boots | Done - axum HTTP/WS, SQLite, Svelte SPA, OTel tracing |
+| M0.3 CLI Connects | Done - clap CLI, WebSocket client, ratatui TUI |
+| M0.4 One Ralph Loop | Done - Activity log, full Ralph loop with activity trail |
+
+26 tests passing. Hexagonal architecture enforced mechanically.
 
 See [`specs/milestones/m0-walking-skeleton.md`](specs/milestones/m0-walking-skeleton.md) for full spec.
