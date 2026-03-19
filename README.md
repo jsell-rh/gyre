@@ -47,7 +47,8 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M1: Domain Foundation | Done | 6-entity domain model, full CRUD REST API, Svelte dashboard, agent lifecycle |
 | M2: Source Control | Done | Git forge, MR workflow + reviews, merge queue, agent-commit tracking, worktrees |
 | M3: Agent Orchestration | Done | Smart HTTP git, agent spawn API, CLI client, end-to-end Ralph loop |
-| M4: Identity & Observability | In Progress | Keycloak SSO + JWT auth, RBAC roles, OpenTelemetry tracing, Prometheus metrics |
+| M4: Identity & Observability | Done | Keycloak SSO + JWT auth, RBAC roles, OpenTelemetry tracing, Prometheus metrics |
+| M5: Agent Protocols | Planned | MCP server, A2A protocol, AG-UI events, jj VCS, agent compose spec |
 
 256 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
