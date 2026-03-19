@@ -88,12 +88,14 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`) |
 | `GET` | `/api/v1/repos/{id}` | Get repository |
+| `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
+| `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
+| `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
 | `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat |
 | `POST/GET` | `/api/v1/agents/{id}/messages` | Send/poll agent messages |
-| `PUT` | `/api/v1/agents/{id}/messages/{msg_id}/ack` | Acknowledge message |
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`) |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
