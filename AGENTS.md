@@ -143,6 +143,13 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, clean worktrees, block assigned task (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
+| `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) |
+| `GET` | `/mcp/sse` | MCP SSE stream — typed AG-UI activity events |
+| `GET` | `/api/v1/agents/discover` | Discover active agents by capability (`?capability=<str>`) |
+| `PUT` | `/api/v1/agents/{id}/card` | Publish / update an agent's A2A AgentCard |
+| `POST` | `/api/v1/compose/apply` | Apply agent-compose spec (JSON or YAML), creates agent tree in dependency order |
+| `GET` | `/api/v1/compose/status` | Get current compose session: agent states |
+| `POST` | `/api/v1/compose/teardown` | Stop all compose agents and remove session |
 
 ### Authentication
 
@@ -203,7 +210,7 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 {"type":"Pong","timestamp":1234567890}
 
 // 3. Record an activity event (server stores + broadcasts to all clients):
-{"type":"ActivityEvent","event_id":"abc","agent_id":"server","event_type":"task.started","description":"Task started","timestamp":1234567890}
+{"type":"ActivityEvent","event_id":"abc","agent_id":"server","event_type":"RUN_STARTED","description":"Task started","timestamp":1234567890}
 
 // 4. Query activity log over WebSocket:
 {"type":"ActivityQuery","since":1234567800,"limit":50}
@@ -212,6 +219,109 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
 The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n>`.
+
+#### AG-UI Event Taxonomy (`gyre-common::AgEventType`)
+
+`event_type` in `ActivityEvent` is a typed `AgEventType` enum (M5.1). Accepted values:
+
+| Value | Meaning |
+|---|---|
+| `TOOL_CALL_START` | Agent began invoking a tool |
+| `TOOL_CALL_END` | Tool call completed |
+| `TEXT_MESSAGE_CONTENT` | Agent produced text output |
+| `RUN_STARTED` | Agent task run started |
+| `RUN_FINISHED` | Agent task run finished |
+| `STATE_CHANGED` | Agent or task state transition |
+| `ERROR` | Error occurred |
+| `<custom>` | Any other string maps to `Custom(String)` |
+
+### MCP Server (M5.1)
+
+Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discover and call Gyre capabilities as MCP tools.
+
+**Endpoints:**
+- `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`
+- `GET /mcp/sse` — SSE stream of typed AG-UI activity events
+
+**Authentication:** Same Bearer token as REST API (`Authorization: Bearer <token>`).
+
+**Available tools** (from `tools/list`):
+
+| Tool | Description |
+|---|---|
+| `gyre_create_task` | Create a new task |
+| `gyre_list_tasks` | Query tasks (`status`, `assigned_to` filters) |
+| `gyre_update_task` | Update task fields or status |
+| `gyre_create_mr` | Create a merge request |
+| `gyre_list_mrs` | List merge requests (`status`, `repository_id` filters) |
+| `gyre_record_activity` | Log a typed AG-UI activity event |
+| `gyre_agent_heartbeat` | Send agent heartbeat |
+| `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
+
+Example MCP `initialize` call:
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"my-agent","version":"1.0"}}}
+```
+
+### A2A Protocol (M5.2)
+
+Agents publish **Agent Cards** announcing their capabilities and can discover peers.
+
+**AgentCard schema** (`PUT /api/v1/agents/{id}/card`):
+```json
+{
+  "agent_id": "<uuid>",
+  "name": "worker-1",
+  "description": "Implements backend tasks",
+  "capabilities": ["rust", "api-design"],
+  "protocols": ["mcp", "a2a"],
+  "endpoint": "http://worker-1:3000"
+}
+```
+
+**Discovery** (`GET /api/v1/agents/discover?capability=rust`): returns Agent Cards for all `Active` agents matching the optional capability filter.
+
+**Typed messages** (`POST /api/v1/agents/{id}/messages`): the `payload` field may carry a structured `MessageType`:
+
+| Type | Use |
+|---|---|
+| `TaskAssignment` | Delegate a task to a peer agent |
+| `ReviewRequest` | Request code review from a peer |
+| `StatusUpdate` | Broadcast progress update |
+| `Escalation` | Escalate a blocked situation |
+| `FreeText` | Unstructured message |
+
+### Agent Compose Spec (M5.2)
+
+Declarative multi-agent team blueprints. Apply via `POST /api/v1/compose/apply` with JSON body or YAML body (`Content-Type: application/yaml`).
+
+**Example `agent-compose.yaml`:**
+```yaml
+agents:
+  - name: orchestrator
+    role: Orchestrator
+    capabilities: [planning, decomposition]
+    task:
+      title: "Implement feature X"
+      description: "Break down and delegate feature X"
+      priority: high
+
+  - name: backend-worker
+    role: Developer
+    parent: orchestrator
+    capabilities: [rust, api-design]
+    task:
+      title: "Implement REST endpoints"
+      priority: medium
+
+  - name: reviewer
+    role: Reviewer
+    parent: orchestrator
+    capabilities: [code-review]
+```
+
+Agents are created in dependency order (parents before children). Parent links are set automatically. After apply, poll `GET /api/v1/compose/status` for agent states. Call `POST /api/v1/compose/teardown` to stop all agents when done.
+
 
 ### Agent Spawn / Complete API (M3.2)
 
