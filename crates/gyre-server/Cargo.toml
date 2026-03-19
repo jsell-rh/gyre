@@ -39,6 +39,7 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

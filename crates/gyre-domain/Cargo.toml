@@ -13,3 +13,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 gyre-common = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
