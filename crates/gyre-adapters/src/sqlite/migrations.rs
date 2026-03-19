@@ -80,7 +80,22 @@ CREATE INDEX IF NOT EXISTS idx_mr_repo ON merge_requests(repository_id);
 CREATE INDEX IF NOT EXISTS idx_repos_project ON repositories(project_id);
 ";
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001)];
+const MIGRATION_002: &str = "
+CREATE TABLE IF NOT EXISTS merge_queue (
+    id TEXT PRIMARY KEY,
+    merge_request_id TEXT NOT NULL REFERENCES merge_requests(id),
+    priority INTEGER NOT NULL DEFAULT 50,
+    status TEXT NOT NULL DEFAULT 'Queued',
+    enqueued_at INTEGER NOT NULL,
+    processed_at INTEGER,
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mq_status ON merge_queue(status);
+CREATE INDEX IF NOT EXISTS idx_mq_priority_enqueued ON merge_queue(priority DESC, enqueued_at ASC);
+";
+
+const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002)];
 
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(
