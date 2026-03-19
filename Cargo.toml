@@ -58,8 +58,12 @@ url = "2"
 ratatui = "0.29"
 crossterm = "0.28"
 
-# HTTP client (CLI health check)
-reqwest = { version = "0.12", features = ["json"] }
+# HTTP client (CLI health check + OIDC JWKS fetch)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# JWT auth — disable default PEM support to avoid simple_asn1 → time 0.3.47 MSRV conflict.
+# Keys are loaded from DER bytes or JWK JSON (both work without the PEM feature).
+jsonwebtoken = { version = "9", default-features = false }
 
 # ID generation
 uuid = { version = "1", features = ["v4"] }

@@ -14,6 +14,7 @@ pub mod project;
 pub mod repository;
 pub mod review;
 pub mod task;
+pub mod user;
 pub mod worktree;
 
 /// SQLite-backed storage adapter.
@@ -89,6 +90,8 @@ mod tests {
             "activity_events",
             "agent_commits",
             "agent_worktrees",
+            "users",
+            "api_keys",
         ];
         for table in &tables {
             let count: i64 = conn

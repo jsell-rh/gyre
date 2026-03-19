@@ -13,15 +13,41 @@ use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
 use gyre_domain::AgentStatus;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, GitOpsPort, MergeQueueRepository,
+    AgentCommitRepository, AgentRepository, ApiKeyRepository, GitOpsPort, MergeQueueRepository,
     MergeRequestRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
-    WorktreeRepository,
+    UserRepository, WorktreeRepository,
 };
 use messages::AgentMessage;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
+
+/// Configuration for OIDC/JWT validation.
+#[derive(Clone)]
+pub struct JwtConfig {
+    pub issuer: String,
+    pub audience: Option<String>,
+    /// kid → DecodingKey cache. Pre-populated in tests; lazily refreshed from JWKS in production.
+    /// Uses `std::sync::RwLock` so it can be written from synchronous (test) code without
+    /// requiring a tokio runtime or `block_in_place`.
+    pub keys: Arc<std::sync::RwLock<HashMap<String, jsonwebtoken::DecodingKey>>>,
+}
+
+impl JwtConfig {
+    pub fn new(issuer: impl Into<String>, audience: Option<String>) -> Self {
+        Self {
+            issuer: issuer.into(),
+            audience,
+            keys: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Insert a decoding key directly (used in tests and initial JWKS load).
+    pub fn insert_key(&self, kid: impl Into<String>, key: jsonwebtoken::DecodingKey) {
+        self.keys.write().unwrap().insert(kid.into(), key);
+    }
+}
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -45,6 +71,14 @@ pub struct AppState {
     pub agent_messages: Arc<Mutex<HashMap<String, VecDeque<AgentMessage>>>>,
     /// Auth tokens issued on agent registration: agent_id -> token.
     pub agent_tokens: Arc<Mutex<HashMap<String, String>>>,
+    /// User repository for JWT/SSO user management.
+    pub users: Arc<dyn UserRepository>,
+    /// API key repository: key -> user_id.
+    pub api_keys: Arc<dyn ApiKeyRepository>,
+    /// OIDC/JWT configuration. None = JWT auth disabled (agent tokens only).
+    pub jwt_config: Option<Arc<JwtConfig>>,
+    /// HTTP client for OIDC JWKS fetching.
+    pub http_client: reqwest::Client,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -94,6 +128,10 @@ pub fn build_state(auth_token: &str, base_url: &str) -> Arc<AppState> {
         broadcast_tx,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        users: Arc::new(mem::MemUserRepository::default()),
+        api_keys: Arc::new(mem::MemApiKeyRepository::default()),
+        jwt_config: None,
+        http_client: reqwest::Client::new(),
     })
 }
 

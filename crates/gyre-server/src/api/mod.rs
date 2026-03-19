@@ -2,6 +2,7 @@ pub mod activity;
 pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
+pub mod auth;
 pub mod error;
 pub mod merge_queue;
 pub mod merge_requests;
@@ -118,6 +119,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
         .route("/api/v1/merge-queue", get(merge_queue::list_queue))
         .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
+        // Auth / API keys
+        .route("/api/v1/auth/api-keys", post(auth::create_api_key))
 }
 
 pub(crate) fn now_secs() -> u64 {
