@@ -64,6 +64,7 @@ How Gyre gets built - process and standards for the agent team.
 | M1: Domain Foundation | [`milestones/m1-domain-foundation.md`](milestones/m1-domain-foundation.md) | Core domain model, persistence, REST API, dashboard |
 | M2: Source Control | [`milestones/m2-source-control.md`](milestones/m2-source-control.md) | Git forge, merge requests, merge queue, agent-commit tracking |
 | M3: Agent Orchestration | [`milestones/m3-agent-orchestration.md`](milestones/m3-agent-orchestration.md) | Smart HTTP git, agent spawn, CLI client, end-to-end Ralph loop |
+| M4: Identity & Observability | [`milestones/m4-identity-observability.md`](milestones/m4-identity-observability.md) | Keycloak SSO, RBAC, OpenTelemetry, admin panel |
 
 ## Open Questions
 
