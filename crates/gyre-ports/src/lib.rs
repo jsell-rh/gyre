@@ -5,6 +5,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod git_ops;
 pub mod merge_request;
 pub mod project;
 pub mod repository;
@@ -13,6 +14,7 @@ pub mod task;
 
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
+pub use git_ops::GitOpsPort;
 pub use merge_request::MergeRequestRepository;
 pub use project::ProjectRepository;
 pub use repository::RepoRepository;
