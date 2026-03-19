@@ -1,6 +1,8 @@
 <script>
   import { api } from '../lib/api.js';
 
+  let { onSelectRepo } = $props();
+
   let projects = $state([]);
   let loading = $state(true);
   let error = $state(null);
@@ -68,7 +70,10 @@
                   <ul class="repo-list">
                     {#each repos as r (r.id)}
                       <li class="repo-item">
-                        <span class="r-name">{r.name}</span>
+                        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+                        <span class="r-link" onclick={() => onSelectRepo && onSelectRepo(r)}>
+                          {r.name}
+                        </span>
                         {#if r.url}<a class="r-url" href={r.url} target="_blank" rel="noreferrer">{r.url}</a>{/if}
                       </li>
                     {/each}
@@ -119,7 +124,12 @@
   .repo-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
 
   .repo-item { display: flex; gap: 0.75rem; align-items: baseline; font-size: 0.83rem; }
-  .r-name { color: var(--text-muted); font-weight: 500; }
+  .r-link {
+    background: none; border: none; padding: 0; cursor: pointer;
+    color: var(--accent); font-weight: 500; font-size: inherit;
+    text-align: left;
+  }
+  .r-link:hover { text-decoration: underline; }
   .r-url { color: var(--accent); text-decoration: none; font-size: 0.78rem; }
   .r-url:hover { text-decoration: underline; }
 

@@ -2,11 +2,12 @@
   let { current = $bindable('activity') } = $props();
 
   const nav = [
-    { id: 'activity', label: 'Activity', icon: '⚡' },
-    { id: 'agents',   label: 'Agents',   icon: '🤖' },
-    { id: 'tasks',    label: 'Tasks',     icon: '📋' },
-    { id: 'projects', label: 'Projects',  icon: '📁' },
-    { id: 'settings', label: 'Settings',  icon: '⚙️' },
+    { id: 'activity',    label: 'Activity',    icon: '⚡' },
+    { id: 'agents',      label: 'Agents',      icon: '🤖' },
+    { id: 'tasks',       label: 'Tasks',       icon: '📋' },
+    { id: 'projects',    label: 'Projects',    icon: '📁' },
+    { id: 'merge-queue', label: 'Merge Queue', icon: '⚙' },
+    { id: 'settings',    label: 'Settings',    icon: '⚙️' },
   ];
 </script>
 
@@ -19,7 +20,7 @@
       <li>
         <button
           class="nav-item"
-          class:active={current === item.id}
+          class:active={current === item.id || (item.id === 'projects' && (current === 'repo-detail' || current === 'mr-detail'))}
           onclick={() => (current = item.id)}
         >
           <span class="icon">{item.icon}</span>
