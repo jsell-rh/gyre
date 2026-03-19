@@ -32,6 +32,14 @@ impl ActivityStore {
         guard.push_back(event);
     }
 
+    /// Remove all events with timestamp < cutoff_secs. Returns number removed.
+    pub fn purge_before(&self, cutoff_secs: u64) -> usize {
+        let mut guard = self.events.write().unwrap();
+        let before = guard.len();
+        guard.retain(|e| e.timestamp >= cutoff_secs);
+        before - guard.len()
+    }
+
     /// Return events matching the optional filters.
     pub fn query(&self, since: Option<u64>, limit: Option<usize>) -> Vec<ActivityEventData> {
         let guard = self.events.read().unwrap();

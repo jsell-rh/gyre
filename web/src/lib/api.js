@@ -97,6 +97,7 @@ export const api = {
   // Admin (requires Admin role)
   adminHealth: () => request('/admin/health'),
   adminJobs: () => request('/admin/jobs'),
+  adminRunJob: (name) => request(`/admin/jobs/${name}/run`, { method: 'POST' }),
   adminAudit: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/admin/audit${qs ? '?' + qs : ''}`);
@@ -107,5 +108,24 @@ export const api = {
     request(`/admin/agents/${id}/reassign`, {
       method: 'POST',
       body: JSON.stringify({ target_agent_id: targetAgentId }),
+    }),
+  // Snapshots
+  adminCreateSnapshot: () => request('/admin/snapshot', { method: 'POST' }),
+  adminListSnapshots: () => request('/admin/snapshots'),
+  adminRestoreSnapshot: (snapshotId) =>
+    request('/admin/restore', {
+      method: 'POST',
+      body: JSON.stringify({ snapshot_id: snapshotId }),
+    }),
+  adminDeleteSnapshot: (id) =>
+    request(`/admin/snapshots/${id}`, { method: 'DELETE' }),
+  // Data export
+  adminExport: () => request('/admin/export'),
+  // Retention
+  adminRetention: () => request('/admin/retention'),
+  adminUpdateRetention: (policies) =>
+    request('/admin/retention', {
+      method: 'PUT',
+      body: JSON.stringify(policies),
     }),
 };

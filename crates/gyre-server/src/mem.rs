@@ -748,5 +748,7 @@ pub fn test_state() -> Arc<crate::AppState> {
             .as_secs(),
         agent_cards: Arc::new(Mutex::new(HashMap::new())),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        retention_store: crate::retention::RetentionStore::new(),
+        job_registry: Arc::new(crate::jobs::JobRegistry::new()),
     })
 }
