@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use git2::{BranchType, Repository};
-use gyre_domain::{BranchInfo, CommitInfo, DiffResult, FileDiff};
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
 use gyre_ports::GitOpsPort;
 
 pub struct Git2OpsAdapter;
@@ -185,6 +185,83 @@ impl GitOpsPort for Git2OpsAdapter {
         })
         .await?
     }
+
+    async fn merge_branches(
+        &self,
+        repo_path: &str,
+        source: &str,
+        target: &str,
+    ) -> Result<MergeResult> {
+        let repo_path = repo_path.to_string();
+        let source = source.to_string();
+        let target = target.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+
+            let source_branch = repo
+                .find_branch(&source, BranchType::Local)
+                .context("source branch not found")?;
+            let source_commit = source_branch.get().peel_to_commit()?;
+
+            let target_branch = repo
+                .find_branch(&target, BranchType::Local)
+                .context("target branch not found")?;
+            let target_commit = target_branch.get().peel_to_commit()?;
+
+            // Fast-forward check: if source is already an ancestor of target, nothing to do.
+            if repo.merge_base(source_commit.id(), target_commit.id())? == source_commit.id() {
+                return Ok(MergeResult::Success {
+                    merge_commit_sha: target_commit.id().to_string(),
+                });
+            }
+
+            // Fast-forward: if target is ancestor of source, just advance target ref.
+            if repo.merge_base(source_commit.id(), target_commit.id())? == target_commit.id() {
+                let refname = format!("refs/heads/{}", target);
+                let mut target_ref = repo.find_reference(&refname)?;
+                target_ref.set_target(
+                    source_commit.id(),
+                    &format!("merge: fast-forward {} into {}", source, target),
+                )?;
+                return Ok(MergeResult::Success {
+                    merge_commit_sha: source_commit.id().to_string(),
+                });
+            }
+
+            // Three-way merge using trees (works for bare and non-bare repos).
+            let merge_base_oid = repo.merge_base(source_commit.id(), target_commit.id())?;
+            let merge_base_commit = repo.find_commit(merge_base_oid)?;
+            let ancestor_tree = merge_base_commit.tree()?;
+            let our_tree = target_commit.tree()?;
+            let their_tree = source_commit.tree()?;
+
+            let mut index = repo.merge_trees(&ancestor_tree, &our_tree, &their_tree, None)?;
+
+            if index.has_conflicts() {
+                return Ok(MergeResult::Conflict {
+                    message: "merge conflict detected".to_string(),
+                });
+            }
+
+            let tree_id = index.write_tree_to(&repo)?;
+            let tree = repo.find_tree(tree_id)?;
+            let sig = git2::Signature::now("Gyre", "gyre@local")?;
+            let message = format!("Merge branch '{}' into '{}'", source, target);
+            let merge_commit_id = repo.commit(
+                Some(&format!("refs/heads/{}", target)),
+                &sig,
+                &sig,
+                &message,
+                &tree,
+                &[&target_commit, &source_commit],
+            )?;
+
+            Ok(MergeResult::Success {
+                merge_commit_sha: merge_commit_id.to_string(),
+            })
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +407,126 @@ mod tests {
             .unwrap();
 
         assert_eq!(log.len(), 3);
+    }
+
+    fn make_file_commit(repo: &Repository, filename: &str, content: &str, msg: &str) -> git2::Oid {
+        let sig = git2::Signature::now("Test User", "test@example.com").unwrap();
+        let mut index = repo.index().unwrap();
+        let path = repo.workdir().unwrap().join(filename);
+        std::fs::write(&path, content).unwrap();
+        index.add_path(std::path::Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parents: Vec<git2::Commit> = match repo.head() {
+            Ok(head) => vec![head.peel_to_commit().unwrap()],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_merge_branches_fast_forward() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        make_commit(&repo, "initial");
+        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create feature branch from main
+        create_branch(&repo, "feature");
+        // Checkout feature and add a commit
+        repo.set_head("refs/heads/feature").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(&repo, "feat.txt", "feature content", "feat: add feature");
+
+        let adapter = Git2OpsAdapter::new();
+        let result = adapter
+            .merge_branches(dir.path().to_str().unwrap(), "feature", &branch_name)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MergeResult::Success { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_merge_branches_three_way_no_conflict() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        make_file_commit(&repo, "base.txt", "base", "initial");
+        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create feature branch
+        create_branch(&repo, "feature");
+
+        // Add commit on main
+        make_file_commit(&repo, "main_change.txt", "main work", "main: add file");
+
+        // Switch to feature and add different file
+        repo.set_head("refs/heads/feature").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(
+            &repo,
+            "feature_change.txt",
+            "feature work",
+            "feat: add file",
+        );
+
+        // Switch back to main
+        repo.set_head(&format!("refs/heads/{}", branch_name))
+            .unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+
+        let adapter = Git2OpsAdapter::new();
+        let result = adapter
+            .merge_branches(dir.path().to_str().unwrap(), "feature", &branch_name)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MergeResult::Success { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_merge_branches_conflict() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        make_file_commit(&repo, "conflict.txt", "original content", "initial");
+        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Create feature branch
+        create_branch(&repo, "feature");
+
+        // Modify same file on main
+        make_file_commit(&repo, "conflict.txt", "main version", "main: modify file");
+
+        // Switch to feature and modify same file differently
+        repo.set_head("refs/heads/feature").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(
+            &repo,
+            "conflict.txt",
+            "feature version",
+            "feat: modify file",
+        );
+
+        // Switch back to main
+        repo.set_head(&format!("refs/heads/{}", branch_name))
+            .unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+
+        let adapter = Git2OpsAdapter::new();
+        let result = adapter
+            .merge_branches(dir.path().to_str().unwrap(), "feature", &branch_name)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MergeResult::Conflict { .. }));
     }
 
     #[tokio::test]

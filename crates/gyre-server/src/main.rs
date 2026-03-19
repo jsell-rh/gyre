@@ -2,6 +2,7 @@ mod activity;
 mod api;
 mod health;
 mod mem;
+mod merge_processor;
 mod messages;
 mod spa;
 mod ws;
@@ -11,8 +12,8 @@ use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
 use gyre_domain::AgentStatus;
 use gyre_ports::{
-    AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository, RepoRepository,
-    ReviewRepository, TaskRepository,
+    AgentRepository, GitOpsPort, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
+    RepoRepository, ReviewRepository, TaskRepository,
 };
 use messages::AgentMessage;
 use std::collections::{HashMap, VecDeque};
@@ -30,6 +31,7 @@ pub struct AppState {
     pub tasks: Arc<dyn TaskRepository>,
     pub merge_requests: Arc<dyn MergeRequestRepository>,
     pub reviews: Arc<dyn ReviewRepository>,
+    pub merge_queue: Arc<dyn MergeQueueRepository>,
     pub git_ops: Arc<dyn GitOpsPort>,
     pub activity_store: activity::ActivityStore,
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
@@ -77,6 +79,7 @@ async fn main() -> Result<()> {
         tasks: Arc::new(mem::MemTaskRepository::default()),
         merge_requests: Arc::new(mem::MemMrRepository::default()),
         reviews: Arc::new(mem::MemReviewRepository::default()),
+        merge_queue: Arc::new(mem::MemMergeQueueRepository::default()),
         git_ops: Arc::new(gyre_adapters::Git2OpsAdapter::new()),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
@@ -84,8 +87,9 @@ async fn main() -> Result<()> {
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
     });
 
-    // Background task: mark agents dead if they miss heartbeats.
+    // Background tasks.
     spawn_stale_agent_detector(state.clone());
+    merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);
 

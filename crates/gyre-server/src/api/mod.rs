@@ -2,6 +2,7 @@ pub mod activity;
 pub mod agent_messages;
 pub mod agents;
 pub mod error;
+pub mod merge_queue;
 pub mod merge_requests;
 pub mod projects;
 pub mod repos;
@@ -9,7 +10,7 @@ pub mod tasks;
 pub mod version;
 
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use gyre_common::Id;
@@ -91,6 +92,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/merge-requests/:id/diff",
             get(merge_requests::get_diff),
         )
+        // Merge Queue
+        .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
+        .route("/api/v1/merge-queue", get(merge_queue::list_queue))
+        .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
 }
 
 pub(crate) fn now_secs() -> u64 {

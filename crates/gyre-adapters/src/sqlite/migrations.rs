@@ -105,8 +105,20 @@ CREATE TABLE IF NOT EXISTS reviews (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS merge_queue (
+    id TEXT PRIMARY KEY,
+    merge_request_id TEXT NOT NULL REFERENCES merge_requests(id),
+    priority INTEGER NOT NULL DEFAULT 50,
+    status TEXT NOT NULL DEFAULT 'Queued',
+    enqueued_at INTEGER NOT NULL,
+    processed_at INTEGER,
+    error_message TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_review_comments_mr ON review_comments(merge_request_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_mr ON reviews(merge_request_id);
+CREATE INDEX IF NOT EXISTS idx_mq_status ON merge_queue(status);
+CREATE INDEX IF NOT EXISTS idx_mq_priority_enqueued ON merge_queue(priority DESC, enqueued_at ASC);
 ";
 
 const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_001), (2, MIGRATION_002)];

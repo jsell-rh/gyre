@@ -6,6 +6,7 @@ use tracing::instrument;
 
 pub mod activity;
 pub mod agent;
+pub mod merge_queue;
 pub mod merge_request;
 mod migrations;
 pub mod project;

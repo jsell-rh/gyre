@@ -4,12 +4,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentStatus, BranchInfo, CommitInfo, DiffResult, MergeRequest, MrStatus, Project,
-    Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
+    Agent, AgentStatus, BranchInfo, CommitInfo, DiffResult, MergeQueueEntry, MergeQueueEntryStatus,
+    MergeRequest, MergeResult, MrStatus, Project, Repository, Review, ReviewComment,
+    ReviewDecision, Task, TaskStatus,
 };
 use gyre_ports::{
-    AgentRepository, GitOpsPort, MergeRequestRepository, ProjectRepository, RepoRepository,
-    ReviewRepository, TaskRepository,
+    AgentRepository, GitOpsPort, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
+    RepoRepository, ReviewRepository, TaskRepository,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,6 +54,17 @@ impl GitOpsPort for NoopGitOps {
 
     async fn can_merge(&self, _repo_path: &str, _source: &str, _target: &str) -> Result<bool> {
         Ok(true)
+    }
+
+    async fn merge_branches(
+        &self,
+        _repo_path: &str,
+        _source: &str,
+        _target: &str,
+    ) -> Result<MergeResult> {
+        Ok(MergeResult::Success {
+            merge_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+        })
     }
 }
 
@@ -395,6 +407,79 @@ impl ReviewRepository for MemReviewRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemMergeQueueRepository {
+    store: Arc<Mutex<Vec<MergeQueueEntry>>>,
+}
+
+#[async_trait]
+impl MergeQueueRepository for MemMergeQueueRepository {
+    async fn enqueue(&self, entry: &MergeQueueEntry) -> Result<()> {
+        self.store.lock().await.push(entry.clone());
+        Ok(())
+    }
+
+    async fn next_pending(&self) -> Result<Option<MergeQueueEntry>> {
+        let store = self.store.lock().await;
+        let mut queued: Vec<&MergeQueueEntry> = store
+            .iter()
+            .filter(|e| e.status == MergeQueueEntryStatus::Queued)
+            .collect();
+        queued.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then(a.enqueued_at.cmp(&b.enqueued_at))
+        });
+        Ok(queued.first().map(|e| (*e).clone()))
+    }
+
+    async fn update_status(
+        &self,
+        id: &Id,
+        status: MergeQueueEntryStatus,
+        error: Option<String>,
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(e) = store.iter_mut().find(|e| e.id.as_str() == id.as_str()) {
+            e.status = status;
+            e.error_message = error;
+        }
+        Ok(())
+    }
+
+    async fn list_queue(&self) -> Result<Vec<MergeQueueEntry>> {
+        let store = self.store.lock().await;
+        let mut entries: Vec<MergeQueueEntry> =
+            store.iter().filter(|e| !e.is_terminal()).cloned().collect();
+        entries.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then(a.enqueued_at.cmp(&b.enqueued_at))
+        });
+        Ok(entries)
+    }
+
+    async fn cancel(&self, id: &Id) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(e) = store.iter_mut().find(|e| e.id.as_str() == id.as_str()) {
+            if !e.is_terminal() {
+                e.status = MergeQueueEntryStatus::Cancelled;
+            }
+        }
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<MergeQueueEntry>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|e| e.id.as_str() == id.as_str())
+            .cloned())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -408,6 +493,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         tasks: Arc::new(MemTaskRepository::default()),
         merge_requests: Arc::new(MemMrRepository::default()),
         reviews: Arc::new(MemReviewRepository::default()),
+        merge_queue: Arc::new(MemMergeQueueRepository::default()),
         git_ops: Arc::new(NoopGitOps),
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,
