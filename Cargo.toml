@@ -47,6 +47,20 @@ mime_guess = "2"
 futures-util = "0.3"
 async-trait = "0.1"
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# WebSocket
+tokio-tungstenite = "0.24"
+url = "2"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# HTTP client (CLI health check)
+reqwest = { version = "0.12", features = ["json"] }
+
 # Internal crates
 gyre-common = { path = "crates/gyre-common" }
 gyre-ports = { path = "crates/gyre-ports" }
