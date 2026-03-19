@@ -1,162 +1,159 @@
 <script>
-  const version = '0.1.0';
-  let connectionStatus = $state('disconnected');
-  let events = $state([]);
+  import { createWsStore } from './lib/ws.js';
+  import Sidebar from './components/Sidebar.svelte';
+  import ActivityFeed from './components/ActivityFeed.svelte';
+  import AgentList from './components/AgentList.svelte';
+  import TaskBoard from './components/TaskBoard.svelte';
+  import ProjectList from './components/ProjectList.svelte';
+  import Settings from './components/Settings.svelte';
 
-  function formatTs(ts) {
-    return new Date(ts).toLocaleTimeString();
-  }
+  let currentView = $state('activity');
+  let wsStatus = $state('disconnected');
+  let wsStore = $state(null);
 
   $effect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    let ws;
-
-    function connect() {
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'Auth', token: 'gyre-dev-token' }));
-      };
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'AuthResult') {
-          connectionStatus = msg.success ? 'connected' : 'auth-failed';
-        } else if (msg.type === 'ActivityEvent') {
-          events = [msg, ...events].slice(0, 200);
-        }
-      };
-
-      ws.onclose = () => {
-        connectionStatus = 'disconnected';
-      };
-
-      ws.onerror = () => {
-        connectionStatus = 'error';
-      };
-    }
-
-    connect();
-    return () => ws?.close();
+    wsStore = createWsStore();
+    const unsub = wsStore.onStatus((s) => (wsStatus = s));
+    return () => {
+      unsub();
+      wsStore.destroy();
+    };
   });
 </script>
 
-<main>
-  <h1>Gyre</h1>
-  <p class="status">Connection: <span class={connectionStatus}>{connectionStatus}</span></p>
-  <p class="version">v{version}</p>
+<div class="app">
+  <Sidebar bind:current={currentView} />
 
-  <section class="activity">
-    <h2>Activity Feed</h2>
-    {#if events.length === 0}
-      <p class="empty">No activity yet.</p>
-    {:else}
-      <ul>
-        {#each events as e (e.event_id)}
-          <li>
-            <span class="ts">{formatTs(e.timestamp)}</span>
-            <span class="badge">{e.event_type}</span>
-            <span class="agent">{e.agent_id}</span>
-            <span class="desc">{e.description}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
-</main>
+  <div class="main">
+    <header class="topbar">
+      <span class="topbar-title">
+        {#if currentView === 'activity'}Activity Feed
+        {:else if currentView === 'agents'}Agents
+        {:else if currentView === 'tasks'}Task Board
+        {:else if currentView === 'projects'}Projects
+        {:else}Settings
+        {/if}
+      </span>
+      <div class="topbar-right">
+        <span class="ws-indicator {wsStatus}" title="WebSocket: {wsStatus}">
+          <span class="ws-dot"></span>
+          {wsStatus}
+        </span>
+        <span class="version">v0.1.0</span>
+      </div>
+    </header>
+
+    <div class="content">
+      {#if currentView === 'activity'}
+        <ActivityFeed {wsStore} />
+      {:else if currentView === 'agents'}
+        <AgentList />
+      {:else if currentView === 'tasks'}
+        <TaskBoard />
+      {:else if currentView === 'projects'}
+        <ProjectList />
+      {:else}
+        <Settings {wsStatus} />
+      {/if}
+    </div>
+  </div>
+</div>
 
 <style>
-  main {
-    font-family: system-ui, sans-serif;
-    max-width: 800px;
-    margin: 2rem auto;
-    padding: 0 1rem;
+  :global(*) { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :global(:root) {
+    --bg:            #0f1117;
+    --surface:       #161b27;
+    --surface-hover: #1e2536;
+    --border:        #2a3148;
+    --border-subtle: #1e2536;
+    --text:          #e2e8f0;
+    --text-muted:    #94a3b8;
+    --text-dim:      #4b5c7a;
+    --accent:        #60a5fa;
+    --accent-muted:  #60a5fa18;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
   }
 
-  h1 {
-    font-size: 2.5rem;
-    font-weight: 700;
-    margin-bottom: 0.5rem;
-    text-align: center;
+  :global(body) {
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow: hidden;
   }
 
-  .status {
-    font-size: 1.1rem;
-    color: #555;
-    text-align: center;
+  :global(html, body) { height: 100%; }
+
+  .app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
   }
 
-  .connected { color: #22c55e; }
-  .disconnected { color: #f97316; }
-  .error { color: #ef4444; }
-  .auth-failed { color: #ef4444; }
-
-  .version {
-    text-align: center;
-    color: #999;
-    font-size: 0.9rem;
-    margin-bottom: 2rem;
-  }
-
-  .activity h2 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    margin-bottom: 0.75rem;
-    border-bottom: 1px solid #e5e7eb;
-    padding-bottom: 0.5rem;
-  }
-
-  .empty {
-    color: #999;
-    font-style: italic;
-  }
-
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
+  .main {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    max-height: 60vh;
-    overflow-y: auto;
+    min-width: 0;
+    overflow: hidden;
   }
 
-  li {
+  .topbar {
     display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    padding: 0.4rem 0.6rem;
-    background: #f9fafb;
-    border-radius: 4px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 1.25rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .topbar-title {
     font-size: 0.9rem;
-  }
-
-  .ts {
-    color: #999;
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-
-  .badge {
-    background: #3b82f6;
-    color: white;
-    padding: 0.1rem 0.4rem;
-    border-radius: 3px;
-    font-size: 0.75rem;
     font-weight: 600;
-    white-space: nowrap;
+    color: var(--text);
   }
 
-  .agent {
-    color: #6366f1;
-    font-weight: 500;
-    white-space: nowrap;
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
   }
 
-  .desc {
-    color: #374151;
+  .ws-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+  }
+
+  .ws-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    flex-shrink: 0;
+  }
+
+  .ws-indicator.connected .ws-dot    { background: #4ade80; box-shadow: 0 0 5px #22c55e88; }
+  .ws-indicator.disconnected .ws-dot { background: #f97316; }
+  .ws-indicator.error .ws-dot        { background: #f87171; }
+  .ws-indicator.auth-failed .ws-dot  { background: #f87171; }
+
+  .version {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    font-family: 'Courier New', monospace;
+  }
+
+  .content {
     flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 </style>
