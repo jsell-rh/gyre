@@ -1,0 +1,11 @@
+//! Adapter implementations for the Gyre platform.
+//!
+//! Adapters implement the port traits defined in `gyre-ports`.
+//! They are the only place where infrastructure concerns (databases, HTTP, etc.) live.
+//!
+//! # Hexagonal Architecture
+//!
+//! Adapters depend on ports, not the other way around.
+//! Domain logic MUST NOT import this crate.
+
+pub mod sqlite;
