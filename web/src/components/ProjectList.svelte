@@ -1,5 +1,7 @@
 <script>
   import { api } from '../lib/api.js';
+  import Skeleton from '../lib/Skeleton.svelte';
+  import EmptyState from '../lib/EmptyState.svelte';
 
   let { onSelectRepo } = $props();
 
@@ -34,47 +36,84 @@
   }
 </script>
 
-<div class="panel">
-  <div class="panel-header">
-    <h2>Projects</h2>
+<div class="page">
+  <div class="page-hdr">
+    <div>
+      <h1 class="page-title">Projects</h1>
+      {#if !loading}
+        <p class="page-desc">{projects.length} project{projects.length !== 1 ? 's' : ''}</p>
+      {/if}
+    </div>
   </div>
 
   {#if loading}
-    <p class="state-msg">Loading…</p>
+    <div class="project-grid">
+      {#each Array(6) as _}
+        <div class="project-card skeleton-card">
+          <div class="card-hdr">
+            <Skeleton width="60%" height="1.2rem" />
+            <Skeleton width="80px" height="0.875rem" />
+          </div>
+          <Skeleton lines={2} height="0.875rem" />
+        </div>
+      {/each}
+    </div>
   {:else if error}
-    <p class="state-msg error">{error}</p>
+    <div class="error-msg">Error: {error}</div>
   {:else if projects.length === 0}
-    <p class="state-msg muted">No projects yet.</p>
+    <EmptyState
+      title="No projects yet"
+      description="Create your first project to get started with Gyre."
+    />
   {:else}
     <div class="scroll">
-      <ul class="project-list">
+      <div class="project-grid">
         {#each projects as p (p.id)}
-          <li>
-          <button class="project-item" class:selected={selected?.id === p.id} onclick={() => selectProject(p)}>
-            <div class="p-header">
-              <span class="p-name">{p.name}</span>
-              <span class="p-date">{formatDate(p.created_at)}</span>
+          <button
+            class="project-card"
+            class:selected={selected?.id === p.id}
+            onclick={() => selectProject(p)}
+          >
+            <div class="card-hdr">
+              <h2 class="project-name">{p.name}</h2>
+              <span class="project-date">{formatDate(p.created_at)}</span>
             </div>
             {#if p.description}
-              <p class="p-desc">{p.description}</p>
+              <p class="project-desc">{p.description}</p>
+            {:else}
+              <p class="project-desc muted">No description</p>
             {/if}
 
             {#if selected?.id === p.id}
-              <div class="repos">
-                <h4>Repositories</h4>
+              <div class="repos-section">
+                <h4 class="repos-title">Repositories</h4>
                 {#if reposLoading}
-                  <p class="muted">Loading…</p>
+                  <Skeleton lines={3} height="1.5rem" />
                 {:else if repos.length === 0}
-                  <p class="muted">No repositories.</p>
+                  <p class="no-repos">No repositories in this project.</p>
                 {:else}
                   <ul class="repo-list">
                     {#each repos as r (r.id)}
                       <li class="repo-item">
                         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                        <span class="r-link" onclick={() => onSelectRepo && onSelectRepo(r)}>
+                        <span
+                          class="repo-link"
+                          onclick={(e) => { e.stopPropagation(); onSelectRepo && onSelectRepo(r); }}
+                        >
                           {r.name}
                         </span>
-                        {#if r.url}<a class="r-url" href={r.url} target="_blank" rel="noreferrer">{r.url}</a>{/if}
+                        {#if r.url}
+                          <!-- svelte-ignore a11y_click_events_have_key_events -->
+                          <a
+                            class="repo-url"
+                            href={r.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            onclick={(e) => e.stopPropagation()}
+                          >
+                            {r.url}
+                          </a>
+                        {/if}
                       </li>
                     {/each}
                   </ul>
@@ -82,60 +121,157 @@
               </div>
             {/if}
           </button>
-          </li>
         {/each}
-      </ul>
+      </div>
     </div>
   {/if}
 </div>
 
 <style>
-  .panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-
-  .panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    padding: var(--space-6);
+    gap: var(--space-4);
   }
 
-  h2 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text); }
-  h4 { margin: 0 0 0.5rem; font-size: 0.82rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  .page-hdr { flex-shrink: 0; }
 
-  .scroll { flex: 1; overflow-y: auto; padding: 0.75rem 1.25rem; }
-
-  .project-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-
-  .project-item {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.8rem 1rem;
-    cursor: pointer; transition: border-color 0.1s;
-    width: 100%; text-align: left; color: inherit; font: inherit;
+  .page-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: var(--space-1);
   }
 
-  .project-item:hover { border-color: var(--accent-muted); }
-  .project-item.selected { border-color: var(--accent); }
+  .page-desc { font-size: var(--text-sm); color: var(--color-text-secondary); }
 
-  .p-header { display: flex; justify-content: space-between; align-items: center; }
-  .p-name { font-weight: 600; color: var(--text); font-size: 0.9rem; }
-  .p-date { font-size: 0.78rem; color: var(--text-dim); }
-  .p-desc { margin: 0.35rem 0 0; font-size: 0.83rem; color: var(--text-muted); }
+  .scroll { flex: 1; overflow-y: auto; }
 
-  .repos { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+  .project-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-4);
+  }
 
-  .repo-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
-
-  .repo-item { display: flex; gap: 0.75rem; align-items: baseline; font-size: 0.83rem; }
-  .r-link {
-    background: none; border: none; padding: 0; cursor: pointer;
-    color: var(--accent); font-weight: 500; font-size: inherit;
+  .project-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-4) var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    cursor: pointer;
     text-align: left;
+    color: inherit;
+    font: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
-  .r-link:hover { text-decoration: underline; }
-  .r-url { color: var(--accent); text-decoration: none; font-size: 0.78rem; }
-  .r-url:hover { text-decoration: underline; }
 
-  .muted { color: var(--text-dim); font-style: italic; font-size: 0.82rem; }
+  .project-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .project-card.selected { border-color: var(--color-primary); }
+  .skeleton-card { cursor: default; }
+  .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
 
-  .state-msg { padding: 2rem; color: var(--text-dim); text-align: center; }
-  .state-msg.error { color: #f87171; }
-  .state-msg.muted { font-style: italic; }
+  .card-hdr {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .project-name {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+    line-height: 1.3;
+  }
+
+  .project-date {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .project-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .project-desc.muted { color: var(--color-text-muted); font-style: italic; }
+
+  .repos-section {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .repos-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0;
+  }
+
+  .repo-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .repo-item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  .repo-link {
+    color: var(--color-link);
+    font-weight: 500;
+    cursor: pointer;
+    transition: color var(--transition-fast);
+  }
+
+  .repo-link:hover { color: var(--color-link-hover); text-decoration: underline; }
+
+  .repo-url {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    text-decoration: none;
+  }
+
+  .repo-url:hover { text-decoration: underline; }
+
+  .no-repos {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
+    margin: 0;
+  }
+
+  .error-msg {
+    padding: var(--space-8);
+    color: var(--color-danger);
+    text-align: center;
+    font-size: var(--text-sm);
+  }
 </style>

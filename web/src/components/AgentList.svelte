@@ -1,6 +1,9 @@
 <script>
   import { api } from '../lib/api.js';
-  import StatusBadge from './StatusBadge.svelte';
+  import Badge from '../lib/Badge.svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
+  import EmptyState from '../lib/EmptyState.svelte';
+  import Table from '../lib/Table.svelte';
   import AgentCardPanel from './AgentCardPanel.svelte';
 
   let agents = $state([]);
@@ -8,25 +11,49 @@
   let tasks = $state([]);
   let loading = $state(true);
   let error = $state(null);
-  let filter = $state('');
+  let statusFilter = $state('');
+  let viewMode = $state('grid');
   let selected = $state(null);
   let showSpawnModal = $state(false);
   let spawnResult = $state(null);
   let spawnError = $state(null);
   let spawnLoading = $state(false);
 
-  // Spawn form fields
   let spawnName = $state('');
   let spawnRepoId = $state('');
   let spawnTaskId = $state('');
   let spawnBranch = $state('');
 
-  const statuses = ['Idle', 'Active', 'Blocked', 'Error', 'Dead'];
-  const filtered = $derived(filter ? agents.filter((a) => a.status === filter) : agents);
+  const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
+
+  const filtered = $derived(
+    statusFilter ? agents.filter((a) => a.status === statusFilter) : agents
+  );
+
+  function relativeTime(ts) {
+    if (!ts) return '—';
+    const diff = Date.now() - ts * 1000;
+    const secs = Math.floor(diff / 1000);
+    if (secs < 60) return `${secs}s ago`;
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  }
 
   function formatTime(ts) {
     if (!ts) return '—';
     return new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function uptimeStr(ts) {
+    if (!ts) return '—';
+    const secs = Math.floor(Date.now() / 1000 - ts);
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+    return `${Math.floor(secs / 86400)}d`;
   }
 
   $effect(() => {
@@ -64,34 +91,70 @@
       spawnLoading = false;
     }
   }
+
+  const tableColumns = [
+    { key: 'name', label: 'Name', sortable: true },
+    { key: 'status', label: 'Status' },
+    { key: 'current_task_id', label: 'Task' },
+    { key: 'last_heartbeat', label: 'Heartbeat' },
+    { key: 'spawned_at', label: 'Uptime' },
+  ];
 </script>
 
-<div class="panel">
-  <div class="panel-header">
-    <h2>Agents</h2>
-    <div class="controls">
-      <select bind:value={filter}>
-        <option value="">All statuses</option>
-        {#each statuses as s}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
+<div class="page">
+  <div class="page-hdr">
+    <div>
+      <h1 class="page-title">Agents</h1>
+      <p class="page-desc">{agents.length} agent{agents.length !== 1 ? 's' : ''} registered</p>
+    </div>
+    <div class="page-actions">
+      <div class="view-toggle">
+        <button class="toggle-btn" class:active={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Grid view">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <rect x="1" y="1" width="6" height="6" rx="1"/>
+            <rect x="9" y="1" width="6" height="6" rx="1"/>
+            <rect x="1" y="9" width="6" height="6" rx="1"/>
+            <rect x="9" y="9" width="6" height="6" rx="1"/>
+          </svg>
+        </button>
+        <button class="toggle-btn" class:active={viewMode === 'table'} onclick={() => (viewMode = 'table')} title="Table view">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <rect x="1" y="2" width="14" height="2" rx="1"/>
+            <rect x="1" y="7" width="14" height="2" rx="1"/>
+            <rect x="1" y="12" width="14" height="2" rx="1"/>
+          </svg>
+        </button>
+      </div>
       <button class="spawn-btn" onclick={openSpawnModal}>+ Spawn Agent</button>
     </div>
   </div>
 
+  <div class="filter-bar">
+    <button class="pill" class:active={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
+    {#each statuses as s}
+      <button
+        class="pill"
+        class:active={statusFilter === s}
+        onclick={() => (statusFilter = statusFilter === s ? '' : s)}
+      >
+        {s}
+      </button>
+    {/each}
+  </div>
+
   {#if showSpawnModal}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="modal-backdrop" onclick={closeSpawnModal}>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="modal" onclick={(e) => e.stopPropagation()}>
         <h3>Spawn Agent</h3>
-
         {#if spawnResult}
           <div class="spawn-success">
             <p class="success-msg">Agent spawned successfully.</p>
             <dl>
               <dt>Agent ID</dt><dd>{spawnResult.agent.id}</dd>
-              <dt>Token</dt><dd class="token">{spawnResult.token}</dd>
-              <dt>Clone URL</dt><dd class="clone-url">{spawnResult.clone_url}</dd>
+              <dt>Token</dt><dd class="mono">{spawnResult.token}</dd>
+              <dt>Clone URL</dt><dd class="mono">{spawnResult.clone_url}</dd>
               <dt>Worktree</dt><dd>{spawnResult.worktree_path}</dd>
               <dt>Branch</dt><dd>{spawnResult.branch}</dd>
             </dl>
@@ -99,35 +162,21 @@
           </div>
         {:else}
           <div class="form">
-            <label>
-              Name
-              <input bind:value={spawnName} placeholder="worker-1" />
-            </label>
-            <label>
-              Repository
+            <label>Name<input bind:value={spawnName} placeholder="worker-1" /></label>
+            <label>Repository
               <select bind:value={spawnRepoId}>
                 <option value="">Select repo...</option>
-                {#each repos as r}
-                  <option value={r.id}>{r.name}</option>
-                {/each}
+                {#each repos as r}<option value={r.id}>{r.name}</option>{/each}
               </select>
             </label>
-            <label>
-              Task
+            <label>Task
               <select bind:value={spawnTaskId}>
                 <option value="">Select task...</option>
-                {#each tasks as t}
-                  <option value={t.id}>{t.title}</option>
-                {/each}
+                {#each tasks as t}<option value={t.id}>{t.title}</option>{/each}
               </select>
             </label>
-            <label>
-              Branch
-              <input bind:value={spawnBranch} placeholder="feat/my-feature" />
-            </label>
-            {#if spawnError}
-              <p class="form-error">{spawnError}</p>
-            {/if}
+            <label>Branch<input bind:value={spawnBranch} placeholder="feat/my-feature" /></label>
+            {#if spawnError}<p class="form-error">{spawnError}</p>{/if}
             <div class="form-actions">
               <button class="modal-btn secondary" onclick={closeSpawnModal}>Cancel</button>
               <button class="modal-btn primary" onclick={doSpawn} disabled={spawnLoading}>
@@ -140,152 +189,394 @@
     </div>
   {/if}
 
-  {#if loading}
-    <p class="state-msg">Loading…</p>
-  {:else if error}
-    <p class="state-msg error">{error}</p>
-  {:else if filtered.length === 0}
-    <p class="state-msg muted">No agents found.</p>
-  {:else}
-    <div class="scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Status</th>
-            <th>Task</th>
-            <th>Last Heartbeat</th>
-            <th>Spawned</th>
-          </tr>
-        </thead>
-        <tbody>
+  <div class="content">
+    {#if loading}
+      {#if viewMode === 'grid'}
+        <div class="agent-grid">
+          {#each Array(6) as _}
+            <div class="agent-card skeleton-card">
+              <div class="card-top">
+                <Skeleton width="60%" height="1.1rem" />
+                <Skeleton width="60px" height="1.2rem" />
+              </div>
+              <Skeleton lines={3} height="0.875rem" />
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <Skeleton lines={8} height="2.5rem" />
+      {/if}
+    {:else if error}
+      <div class="error-msg">Error: {error}</div>
+    {:else if filtered.length === 0}
+      <EmptyState
+        title="No agents found"
+        description={statusFilter
+          ? `No agents with status "${statusFilter}". Try a different filter.`
+          : 'No agents have been spawned yet.'}
+      />
+    {:else if viewMode === 'grid'}
+      <div class="agent-grid">
+        {#each filtered as a}
+          <button class="agent-card" class:selected={selected?.id === a.id} onclick={() => selectAgent(a)}>
+            <div class="card-top">
+              <span class="agent-name">{a.name}</span>
+              <Badge value={a.status} />
+            </div>
+            <div class="card-fields">
+              <div class="field">
+                <span class="field-label">Task</span>
+                <span class="field-value mono">{a.current_task_id ?? '—'}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Uptime</span>
+                <span class="field-value">{uptimeStr(a.spawned_at)}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Heartbeat</span>
+                <span class="field-value">{relativeTime(a.last_heartbeat)}</span>
+              </div>
+            </div>
+          </button>
+        {/each}
+      </div>
+    {:else}
+      <Table columns={tableColumns}>
+        {#snippet children()}
           {#each filtered as a}
-            <tr class:selected={selected?.id === a.id} onclick={() => selectAgent(a)}>
-              <td class="name">{a.name}</td>
-              <td><StatusBadge value={a.status} /></td>
-              <td class="dim">{a.current_task_id ?? '—'}</td>
-              <td class="dim">{formatTime(a.last_heartbeat)}</td>
-              <td class="dim">{formatTime(a.spawned_at)}</td>
+            <tr class:row-selected={selected?.id === a.id} onclick={() => selectAgent(a)} style="cursor:pointer">
+              <td class="name-cell">{a.name}</td>
+              <td><Badge value={a.status} /></td>
+              <td class="mono muted">{a.current_task_id ?? '—'}</td>
+              <td class="muted">{relativeTime(a.last_heartbeat)}</td>
+              <td class="muted">{uptimeStr(a.spawned_at)}</td>
             </tr>
           {/each}
-        </tbody>
-      </table>
+        {/snippet}
+      </Table>
+    {/if}
 
-      {#if selected}
-        <div class="detail">
-          <h3>Agent Detail: {selected.name}</h3>
-          <dl>
-            <dt>ID</dt><dd>{selected.id}</dd>
-            <dt>Status</dt><dd><StatusBadge value={selected.status} /></dd>
-            <dt>Parent</dt><dd>{selected.parent_id ?? '—'}</dd>
-            <dt>Current Task</dt><dd>{selected.current_task_id ?? '—'}</dd>
+    {#if selected}
+      <div class="detail-panel">
+        <div class="detail-header">
+          <h3>Agent: {selected.name}</h3>
+          <button class="close-btn" onclick={() => (selected = null)}>✕</button>
+        </div>
+        <div class="detail-body">
+          <dl class="detail-dl">
+            <dt>ID</dt><dd class="mono">{selected.id}</dd>
+            <dt>Status</dt><dd><Badge value={selected.status} /></dd>
+            <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
+            <dt>Current Task</dt><dd class="mono">{selected.current_task_id ?? '—'}</dd>
             <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
             <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
             <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
           </dl>
           <AgentCardPanel agentId={selected.id} />
         </div>
-      {/if}
-    </div>
-  {/if}
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
-  .panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-
-  .panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    padding: var(--space-6);
+    gap: var(--space-4);
   }
 
-  h2 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text); }
-  h3 { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--text); }
+  .page-hdr {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+    flex-shrink: 0;
+  }
 
-  select {
-    background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.82rem; cursor: pointer;
+  .page-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: var(--space-1);
+  }
+
+  .page-desc { font-size: var(--text-sm); color: var(--color-text-secondary); }
+
+  .page-actions { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
+
+  .view-toggle {
+    display: flex;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .toggle-btn:hover, .toggle-btn.active {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
   }
 
   .spawn-btn {
-    background: var(--accent); color: #fff; border: none; border-radius: 4px;
-    padding: 0.3rem 0.75rem; font-size: 0.82rem; cursor: pointer; font-weight: 600;
+    background: var(--color-primary);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast);
   }
-  .spawn-btn:hover { opacity: 0.88; }
 
+  .spawn-btn:hover { background: var(--color-primary-hover); }
+
+  .filter-bar { display: flex; flex-wrap: wrap; gap: var(--space-2); flex-shrink: 0; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.75rem;
+    border-radius: 99px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .pill:hover { border-color: var(--color-border-strong); color: var(--color-text); }
+  .pill.active { background: rgba(238,0,0,0.12); border-color: var(--color-primary); color: var(--color-primary); }
+
+  .content {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .agent-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-4);
+  }
+
+  .agent-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    cursor: pointer;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .agent-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .agent-card.selected { border-color: var(--color-primary); background: rgba(238,0,0,0.04); }
+  .skeleton-card { cursor: default; }
+  .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .agent-name {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .card-fields { display: flex; flex-direction: column; gap: var(--space-2); }
+
+  .field { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+
+  .field-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+
+  .field-value { font-size: var(--text-sm); color: var(--color-text-secondary); }
+
+  .name-cell { font-weight: 600; color: var(--color-text); }
+  .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+  .muted { color: var(--color-text-secondary); font-size: var(--text-xs); }
+
+  :global(tr.row-selected td) { background: rgba(238,0,0,0.04); }
+
+  .detail-panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .detail-header h3 {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .close-btn {
+    background: none;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--text-base);
+    padding: var(--space-1);
+    line-height: 1;
+    transition: color var(--transition-fast);
+  }
+
+  .close-btn:hover { color: var(--color-text); }
+
+  .detail-body {
+    padding: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .detail-dl {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: var(--space-2) var(--space-4);
+    font-size: var(--text-sm);
+  }
+
+  .detail-dl dt { color: var(--color-text-muted); }
+  .detail-dl dd { margin: 0; color: var(--color-text-secondary); }
+
+  /* Modal */
   .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
     display: flex; align-items: center; justify-content: center;
   }
 
   .modal {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 1.5rem; min-width: 360px; max-width: 480px; width: 100%;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    min-width: 360px;
+    max-width: 480px;
+    width: 100%;
+    box-shadow: var(--shadow-lg);
   }
 
-  .form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .modal h3 {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-4);
+  }
+
+  .form { display: flex; flex-direction: column; gap: var(--space-3); }
 
   .form label {
-    display: flex; flex-direction: column; gap: 0.25rem;
-    font-size: 0.82rem; color: var(--text-dim);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
   .form input, .form select {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.4rem 0.6rem; font-size: 0.85rem;
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
   }
 
-  .form-error { color: #f87171; font-size: 0.82rem; margin: 0; }
+  .form input:focus, .form select:focus { outline: none; border-color: var(--color-primary); }
 
-  .form-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.25rem; }
+  .form-error { color: var(--color-danger); font-size: var(--text-xs); margin: 0; }
+
+  .form-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-2); }
 
   .modal-btn {
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.9rem;
-    font-size: 0.82rem; cursor: pointer; background: var(--surface); color: var(--text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    background: var(--color-surface);
+    color: var(--color-text);
+    transition: all var(--transition-fast);
   }
-  .modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .modal-btn.primary:hover { opacity: 0.88; }
-  .modal-btn.secondary:hover { background: var(--surface-hover); }
+
+  .modal-btn.primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+  .modal-btn.primary:hover { background: var(--color-primary-hover); }
+  .modal-btn.secondary:hover { background: var(--color-surface-elevated); }
   .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .spawn-success dl {
-    display: grid; grid-template-columns: 7rem 1fr; gap: 0.4rem 0.5rem;
-    font-size: 0.82rem; margin: 0.75rem 0 1rem;
-  }
-  .spawn-success dt { color: var(--text-dim); }
-  .spawn-success dd { margin: 0; color: var(--text-muted); word-break: break-all; }
-  .spawn-success .token { font-family: monospace; font-size: 0.75rem; }
-  .spawn-success .clone-url { font-family: monospace; font-size: 0.75rem; }
-  .success-msg { color: #4ade80; font-size: 0.85rem; margin: 0 0 0.5rem; }
-
-  .scroll { flex: 1; overflow-y: auto; padding: 0.75rem 1.25rem; }
-
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-
-  th {
-    text-align: left; padding: 0.4rem 0.6rem;
-    color: var(--text-dim); font-weight: 500; font-size: 0.78rem;
-    border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.04em;
+    display: grid;
+    grid-template-columns: 7rem 1fr;
+    gap: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    margin: var(--space-3) 0 var(--space-4);
   }
 
-  td { padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+  .spawn-success dt { color: var(--color-text-secondary); }
+  .spawn-success dd { margin: 0; color: var(--color-text-muted); word-break: break-all; }
+  .success-msg { color: var(--color-success); font-size: var(--text-sm); margin: 0 0 var(--space-2); }
 
-  tr { cursor: pointer; transition: background 0.1s; }
-  tr:hover { background: var(--surface-hover); }
-  tr.selected { background: var(--accent-muted); }
-
-  .name { color: var(--text); font-weight: 500; }
-  .dim { color: var(--text-muted); font-size: 0.82rem; }
-
-  .detail {
-    margin-top: 1.5rem; padding: 1rem; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 6px;
+  .error-msg {
+    padding: var(--space-8);
+    color: var(--color-danger);
+    text-align: center;
+    font-size: var(--text-sm);
   }
-
-  dl { display: grid; grid-template-columns: 8rem 1fr; gap: 0.35rem 0.75rem; font-size: 0.85rem; }
-  dt { color: var(--text-dim); }
-  dd { margin: 0; color: var(--text-muted); }
-
-  .state-msg { padding: 2rem; color: var(--text-dim); text-align: center; }
-  .state-msg.error { color: #f87171; }
-  .state-msg.muted { font-style: italic; }
 </style>
