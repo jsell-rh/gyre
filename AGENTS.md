@@ -104,8 +104,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
 | `POST/GET` | `/api/v1/projects` | Create / list projects |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
-| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). Note: `path` field in create body is ignored — path is always server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
-| `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields) |
+| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
+| `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
