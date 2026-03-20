@@ -51,8 +51,8 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M5: Agent Protocols | Done | MCP server, A2A protocol, AG-UI events, jj VCS, agent compose spec, M5 dashboard |
 | M6: Infrastructure & Operations | Done | Product analytics, cost tracking, BCP snapshot/restore, background job framework, M6 dashboard |
 | M7: Production Hardening | Done | eBPF audit, SIEM forwarding, NixOS packaging, remote compute targets, WireGuard mesh, production hardening |
-| M8: Frontend Excellence | Planned | Red Hat brand design system, polished dashboard UX, component library, consistent user journeys, dark theme |
+| M8: Frontend Excellence | Done | Red Hat brand design system, polished dashboard UX, component library, consistent user journeys, dark theme |
 
-482 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+476 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications.
