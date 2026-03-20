@@ -2,7 +2,7 @@ const API_BASE = '/api/v1';
 const AUTH_TOKEN_KEY = 'gyre_auth_token';
 
 function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY) || 'test-token';
+  return localStorage.getItem(AUTH_TOKEN_KEY) || 'gyre-dev-token';
 }
 
 export function setAuthToken(token) {
