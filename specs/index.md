@@ -18,6 +18,7 @@ What Gyre does - the product.
 |---|---|---|
 | Design Principles | [`system/design-principles.md`](system/design-principles.md) | Core invariants that govern all decisions |
 | Source Control | [`system/source-control.md`](system/source-control.md) | Built-in git forge, MRs, merge queue, jj evaluation |
+| Forge Advantages | [`system/forge-advantages.md`](system/forge-advantages.md) | 8 capabilities only possible with a forge-native agent platform |
 | Agent Runtime & Compute | [`system/agent-runtime.md`](system/agent-runtime.md) | CLI, TTY, WebSocket, compute targets, lifetimes, networking, MCP, protocols |
 | Identity & Security | [`system/identity-security.md`](system/identity-security.md) | SPIFFE, SSO/Keycloak, SCIM, ABAC, impersonation, audit |
 | Observability & Governance | [`system/observability.md`](system/observability.md) | OTel, eBPF audit, SIEM forwarding, agent auditability |
@@ -74,6 +75,7 @@ How Gyre gets built - process and standards for the agent team.
 | M10: Persistent Storage | [`milestones/m10-persistent-storage.md`](milestones/m10-persistent-storage.md) | SQLite persistence, real-time WebSocket events, git repo storage |
 | M11: Agent Execution | [`milestones/m11-agent-execution.md`](milestones/m11-agent-execution.md) | Real agent processes, TTY attach from browser, agent logs |
 | M12: Quality Gates | [`milestones/m12-quality-gates.md`](milestones/m12-quality-gates.md) | Merge queue gates (tests/lints/reviews), repo mirroring, diff viewer |
+| M13: Forge Native | [`milestones/m13-forge-native.md`](milestones/m13-forge-native.md) | Pre-accept validation, commit provenance, speculative merging, cross-agent awareness |
 
 ## Open Questions
 
@@ -81,11 +83,11 @@ How Gyre gets built - process and standards for the agent team.
 |---|---|
 | SPIFFE integration details | **Resolved** - 3-layer stack: SPIFFE (workload attestation) + Gyre as OIDC provider (agent permissions) + Sigstore/Fulcio (keyless commit signing). Federated via standard protocols. |
 | jj (Jujutsu) vs. Git | **Resolved** - jj adds value for agent workflows (atomic changes, auto-rebase, undo) |
-| Agent collaboration model (hierarchy + ?) | Open |
-| Coordination primitives (blackboard vs. event stream vs. persistent work chains) | Open |
-| Persistent Ralph loop steps (NDI pattern) | Open |
+| Agent collaboration model (hierarchy + ?) | **Resolved** - hierarchy (spawn tree) + typed peer messages (A2A) + cross-agent code awareness (M13.4) |
+| Coordination primitives (blackboard vs. event stream vs. persistent work chains) | **Resolved** - event stream (domain events via WebSocket) + persistent work chains (task/Ralph ref tree) |
+| Persistent Ralph loop steps (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): refs/ralph/{task-id}/{step} survives agent crash |
 | Decision library for learned interrupt resolutions | Open |
-| Cost tracking model | Open |
-| CI as separate concept vs. emergent property | Open |
+| Cost tracking model | **Resolved** - cost entries table, per-agent aggregation, dashboard cost view (M6.1) |
+| CI as separate concept vs. emergent property | **Resolved** - emergent: pre-accept gates (M13.1) + merge queue gates (M12.1) = CI without a separate concept |
 | Feature flags as CI alternative | Open |
 | SSO/SCIM provider targets | **Resolved** - Keycloak primary, pluggable for others |
