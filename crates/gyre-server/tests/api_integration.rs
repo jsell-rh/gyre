@@ -219,7 +219,10 @@ async fn projects_crud() {
 
     // Create
     let resp = ctx
-        .post("/api/v1/projects", json!({"name": "proj-a", "description": "test"}))
+        .post(
+            "/api/v1/projects",
+            json!({"name": "proj-a", "description": "test"}),
+        )
         .await;
     assert_eq!(resp.status(), 201);
     let project: serde_json::Value = resp.json().await.unwrap();
@@ -227,7 +230,9 @@ async fn projects_crud() {
     assert_eq!(project["name"], "proj-a");
 
     // Get
-    let got = ctx.get_json(&format!("/api/v1/projects/{project_id}")).await;
+    let got = ctx
+        .get_json(&format!("/api/v1/projects/{project_id}"))
+        .await;
     assert_eq!(got["id"], project_id);
     assert_eq!(got["name"], "proj-a");
 
@@ -246,9 +251,7 @@ async fn projects_crud() {
     assert_eq!(updated["name"], "proj-a-renamed");
 
     // Delete
-    let del_resp = ctx
-        .delete(&format!("/api/v1/projects/{project_id}"))
-        .await;
+    let del_resp = ctx.delete(&format!("/api/v1/projects/{project_id}")).await;
     assert!(del_resp.status().is_success());
 
     // Get after delete → 404
@@ -291,7 +294,10 @@ async fn repos_create_and_get() {
     let proj_id = create_project(&ctx).await;
 
     let resp = ctx
-        .post("/api/v1/repos", json!({"project_id": proj_id, "name": "myrepo"}))
+        .post(
+            "/api/v1/repos",
+            json!({"project_id": proj_id, "name": "myrepo"}),
+        )
         .await;
     assert_eq!(resp.status(), 201);
     let repo: serde_json::Value = resp.json().await.unwrap();
@@ -322,9 +328,7 @@ async fn repos_branches_empty_on_new_repo() {
     let repo_id = create_repo(&ctx, &proj_id).await;
 
     // Branches list: empty (no real git repo on disk)
-    let resp = ctx
-        .get(&format!("/api/v1/repos/{repo_id}/branches"))
-        .await;
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/branches")).await;
     // Either 200 with empty array or 404/500 — we just check it doesn't 401
     assert_ne!(resp.status(), 401_u16);
 }
@@ -421,10 +425,7 @@ async fn agent_heartbeat() {
     let agent_id = create_agent(&ctx).await;
 
     let resp = ctx
-        .put(
-            &format!("/api/v1/agents/{agent_id}/heartbeat"),
-            json!({}),
-        )
+        .put(&format!("/api/v1/agents/{agent_id}/heartbeat"), json!({}))
         .await;
     assert!(resp.status().is_success());
 }
@@ -794,9 +795,7 @@ async fn merge_queue_enqueue_list_cancel() {
     assert!(arr.iter().any(|e| e["id"] == entry_id));
 
     // Cancel
-    let del_resp = ctx
-        .delete(&format!("/api/v1/merge-queue/{entry_id}"))
-        .await;
+    let del_resp = ctx.delete(&format!("/api/v1/merge-queue/{entry_id}")).await;
     assert!(del_resp.status().is_success());
 
     // List again: entry should be gone or cancelled
@@ -906,9 +905,7 @@ async fn costs_record_and_query() {
     assert!(resp.status().is_success());
 
     // Query costs (requires agent_id or task_id filter)
-    let costs = ctx
-        .get_json("/api/v1/costs?agent_id=agent-1")
-        .await;
+    let costs = ctx.get_json("/api/v1/costs?agent_id=agent-1").await;
     let arr = costs.as_array().unwrap();
     assert!(!arr.is_empty());
 
@@ -1024,19 +1021,14 @@ async fn admin_kill_agent() {
 
     // Kill
     let resp = ctx
-        .post(
-            &format!("/api/v1/admin/agents/{agent_id}/kill"),
-            json!({}),
-        )
+        .post(&format!("/api/v1/admin/agents/{agent_id}/kill"), json!({}))
         .await;
     assert!(resp.status().is_success());
 
     // Agent should be dead/stopped
     let got = ctx.get_json(&format!("/api/v1/agents/{agent_id}")).await;
     assert!(
-        got["status"] == "dead"
-            || got["status"] == "idle"
-            || got["status"] == "stopped",
+        got["status"] == "dead" || got["status"] == "idle" || got["status"] == "stopped",
         "agent status after kill: {}",
         got["status"]
     );
@@ -1096,9 +1088,7 @@ async fn siem_targets_crud() {
     assert!(upd.status().is_success());
 
     // Delete
-    let del = ctx
-        .delete(&format!("/api/v1/admin/siem/{target_id}"))
-        .await;
+    let del = ctx.delete(&format!("/api/v1/admin/siem/{target_id}")).await;
     assert!(del.status().is_success());
 }
 
@@ -1228,7 +1218,10 @@ async fn compose_apply_status_teardown() {
 
     // Teardown (requires compose_id in body)
     let teardown = ctx
-        .post("/api/v1/compose/teardown", json!({"compose_id": compose_id}))
+        .post(
+            "/api/v1/compose/teardown",
+            json!({"compose_id": compose_id}),
+        )
         .await;
     assert!(teardown.status().is_success());
 }
@@ -1318,9 +1311,7 @@ async fn code_awareness_endpoints() {
     assert_ne!(blame.status(), 401_u16);
 
     // Hot files
-    let hot = ctx
-        .get(&format!("/api/v1/repos/{repo_id}/hot-files"))
-        .await;
+    let hot = ctx.get(&format!("/api/v1/repos/{repo_id}/hot-files")).await;
     assert_ne!(hot.status(), 401_u16);
 
     // Review routing (no real git)
@@ -1359,9 +1350,7 @@ async fn speculative_merge_endpoints() {
 
     // Get for specific branch
     let branch_result = ctx
-        .get(&format!(
-            "/api/v1/repos/{repo_id}/speculative/feat~test"
-        ))
+        .get(&format!("/api/v1/repos/{repo_id}/speculative/feat~test"))
         .await;
     assert_ne!(branch_result.status(), 401_u16);
 }
@@ -1616,9 +1605,7 @@ async fn aibom_query() {
     let proj_id = create_project(&ctx).await;
     let repo_id = create_repo(&ctx, &proj_id).await;
 
-    let resp = ctx
-        .get(&format!("/api/v1/repos/{repo_id}/aibom"))
-        .await;
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/aibom")).await;
     assert_ne!(resp.status(), 401_u16);
 }
 
@@ -1632,7 +1619,10 @@ async fn api_key_creation() {
     // The global dev token is Admin but has no user_id, so this returns 403.
     // We just verify the endpoint exists (not 404/401).
     let resp = ctx
-        .post("/api/v1/auth/api-keys", json!({"name": "integration-test-key"}))
+        .post(
+            "/api/v1/auth/api-keys",
+            json!({"name": "integration-test-key"}),
+        )
         .await;
     assert_ne!(resp.status(), 404_u16, "endpoint should exist");
     assert_ne!(resp.status(), 401_u16, "should be authenticated");
