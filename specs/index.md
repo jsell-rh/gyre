@@ -69,6 +69,10 @@ How Gyre gets built - process and standards for the agent team.
 | M6: Infrastructure | [`milestones/m6-infrastructure.md`](milestones/m6-infrastructure.md) | Analytics, BCP, cost tracking, job framework |
 | M7: Production Hardening | [`milestones/m7-production-hardening.md`](milestones/m7-production-hardening.md) | eBPF audit, SIEM, NixOS, compute targets, WireGuard, hardening |
 | M8: Frontend Excellence | [`milestones/m8-frontend-excellence.md`](milestones/m8-frontend-excellence.md) | Red Hat brand, design system, polished UX, component library |
+| M9: Functional UI | [`milestones/m9-functional-ui.md`](milestones/m9-functional-ui.md) | Seed data, CRUD modals, auth integration, working user journeys |
+| M10: Persistent Storage | [`milestones/m10-persistent-storage.md`](milestones/m10-persistent-storage.md) | SQLite persistence, real-time WebSocket events, git repo storage |
+| M11: Agent Execution | [`milestones/m11-agent-execution.md`](milestones/m11-agent-execution.md) | Real agent processes, TTY attach from browser, agent logs |
+| M12: Quality Gates | [`milestones/m12-quality-gates.md`](milestones/m12-quality-gates.md) | Merge queue gates (tests/lints/reviews), repo mirroring, diff viewer |
 
 ## Open Questions
 
