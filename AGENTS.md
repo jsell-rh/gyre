@@ -158,7 +158,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8) |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
@@ -294,6 +294,7 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 {"type":"DomainEvent","event":"SpeculativeConflict","repo_id":"<uuid>","branch":"<ref>"}
 {"type":"DomainEvent","event":"SpeculativeMergeClean","repo_id":"<uuid>","branch":"<ref>"}
 {"type":"DomainEvent","event":"HotFilesChanged","repo_id":"<uuid>"}
+{"type":"DomainEvent","event":"SpecChanged","repo_id":"<uuid>","spec_path":"specs/system/foo.md","change_kind":"added","task_id":"<uuid>"}
 ```
 
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
@@ -457,6 +458,27 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 | `complete` | `refs/agents/{agent-id}/snapshots/{n}` | Immutable snapshot of the branch tip at completion (n increments per call) |
 
 These refs survive agent restarts. Query them via standard git: `git ls-remote <clone-url> 'refs/agents/*'`.
+
+### Spec Lifecycle Automation (M13.8)
+
+When an agent pushes to the **default branch** of any repo, the post-receive hook scans for changes to watched spec paths. If spec files are added, modified, deleted, or renamed, the server automatically creates a task and broadcasts a `SpecChanged` domain event.
+
+**Watched paths** (changes outside these prefixes are ignored):
+- `specs/system/`
+- `specs/development/`
+
+**Auto-created task titles and labels by change type:**
+
+| `git diff --name-status` | Task title | Labels | Priority |
+|---|---|---|---|
+| `A` (Added) | `Implement spec: <path>` | `spec-implementation`, `auto-created` | Medium |
+| `M` (Modified) | `Review spec change: <path>` | `spec-drift-review`, `auto-created` | High |
+| `D` (Deleted) | `Handle spec removal: <path>` | `spec-deprecated`, `auto-created` | High |
+| `R` (Renamed) | `Update spec references: <old> -> <new>` | `spec-housekeeping`, `auto-created` | Medium |
+
+The task description records the spec path and repo ID. The `SpecChanged` domain event is broadcast over WebSocket immediately after the task is created, so dashboards and listeners can react in real time.
+
+**No action required** from agents pushing spec changes — task creation is automatic and idempotent within a single push. Multiple spec files changed in one push create one task per file.
 
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
