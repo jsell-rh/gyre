@@ -439,6 +439,22 @@ pub async fn admin_seed(
     state.repos.create(&repo2).await?;
     state.repos.create(&repo3).await?;
 
+    // Initialize bare git repos on disk with an initial commit.
+    for repo in [&repo1, &repo2, &repo3] {
+        if let Err(e) = state.git_ops.init_bare(&repo.path).await {
+            tracing::warn!("seed: init_bare failed for {}: {e}", repo.path);
+        } else if let Err(e) = state
+            .git_ops
+            .create_initial_commit(&repo.path, &repo.default_branch)
+            .await
+        {
+            tracing::warn!(
+                "seed: create_initial_commit failed for {}: {e}",
+                repo.path
+            );
+        }
+    }
+
     // ── Agents ────────────────────────────────────────────────────────────────
     let mut agent1 = Agent::new(Id::new("seed-agent-1"), "orchestrator", now - 1800);
     agent1.status = AgentStatus::Active;
@@ -585,6 +601,7 @@ pub async fn admin_seed(
             timestamp,
         });
     }
+
 
     Ok(Json(SeedResponse {
         projects: 2,

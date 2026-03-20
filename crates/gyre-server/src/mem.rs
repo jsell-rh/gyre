@@ -96,6 +96,10 @@ impl GitOpsPort for NoopGitOps {
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
+
+    async fn create_initial_commit(&self, _repo_path: &str, _branch: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -976,6 +980,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         worktrees: Arc::new(MemWorktreeRepository::default()),
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,
+        event_tx: broadcast::channel(16).0,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
         users: Arc::new(MemUserRepository::default()),
