@@ -7,10 +7,21 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use gyre_common::{ActivityEventData, WsMessage};
+use serde::Serialize;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
+use crate::domain_events::DomainEvent;
 use crate::AppState;
+
+/// Wrapper that adds `type: "DomainEvent"` to the serialized domain event.
+#[derive(Serialize)]
+struct WsDomainEvent<'a> {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    #[serde(flatten)]
+    event: &'a DomainEvent,
+}
 
 /// GET /ws - WebSocket upgrade endpoint.
 pub async fn ws_handler(
@@ -43,6 +54,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 
     let mut broadcast_rx = state.broadcast_tx.subscribe();
+    let mut domain_event_rx = state.event_tx.subscribe();
 
     // Main message loop: handle activity messages and broadcast events.
     loop {
@@ -118,6 +130,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(n, "broadcast receiver lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            domain_ev = domain_event_rx.recv() => {
+                match domain_ev {
+                    Ok(event) => {
+                        let wrapper = WsDomainEvent { msg_type: "DomainEvent", event: &event };
+                        let payload = serde_json::to_string(&wrapper).unwrap();
+                        if sender.send(Message::Text(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(n, "domain event receiver lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -366,6 +393,31 @@ mod tests {
             } else {
                 panic!("expected ActivityEvent, got: {:?}", result);
             }
+        } else {
+            panic!("expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_domain_event_broadcast_to_client() {
+        let (url, state) = start_test_server("tok").await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+
+        // Publish a domain event via the event bus.
+        let _ = state
+            .event_tx
+            .send(crate::domain_events::DomainEvent::AgentCreated {
+                id: "agent-123".to_string(),
+            });
+
+        // Client should receive a DomainEvent message.
+        let msg = ws.next().await.unwrap().unwrap();
+        if let tungstenite::Message::Text(text) = msg {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["type"], "DomainEvent");
+            assert_eq!(value["event"], "AgentCreated");
+            assert_eq!(value["id"], "agent-123");
         } else {
             panic!("expected text message");
         }

@@ -779,6 +779,7 @@ dependencies = [
  "prometheus",
  "reqwest",
  "ring",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
