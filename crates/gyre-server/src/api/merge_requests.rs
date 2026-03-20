@@ -73,6 +73,8 @@ pub struct MrResponse {
     pub diff_stats: Option<DiffStatsResponse>,
     pub has_conflicts: Option<bool>,
     pub spec_ref: Option<String>,
+    pub depends_on: Vec<String>,
+    pub atomic_group: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -94,6 +96,8 @@ impl From<MergeRequest> for MrResponse {
             }),
             has_conflicts: mr.has_conflicts,
             spec_ref: mr.spec_ref,
+            depends_on: mr.depends_on.iter().map(|id| id.to_string()).collect(),
+            atomic_group: mr.atomic_group,
             created_at: mr.created_at,
             updated_at: mr.updated_at,
         }

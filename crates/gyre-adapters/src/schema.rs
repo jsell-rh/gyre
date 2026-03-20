@@ -78,6 +78,8 @@ diesel::table! {
         diff_deletions -> Nullable<BigInt>,
         has_conflicts -> Nullable<Integer>,
         tenant_id -> Text,
+        depends_on -> Text,
+        atomic_group -> Nullable<Text>,
     }
 }
 
