@@ -114,8 +114,11 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
-| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: TestCommand, LintCommand, RequiredApprovals) (M12.1) |
+| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: TestCommand, LintCommand, RequiredApprovals, AgentReview, AgentValidation) (M12.1, M12.3) |
 | `DELETE` | `/api/v1/repos/{id}/gates/{gate_id}` | Delete a quality gate (M12.1) |
+| `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, approver_id}` — `sha` must be 40-char hex of the spec blob at approval time (M12.3) |
+| `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
+| `POST` | `/api/v1/specs/revoke` | Revoke a spec approval: `{approval_id, revoked_by, reason}`; marks it inactive without deleting the audit record (M12.3) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
 | `GET` | `/api/v1/repos/{id}/blame?path={file}` | Per-line agent attribution — which agent last touched each line (M13.4) |
 | `GET` | `/api/v1/repos/{id}/hot-files?limit=20` | Files with the most concurrent active agents in the last 24h (M13.4) |
@@ -158,7 +161,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8) |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
@@ -295,6 +298,7 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 {"type":"DomainEvent","event":"SpeculativeMergeClean","repo_id":"<uuid>","branch":"<ref>"}
 {"type":"DomainEvent","event":"HotFilesChanged","repo_id":"<uuid>"}
 {"type":"DomainEvent","event":"SpecChanged","repo_id":"<uuid>","spec_path":"specs/system/foo.md","change_kind":"added","task_id":"<uuid>"}
+{"type":"DomainEvent","event":"GateFailure","mr_id":"<uuid>","gate_name":"<name>","gate_type":"agent_review","status":"failed","output":"<gate output>","spec_ref":"specs/system/agent-gates.md@<sha>","gate_agent_id":"<uuid>"}
 ```
 
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
@@ -422,7 +426,11 @@ Agents are created in dependency order (parents before children). Parent links a
 
 // Response 201
 {
-  "agent": { "id": "...", "name": "worker-1", "status": "Active", ... },
+  "agent": {
+    "id": "...", "name": "worker-1", "status": "Active",
+    "spawned_by": "<caller-agent-id or user-id>",   // M13.2: who initiated spawn
+    ...
+  },
   "token": "<per-agent-bearer-token>",
   "worktree_path": "/path/to/worktree",
   "clone_url": "http://localhost:3000/git/project/repo.git",
@@ -448,6 +456,14 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 **Idempotent (M13.7):** Calling complete a second time returns **202 Accepted** rather than an error — safe to retry on network failure or agent restart.
 
 **Token revocation (M13.7):** The agent's bearer token is revoked in the database on successful completion. Any subsequent API call with the same token will be rejected with 401. Agents must not reuse a token after completing.
+
+**Commit provenance (M13.2):** When an agent pushes via Smart HTTP, the server automatically captures:
+- `spawned_by` — the identity of whoever called `POST /api/v1/agents/spawn` for this agent
+- `X-Gyre-Model-Context` — optional request header agents may set on the `git-receive-pack` call to record model/context metadata (e.g. `claude-opus-4@anthropic`)
+
+These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}/agent-commits`.
+
+**Spec binding on MR create (M12.3):** `POST /api/v1/merge-requests` accepts an optional `spec_ref` field in the request body — a string of the form `"specs/system/agent-gates.md@<40-char-sha>"` — to cryptographically bind the MR to the spec version it implements. A `GateFailure` domain event is broadcast if an `AgentReview` or `AgentValidation` gate fails.
 
 **Custom git ref namespaces (M13.6):** The server writes refs into reserved namespaces on each lifecycle event:
 
