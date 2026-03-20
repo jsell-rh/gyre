@@ -8,7 +8,14 @@ use serde_json::json;
 pub enum ApiError {
     NotFound(String),
     InvalidInput(String),
+    Forbidden(String),
     Internal(anyhow::Error),
+}
+
+impl ApiError {
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        ApiError::Forbidden(msg.into())
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -16,6 +23,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::Internal(err) => {
                 tracing::error!("internal error: {err:#}");
                 (
