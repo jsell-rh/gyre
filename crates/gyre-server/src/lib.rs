@@ -228,14 +228,13 @@ pub fn build_state(
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
 
-    let db: Option<Arc<sqlite::SqliteDb>> =
-        std::env::var("GYRE_DATABASE_URL").ok().map(|url| {
-            let path = url.strip_prefix("sqlite://").unwrap_or(&url).to_string();
-            Arc::new(
-                sqlite::SqliteDb::open(&path)
-                    .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
-            )
-        });
+    let db: Option<Arc<sqlite::SqliteDb>> = std::env::var("GYRE_DATABASE_URL").ok().map(|url| {
+        let path = url.strip_prefix("sqlite://").unwrap_or(&url).to_string();
+        Arc::new(
+            sqlite::SqliteDb::open(&path)
+                .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
+        )
+    });
 
     macro_rules! store {
         ($trait:ty, $mem:expr) => {
@@ -254,11 +253,20 @@ pub fn build_state(
         tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
         merge_requests: store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
         reviews: store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
-        merge_queue: store!(dyn MergeQueueRepository, mem::MemMergeQueueRepository::default()),
+        merge_queue: store!(
+            dyn MergeQueueRepository,
+            mem::MemMergeQueueRepository::default()
+        ),
         git_ops: Arc::new(gyre_adapters::Git2OpsAdapter::new()),
         jj_ops: Arc::new(gyre_adapters::JjOpsAdapter::new()),
-        agent_commits: store!(dyn AgentCommitRepository, mem::MemAgentCommitRepository::default()),
-        worktrees: store!(dyn WorktreeRepository, mem::MemWorktreeRepository::default()),
+        agent_commits: store!(
+            dyn AgentCommitRepository,
+            mem::MemAgentCommitRepository::default()
+        ),
+        worktrees: store!(
+            dyn WorktreeRepository,
+            mem::MemWorktreeRepository::default()
+        ),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
         event_tx,
@@ -274,13 +282,19 @@ pub fn build_state(
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
-        analytics: store!(dyn AnalyticsRepository, mem::MemAnalyticsRepository::default()),
+        analytics: store!(
+            dyn AnalyticsRepository,
+            mem::MemAnalyticsRepository::default()
+        ),
         costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
         audit: store!(dyn AuditRepository, mem::MemAuditRepository::default()),
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
         compute_targets: Arc::new(Mutex::new(HashMap::new())),
-        network_peers: store!(dyn NetworkPeerRepository, mem::MemNetworkPeerRepository::default()),
+        network_peers: store!(
+            dyn NetworkPeerRepository,
+            mem::MemNetworkPeerRepository::default()
+        ),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
     })
 }
