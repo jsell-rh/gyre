@@ -22,7 +22,7 @@ pub mod siem;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
 pub mod speculative_merge;
-pub mod sqlite;
+// sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod tty;
@@ -316,13 +316,14 @@ pub fn build_state(
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
 
-    let db: Option<Arc<sqlite::SqliteDb>> = std::env::var("GYRE_DATABASE_URL").ok().map(|url| {
-        let path = url.strip_prefix("sqlite://").unwrap_or(&url).to_string();
-        Arc::new(
-            sqlite::SqliteDb::open(&path)
-                .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
-        )
-    });
+    let db: Option<Arc<gyre_adapters::SqliteStorage>> =
+        std::env::var("GYRE_DATABASE_URL").ok().map(|url| {
+            let path = url.strip_prefix("sqlite://").unwrap_or(&url).to_string();
+            Arc::new(
+                gyre_adapters::SqliteStorage::new(&path)
+                    .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
+            )
+        });
 
     macro_rules! store {
         ($trait:ty, $mem:expr) => {

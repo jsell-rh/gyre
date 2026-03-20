@@ -18,6 +18,7 @@ struct ActivityEventRow {
     event_type: String,
     description: String,
     timestamp: i64,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 
