@@ -26,3 +26,5 @@
 
 # Web app
 web/node_modules/
+repos/
+crates/gyre-server/repos/
