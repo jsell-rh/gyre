@@ -55,6 +55,7 @@ How Gyre gets built - process and standards for the agent team.
 | Persona | Path | Summary |
 |---|---|---|
 | CEO Agent | [`personas/ceo.md`](personas/ceo.md) | Top-level orchestrator, spawns all work |
+| Accountability Agent | [`personas/accountability.md`](personas/accountability.md) | Spec integrity guardian, detects implementation drift |
 
 ## Milestones
 

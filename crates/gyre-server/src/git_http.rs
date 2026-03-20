@@ -471,6 +471,10 @@ mod tests {
             path: repo_path.to_str().unwrap().to_string(),
             default_branch: "main".to_string(),
             created_at: 0,
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
         };
         state.repos.create(&repo).await.unwrap();
 
