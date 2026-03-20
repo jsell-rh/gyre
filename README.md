@@ -105,7 +105,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
 | M17: Integration Testing | In Progress | REST API contract tests, git smart HTTP tests, merge queue system tests, auth matrix, Playwright E2E |
 
-710 Rust + 92 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+722 Rust + 92 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
