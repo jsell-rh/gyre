@@ -1,6 +1,7 @@
 use anyhow::Result;
 use gyre_server::{
-    build_router, build_state, merge_processor, spawn_stale_agent_detector, telemetry, JwtConfig,
+    audit_simulator, build_router, build_state, merge_processor, siem, spawn_stale_agent_detector,
+    telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -33,6 +34,8 @@ async fn main() -> Result<()> {
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     merge_processor::spawn_merge_processor(state.clone());
+    siem::spawn_siem_forwarder(state.clone());
+    audit_simulator::spawn_audit_simulator(state.clone());
 
     let app = build_router(state);
 
