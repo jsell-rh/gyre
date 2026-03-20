@@ -150,9 +150,14 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
+| `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps (TASK-100) |
+| `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
+| `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on (TASK-100) |
+| `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued (TASK-100) |
 | `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |
 | `GET` | `/api/v1/merge-queue` | List merge queue entries (priority ordered) |
 | `DELETE` | `/api/v1/merge-queue/{id}` | Cancel queued entry |
+| `GET` | `/api/v1/merge-queue/graph` | Return full merge queue DAG: `{nodes: [{mr_id, title, status, priority},...], edges: [{from, to},...]}` (TASK-100) |
 | `POST` | `/api/v1/repos/{id}/commits/record` | Record agent-commit mapping |
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees |
@@ -686,6 +691,8 @@ Key specs to read before making changes:
 | M13 milestone deliverables | [specs/milestones/m13-forge-native.md](specs/milestones/m13-forge-native.md) |
 | M14 milestone deliverables | [specs/milestones/m14-supply-chain.md](specs/milestones/m14-supply-chain.md) |
 | M15 milestone deliverables | [specs/milestones/m15-diesel-migrations.md](specs/milestones/m15-diesel-migrations.md) |
+| M16 milestone deliverables | [specs/milestones/m16-security-hardening.md](specs/milestones/m16-security-hardening.md) |
+| M17 milestone deliverables | [specs/milestones/m17-integration-testing.md](specs/milestones/m17-integration-testing.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
