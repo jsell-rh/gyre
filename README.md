@@ -71,7 +71,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
 - **Git forge** — bare repos on disk, Smart HTTP clone/push, branches, diffs, merge requests with reviews and a merge queue
 - **Agent orchestration** — spawn agents with a dedicated worktree and auth token; agents push, open MRs, and self-complete
-- **Quality gates** — per-repo gate definitions (test command, lint, required approvals) enforced before merge
+- **Quality gates** — per-repo gate definitions (test command, lint, required approvals, agent review and validation) enforced before merge
 - **Full audit trail** — every agent action logged; eBPF syscall capture; SIEM forwarding
 
 ## Tech Stack
@@ -104,7 +104,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M15: Diesel ORM | Done | Diesel ORM + migrations, SQLite + PostgreSQL adapters, full persistence, multi-tenancy (tenant_id scoping) |
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
 
-553 Rust + 79 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+600 Rust + 86 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
