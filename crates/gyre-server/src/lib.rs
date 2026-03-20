@@ -6,6 +6,7 @@ pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
+
 pub(crate) mod health;
 pub mod jobs;
 pub(crate) mod mcp;
@@ -321,20 +322,36 @@ pub fn build_state(
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
 
-    let db: Option<Arc<gyre_adapters::SqliteStorage>> =
-        std::env::var("GYRE_DATABASE_URL").ok().map(|url| {
-            let path = url.strip_prefix("sqlite://").unwrap_or(&url).to_string();
+    let db_url = std::env::var("GYRE_DATABASE_URL").ok();
+    let sqlite_db: Option<Arc<gyre_adapters::SqliteStorage>> = db_url
+        .as_deref()
+        .filter(|u| !u.starts_with("postgres://") && !u.starts_with("postgresql://"))
+        .map(|url| {
+            let path = url.strip_prefix("sqlite://").unwrap_or(url).to_string();
             Arc::new(
                 gyre_adapters::SqliteStorage::new(&path)
                     .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
             )
         });
+    let pg_db: Option<Arc<gyre_adapters::PgStorage>> = db_url
+        .as_deref()
+        .filter(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"))
+        .map(|url| {
+            Arc::new(
+                gyre_adapters::PgStorage::new(url)
+                    .unwrap_or_else(|e| panic!("Failed to connect to PostgreSQL: {e}")),
+            )
+        });
 
     macro_rules! store {
         ($trait:ty, $mem:expr) => {
-            db.as_ref()
-                .map(|d| Arc::clone(d) as Arc<$trait>)
-                .unwrap_or_else(|| Arc::new($mem))
+            if let Some(ref d) = pg_db {
+                Arc::clone(d) as Arc<$trait>
+            } else if let Some(ref d) = sqlite_db {
+                Arc::clone(d) as Arc<$trait>
+            } else {
+                Arc::new($mem) as Arc<$trait>
+            }
         };
     }
 
