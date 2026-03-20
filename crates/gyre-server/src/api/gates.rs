@@ -104,10 +104,10 @@ fn gate_status_str(s: &GateStatus) -> String {
 // ---------------------------------------------------------------------------
 
 /// POST /api/v1/repos/:id/gates — create a quality gate for a repo.
-#[instrument(skip(state, req, _auth), fields(repo_id = %repo_id))]
+#[instrument(skip(state, req, _admin), fields(repo_id = %repo_id))]
 pub async fn create_gate(
     State(state): State<Arc<AppState>>,
-    _auth: crate::auth::AuthenticatedAgent,
+    _admin: crate::auth::AdminOnly,
     Path(repo_id): Path<String>,
     Json(req): Json<CreateGateRequest>,
 ) -> Result<(StatusCode, Json<GateResponse>), ApiError> {

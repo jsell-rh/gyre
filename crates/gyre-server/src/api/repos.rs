@@ -17,7 +17,9 @@ use super::{new_id, now_secs};
 pub struct CreateRepoRequest {
     pub project_id: String,
     pub name: String,
-    pub path: Option<String>,
+    /// Ignored — path is always computed server-side (C-4 security fix).
+    #[serde(default)]
+    pub _path: Option<String>,
     pub default_branch: Option<String>,
 }
 
@@ -90,9 +92,8 @@ pub async fn create_repo(
         }
     }
     let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
-    let repo_path = req
-        .path
-        .unwrap_or_else(|| format!("{}/{}/{}.git", repos_root, req.project_id, req.name));
+    // C-4 fix: always compute path server-side, never from user input.
+    let repo_path = format!("{}/{}/{}.git", repos_root, req.project_id, req.name);
 
     let now = now_secs();
     let mut repo = Repository::new(
@@ -330,7 +331,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_repo_custom_path() {
+    async fn create_repo_ignores_user_supplied_path() {
+        // C-4 security fix: user-supplied path is ignored; server computes path.
         let body = serde_json::json!({
             "project_id": "proj-1",
             "name": "gyre",
@@ -349,7 +351,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
-        assert_eq!(json["path"], "/custom/path/gyre.git");
+        // Path should be server-computed, NOT the user-supplied value.
+        assert_ne!(json["path"], "/custom/path/gyre.git");
+        assert!(json["path"].as_str().unwrap().contains("proj-1/gyre.git"));
     }
 
     #[tokio::test]
