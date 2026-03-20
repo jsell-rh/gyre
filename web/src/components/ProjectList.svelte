@@ -2,6 +2,9 @@
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
+  import Modal from '../lib/Modal.svelte';
+  import Button from '../lib/Button.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { onSelectRepo } = $props();
 
@@ -12,15 +15,32 @@
   let repos = $state([]);
   let reposLoading = $state(false);
 
+  // New project modal
+  let showNewProject = $state(false);
+  let projName = $state('');
+  let projDesc = $state('');
+  let projCreating = $state(false);
+
+  // Add repo modal
+  let showAddRepo = $state(false);
+  let repoName = $state('');
+  let repoBranch = $state('main');
+  let repoCreating = $state(false);
+
   function formatDate(ts) {
     return new Date(ts * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
   }
 
-  $effect(() => {
-    api.projects()
-      .then((data) => { projects = data; loading = false; })
-      .catch((err) => { error = err.message; loading = false; });
-  });
+  async function loadProjects() {
+    try {
+      projects = await api.projects();
+    } catch (err) {
+      error = err.message;
+    }
+    loading = false;
+  }
+
+  $effect(() => { loadProjects(); });
 
   async function selectProject(p) {
     if (selected?.id === p.id) { selected = null; repos = []; return; }
@@ -34,7 +54,74 @@
     }
     reposLoading = false;
   }
+
+  async function createProject() {
+    if (!projName.trim()) return;
+    projCreating = true;
+    try {
+      await api.createProject({ name: projName.trim(), description: projDesc.trim() || undefined });
+      toastSuccess('Project created');
+      showNewProject = false;
+      projName = ''; projDesc = '';
+      loading = true;
+      await loadProjects();
+    } catch (e) {
+      toastError(e.message);
+    }
+    projCreating = false;
+  }
+
+  async function addRepo() {
+    if (!repoName.trim() || !selected) return;
+    repoCreating = true;
+    try {
+      await api.createRepo({ name: repoName.trim(), project_id: selected.id, default_branch: repoBranch.trim() || 'main' });
+      toastSuccess('Repository created');
+      showAddRepo = false;
+      repoName = ''; repoBranch = 'main';
+      reposLoading = true;
+      repos = await api.repos(selected.id);
+      reposLoading = false;
+    } catch (e) {
+      toastError(e.message);
+    }
+    repoCreating = false;
+  }
 </script>
+
+<Modal bind:open={showNewProject} title="New Project">
+  <div class="form">
+    <label class="form-label">Name
+      <input class="form-input" bind:value={projName} placeholder="my-project" />
+    </label>
+    <label class="form-label">Description
+      <input class="form-input" bind:value={projDesc} placeholder="Optional description" />
+    </label>
+  </div>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (showNewProject = false)}>Cancel</Button>
+    <Button variant="primary" onclick={createProject} disabled={projCreating || !projName.trim()}>
+      {projCreating ? 'Creating…' : 'Create Project'}
+    </Button>
+  {/snippet}
+</Modal>
+
+<Modal bind:open={showAddRepo} title="Add Repository">
+  <div class="form">
+    <label class="form-label">Repository Name
+      <input class="form-input" bind:value={repoName} placeholder="my-repo" />
+    </label>
+    <label class="form-label">Default Branch
+      <input class="form-input" bind:value={repoBranch} placeholder="main" />
+    </label>
+  </div>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (showAddRepo = false)}>Cancel</Button>
+    <Button variant="primary" onclick={addRepo} disabled={repoCreating || !repoName.trim()}>
+      {repoCreating ? 'Creating…' : 'Add Repository'}
+    </Button>
+  {/snippet}
+</Modal>
 
 <div class="page">
   <div class="page-hdr">
@@ -44,6 +131,7 @@
         <p class="page-desc">{projects.length} project{projects.length !== 1 ? 's' : ''}</p>
       {/if}
     </div>
+    <Button variant="primary" onclick={() => (showNewProject = true)}>+ New Project</Button>
   </div>
 
   {#if loading}
@@ -86,7 +174,11 @@
 
             {#if selected?.id === p.id}
               <div class="repos-section">
-                <h4 class="repos-title">Repositories</h4>
+                <div class="repos-hdr">
+                  <h4 class="repos-title">Repositories</h4>
+                  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                  <span class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showAddRepo = true; }}>+ Add Repo</span>
+                </div>
                 {#if reposLoading}
                   <Skeleton lines={3} height="1.5rem" />
                 {:else if repos.length === 0}
@@ -137,7 +229,13 @@
     gap: var(--space-4);
   }
 
-  .page-hdr { flex-shrink: 0; }
+  .page-hdr {
+    flex-shrink: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
 
   .page-title {
     font-family: var(--font-display);
@@ -218,6 +316,12 @@
     gap: var(--space-2);
   }
 
+  .repos-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
   .repos-title {
     font-family: var(--font-display);
     font-size: var(--text-xs);
@@ -227,6 +331,39 @@
     letter-spacing: 0.06em;
     margin: 0;
   }
+
+  .add-repo-btn {
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    cursor: pointer;
+    transition: color var(--transition-fast);
+  }
+
+  .add-repo-btn:hover { color: var(--color-link-hover); }
+
+  .form { display: flex; flex-direction: column; gap: var(--space-3); }
+
+  .form-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .form-input {
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
+  }
+
+  .form-input:focus { outline: none; border-color: var(--color-primary); }
 
   .repo-list {
     list-style: none;

@@ -3,12 +3,23 @@
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
+  import Modal from '../lib/Modal.svelte';
+  import Button from '../lib/Button.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let tasks = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let filterAgent = $state('');
   let filterPriority = $state('');
+
+  // New task modal
+  let showNewTask = $state(false);
+  let taskTitle = $state('');
+  let taskDesc = $state('');
+  let taskPriority = $state('Medium');
+  let taskStatus = $state('Backlog');
+  let taskCreating = $state(false);
 
   const columns = [
     { key: 'Backlog',    label: 'Backlog',      colorClass: 'col-backlog' },
@@ -19,6 +30,7 @@
   ];
 
   const priorities = ['Critical', 'High', 'Medium', 'Low'];
+  const statuses = ['Backlog', 'InProgress', 'Review', 'Done', 'Blocked'];
 
   const agents = $derived([...new Set(tasks.map((t) => t.assigned_to).filter(Boolean))].sort());
 
@@ -34,12 +46,65 @@
     return filtered.filter((t) => t.status === key);
   }
 
-  $effect(() => {
-    api.tasks()
-      .then((data) => { tasks = data; loading = false; })
-      .catch((err) => { error = err.message; loading = false; });
-  });
+  async function loadTasks() {
+    try {
+      tasks = await api.tasks();
+    } catch (err) {
+      error = err.message;
+    }
+    loading = false;
+  }
+
+  $effect(() => { loadTasks(); });
+
+  async function createTask() {
+    if (!taskTitle.trim()) return;
+    taskCreating = true;
+    try {
+      await api.createTask({
+        title: taskTitle.trim(),
+        description: taskDesc.trim() || undefined,
+        priority: taskPriority,
+        status: taskStatus,
+      });
+      toastSuccess('Task created');
+      showNewTask = false;
+      taskTitle = ''; taskDesc = ''; taskPriority = 'Medium'; taskStatus = 'Backlog';
+      loading = true;
+      await loadTasks();
+    } catch (e) {
+      toastError(e.message);
+    }
+    taskCreating = false;
+  }
 </script>
+
+<Modal bind:open={showNewTask} title="New Task">
+  <div class="form">
+    <label class="form-label">Title
+      <input class="form-input" bind:value={taskTitle} placeholder="Task title" />
+    </label>
+    <label class="form-label">Description
+      <textarea class="form-input form-textarea" bind:value={taskDesc} placeholder="Optional description" rows="3"></textarea>
+    </label>
+    <label class="form-label">Priority
+      <select class="form-input" bind:value={taskPriority}>
+        {#each priorities as p}<option value={p}>{p}</option>{/each}
+      </select>
+    </label>
+    <label class="form-label">Status
+      <select class="form-input" bind:value={taskStatus}>
+        {#each statuses as s}<option value={s}>{s}</option>{/each}
+      </select>
+    </label>
+  </div>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (showNewTask = false)}>Cancel</Button>
+    <Button variant="primary" onclick={createTask} disabled={taskCreating || !taskTitle.trim()}>
+      {taskCreating ? 'Creating…' : 'Create Task'}
+    </Button>
+  {/snippet}
+</Modal>
 
 <div class="page">
   <div class="page-hdr">
@@ -47,15 +112,18 @@
       <h1 class="page-title">Task Board</h1>
       <p class="page-desc">{tasks.length} task{tasks.length !== 1 ? 's' : ''} total</p>
     </div>
-    <div class="filters">
-      <select bind:value={filterPriority} class="filter-select">
-        <option value="">All priorities</option>
-        {#each priorities as p}<option value={p}>{p}</option>{/each}
-      </select>
-      <select bind:value={filterAgent} class="filter-select">
-        <option value="">All agents</option>
-        {#each agents as a}<option value={a}>{a}</option>{/each}
-      </select>
+    <div class="page-actions">
+      <div class="filters">
+        <select bind:value={filterPriority} class="filter-select">
+          <option value="">All priorities</option>
+          {#each priorities as p}<option value={p}>{p}</option>{/each}
+        </select>
+        <select bind:value={filterAgent} class="filter-select">
+          <option value="">All agents</option>
+          {#each agents as a}<option value={a}>{a}</option>{/each}
+        </select>
+      </div>
+      <Button variant="primary" onclick={() => (showNewTask = true)}>+ New Task</Button>
     </div>
   </div>
 
@@ -150,7 +218,35 @@
 
   .page-desc { font-size: var(--text-sm); color: var(--color-text-secondary); }
 
+  .page-actions { display: flex; align-items: center; gap: var(--space-3); flex-shrink: 0; }
+
   .filters { display: flex; gap: var(--space-2); align-items: center; }
+
+  .form { display: flex; flex-direction: column; gap: var(--space-3); }
+
+  .form-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .form-input {
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
+  }
+
+  .form-input:focus { outline: none; border-color: var(--color-primary); }
+
+  .form-textarea { resize: vertical; min-height: 5rem; }
 
   .filter-select {
     background: var(--color-surface);
