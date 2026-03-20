@@ -67,7 +67,27 @@ cargo watch -x "test --all"
 
 # Run the E2E Ralph loop integration test (requires git on PATH)
 cargo test -p gyre-server --test e2e_ralph_loop
+
+# Run M17 integration test suites individually (all require git on PATH)
+cargo test -p gyre-server --test api_integration      # 67 REST API contract tests
+cargo test -p gyre-server --test auth_integration     # 21 auth + RBAC tests
+cargo test -p gyre-server --test git_integration      # 12 git smart HTTP + merge queue tests
 ```
+
+### M17 Integration Test Suites
+
+Four integration test files in `crates/gyre-server/tests/` each start a live server on a random port:
+
+| File | Tests | Coverage |
+|---|---|---|
+| `e2e_ralph_loop.rs` | 1 | Full Ralph loop end-to-end: spawn → clone → push → MR → merge |
+| `api_integration.rs` | 67 | REST API contract tests for all endpoints (M17.2) |
+| `auth_integration.rs` | 21 | Auth matrix: valid tokens, invalid tokens, RBAC role enforcement (M17.4) |
+| `git_integration.rs` | 12 | Smart HTTP clone/push, push gates, merge queue, commit provenance (M17.3) |
+
+All tests bind to `127.0.0.1:0` (random port) and run safely in parallel. Require `git` on `PATH`.
+
+> **Note for CI / integration tests:** Always use `git push origin HEAD:main` (not `git push origin main`) when pushing to an empty repo. GitHub Actions runners default to `init.defaultBranch=master`, so the local unborn branch may be named `master` even if the remote expects `main`.
 
 ### E2E Integration Test (`e2e_ralph_loop`)
 
