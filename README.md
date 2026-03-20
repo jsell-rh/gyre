@@ -98,7 +98,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M12: Quality Gates | In Progress | Merge queue gates, repo mirroring, diff viewer |
 | M13: Forge Native | In Progress | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
 | M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
-| M15: Diesel ORM | Planned | Diesel ORM + migrations, PostgreSQL support, multi-tenancy |
+| M15: Diesel ORM | In Progress | Diesel ORM + migrations, PostgreSQL support, multi-tenancy |
 
 554 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
