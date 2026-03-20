@@ -3,7 +3,7 @@
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
-  import { toastSuccess, toastError } from '../lib/toast.js';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let entries = $state([]);
   let loading = $state(true);

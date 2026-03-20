@@ -2,7 +2,7 @@
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
-  import { toastSuccess, toastError } from '../lib/toast.js';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let composeId = $state('');
   let statusAgents = $state([]);

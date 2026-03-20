@@ -1,7 +1,7 @@
 <script>
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
-  import { toastSuccess, toastError } from '../lib/toast.js';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { agentId } = $props();
 
