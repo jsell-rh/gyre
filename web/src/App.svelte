@@ -28,28 +28,34 @@
   let wsStatus = $state('disconnected');
   let wsStore = $state(null);
   let tokenModalOpen = $state(false);
-  let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'test-token');
+  let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
+  let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
 
   function saveToken() {
-    setAuthToken(tokenInput.trim() || 'test-token');
-    tokenInput = tokenInput.trim() || 'test-token';
+    const t = tokenInput.trim() || 'gyre-dev-token';
+    setAuthToken(t);
+    tokenInput = t;
+    hasToken = true;
     tokenModalOpen = false;
-    // Reconnect WS with new token
+    // Reconnect WS with new token — capture local ref so we own the lifecycle
     if (wsStore) {
-      wsStore.destroy();
+      const old = wsStore;
       wsStore = createWsStore();
       wsStore.onStatus((s) => (wsStatus = s));
+      old.destroy();
     }
   }
 
-  let hasToken = $derived(!!localStorage.getItem('gyre_auth_token'));
-
   $effect(() => {
-    wsStore = createWsStore();
-    const unsub = wsStore.onStatus((s) => (wsStatus = s));
+    // Capture the store in a local variable so the cleanup closes over this
+    // specific instance rather than the reactive proxy (which may point to a
+    // newer store after saveToken() runs).
+    const store = createWsStore();
+    wsStore = store;
+    const unsub = store.onStatus((s) => (wsStatus = s));
     return () => {
       unsub();
-      wsStore.destroy();
+      store.destroy();
     };
   });
 
