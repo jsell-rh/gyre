@@ -51,6 +51,18 @@ pub async fn release_prepare(
     _admin: AdminOnly,
     Json(req): Json<ReleasePrepareRequest>,
 ) -> Result<Json<ReleasePrepareResponse>, ApiError> {
+    // Validate optional ref inputs to prevent git argument injection.
+    if let Some(ref b) = req.branch {
+        if !crate::git_refs::refname_safe(b) {
+            return Err(ApiError::InvalidInput("invalid branch name".into()));
+        }
+    }
+    if let Some(ref f) = req.from {
+        if !crate::git_refs::refname_safe(f) {
+            return Err(ApiError::InvalidInput("invalid from ref".into()));
+        }
+    }
+
     // Look up the repository.
     let repo = state
         .repos
@@ -301,6 +313,60 @@ mod tests {
         assert_eq!(json["has_release"], false);
         assert!(json["current_tag"].is_null());
         assert!(json["sections"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn release_prepare_invalid_branch_returns_400() {
+        let app = app();
+        let repo_id = create_repo(&app).await;
+
+        // Branch starting with '-' is a git flag injection attempt.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/release/prepare")
+                    .header("content-type", "application/json")
+                    .header("Authorization", AUTH)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": "-evil-branch"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn release_prepare_invalid_from_returns_400() {
+        let app = app();
+        let repo_id = create_repo(&app).await;
+
+        // "from" ref containing ".." is a git path traversal attempt.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/release/prepare")
+                    .header("content-type", "application/json")
+                    .header("Authorization", AUTH)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "repo_id": repo_id,
+                            "from": "HEAD..evil"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
