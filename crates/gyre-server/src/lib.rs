@@ -152,6 +152,10 @@ pub struct AppState {
         Arc<Mutex<HashMap<(String, String), speculative_merge::SpeculativeResult>>>,
     /// Spawn log: agent_id -> Vec<(step, status, detail, timestamp)> (M13.7).
     pub spawn_log: Arc<Mutex<HashMap<String, Vec<serde_json::Value>>>>,
+    /// Agent stack fingerprints: agent_id -> AgentStack (M14.1).
+    pub agent_stacks: Arc<Mutex<HashMap<String, api::stack_attest::AgentStack>>>,
+    /// Repo stack attestation policies: repo_id -> required fingerprint (M14.2).
+    pub repo_stack_policies: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -389,6 +393,8 @@ pub fn build_state(
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(Mutex::new(HashMap::new())),
+        agent_stacks: Arc::new(Mutex::new(HashMap::new())),
+        repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

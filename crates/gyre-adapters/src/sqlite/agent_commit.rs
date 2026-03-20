@@ -7,7 +7,7 @@ use gyre_ports::AgentCommitRepository;
 use super::{open_conn, SqliteStorage};
 
 const COLS: &str = "id, agent_id, repository_id, commit_sha, branch, timestamp, \
-     task_id, ralph_step, spawned_by_user_id, parent_agent_id, model_context";
+     task_id, ralph_step, spawned_by_user_id, parent_agent_id, model_context, attestation_level";
 
 fn row_to_agent_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommit> {
     let ralph_step_str: Option<String> = row.get(7)?;
@@ -25,6 +25,7 @@ fn row_to_agent_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommit>
         spawned_by_user_id: row.get(8)?,
         parent_agent_id: row.get(9)?,
         model_context: row.get(10)?,
+        attestation_level: row.get(11)?,
     })
 }
 
@@ -38,7 +39,7 @@ impl AgentCommitRepository for SqliteStorage {
             conn.execute(
                 &format!(
                     "INSERT INTO agent_commits ({COLS}) VALUES \
-                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
                 ),
                 rusqlite::params![
                     m.id.as_str(),
@@ -52,6 +53,7 @@ impl AgentCommitRepository for SqliteStorage {
                     m.spawned_by_user_id,
                     m.parent_agent_id,
                     m.model_context,
+                    m.attestation_level,
                 ],
             )
             .context("insert agent_commit")?;

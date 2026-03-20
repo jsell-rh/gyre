@@ -149,6 +149,8 @@ mod tests {
             repo_push_gates: base.repo_push_gates.clone(),
             speculative_results: base.speculative_results.clone(),
             spawn_log: base.spawn_log.clone(),
+            agent_stacks: base.agent_stacks.clone(),
+            repo_stack_policies: base.repo_stack_policies.clone(),
         });
         crate::build_router(state)
     }

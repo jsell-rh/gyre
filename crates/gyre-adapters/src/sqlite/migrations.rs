@@ -245,6 +245,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_commits_task ON agent_commits(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_commits_ralph_step ON agent_commits(ralph_step);
 ";
 
+const MIGRATION_008: &str = "
+ALTER TABLE agent_commits ADD COLUMN attestation_level TEXT;
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
@@ -253,6 +257,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, MIGRATION_005),
     (6, MIGRATION_006),
     (7, MIGRATION_007),
+    (8, MIGRATION_008),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

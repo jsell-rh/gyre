@@ -1375,7 +1375,7 @@ impl ApiKeyRepository for SqliteDb {
 // ───────────────────────────────────────────────
 
 const AC_COLS: &str = "id, agent_id, repository_id, commit_sha, branch, timestamp, \
-     task_id, ralph_step, spawned_by_user_id, parent_agent_id, model_context";
+     task_id, ralph_step, spawned_by_user_id, parent_agent_id, model_context, attestation_level";
 
 fn agent_commit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommit> {
     let ralph_step_str: Option<String> = row.get(7)?;
@@ -1392,6 +1392,7 @@ fn agent_commit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommi
         spawned_by_user_id: row.get(8)?,
         parent_agent_id: row.get(9)?,
         model_context: row.get(10)?,
+        attestation_level: row.get(11)?,
     })
 }
 
@@ -1402,13 +1403,14 @@ impl AgentCommitRepository for SqliteDb {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
                 conn.execute(
-                    &format!("INSERT OR REPLACE INTO agent_commits ({AC_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
+                    &format!("INSERT OR REPLACE INTO agent_commits ({AC_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
                     params![
                         ac.id.as_str(), ac.agent_id.as_str(), ac.repository_id.as_str(),
                         ac.commit_sha, ac.branch, ac.timestamp as i64,
                         ac.task_id,
                         ac.ralph_step.as_ref().map(|s| s.as_str()),
                         ac.spawned_by_user_id, ac.parent_agent_id, ac.model_context,
+                        ac.attestation_level,
                     ],
                 )?;
                 Ok(())

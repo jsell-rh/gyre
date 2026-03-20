@@ -1050,5 +1050,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(Mutex::new(HashMap::new())),
+        agent_stacks: Arc::new(Mutex::new(HashMap::new())),
+        repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
