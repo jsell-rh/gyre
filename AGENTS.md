@@ -83,11 +83,11 @@ Requires `git` on `PATH`. Test binds to `127.0.0.1:0` (random port) so runs safe
 ## Running the Server
 
 ```bash
-# Dev mode (defaults: port 3000, token gyre-dev-token, db gyre.db)
+# Dev mode (defaults: port 3000, token gyre-dev-token, in-memory DB)
 cargo run -p gyre-server
 
 # With custom settings
-GYRE_PORT=8080 GYRE_AUTH_TOKEN=my-token GYRE_DB_PATH=/tmp/gyre.db RUST_LOG=debug \
+GYRE_PORT=8080 GYRE_AUTH_TOKEN=my-token GYRE_DATABASE_URL=sqlite:///tmp/gyre.db RUST_LOG=debug \
   cargo run -p gyre-server
 
 # Release build
@@ -242,7 +242,6 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 |----------|---------|-------------|
 | `GYRE_PORT` | `3000` | TCP port to listen on |
 | `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Bearer token clients must send to authenticate |
-| `GYRE_DB_PATH` | `gyre.db` | SQLite database file path |
 | `GYRE_BASE_URL` | `http://localhost:<port>` | Public base URL (used in clone URLs returned by spawn API) |
 | `GYRE_LOG_FORMAT` | _(human-readable)_ | Set to `json` for structured JSON log output (M4.1) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(disabled)_ | OTLP/gRPC collector URL, e.g. `http://otel-collector:4317` (M4.1) |
