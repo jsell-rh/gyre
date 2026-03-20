@@ -36,7 +36,7 @@ export const api = {
   task: (id) => request(`/tasks/${id}`),
   projects: () => request('/projects'),
   project: (id) => request(`/projects/${id}`),
-  repos: (projectId) => request(`/projects/${projectId}/repos`),
+  repos: (projectId) => request(`/repos?project_id=${projectId}`),
   allRepos: () => request('/repos'),
   repoBranches: (id) => request(`/repos/${id}/branches`),
   repoCommits: (id, branch, limit = 50) =>
