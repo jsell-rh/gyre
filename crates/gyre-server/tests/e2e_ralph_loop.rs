@@ -75,7 +75,8 @@ async fn full_ralph_loop_via_gyre() {
         .await
         .unwrap();
     let repo_id = repo["id"].as_str().unwrap().to_string();
-    let repo_path_str = repo["path"].as_str().unwrap();
+    // path field removed from response in M16 (M-3 security: no filesystem path exposure)
+    let repo_path_str = repo["path"].as_str().unwrap_or("");
 
     // Verify repo was created — the API response path is server-computed.
     assert!(

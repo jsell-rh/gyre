@@ -278,7 +278,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 fn build_cors_layer() -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
-    let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| "http://localhost:2222,http://localhost:3000,http://localhost:5173".to_string());
+    let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:2222,http://localhost:3000,http://localhost:5173".to_string()
+    });
 
     if origins_str == "*" {
         CorsLayer::new()

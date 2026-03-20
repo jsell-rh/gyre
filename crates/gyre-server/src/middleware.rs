@@ -346,7 +346,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/health")
-                    .header("Origin", "http://example.com")
+                    .header("Origin", "http://localhost:3000")
                     .body(Body::empty())
                     .unwrap(),
             )
