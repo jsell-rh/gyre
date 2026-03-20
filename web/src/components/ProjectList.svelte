@@ -88,11 +88,12 @@
       repoName = ''; repoBranch = 'main';
       reposLoading = true;
       repos = await api.repos(selected.id);
-      reposLoading = false;
     } catch (e) {
       toastError(e.message);
+    } finally {
+      reposLoading = false;
+      repoCreating = false;
     }
-    repoCreating = false;
   }
 
   async function addMirrorRepo() {
@@ -105,11 +106,12 @@
       mirrorName = ''; mirrorUrl = ''; mirrorInterval = 300;
       reposLoading = true;
       repos = await api.repos(selected.id);
-      reposLoading = false;
     } catch (e) {
       toastError(e.message);
+    } finally {
+      reposLoading = false;
+      mirrorCreating = false;
     }
-    mirrorCreating = false;
   }
 </script>
 

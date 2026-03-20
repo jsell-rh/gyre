@@ -106,3 +106,66 @@ describe('api.js — auth header', () => {
     expect(url).toBe('/api/v1/merge-queue');
   });
 });
+
+// ── Repo URL correctness (TASK-097 regression) ────────────────────────────────
+// The bug: api.repos(projectId) was calling /projects/{id}/repos instead of
+// /repos?project_id={id}, causing the SPA catch-all to return HTML with status
+// 200, which failed with "JSON.parse: unexpected character at line 1 column 1".
+
+describe('api.js — repo URL correctness', () => {
+  it('api.repos(projectId) calls /api/v1/repos?project_id=...', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+    );
+    await api.repos('proj-123');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos?project_id=proj-123');
+  });
+
+  it('api.repos() URL-encodes the project ID', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+    );
+    await api.repos('proj/with-slash');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos?project_id=proj%2Fwith-slash');
+  });
+
+  it('api.repos() does NOT call /projects/{id}/repos (the old wrong path)', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+    );
+    await api.repos('my-project');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).not.toContain('/projects/');
+    expect(url).not.toContain('/my-project/repos');
+  });
+
+  it('api.createRepo() POSTs to /api/v1/repos and returns a JSON object', async () => {
+    const mockRepo = { id: 'repo-1', name: 'my-repo', project_id: 'proj-1', default_branch: 'main' };
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve(mockRepo) })
+    );
+    const result = await api.createRepo({ name: 'my-repo', project_id: 'proj-1' });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos');
+    expect(options.method).toBe('POST');
+    expect(result).not.toBeNull();
+    expect(result).toHaveProperty('id');
+    expect(result).toHaveProperty('name', 'my-repo');
+  });
+
+  it('request() propagates SyntaxError when API returns non-JSON with status 200 (SPA HTML fallback)', async () => {
+    // Simulates the SPA catch-all returning HTML for an unknown API path:
+    // the server route does not exist, returns index.html with 200,
+    // and res.json() throws a SyntaxError (JSON.parse error).
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError('JSON.parse: unexpected character at line 1 column 1 of the JSON data')),
+      })
+    );
+    await expect(api.repos('proj-1')).rejects.toThrow(SyntaxError);
+  });
+});

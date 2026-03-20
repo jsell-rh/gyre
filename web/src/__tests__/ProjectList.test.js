@@ -30,3 +30,44 @@ describe('ProjectList', () => {
     expect(container).toBeTruthy();
   });
 });
+
+// ── addRepo error-handling (TASK-097 regression) ──────────────────────────────
+// Verifies that the addRepo flow uses the correct API URL for the repos list.
+
+describe('ProjectList — addRepo fetch sequence uses correct URLs', () => {
+  it('api.repos() fetch uses /repos?project_id= not /projects/{id}/repos', async () => {
+    const { api } = await import('../lib/api.js');
+    const calls = [];
+    global.fetch = vi.fn((url) => {
+      calls.push(url);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    });
+
+    await api.createRepo({ name: 'test', project_id: 'p1' });
+    await api.repos('p1');
+
+    const reposListCall = calls.find(u => u.includes('project_id'));
+    expect(reposListCall).toBeDefined();
+    expect(reposListCall).toContain('/api/v1/repos?project_id=p1');
+    expect(reposListCall).not.toContain('/projects/p1/repos');
+  });
+
+  it('api.repos() returns parseable JSON (not SPA HTML) for the correct URL', async () => {
+    const { api } = await import('../lib/api.js');
+    global.fetch = vi.fn((url) => {
+      if (url === '/api/v1/repos?project_id=p1') {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([{ id: 'r1', name: 'repo' }]) });
+      }
+      // Wrong URL — simulate SPA HTML response
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError('JSON.parse: unexpected character at line 1 column 1 of the JSON data')),
+      });
+    });
+
+    const result = await api.repos('p1');
+    expect(Array.isArray(result)).toBe(true);
+    expect(result[0]).toHaveProperty('name', 'repo');
+  });
+});
