@@ -16,9 +16,25 @@ use axum::{
 use gyre_common::Id;
 use gyre_domain::{User, UserRole};
 use serde::Deserialize;
+use sha2::Digest;
 use std::{collections::HashMap, sync::Arc};
+use subtle::ConstantTimeEq;
 
 use crate::AppState;
+
+// ── Security helpers ──────────────────────────────────────────────────────────
+
+/// Compare two tokens in constant time to prevent timing attacks.
+pub(crate) fn tokens_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+/// Hash an API key with SHA-256 before storage/lookup.
+/// Prevents leaking raw keys if the database is compromised.
+pub(crate) fn hash_api_key(key: &str) -> String {
+    let result = sha2::Sha256::digest(key.as_bytes());
+    result.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Resolved principal injected by the auth extractor.
 pub struct AuthenticatedAgent {
@@ -151,8 +167,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
 
-        // 1. Global auth token (dev / system usage).
-        if token == state.auth_token {
+        // 1. Global auth token (dev / system usage). Use constant-time compare.
+        if tokens_equal(token, &state.auth_token) {
             return Ok(AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
@@ -176,8 +192,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
             }
         }
 
-        // 3. API keys.
-        if let Ok(Some(user_id)) = state.api_keys.find_user_id(token).await {
+        // 3. API keys — look up by SHA-256 hash of the raw token.
+        if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
                 return Ok(AuthenticatedAgent {
                     agent_id: user.name.clone(),
@@ -713,9 +729,11 @@ mod tests {
         let now = 1000u64;
         let user = User::new(Id::new("u1"), "ext-1", "frank", now);
         state.users.create(&user).await.unwrap();
+        // Store the SHA-256 hash of the API key (matching auth extractor behaviour).
+        let raw_key = "gyre_test_api_key";
         state
             .api_keys
-            .create("gyre_test_api_key", &user.id, "test-key")
+            .create(&super::hash_api_key(raw_key), &user.id, "test-key")
             .await
             .unwrap();
 

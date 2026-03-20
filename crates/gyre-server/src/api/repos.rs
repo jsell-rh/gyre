@@ -54,7 +54,7 @@ pub struct RepoResponse {
     pub id: String,
     pub project_id: String,
     pub name: String,
-    pub path: String,
+    // path is intentionally omitted — it is a server-internal filesystem path.
     pub default_branch: String,
     pub created_at: u64,
     pub is_mirror: bool,
@@ -69,7 +69,6 @@ impl From<Repository> for RepoResponse {
             id: r.id.to_string(),
             project_id: r.project_id.to_string(),
             name: r.name,
-            path: r.path,
             default_branch: r.default_branch,
             created_at: r.created_at,
             is_mirror: r.is_mirror,
@@ -337,10 +336,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
-        let path = json["path"].as_str().unwrap();
-        assert!(path.contains("proj-99"));
-        assert!(path.contains("my-svc"));
-        assert!(path.ends_with(".git"));
+        // M-3: path is no longer exposed in API response
+        assert!(json["path"].is_null(), "path should not be in response");
+        assert!(json["name"].as_str().unwrap() == "my-svc");
     }
 
     #[tokio::test]
@@ -364,9 +362,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
-        // Path should be server-computed, NOT the user-supplied value.
-        assert_ne!(json["path"], "/custom/path/gyre.git");
-        assert!(json["path"].as_str().unwrap().contains("proj-1/gyre.git"));
+        // M-3: path is no longer exposed in API response
+        assert!(json["path"].is_null(), "path should not be in response");
+        assert_eq!(json["name"], "gyre");
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ impl SshTarget {
     fn base_ssh_args(&self) -> Vec<String> {
         let mut args = vec![
             "-o".to_string(),
-            "StrictHostKeyChecking=no".to_string(),
+            "StrictHostKeyChecking=accept-new".to_string(),
             "-o".to_string(),
             "BatchMode=yes".to_string(),
         ];
