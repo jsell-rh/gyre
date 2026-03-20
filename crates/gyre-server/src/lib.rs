@@ -23,6 +23,7 @@ pub mod telemetry;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
+use domain_events::DomainEvent;
 use gyre_common::ActivityEventData;
 use gyre_domain::AgentCard;
 use gyre_ports::{
@@ -31,7 +32,6 @@ use gyre_ports::{
     NetworkPeerRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
     UserRepository, WorktreeRepository,
 };
-use domain_events::DomainEvent;
 use jobs::JobRegistry;
 use messages::AgentMessage;
 use retention::RetentionStore;

@@ -30,8 +30,7 @@ async fn main() -> Result<()> {
     });
 
     // Ensure the git repos root directory exists on startup.
-    let repos_dir =
-        std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
+    let repos_dir = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
     if let Err(e) = std::fs::create_dir_all(&repos_dir) {
         tracing::warn!("failed to create repos directory '{repos_dir}': {e}");
     }

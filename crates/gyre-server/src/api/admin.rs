@@ -448,10 +448,7 @@ pub async fn admin_seed(
             .create_initial_commit(&repo.path, &repo.default_branch)
             .await
         {
-            tracing::warn!(
-                "seed: create_initial_commit failed for {}: {e}",
-                repo.path
-            );
+            tracing::warn!("seed: create_initial_commit failed for {}: {e}", repo.path);
         }
     }
 
@@ -601,7 +598,6 @@ pub async fn admin_seed(
             timestamp,
         });
     }
-
 
     Ok(Json(SeedResponse {
         projects: 2,
