@@ -133,6 +133,11 @@ impl JjOpsPort for JjOpsAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate GYRE_JJ_PATH — env vars are process-global
+    // and parallel test threads cause intermittent failures without this lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn jj_available() -> bool {
         std::process::Command::new("jj")
@@ -145,15 +150,17 @@ mod tests {
     /// Unit test: JjOpsAdapter is constructible and uses GYRE_JJ_PATH.
     #[test]
     fn adapter_respects_env_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("GYRE_JJ_PATH", "/custom/jj") };
         let adapter = JjOpsAdapter::new();
-        assert_eq!(adapter.jj_path, "/custom/jj");
         unsafe { std::env::remove_var("GYRE_JJ_PATH") };
+        assert_eq!(adapter.jj_path, "/custom/jj");
     }
 
     /// Unit test: default adapter uses "jj".
     #[test]
     fn adapter_default_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("GYRE_JJ_PATH") };
         let adapter = JjOpsAdapter::default();
         assert_eq!(adapter.jj_path, "jj");
