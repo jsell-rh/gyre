@@ -27,6 +27,13 @@
   let repoBranch = $state('main');
   let repoCreating = $state(false);
 
+  // Mirror repo modal
+  let showMirrorRepo = $state(false);
+  let mirrorName = $state('');
+  let mirrorUrl = $state('');
+  let mirrorInterval = $state(300);
+  let mirrorCreating = $state(false);
+
   function formatDate(ts) {
     return new Date(ts * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
   }
@@ -87,6 +94,23 @@
     }
     repoCreating = false;
   }
+
+  async function addMirrorRepo() {
+    if (!mirrorName.trim() || !mirrorUrl.trim() || !selected) return;
+    mirrorCreating = true;
+    try {
+      await api.createMirrorRepo({ name: mirrorName.trim(), project_id: selected.id, url: mirrorUrl.trim(), interval_secs: mirrorInterval || 300 });
+      toastSuccess('Mirror repository created');
+      showMirrorRepo = false;
+      mirrorName = ''; mirrorUrl = ''; mirrorInterval = 300;
+      reposLoading = true;
+      repos = await api.repos(selected.id);
+      reposLoading = false;
+    } catch (e) {
+      toastError(e.message);
+    }
+    mirrorCreating = false;
+  }
 </script>
 
 <Modal bind:open={showNewProject} title="New Project">
@@ -119,6 +143,26 @@
     <Button variant="secondary" onclick={() => (showAddRepo = false)}>Cancel</Button>
     <Button variant="primary" onclick={addRepo} disabled={repoCreating || !repoName.trim()}>
       {repoCreating ? 'Creating…' : 'Add Repository'}
+    </Button>
+  {/snippet}
+</Modal>
+
+<Modal bind:open={showMirrorRepo} title="Mirror Repository">
+  <div class="form">
+    <label class="form-label">Repository Name
+      <input class="form-input" bind:value={mirrorName} placeholder="my-mirror" />
+    </label>
+    <label class="form-label">Remote URL
+      <input class="form-input" bind:value={mirrorUrl} placeholder="https://github.com/org/repo.git" />
+    </label>
+    <label class="form-label">Sync Interval (seconds)
+      <input class="form-input" type="number" bind:value={mirrorInterval} min="60" placeholder="300" />
+    </label>
+  </div>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (showMirrorRepo = false)}>Cancel</Button>
+    <Button variant="primary" onclick={addMirrorRepo} disabled={mirrorCreating || !mirrorName.trim() || !mirrorUrl.trim()}>
+      {mirrorCreating ? 'Mirroring…' : 'Create Mirror'}
     </Button>
   {/snippet}
 </Modal>
@@ -176,8 +220,12 @@
               <div class="repos-section">
                 <div class="repos-hdr">
                   <h4 class="repos-title">Repositories</h4>
-                  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                  <span class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showAddRepo = true; }}>+ Add Repo</span>
+                  <div class="repo-actions">
+                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                    <span class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showAddRepo = true; }}>+ Add Repo</span>
+                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                    <span class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showMirrorRepo = true; }}>⟳ Mirror</span>
+                  </div>
                 </div>
                 {#if reposLoading}
                   <Skeleton lines={3} height="1.5rem" />
@@ -194,6 +242,9 @@
                         >
                           {r.name}
                         </span>
+                        {#if r.is_mirror}
+                          <span class="mirror-badge" title={r.mirror_url}>mirror</span>
+                        {/if}
                         {#if r.url}
                           <!-- svelte-ignore a11y_click_events_have_key_events -->
                           <a
@@ -322,6 +373,11 @@
     justify-content: space-between;
   }
 
+  .repo-actions {
+    display: flex;
+    gap: var(--space-3);
+  }
+
   .repos-title {
     font-family: var(--font-display);
     font-size: var(--text-xs);
@@ -397,6 +453,16 @@
   }
 
   .repo-url:hover { text-decoration: underline; }
+
+  .mirror-badge {
+    font-size: var(--text-xs);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    padding: 0 var(--space-1);
+    font-weight: 500;
+  }
 
   .no-repos {
     font-size: var(--text-sm);
