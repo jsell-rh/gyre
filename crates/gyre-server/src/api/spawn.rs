@@ -306,6 +306,9 @@ pub async fn complete_agent(
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
 
+    // Revoke the agent's token — completed agents must not continue to authenticate (N-1).
+    state.agent_tokens.lock().await.remove(&id);
+
     // Write snapshot ref for this agent (best-effort)
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
         let snap_prefix = format!("refs/agents/{}/snapshots/", agent.id);
@@ -843,6 +846,61 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let mr_json = body_json(resp).await;
         assert_eq!(mr_json["author_agent_id"].as_str().unwrap(), &agent_id);
+    }
+
+    #[tokio::test]
+    async fn complete_revokes_agent_token() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Revoke task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/revoke-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Complete the agent
+        let body = serde_json::json!({
+            "branch": "feat/revoke-test",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The agent's token must now be rejected (401) — it was revoked on complete.
+        let spawn_body = serde_json::json!({
+            "name": "should-fail",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/should-fail",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(serde_json::to_vec(&spawn_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "agent token must be invalid after complete"
+        );
     }
 
     #[tokio::test]
