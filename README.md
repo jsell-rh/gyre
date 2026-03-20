@@ -89,10 +89,10 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M8: Frontend Excellence | Done | Red Hat brand design system, polished dashboard UX, component library, consistent user journeys, dark theme |
 | M9: Functional UI | Done | Seed data endpoint, CRUD modals (projects/repos/tasks), auth token integration, end-to-end user journeys |
 | M10: Persistent Storage | Done | SQLite persistence, real-time WebSocket events, git repo management |
-| M11: Agent Execution | In Progress | Real agent processes, TTY attach, agent logs, execution lifecycle |
+| M11: Agent Execution | Done | Real agent processes, TTY attach, agent logs, execution lifecycle |
 | M12: Quality Gates | In Progress | Merge queue gates, repo mirroring, diff viewer |
 | M13: Forge Native | Planned | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
 
-494 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+497 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
