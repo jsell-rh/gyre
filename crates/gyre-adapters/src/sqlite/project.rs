@@ -18,6 +18,7 @@ struct ProjectRow {
     description: Option<String>,
     created_at: i64,
     updated_at: i64,
+    tenant_id: String,
 }
 
 impl From<ProjectRow> for Project {
@@ -40,18 +41,7 @@ struct ProjectRecord<'a> {
     description: Option<&'a str>,
     created_at: i64,
     updated_at: i64,
-}
-
-impl<'a> From<&'a Project> for ProjectRecord<'a> {
-    fn from(p: &'a Project) -> Self {
-        ProjectRecord {
-            id: p.id.as_str(),
-            name: &p.name,
-            description: p.description.as_deref(),
-            created_at: p.created_at as i64,
-            updated_at: p.updated_at as i64,
-        }
-    }
+    tenant_id: &'a str,
 }
 
 #[async_trait]
@@ -59,9 +49,17 @@ impl ProjectRepository for SqliteStorage {
     async fn create(&self, project: &Project) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let p = project.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let record = ProjectRecord::from(&p);
+            let record = ProjectRecord {
+                id: p.id.as_str(),
+                name: &p.name,
+                description: p.description.as_deref(),
+                created_at: p.created_at as i64,
+                updated_at: p.updated_at as i64,
+                tenant_id: &tenant,
+            };
             diesel::insert_into(projects::table)
                 .values(&record)
                 .on_conflict(projects::id)
@@ -77,10 +75,12 @@ impl ProjectRepository for SqliteStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<Project>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Project>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = projects::table
                 .find(id.as_str())
+                .filter(projects::tenant_id.eq(&tenant))
                 .first::<ProjectRow>(&mut *conn)
                 .optional()
                 .context("find project by id")?;
@@ -91,9 +91,11 @@ impl ProjectRepository for SqliteStorage {
 
     async fn list(&self) -> Result<Vec<Project>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Project>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = projects::table
+                .filter(projects::tenant_id.eq(&tenant))
                 .order(projects::created_at.asc())
                 .load::<ProjectRow>(&mut *conn)
                 .context("list projects")?;
@@ -105,16 +107,21 @@ impl ProjectRepository for SqliteStorage {
     async fn update(&self, project: &Project) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let p = project.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(projects::table.find(p.id.as_str()))
-                .set((
-                    projects::name.eq(&p.name),
-                    projects::description.eq(p.description.as_deref()),
-                    projects::updated_at.eq(p.updated_at as i64),
-                ))
-                .execute(&mut *conn)
-                .context("update project")?;
+            diesel::update(
+                projects::table
+                    .find(p.id.as_str())
+                    .filter(projects::tenant_id.eq(&tenant)),
+            )
+            .set((
+                projects::name.eq(&p.name),
+                projects::description.eq(p.description.as_deref()),
+                projects::updated_at.eq(p.updated_at as i64),
+            ))
+            .execute(&mut *conn)
+            .context("update project")?;
             Ok(())
         })
         .await?
@@ -123,11 +130,16 @@ impl ProjectRepository for SqliteStorage {
     async fn delete(&self, id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::delete(projects::table.find(id.as_str()))
-                .execute(&mut *conn)
-                .context("delete project")?;
+            diesel::delete(
+                projects::table
+                    .find(id.as_str())
+                    .filter(projects::tenant_id.eq(&tenant)),
+            )
+            .execute(&mut *conn)
+            .context("delete project")?;
             Ok(())
         })
         .await?
@@ -198,5 +210,35 @@ mod tests {
         s.create(&p).await.unwrap();
         s.delete(&p.id).await.unwrap();
         assert!(s.find_by_id(&p.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let tenant_a = SqliteStorage::new_for_tenant(path, "acme").unwrap();
+        let tenant_b = SqliteStorage::new_for_tenant(path, "beta").unwrap();
+
+        tenant_a
+            .create(&make_project("p1", "Acme Project"))
+            .await
+            .unwrap();
+        tenant_b
+            .create(&make_project("p2", "Beta Project"))
+            .await
+            .unwrap();
+
+        // Each tenant only sees their own projects
+        let acme_projects = tenant_a.list().await.unwrap();
+        assert_eq!(acme_projects.len(), 1);
+        assert_eq!(acme_projects[0].name, "Acme Project");
+
+        let beta_projects = tenant_b.list().await.unwrap();
+        assert_eq!(beta_projects.len(), 1);
+        assert_eq!(beta_projects[0].name, "Beta Project");
+
+        // Cross-tenant find_by_id returns None
+        assert!(tenant_a.find_by_id(&Id::new("p2")).await.unwrap().is_none());
+        assert!(tenant_b.find_by_id(&Id::new("p1")).await.unwrap().is_none());
     }
 }

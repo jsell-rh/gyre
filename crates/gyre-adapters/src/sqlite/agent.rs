@@ -42,6 +42,7 @@ struct AgentRow {
     lifetime_budget_secs: Option<i64>,
     spawned_at: i64,
     last_heartbeat: Option<i64>,
+    tenant_id: String,
 }
 
 impl AgentRow {
@@ -70,6 +71,7 @@ struct NewAgentRow<'a> {
     lifetime_budget_secs: Option<i64>,
     spawned_at: i64,
     last_heartbeat: Option<i64>,
+    tenant_id: &'a str,
 }
 
 #[async_trait]
@@ -77,6 +79,7 @@ impl AgentRepository for SqliteStorage {
     async fn create(&self, agent: &Agent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let a = agent.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let row = NewAgentRow {
@@ -88,6 +91,7 @@ impl AgentRepository for SqliteStorage {
                 lifetime_budget_secs: a.lifetime_budget_secs.map(|v| v as i64),
                 spawned_at: a.spawned_at as i64,
                 last_heartbeat: a.last_heartbeat.map(|v| v as i64),
+                tenant_id: &tenant,
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -111,10 +115,12 @@ impl AgentRepository for SqliteStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<Agent>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Agent>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = agents::table
                 .find(id.as_str())
+                .filter(agents::tenant_id.eq(&tenant))
                 .first::<AgentRow>(&mut *conn)
                 .optional()
                 .context("find agent by id")?;
@@ -126,10 +132,12 @@ impl AgentRepository for SqliteStorage {
     async fn find_by_name(&self, name: &str) -> Result<Option<Agent>> {
         let pool = Arc::clone(&self.pool);
         let name = name.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Agent>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = agents::table
                 .filter(agents::name.eq(&name))
+                .filter(agents::tenant_id.eq(&tenant))
                 .first::<AgentRow>(&mut *conn)
                 .optional()
                 .context("find agent by name")?;
@@ -140,9 +148,11 @@ impl AgentRepository for SqliteStorage {
 
     async fn list(&self) -> Result<Vec<Agent>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
                 .order(agents::spawned_at.asc())
                 .load::<AgentRow>(&mut *conn)
                 .context("list agents")?;
@@ -154,9 +164,11 @@ impl AgentRepository for SqliteStorage {
     async fn list_by_status(&self, status: &AgentStatus) -> Result<Vec<Agent>> {
         let pool = Arc::clone(&self.pool);
         let status_str = status_to_str(status).to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
                 .filter(agents::status.eq(&status_str))
                 .order(agents::spawned_at.asc())
                 .load::<AgentRow>(&mut *conn)
@@ -169,19 +181,24 @@ impl AgentRepository for SqliteStorage {
     async fn update(&self, agent: &Agent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let a = agent.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(agents::table.find(a.id.as_str()))
-                .set((
-                    agents::name.eq(&a.name),
-                    agents::status.eq(status_to_str(&a.status)),
-                    agents::parent_id.eq(a.parent_id.as_ref().map(|id| id.as_str())),
-                    agents::current_task_id.eq(a.current_task_id.as_ref().map(|id| id.as_str())),
-                    agents::lifetime_budget_secs.eq(a.lifetime_budget_secs.map(|v| v as i64)),
-                    agents::last_heartbeat.eq(a.last_heartbeat.map(|v| v as i64)),
-                ))
-                .execute(&mut *conn)
-                .context("update agent")?;
+            diesel::update(
+                agents::table
+                    .find(a.id.as_str())
+                    .filter(agents::tenant_id.eq(&tenant)),
+            )
+            .set((
+                agents::name.eq(&a.name),
+                agents::status.eq(status_to_str(&a.status)),
+                agents::parent_id.eq(a.parent_id.as_ref().map(|id| id.as_str())),
+                agents::current_task_id.eq(a.current_task_id.as_ref().map(|id| id.as_str())),
+                agents::lifetime_budget_secs.eq(a.lifetime_budget_secs.map(|v| v as i64)),
+                agents::last_heartbeat.eq(a.last_heartbeat.map(|v| v as i64)),
+            ))
+            .execute(&mut *conn)
+            .context("update agent")?;
             Ok(())
         })
         .await?
@@ -190,11 +207,16 @@ impl AgentRepository for SqliteStorage {
     async fn delete(&self, id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::delete(agents::table.find(id.as_str()))
-                .execute(&mut *conn)
-                .context("delete agent")?;
+            diesel::delete(
+                agents::table
+                    .find(id.as_str())
+                    .filter(agents::tenant_id.eq(&tenant)),
+            )
+            .execute(&mut *conn)
+            .context("delete agent")?;
             Ok(())
         })
         .await?
@@ -302,5 +324,21 @@ mod tests {
         s.create(&child).await.unwrap();
         let found = s.find_by_id(&child.id).await.unwrap().unwrap();
         assert_eq!(found.parent_id, Some(Id::new("p1")));
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let t1 = SqliteStorage::new_for_tenant(path, "t1").unwrap();
+        let t2 = SqliteStorage::new_for_tenant(path, "t2").unwrap();
+
+        t1.create(&make_agent("a1", "agent-t1")).await.unwrap();
+        t2.create(&make_agent("a2", "agent-t2")).await.unwrap();
+
+        assert_eq!(t1.list().await.unwrap().len(), 1);
+        assert_eq!(t2.list().await.unwrap().len(), 1);
+        assert!(t1.find_by_id(&Id::new("a2")).await.unwrap().is_none());
+        assert!(t2.find_by_id(&Id::new("a1")).await.unwrap().is_none());
     }
 }
