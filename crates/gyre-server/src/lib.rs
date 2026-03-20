@@ -2,6 +2,7 @@ pub(crate) mod activity;
 pub mod api;
 pub mod audit_simulator;
 pub(crate) mod auth;
+pub mod domain_events;
 pub(crate) mod git_http;
 pub(crate) mod health;
 pub mod jobs;
@@ -30,6 +31,7 @@ use gyre_ports::{
     NetworkPeerRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
     UserRepository, WorktreeRepository,
 };
+use domain_events::DomainEvent;
 use jobs::JobRegistry;
 use messages::AgentMessage;
 use retention::RetentionStore;
@@ -83,6 +85,8 @@ pub struct AppState {
     pub worktrees: Arc<dyn WorktreeRepository>,
     pub activity_store: activity::ActivityStore,
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
+    /// Domain event bus: broadcasts structured domain events to all WS clients.
+    pub event_tx: broadcast::Sender<DomainEvent>,
     /// Per-agent message inboxes: agent_id -> queued messages.
     pub agent_messages: Arc<Mutex<HashMap<String, VecDeque<AgentMessage>>>>,
     /// Auth tokens issued on agent registration: agent_id -> token.
@@ -210,6 +214,7 @@ pub fn build_state(
     jwt_config: Option<Arc<JwtConfig>>,
 ) -> Arc<AppState> {
     let (broadcast_tx, _) = broadcast::channel(256);
+    let (event_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
     let metrics = Arc::new(metrics::Metrics::new().expect("failed to create Prometheus metrics"));
     let started_at_secs = std::time::SystemTime::now()
@@ -236,6 +241,7 @@ pub fn build_state(
         worktrees: Arc::new(mem::MemWorktreeRepository::default()),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
+        event_tx,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
         users: Arc::new(mem::MemUserRepository::default()),

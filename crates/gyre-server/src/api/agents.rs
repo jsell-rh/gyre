@@ -8,6 +8,7 @@ use gyre_domain::{Agent, AgentStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -81,6 +82,7 @@ pub async fn create_agent(
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     state.agents.create(&agent).await?;
+    let _ = state.event_tx.send(DomainEvent::AgentCreated { id: agent.id.to_string() });
 
     let token = uuid::Uuid::new_v4().to_string();
     state
@@ -138,6 +140,10 @@ pub async fn update_agent_status(
         .transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
+    let _ = state.event_tx.send(DomainEvent::AgentStatusChanged {
+        id: agent.id.to_string(),
+        status: req.status.clone(),
+    });
     Ok(Json(AgentResponse::from(agent)))
 }
 

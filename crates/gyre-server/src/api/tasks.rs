@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
+use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -136,6 +137,7 @@ pub async fn create_task(
     task.parent_task_id = req.parent_task_id.map(Id::new);
     task.labels = req.labels.unwrap_or_default();
     state.tasks.create(&task).await?;
+    let _ = state.event_tx.send(DomainEvent::TaskCreated { id: task.id.to_string() });
     Ok((StatusCode::CREATED, Json(TaskResponse::from(task))))
 }
 
@@ -220,6 +222,10 @@ pub async fn transition_task_status(
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
+    let _ = state.event_tx.send(DomainEvent::TaskTransitioned {
+        id: task.id.to_string(),
+        status: req.status.clone(),
+    });
 
     // Auto-track status transition as analytics event
     let event = AnalyticsEvent::new(

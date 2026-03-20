@@ -139,6 +139,7 @@ mod tests {
             audit_broadcast_tx: base.audit_broadcast_tx.clone(),
             compute_targets: base.compute_targets.clone(),
             network_peers: base.network_peers.clone(),
+            event_tx: base.event_tx.clone(),
         });
         crate::build_router(state)
     }
