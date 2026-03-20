@@ -4,16 +4,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, CostEntry, MergeQueueEntry,
-    MergeQueueEntryStatus, MergeRequest, MrStatus, Project, Repository, Review, ReviewComment,
-    ReviewDecision, Task, TaskStatus, User,
+    Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
+    MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, Project, Repository, Review,
+    ReviewComment, ReviewDecision, Task, TaskStatus, User,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, CostRepository,
-    MergeQueueRepository, MergeRequestRepository, ProjectRepository, RepoRepository,
-    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
+    CostRepository, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
+    RepoRepository, ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -848,6 +848,71 @@ impl CostRepository for MemCostRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemAuditRepository {
+    store: Arc<Mutex<Vec<AuditEvent>>>,
+}
+
+#[async_trait]
+impl AuditRepository for MemAuditRepository {
+    async fn record(&self, event: &AuditEvent) -> Result<()> {
+        self.store.lock().await.push(event.clone());
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        agent_id: Option<&str>,
+        event_type: Option<&str>,
+        since: Option<u64>,
+        until: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>> {
+        let store = self.store.lock().await;
+        let mut events: Vec<AuditEvent> = store
+            .iter()
+            .filter(|e| {
+                agent_id.is_none_or(|a| e.agent_id.as_str() == a)
+                    && event_type.is_none_or(|t| e.event_type.as_str() == t)
+                    && since.is_none_or(|s| e.timestamp >= s)
+                    && until.is_none_or(|u| e.timestamp <= u)
+            })
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn count(&self) -> Result<u64> {
+        Ok(self.store.lock().await.len() as u64)
+    }
+
+    async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
+        use std::collections::HashMap;
+        let store = self.store.lock().await;
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for e in store.iter() {
+            *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+        }
+        let mut result: Vec<(String, u64)> = counts.into_iter().collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(result)
+    }
+
+    async fn since_timestamp(&self, since: u64, limit: usize) -> Result<Vec<AuditEvent>> {
+        let store = self.store.lock().await;
+        let mut events: Vec<AuditEvent> = store
+            .iter()
+            .filter(|e| e.timestamp > since)
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        events.truncate(limit);
+        Ok(events)
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -886,5 +951,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
         analytics: Arc::new(MemAnalyticsRepository::default()),
         costs: Arc::new(MemCostRepository::default()),
+        audit: Arc::new(MemAuditRepository::default()),
+        siem_store: crate::siem::SiemStore::new(),
+        audit_broadcast_tx: broadcast::channel(64).0,
     })
 }

@@ -4,6 +4,7 @@ pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod analytics;
+pub mod audit;
 pub mod auth;
 pub mod compose;
 pub mod discover;
@@ -17,6 +18,10 @@ pub mod spawn;
 pub mod tasks;
 pub mod version;
 
+use audit::{
+    audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
+    query_audit_events, record_audit_event, update_siem_target,
+};
 use axum::{
     routing::{delete, get, post, put},
     Router,
@@ -154,6 +159,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(analytics::record_cost).get(analytics::query_costs),
         )
         .route("/api/v1/costs/summary", get(analytics::cost_summary))
+        // Audit events
+        .route(
+            "/api/v1/audit/events",
+            post(record_audit_event).get(query_audit_events),
+        )
+        .route("/api/v1/audit/stream", get(audit_stream))
+        .route("/api/v1/audit/stats", get(audit_stats))
         // Admin (Admin role required)
         .route("/api/v1/admin/health", get(admin::admin_health))
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
@@ -181,6 +193,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/admin/retention",
             get(admin::admin_list_retention).put(admin::admin_update_retention),
+        )
+        // SIEM targets
+        .route(
+            "/api/v1/admin/siem",
+            post(create_siem_target).get(list_siem_targets),
+        )
+        .route(
+            "/api/v1/admin/siem/:id",
+            put(update_siem_target).delete(delete_siem_target),
         )
 }
 

@@ -197,12 +197,39 @@ CREATE INDEX IF NOT EXISTS idx_cost_agent_id ON cost_entries(agent_id);
 CREATE INDEX IF NOT EXISTS idx_cost_task_id ON cost_entries(task_id);
 ";
 
+const MIGRATION_006: &str = "
+CREATE TABLE IF NOT EXISTS audit_events (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    path TEXT,
+    details TEXT NOT NULL DEFAULT '{}',
+    pid INTEGER,
+    timestamp INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS siem_targets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    target_type TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_events(event_type);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
     (3, MIGRATION_003),
     (4, MIGRATION_004),
     (5, MIGRATION_005),
+    (6, MIGRATION_006),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

@@ -8,6 +8,7 @@ pub mod activity;
 pub mod agent;
 pub mod agent_commit;
 pub mod analytics;
+pub mod audit;
 pub mod merge_queue;
 pub mod merge_request;
 mod migrations;
@@ -95,6 +96,8 @@ mod tests {
             "api_keys",
             "analytics_events",
             "cost_entries",
+            "audit_events",
+            "siem_targets",
         ];
         for table in &tables {
             let count: i64 = conn
