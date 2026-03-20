@@ -96,3 +96,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 541 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
+
+## License
+
+Apache 2.0 — Copyright 2026 Red Hat, Inc. See [LICENSE](LICENSE).
