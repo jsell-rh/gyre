@@ -42,8 +42,8 @@ pub fn parse_conventional(sha: &str, message: &str) -> Option<ParsedCommit> {
     }
 
     // Detect `!` modifier immediately before `:`.
-    let (type_scope_clean, bang) = if type_scope.ends_with('!') {
-        (&type_scope[..type_scope.len() - 1], true)
+    let (type_scope_clean, bang) = if let Some(stripped) = type_scope.strip_suffix('!') {
+        (stripped, true)
     } else {
         (type_scope, false)
     };
