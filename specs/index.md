@@ -45,6 +45,7 @@ How Gyre gets built - process and standards for the agent team.
 | Agent Development Workflow | [`development/agent-workflow.md`](development/agent-workflow.md) | Immediate feedback, worktrees, PRs, fix the environment |
 | Dogfooding | [`development/dogfooding.md`](development/dogfooding.md) | Building Gyre with agent-boss |
 | Development Philosophy | [`development/philosophy.md`](development/philosophy.md) | Speed, failure domains, humans steer / agents execute |
+| Frontend Testing | [`development/frontend-testing.md`](development/frontend-testing.md) | Vitest + Testing Library component tests, jsdom setup, build gate |
 
 ## Prior Art & Lessons Learned
 
