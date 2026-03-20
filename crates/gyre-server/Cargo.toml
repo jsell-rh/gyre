@@ -52,3 +52,8 @@ reqwest = { workspace = true, features = ["json"] }
 # ring for RSA JWT signing in tests (no simple_asn1 → time MSRV issue)
 ring = "0.17"
 base64 = "0.22"
+# For auth integration tests: seed users/api-keys and hash api keys.
+gyre-common = { workspace = true }
+gyre-ports = { workspace = true }
+gyre-domain = { workspace = true }
+sha2 = "0.10"
