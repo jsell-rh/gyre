@@ -81,6 +81,7 @@ How Gyre gets built - process and standards for the agent team.
 | M12: Quality Gates | [`milestones/m12-quality-gates.md`](milestones/m12-quality-gates.md) | Merge queue gates (tests/lints/reviews), repo mirroring, diff viewer |
 | M13: Forge Native | [`milestones/m13-forge-native.md`](milestones/m13-forge-native.md) | Pre-accept validation, commit provenance, speculative merging, cross-agent awareness |
 | M14: Supply Chain Security | [`milestones/m14-supply-chain.md`](milestones/m14-supply-chain.md) | Agent stack fingerprinting, push attestation, AIBOM generation |
+| M15: Diesel ORM | [`milestones/m15-diesel-migrations.md`](milestones/m15-diesel-migrations.md) | Diesel ORM + migrations, full SQLite persistence, multi-tenancy |
 
 ## Open Questions
 
