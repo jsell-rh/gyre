@@ -204,6 +204,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (Admin only) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
 | `POST` | `/api/v1/admin/seed` | Idempotent demo data seed: 2 projects, 3 repos, 4 agents, 6 tasks, 2 MRs, 1 queue entry, 5 activity events. Returns `{already_seeded:true}` on repeat. AdminOnly. (M9.1) |
+| `POST` | `/api/v1/release/prepare` | Admin: compute next semver version from conventional commits + generate changelog with agent/task attribution; optionally open a release MR. Request: `{repo_id, branch?, from?, create_mr?, mr_title?}`; `branch` and `from` validated against git argument injection — must not start with `-` or contain `..` (M16-A). Response: `{next_version, changelog, commit_count, mr?}` (M16) |
 | `POST/GET` | `/api/v1/audit/events` | Record / query eBPF audit events (`?agent_id=&event_type=&since=`) |
 | `GET` | `/api/v1/audit/stream` | SSE stream of live audit events |
 | `GET` | `/api/v1/audit/stats` | Audit event statistics and counts |
