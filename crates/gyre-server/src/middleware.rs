@@ -388,7 +388,7 @@ mod tests {
 
         // Build a minimal router with a panicking handler + CatchPanicLayer
         let panic_router: Router = Router::new()
-            .route("/panic", get(|| async { panic!("test panic!") }))
+            .route("/panic", get(|| async { panic!("test panic!"); #[allow(unreachable_code)] StatusCode::OK }))
             .layer(CatchPanicLayer::new());
 
         let resp = panic_router
