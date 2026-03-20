@@ -125,4 +125,33 @@ describe('api.js — auth header', () => {
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body).name).toBe('my-repo');
   });
+
+  it('api.allRepos() calls /api/v1/repos without project_id filter', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+    );
+    await api.allRepos();
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos');
+  });
+
+  it('api.repos() does NOT call /projects/:id/repos (nonexistent route)', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+    );
+    await api.repos('proj-abc');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).not.toMatch(/\/projects\/proj-abc\/repos/);
+    expect(url).toContain('project_id=proj-abc');
+  });
+
+  it('api.createMirrorRepo() POSTs to /api/v1/repos/mirror', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ id: 'm1' }) })
+    );
+    await api.createMirrorRepo({ name: 'mirror', project_id: 'p1', url: 'https://github.com/org/repo.git' });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos/mirror');
+    expect(options.method).toBe('POST');
+  });
 });
