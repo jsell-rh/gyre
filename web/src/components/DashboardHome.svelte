@@ -3,6 +3,10 @@
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
+  import Modal from '../lib/Modal.svelte';
+  import Button from '../lib/Button.svelte';
+  import { api } from '../lib/api.js';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { wsStore = null, onnavigate = undefined } = $props();
 
@@ -36,6 +40,60 @@
     fetchAll();
   });
 
+  // Quick action modals
+  let showNewProject = $state(false);
+  let qaName = $state('');
+  let qaDesc = $state('');
+  let qaCreating = $state(false);
+
+  let showNewTask = $state(false);
+  let qaTaskTitle = $state('');
+  let qaTaskPriority = $state('Medium');
+  let qaTaskCreating = $state(false);
+
+  let seedLoading = $state(false);
+
+  async function quickCreateProject() {
+    if (!qaName.trim()) return;
+    qaCreating = true;
+    try {
+      await api.createProject({ name: qaName.trim(), description: qaDesc.trim() || undefined });
+      toastSuccess('Project created');
+      showNewProject = false;
+      qaName = ''; qaDesc = '';
+    } catch (e) {
+      toastError(e.message);
+    }
+    qaCreating = false;
+  }
+
+  async function quickCreateTask() {
+    if (!qaTaskTitle.trim()) return;
+    qaTaskCreating = true;
+    try {
+      await api.createTask({ title: qaTaskTitle.trim(), priority: qaTaskPriority, status: 'Backlog' });
+      toastSuccess('Task created');
+      showNewTask = false;
+      qaTaskTitle = ''; qaTaskPriority = 'Medium';
+      fetchAll();
+    } catch (e) {
+      toastError(e.message);
+    }
+    qaTaskCreating = false;
+  }
+
+  async function seedDemoData() {
+    seedLoading = true;
+    try {
+      await api.seedData();
+      toastSuccess('Demo data seeded');
+      fetchAll();
+    } catch (e) {
+      toastError(e.message);
+    }
+    seedLoading = false;
+  }
+
   let activeAgents    = $derived(agents.filter(a => a.status === 'Active' || a.status === 'active'));
   let openTasks       = $derived(tasks.filter(t => t.status === 'InProgress' || t.status === 'in_progress' || t.status === 'Backlog' || t.status === 'backlog'));
   let pendingMrs      = $derived(mrs.filter(m => m.status === 'Open' || m.status === 'open'));
@@ -61,6 +119,45 @@
     return 'var(--color-text-muted)';
   }
 </script>
+
+<Modal bind:open={showNewProject} title="New Project">
+  <div class="qa-form">
+    <label class="qa-label">Name
+      <input class="qa-input" bind:value={qaName} placeholder="my-project" />
+    </label>
+    <label class="qa-label">Description
+      <input class="qa-input" bind:value={qaDesc} placeholder="Optional description" />
+    </label>
+  </div>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (showNewProject = false)}>Cancel</Button>
+    <Button variant="primary" onclick={quickCreateProject} disabled={qaCreating || !qaName.trim()}>
+      {qaCreating ? 'Creating…' : 'Create Project'}
+    </Button>
+  {/snippet}
+</Modal>
+
+<Modal bind:open={showNewTask} title="New Task">
+  <div class="qa-form">
+    <label class="qa-label">Title
+      <input class="qa-input" bind:value={qaTaskTitle} placeholder="Task title" />
+    </label>
+    <label class="qa-label">Priority
+      <select class="qa-input" bind:value={qaTaskPriority}>
+        <option value="Critical">Critical</option>
+        <option value="High">High</option>
+        <option value="Medium">Medium</option>
+        <option value="Low">Low</option>
+      </select>
+    </label>
+  </div>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (showNewTask = false)}>Cancel</Button>
+    <Button variant="primary" onclick={quickCreateTask} disabled={qaTaskCreating || !qaTaskTitle.trim()}>
+      {qaTaskCreating ? 'Creating…' : 'Create Task'}
+    </Button>
+  {/snippet}
+</Modal>
 
 <div class="dashboard">
   <!-- Metric cards -->
@@ -104,6 +201,15 @@
         <div class="metric-sub">{queue.length} total entries</div>
       {/if}
     </button>
+  </section>
+
+  <!-- Quick actions -->
+  <section class="quick-actions">
+    <Button variant="secondary" onclick={() => (showNewProject = true)}>+ New Project</Button>
+    <Button variant="secondary" onclick={() => (showNewTask = true)}>+ New Task</Button>
+    <Button variant="secondary" onclick={seedDemoData} disabled={seedLoading}>
+      {seedLoading ? 'Seeding…' : '⚡ Seed Demo Data'}
+    </Button>
   </section>
 
   <div class="dashboard-grid">
@@ -195,6 +301,39 @@
     height: 100%;
     max-width: var(--content-max-width);
   }
+
+  /* Quick actions */
+  .quick-actions {
+    display: flex;
+    gap: var(--space-3);
+    margin-bottom: var(--space-6);
+    flex-wrap: wrap;
+  }
+
+  /* Modal form helpers */
+  .qa-form { display: flex; flex-direction: column; gap: var(--space-3); }
+
+  .qa-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .qa-input {
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
+  }
+
+  .qa-input:focus { outline: none; border-color: var(--color-primary); }
 
   /* Metric cards */
   .metrics {
