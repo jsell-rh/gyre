@@ -364,6 +364,232 @@ pub async fn admin_reassign_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── Seed Data ─────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SeedResponse {
+    pub projects: usize,
+    pub repos: usize,
+    pub agents: usize,
+    pub tasks: usize,
+    pub merge_requests: usize,
+    pub merge_queue_entries: usize,
+    pub activity_events: usize,
+    pub already_seeded: bool,
+}
+
+/// POST /api/v1/admin/seed — populate demo data (Admin only, idempotent).
+pub async fn admin_seed(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SeedResponse>, ApiError> {
+    use gyre_domain::{
+        Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Project, Repository, Task,
+        TaskPriority, TaskStatus,
+    };
+
+    // Idempotency: if seed project already exists, return early.
+    let existing = state.projects.find_by_id(&Id::new("seed-proj-1")).await?;
+    if existing.is_some() {
+        return Ok(Json(SeedResponse {
+            projects: 2,
+            repos: 3,
+            agents: 4,
+            tasks: 6,
+            merge_requests: 2,
+            merge_queue_entries: 1,
+            activity_events: 5,
+            already_seeded: true,
+        }));
+    }
+
+    let now = now_secs();
+
+    // ── Projects ──────────────────────────────────────────────────────────────
+    let mut proj1 = Project::new(Id::new("seed-proj-1"), "Gyre Platform", now - 3600);
+    proj1.description = Some("Core platform services and agent infrastructure".to_string());
+    let mut proj2 = Project::new(Id::new("seed-proj-2"), "Infrastructure", now - 3600);
+    proj2.description = Some("NixOS configs, CI/CD pipelines, and tooling".to_string());
+    state.projects.create(&proj1).await?;
+    state.projects.create(&proj2).await?;
+
+    // ── Repos ─────────────────────────────────────────────────────────────────
+    let repo1 = Repository::new(
+        Id::new("seed-repo-1"),
+        Id::new("seed-proj-1"),
+        "gyre-core",
+        "./repos/seed-proj-1/gyre-core.git",
+        now - 3500,
+    );
+    let repo2 = Repository::new(
+        Id::new("seed-repo-2"),
+        Id::new("seed-proj-1"),
+        "gyre-web",
+        "./repos/seed-proj-1/gyre-web.git",
+        now - 3400,
+    );
+    let repo3 = Repository::new(
+        Id::new("seed-repo-3"),
+        Id::new("seed-proj-2"),
+        "infra-config",
+        "./repos/seed-proj-2/infra-config.git",
+        now - 3300,
+    );
+    state.repos.create(&repo1).await?;
+    state.repos.create(&repo2).await?;
+    state.repos.create(&repo3).await?;
+
+    // ── Agents ────────────────────────────────────────────────────────────────
+    let mut agent1 = Agent::new(Id::new("seed-agent-1"), "orchestrator", now - 1800);
+    agent1.status = AgentStatus::Active;
+    agent1.last_heartbeat = Some(now - 30);
+
+    let mut agent2 = Agent::new(Id::new("seed-agent-2"), "worker-backend", now - 1200);
+    agent2.status = AgentStatus::Active;
+    agent2.last_heartbeat = Some(now - 15);
+
+    let mut agent3 = Agent::new(Id::new("seed-agent-3"), "worker-frontend", now - 900);
+    agent3.status = AgentStatus::Idle;
+
+    let mut agent4 = Agent::new(Id::new("seed-agent-4"), "reviewer", now - 7200);
+    agent4.status = AgentStatus::Dead;
+
+    state.agents.create(&agent1).await?;
+    state.agents.create(&agent2).await?;
+    state.agents.create(&agent3).await?;
+    state.agents.create(&agent4).await?;
+
+    // ── Tasks ─────────────────────────────────────────────────────────────────
+    let task1 = Task::new(Id::new("seed-task-1"), "Set up NixOS flake for CI", now - 3000);
+
+    let mut task2 = Task::new(Id::new("seed-task-2"), "Implement agent spawn API", now - 2800);
+    task2.status = TaskStatus::InProgress;
+    task2.priority = TaskPriority::High;
+    task2.assigned_to = Some(Id::new("seed-agent-1"));
+
+    let mut task3 = Task::new(
+        Id::new("seed-task-3"),
+        "Build Svelte dashboard components",
+        now - 2600,
+    );
+    task3.status = TaskStatus::InProgress;
+    task3.assigned_to = Some(Id::new("seed-agent-2"));
+
+    let mut task4 = Task::new(
+        Id::new("seed-task-4"),
+        "Add Prometheus metrics endpoint",
+        now - 2400,
+    );
+    task4.status = TaskStatus::Review;
+
+    let mut task5 = Task::new(Id::new("seed-task-5"), "Write E2E Ralph loop test", now - 5000);
+    task5.status = TaskStatus::Done;
+    task5.priority = TaskPriority::Critical;
+
+    let mut task6 = Task::new(
+        Id::new("seed-task-6"),
+        "Integrate Keycloak OIDC auth",
+        now - 1800,
+    );
+    task6.status = TaskStatus::Blocked;
+
+    state.tasks.create(&task1).await?;
+    state.tasks.create(&task2).await?;
+    state.tasks.create(&task3).await?;
+    state.tasks.create(&task4).await?;
+    state.tasks.create(&task5).await?;
+    state.tasks.create(&task6).await?;
+
+    // ── Merge Requests ────────────────────────────────────────────────────────
+    let mr_open = MergeRequest::new(
+        Id::new("seed-mr-1"),
+        Id::new("seed-repo-1"),
+        "feat: add agent spawn endpoint",
+        "feat/agent-spawn",
+        "main",
+        now - 1200,
+    );
+    let mut mr_merged = MergeRequest::new(
+        Id::new("seed-mr-2"),
+        Id::new("seed-repo-1"),
+        "feat: add Prometheus metrics",
+        "feat/metrics",
+        "main",
+        now - 5000,
+    );
+    mr_merged.status = MrStatus::Merged;
+    state.merge_requests.create(&mr_open).await?;
+    state.merge_requests.create(&mr_merged).await?;
+
+    // ── Merge Queue ───────────────────────────────────────────────────────────
+    let queue_entry = MergeQueueEntry::new(
+        Id::new("seed-queue-1"),
+        Id::new("seed-mr-1"),
+        50,
+        now - 600,
+    );
+    state.merge_queue.enqueue(&queue_entry).await?;
+
+    // ── Activity Events ───────────────────────────────────────────────────────
+    let events = [
+        (
+            "seed-evt-1",
+            "seed-agent-1",
+            AgEventType::RunStarted,
+            "Orchestrator agent started",
+            now - 3600,
+        ),
+        (
+            "seed-evt-2",
+            "seed-agent-2",
+            AgEventType::RunStarted,
+            "Backend worker agent spawned",
+            now - 2700,
+        ),
+        (
+            "seed-evt-3",
+            "seed-agent-2",
+            AgEventType::ToolCallStart,
+            "Running cargo test --all",
+            now - 1800,
+        ),
+        (
+            "seed-evt-4",
+            "seed-agent-1",
+            AgEventType::StateChanged,
+            "Task seed-task-2 transitioned to in_progress",
+            now - 900,
+        ),
+        (
+            "seed-evt-5",
+            "seed-agent-2",
+            AgEventType::TextMessageContent,
+            "All tests passing (476 tests)",
+            now - 300,
+        ),
+    ];
+    for (event_id, agent_id, event_type, description, timestamp) in events {
+        state.activity_store.record(gyre_common::ActivityEventData {
+            event_id: event_id.to_string(),
+            agent_id: agent_id.to_string(),
+            event_type,
+            description: description.to_string(),
+            timestamp,
+        });
+    }
+
+    Ok(Json(SeedResponse {
+        projects: 2,
+        repos: 3,
+        agents: 4,
+        tasks: 6,
+        merge_requests: 2,
+        merge_queue_entries: 1,
+        activity_events: 5,
+        already_seeded: false,
+    }))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -980,5 +1206,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Seed tests ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_seed_creates_demo_data() {
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["projects"], 2);
+        assert_eq!(json["repos"], 3);
+        assert_eq!(json["agents"], 4);
+        assert_eq!(json["tasks"], 6);
+        assert_eq!(json["merge_requests"], 2);
+        assert_eq!(json["merge_queue_entries"], 1);
+        assert_eq!(json["activity_events"], 5);
+        assert_eq!(json["already_seeded"], false);
+
+        let projects = state.projects.list().await.unwrap();
+        assert_eq!(projects.len(), 2);
+        let agents = state.agents.list().await.unwrap();
+        assert_eq!(agents.len(), 4);
+        let tasks = state.tasks.list().await.unwrap();
+        assert_eq!(tasks.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn admin_seed_is_idempotent() {
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let json1 = body_json(resp1).await;
+        assert_eq!(json1["already_seeded"], false);
+
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["already_seeded"], true);
+
+        // No duplicate projects created
+        let projects = state.projects.list().await.unwrap();
+        assert_eq!(projects.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn admin_seed_requires_admin() {
+        let resp = app_with_jwt()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", format!("Bearer {}", developer_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
