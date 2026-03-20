@@ -27,6 +27,8 @@ pub struct Agent {
     pub lifetime_budget_secs: Option<u64>,
     pub spawned_at: u64,
     pub last_heartbeat: Option<u64>,
+    /// Identity of the agent or user who spawned this agent (M13.2).
+    pub spawned_by: Option<String>,
 }
 
 impl Agent {
@@ -40,6 +42,7 @@ impl Agent {
             lifetime_budget_secs: None,
             spawned_at,
             last_heartbeat: None,
+            spawned_by: None,
         }
     }
 
