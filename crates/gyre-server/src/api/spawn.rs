@@ -260,6 +260,19 @@ pub async fn complete_agent(
         .map(|wt| wt.repository_id.clone())
         .ok_or_else(|| ApiError::InvalidInput("agent has no associated worktree".to_string()))?;
 
+    // Idempotent complete: if an MR already exists for this agent+branch, return 202.
+    {
+        let existing_mrs = state.merge_requests.list_by_repo(&repo_id).await?;
+        let found = existing_mrs.into_iter().find(|m| {
+            m.source_branch == req.branch
+                && m.author_agent_id.as_ref() == Some(&agent.id)
+                && m.status != gyre_domain::MrStatus::Closed
+        });
+        if let Some(existing) = found {
+            return Ok((StatusCode::ACCEPTED, Json(MrResponse::from(existing))));
+        }
+    }
+
     let now = now_secs();
 
     // Create MergeRequest
@@ -830,5 +843,53 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let mr_json = body_json(resp).await;
         assert_eq!(mr_json["author_agent_id"].as_str().unwrap(), &agent_id);
+    }
+
+    #[tokio::test]
+    async fn complete_idempotent_returns_202_on_double_complete() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Idempotent task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/idempotent-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/idempotent-test",
+            "title": "Idempotent Feature",
+            "target_branch": "main",
+        });
+
+        // First complete — should return 201 CREATED
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let mr_json1 = body_json(resp1).await;
+        let mr_id = mr_json1["id"].as_str().unwrap().to_string();
+
+        // Second complete — should return 202 ACCEPTED with the same MR id
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::ACCEPTED);
+        let mr_json2 = body_json(resp2).await;
+        assert_eq!(mr_json2["id"].as_str().unwrap(), &mr_id);
     }
 }

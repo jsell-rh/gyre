@@ -17,6 +17,9 @@ cargo build --release -p gyre-server -p gyre-cli
 
 # Run with persistent SQLite storage
 GYRE_DATABASE_URL=sqlite://gyre.db ./target/release/gyre-server
+
+# Run with PostgreSQL
+GYRE_DATABASE_URL=postgres://user:pass@localhost/gyre ./target/release/gyre-server
 ```
 
 Open **http://localhost:3000** — the dashboard loads immediately. Default auth token: `gyre-dev-token`.
@@ -56,7 +59,7 @@ All settings are environment variables. The server starts with safe defaults —
 |---|---|---|
 | `GYRE_PORT` | `3000` | HTTP/WS listen port |
 | `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Bearer token for API auth |
-| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | SQLite URL for persistence, e.g. `sqlite://gyre.db` |
+| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | Database URL. Supports `sqlite://gyre.db` (SQLite) or `postgres://user:pass@host/db` (PostgreSQL). Diesel runs migrations automatically on startup. |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories |
 | `GYRE_BASE_URL` | `http://localhost:<port>` | Public URL used in clone URLs |
 | `RUST_LOG` | `info` | Log level (`debug`, `trace`, `warn`) |
@@ -75,7 +78,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
 - **Rust** - server, CLI, agent runtime
 - **Svelte 5 + shadcn-svelte** - web UI (pre-built, no Node required to run)
-- **SQLite + Diesel ORM** - default storage; WAL mode, type-safe queries, auto-migrations, full persistence when `GYRE_DATABASE_URL` is set
+- **SQLite + PostgreSQL via Diesel ORM** - type-safe queries, auto-migrations on startup; `sqlite://` for default persistence, `postgres://` for production scale
 - **NixOS** - single definition builds server, Docker image, QEMU VM, LXC container
 - **WireGuard** - agent networking mesh
 
@@ -95,13 +98,13 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M9: Functional UI | Done | Seed data endpoint, CRUD modals (projects/repos/tasks), auth token integration, end-to-end user journeys |
 | M10: Persistent Storage | Done | SQLite persistence, real-time WebSocket events, git repo management |
 | M11: Agent Execution | Done | Real agent processes, TTY attach, agent logs, execution lifecycle |
-| M12: Quality Gates | In Progress | Merge queue gates, repo mirroring, diff viewer |
+| M12: Quality Gates | Done | Merge queue gates, repo mirroring, diff viewer with syntax highlighting |
 | M13: Forge Native | In Progress | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
 | M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
-| M15: Diesel ORM | In Progress | Diesel ORM + migrations, full SQLite persistence, multi-tenancy (tenant_id scoping) |
+| M15: Diesel ORM | Done | Diesel ORM + migrations, SQLite + PostgreSQL adapters, full persistence, multi-tenancy (tenant_id scoping) |
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
 
-554 Rust + 31 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+553 Rust + 79 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 

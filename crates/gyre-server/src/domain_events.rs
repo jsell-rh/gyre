@@ -62,4 +62,11 @@ pub enum DomainEvent {
     HotFilesChanged {
         repo_id: String,
     },
+    /// Emitted when a spec file changes and a lifecycle task is auto-created.
+    SpecChanged {
+        repo_id: String,
+        spec_path: String,
+        change_kind: String,
+        task_id: String,
+    },
 }
