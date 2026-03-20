@@ -143,7 +143,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
 | `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor + stale agent detector (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
-| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, clean worktrees, block assigned task (Admin only) |
+| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) |
@@ -391,7 +391,9 @@ Agents are created in dependency order (parents before children). Parent links a
   "repo_id": "<repo-uuid>",
   "task_id": "<task-uuid>",
   "branch": "feat/my-feature",
-  "parent_id": "<orchestrator-agent-uuid>"   // optional
+  "parent_id": "<orchestrator-agent-uuid>",  // optional
+  "command": "claude",                        // optional — process to launch (M11.1)
+  "command_args": ["--task", "<task-uuid>"]   // optional — args for command (M11.1)
 }
 
 // Response 201
