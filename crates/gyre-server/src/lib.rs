@@ -28,6 +28,7 @@ pub mod speculative_merge;
 pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod tty;
+pub mod version_compute;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
