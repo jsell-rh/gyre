@@ -106,6 +106,8 @@ pub struct AppState {
     pub analytics: Arc<dyn AnalyticsRepository>,
     /// Cost tracking store.
     pub costs: Arc<dyn CostRepository>,
+    /// Admin-configured compute targets: id -> ComputeTargetConfig.
+    pub compute_targets: Arc<Mutex<HashMap<String, api::compute::ComputeTargetConfig>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -187,6 +189,7 @@ pub fn build_state(
         job_registry: Arc::new(JobRegistry::new()),
         analytics: Arc::new(mem::MemAnalyticsRepository::default()),
         costs: Arc::new(mem::MemCostRepository::default()),
+        compute_targets: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

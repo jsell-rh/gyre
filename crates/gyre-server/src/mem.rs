@@ -886,5 +886,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
         analytics: Arc::new(MemAnalyticsRepository::default()),
         costs: Arc::new(MemCostRepository::default()),
+        compute_targets: Arc::new(Mutex::new(HashMap::new())),
     })
 }

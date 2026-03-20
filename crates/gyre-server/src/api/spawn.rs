@@ -25,6 +25,8 @@ pub struct SpawnAgentRequest {
     pub task_id: String,
     pub branch: String,
     pub parent_id: Option<String>,
+    /// Optional compute target to associate with this agent spawn.
+    pub compute_target_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -34,6 +36,7 @@ pub struct SpawnAgentResponse {
     pub worktree_path: String,
     pub clone_url: String,
     pub branch: String,
+    pub compute_target_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +75,16 @@ pub async fn spawn_agent(
         .find_by_id(&Id::new(&req.task_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {} not found", req.task_id)))?;
+
+    // Validate compute target if provided
+    if let Some(ref ct_id) = req.compute_target_id {
+        let store = state.compute_targets.lock().await;
+        if !store.contains_key(ct_id.as_str()) {
+            return Err(ApiError::NotFound(format!(
+                "compute target {ct_id} not found"
+            )));
+        }
+    }
 
     let now = now_secs();
 
@@ -146,6 +159,7 @@ pub async fn spawn_agent(
             worktree_path,
             clone_url,
             branch: req.branch,
+            compute_target_id: req.compute_target_id,
         }),
     ))
 }
