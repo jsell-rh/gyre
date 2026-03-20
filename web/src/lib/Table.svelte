@@ -1,0 +1,136 @@
+<script>
+  let {
+    columns = [],
+    rows = [],
+    sortKey = $bindable(null),
+    sortDir = $bindable('asc'),
+    onrowclick = undefined,
+    children,
+  } = $props();
+
+  function toggleSort(key) {
+    if (sortKey === key) {
+      sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortKey = key;
+      sortDir = 'asc';
+    }
+  }
+</script>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        {#each columns as col}
+          <th
+            class:sortable={col.sortable}
+            class:sorted={sortKey === col.key}
+            onclick={col.sortable ? () => toggleSort(col.key) : undefined}
+            style={col.width ? `width:${col.width}` : ''}
+          >
+            {col.label}
+            {#if col.sortable}
+              <span class="sort-icon">
+                {#if sortKey === col.key}
+                  {sortDir === 'asc' ? '↑' : '↓'}
+                {:else}
+                  <span class="sort-idle">↕</span>
+                {/if}
+              </span>
+            {/if}
+          </th>
+        {/each}
+      </tr>
+    </thead>
+    <tbody>
+      {#if children}
+        {@render children()}
+      {:else}
+        {#each rows as row}
+          <tr
+            class:clickable={!!onrowclick}
+            onclick={onrowclick ? () => onrowclick(row) : undefined}
+          >
+            {#each columns as col}
+              <td>{row[col.key] ?? ''}</td>
+            {/each}
+          </tr>
+        {/each}
+      {/if}
+    </tbody>
+  </table>
+</div>
+
+<style>
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+  }
+
+  thead {
+    background: var(--color-surface-elevated);
+  }
+
+  th {
+    padding: var(--space-3) var(--space-4);
+    text-align: left;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-secondary);
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  th.sortable {
+    cursor: pointer;
+  }
+
+  th.sortable:hover {
+    color: var(--color-text);
+  }
+
+  th.sorted {
+    color: var(--color-text);
+  }
+
+  .sort-icon {
+    margin-left: var(--space-1);
+    font-size: 0.7em;
+  }
+
+  .sort-idle {
+    opacity: 0.35;
+  }
+
+  td {
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text);
+    vertical-align: middle;
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
+
+  tbody tr:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  tbody tr.clickable {
+    cursor: pointer;
+  }
+</style>
