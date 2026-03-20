@@ -143,9 +143,10 @@ pub async fn set_dependencies(
     }
 
     if would_create_cycle(&id, &req.depends_on, &adj) {
-        return Err(ApiError::InvalidInput(format!(
+        return Err(ApiError::InvalidInput(
             "cycle detected: adding these dependencies would create a circular dependency chain"
-        )));
+                .to_string(),
+        ));
     }
 
     // Apply
