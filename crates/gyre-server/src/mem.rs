@@ -954,5 +954,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         audit: Arc::new(MemAuditRepository::default()),
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
+        compute_targets: Arc::new(Mutex::new(HashMap::new())),
     })
 }

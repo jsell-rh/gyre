@@ -7,6 +7,7 @@ pub mod analytics;
 pub mod audit;
 pub mod auth;
 pub mod compose;
+pub mod compute;
 pub mod discover;
 pub mod error;
 pub mod jj;
@@ -27,6 +28,9 @@ use axum::{
     Router,
 };
 use compose::{compose_apply, compose_status, compose_teardown};
+use compute::{
+    create_compute_target, delete_compute_target, get_compute_target, list_compute_targets,
+};
 use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
@@ -202,6 +206,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/admin/siem/:id",
             put(update_siem_target).delete(delete_siem_target),
+        )
+        // Compute Targets
+        .route(
+            "/api/v1/admin/compute-targets",
+            post(create_compute_target).get(list_compute_targets),
+        )
+        .route(
+            "/api/v1/admin/compute-targets/:id",
+            get(get_compute_target).delete(delete_compute_target),
         )
 }
 
