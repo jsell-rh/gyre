@@ -100,10 +100,13 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
 }
 
 async fn run_command(cmd: &str) -> (GateStatus, String) {
-    // Run via `sh -c` so piped / complex commands work.
-    let result = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+    // Split command on whitespace to avoid shell injection via `sh -c`.
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return (GateStatus::Failed, "empty command".to_string());
+    }
+    let result = tokio::process::Command::new(parts[0])
+        .args(&parts[1..])
         .output()
         .await;
 
