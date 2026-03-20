@@ -99,6 +99,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M13: Forge Native | In Progress | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
 | M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | In Progress | Diesel ORM + migrations, full SQLite persistence, multi-tenancy (tenant_id scoping) |
+| M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
 
 554 Rust + 31 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
