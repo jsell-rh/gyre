@@ -285,6 +285,16 @@ pub async fn admin_kill_agent(
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
 
+    // Kill the actual process if it is running.
+    if let Some(handle) = state.process_registry.lock().await.remove(&id) {
+        if let Err(e) =
+            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+                .await
+        {
+            tracing::warn!(agent_id = %id, "kill_process failed: {e}");
+        }
+    }
+
     // Clean up worktrees.
     if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
         for wt in worktrees {

@@ -27,6 +27,10 @@ pub struct SpawnAgentRequest {
     pub parent_id: Option<String>,
     /// Optional compute target to associate with this agent spawn.
     pub compute_target_id: Option<String>,
+    /// Command to execute in the spawned process. Defaults to `echo "Agent <id> started"`.
+    pub command: Option<String>,
+    /// Arguments for the command.
+    pub command_args: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -140,6 +144,71 @@ pub async fn spawn_agent(
 
     // Build clone URL: {base_url}/git/{project_id}/{repo_name}
     let clone_url = format!("{}/git/{}/{}", state.base_url, repo.project_id, repo.name);
+
+    // Launch a real process via LocalTarget and monitor its lifecycle.
+    {
+        let command = req.command.clone().unwrap_or_else(|| "echo".to_string());
+        let args = req
+            .command_args
+            .clone()
+            .unwrap_or_else(|| vec![format!("Agent {} started", agent.id)]);
+        let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
+            worktree_path.clone()
+        } else {
+            ".".to_string()
+        };
+        let spawn_config = gyre_ports::SpawnConfig {
+            name: agent.name.clone(),
+            command,
+            args,
+            env: std::collections::HashMap::new(),
+            work_dir: effective_work_dir,
+        };
+        let local = gyre_adapters::compute::LocalTarget;
+        match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
+            Ok(handle) => {
+                let agent_id_str = agent.id.to_string();
+                state
+                    .process_registry
+                    .lock()
+                    .await
+                    .insert(agent_id_str.clone(), handle.clone());
+
+                // Background monitor: watch for process exit and update agent status.
+                let state_mon = Arc::clone(&state);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        let alive = gyre_ports::ComputeTarget::is_alive(
+                            &gyre_adapters::compute::LocalTarget,
+                            &handle,
+                        )
+                        .await
+                        .unwrap_or(false);
+                        if !alive {
+                            state_mon
+                                .process_registry
+                                .lock()
+                                .await
+                                .remove(&agent_id_str);
+                            if let Ok(Some(mut a)) =
+                                state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
+                            {
+                                if a.status == AgentStatus::Active {
+                                    let _ = a.transition_status(AgentStatus::Idle);
+                                    let _ = state_mon.agents.update(&a).await;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
+            }
+        }
+    }
 
     // Auto-track agent spawn
     let ev = AnalyticsEvent::new(
