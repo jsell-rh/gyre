@@ -18,6 +18,7 @@ pub mod network_peer;
 pub mod project;
 pub mod repository;
 pub mod review;
+pub mod spawn_log;
 pub mod task;
 pub mod user;
 pub mod worktree;
