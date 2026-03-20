@@ -23,6 +23,7 @@ struct RepositoryRow {
     mirror_url: Option<String>,
     mirror_interval_secs: Option<i64>,
     last_mirror_sync: Option<i64>,
+    tenant_id: String,
 }
 
 impl From<RepositoryRow> for Repository {
@@ -55,6 +56,7 @@ struct NewRepositoryRow<'a> {
     mirror_url: Option<&'a str>,
     mirror_interval_secs: Option<i64>,
     last_mirror_sync: Option<i64>,
+    tenant_id: &'a str,
 }
 
 #[async_trait]
@@ -75,6 +77,7 @@ impl RepoRepository for SqliteStorage {
                 mirror_url: r.mirror_url.as_deref(),
                 mirror_interval_secs: r.mirror_interval_secs.map(|v| v as i64),
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
+                tenant_id: "default",
             };
             diesel::insert_into(repositories::table)
                 .values(&row)

@@ -46,6 +46,7 @@ struct MergeRequestRow {
     diff_insertions: Option<i64>,
     diff_deletions: Option<i64>,
     has_conflicts: Option<i32>,
+    tenant_id: String,
 }
 
 impl MergeRequestRow {
@@ -97,6 +98,7 @@ struct NewMergeRequestRow<'a> {
     diff_insertions: Option<i64>,
     diff_deletions: Option<i64>,
     has_conflicts: Option<i32>,
+    tenant_id: &'a str,
 }
 
 #[async_trait]
@@ -123,6 +125,7 @@ impl MergeRequestRepository for SqliteStorage {
                 diff_insertions: m.diff_stats.as_ref().map(|d| d.insertions as i64),
                 diff_deletions: m.diff_stats.as_ref().map(|d| d.deletions as i64),
                 has_conflicts: m.has_conflicts.map(|v| if v { 1i32 } else { 0 }),
+                tenant_id: "default",
             };
             diesel::insert_into(merge_requests::table)
                 .values(&row)

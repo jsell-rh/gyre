@@ -18,6 +18,7 @@ struct ActivityEventRow {
     event_type: String,
     description: String,
     timestamp: i64,
+    tenant_id: String,
 }
 
 impl From<ActivityEventRow> for ActivityEvent {
@@ -40,6 +41,7 @@ struct ActivityEventRecord<'a> {
     event_type: &'a str,
     description: &'a str,
     timestamp: i64,
+    tenant_id: &'a str,
 }
 
 impl<'a> From<&'a ActivityEvent> for ActivityEventRecord<'a> {
@@ -50,6 +52,7 @@ impl<'a> From<&'a ActivityEvent> for ActivityEventRecord<'a> {
             event_type: &e.event_type,
             description: &e.description,
             timestamp: e.timestamp as i64,
+            tenant_id: "default",
         }
     }
 }
