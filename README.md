@@ -99,12 +99,12 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M10: Persistent Storage | Done | SQLite persistence, real-time WebSocket events, git repo management |
 | M11: Agent Execution | Done | Real agent processes, TTY attach, agent logs, execution lifecycle |
 | M12: Quality Gates | Done | Merge queue gates, repo mirroring, diff viewer with syntax highlighting |
-| M13: Forge Native | In Progress | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
+| M13: Forge Native | Done | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness, agent gates + spec binding |
 | M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | Done | Diesel ORM + migrations, SQLite + PostgreSQL adapters, full persistence, multi-tenancy (tenant_id scoping) |
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
 
-600 Rust + 86 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+606 Rust + 86 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
