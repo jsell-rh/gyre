@@ -252,6 +252,19 @@ pub async fn complete_agent(
         .map(|wt| wt.repository_id.clone())
         .ok_or_else(|| ApiError::InvalidInput("agent has no associated worktree".to_string()))?;
 
+    // Idempotent complete: if an MR already exists for this agent+branch, return 202.
+    {
+        let existing_mrs = state.merge_requests.list_by_repo(&repo_id).await?;
+        let found = existing_mrs.into_iter().find(|m| {
+            m.source_branch == req.branch
+                && m.author_agent_id.as_ref() == Some(&agent.id)
+                && m.status != gyre_domain::MrStatus::Closed
+        });
+        if let Some(existing) = found {
+            return Ok((StatusCode::ACCEPTED, Json(MrResponse::from(existing))));
+        }
+    }
+
     let now = now_secs();
 
     // Create MergeRequest

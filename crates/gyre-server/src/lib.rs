@@ -36,7 +36,7 @@ use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository,
     NetworkPeerRepository, PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository,
-    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    ReviewRepository, SpawnLogRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -150,8 +150,8 @@ pub struct AppState {
     /// Speculative merge results: (repo_id, branch) -> SpeculativeResult (M13.5).
     pub speculative_results:
         Arc<Mutex<HashMap<(String, String), speculative_merge::SpeculativeResult>>>,
-    /// Spawn log: agent_id -> Vec<(step, status, detail, timestamp)> (M13.7).
-    pub spawn_log: Arc<Mutex<HashMap<String, Vec<serde_json::Value>>>>,
+    /// Spawn log: persisted to DB for diagnostic recovery (M13.7).
+    pub spawn_log: Arc<dyn SpawnLogRepository>,
     /// Agent stack fingerprints: agent_id -> AgentStack (M14.1).
     pub agent_stacks: Arc<Mutex<HashMap<String, api::stack_attest::AgentStack>>>,
     /// Repo stack attestation policies: repo_id -> required fingerprint (M14.2).
@@ -278,7 +278,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 fn build_cors_layer() -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
-    let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| "http://localhost:2222,http://localhost:3000,http://localhost:5173".to_string());
+    let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:2222,http://localhost:3000,http://localhost:5173".to_string()
+    });
 
     if origins_str == "*" {
         CorsLayer::new()
@@ -395,7 +397,10 @@ pub fn build_state(
         push_gate_registry: Arc::new(pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
-        spawn_log: Arc::new(Mutex::new(HashMap::new())),
+        spawn_log: store!(
+            dyn SpawnLogRepository,
+            mem::MemSpawnLogRepository::default()
+        ),
         agent_stacks: Arc::new(Mutex::new(HashMap::new())),
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
     })

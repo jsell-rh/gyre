@@ -224,6 +224,25 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    spawn_log (id) {
+        id -> Text,
+        agent_id -> Text,
+        step -> Text,
+        status -> Text,
+        detail -> Nullable<Text>,
+        occurred_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    revoked_tokens (token_hash) {
+        token_hash -> Text,
+        agent_id -> Text,
+        revoked_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     projects,
     repositories,
@@ -242,4 +261,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     cost_entries,
     audit_events,
     network_peers,
+    spawn_log,
+    revoked_tokens,
 );
