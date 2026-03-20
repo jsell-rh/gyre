@@ -615,6 +615,7 @@ Key specs to read before making changes:
 |---|---|
 | Tech stack + hexagonal invariants | [specs/development/architecture.md](specs/development/architecture.md) |
 | Design principles (invariants) | [specs/system/design-principles.md](specs/system/design-principles.md) |
+| Agent Gates & Spec Binding | [specs/system/agent-gates.md](specs/system/agent-gates.md) |
 | M0 milestone deliverables | [specs/milestones/m0-walking-skeleton.md](specs/milestones/m0-walking-skeleton.md) |
 | M1 milestone deliverables | [specs/milestones/m1-domain-foundation.md](specs/milestones/m1-domain-foundation.md) |
 | M2 milestone deliverables | [specs/milestones/m2-source-control.md](specs/milestones/m2-source-control.md) |
