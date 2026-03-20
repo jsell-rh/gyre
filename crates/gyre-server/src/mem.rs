@@ -13,8 +13,8 @@ use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository,
-    ProjectRepository, RepoRepository, ReviewRepository, TaskRepository, UserRepository,
-    WorktreeRepository,
+    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, UserRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -996,6 +996,65 @@ impl NetworkPeerRepository for MemNetworkPeerRepository {
     }
 }
 
+/// In-memory spawn log + revoked tokens store (M13.7).
+#[derive(Default)]
+pub struct MemSpawnLogRepository {
+    entries: Arc<Mutex<Vec<SpawnLogEntry>>>,
+    revoked: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+#[async_trait]
+impl SpawnLogRepository for MemSpawnLogRepository {
+    async fn append_spawn_step(
+        &self,
+        agent_id: &str,
+        step: &str,
+        status: &str,
+        detail: Option<&str>,
+        occurred_at: u64,
+    ) -> Result<()> {
+        self.entries.lock().await.push(SpawnLogEntry {
+            agent_id: agent_id.to_string(),
+            step: step.to_string(),
+            status: status.to_string(),
+            detail: detail.map(|s| s.to_string()),
+            occurred_at,
+        });
+        Ok(())
+    }
+
+    async fn get_spawn_log(&self, agent_id: &str) -> Result<Vec<SpawnLogEntry>> {
+        Ok(self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.agent_id == agent_id)
+            .map(|e| SpawnLogEntry {
+                agent_id: e.agent_id.clone(),
+                step: e.step.clone(),
+                status: e.status.clone(),
+                detail: e.detail.clone(),
+                occurred_at: e.occurred_at,
+            })
+            .collect())
+    }
+
+    async fn revoke_token(
+        &self,
+        token_hash: &str,
+        _agent_id: &str,
+        _revoked_at: u64,
+    ) -> Result<()> {
+        self.revoked.lock().await.insert(token_hash.to_string());
+        Ok(())
+    }
+
+    async fn is_token_revoked(&self, token_hash: &str) -> Result<bool> {
+        Ok(self.revoked.lock().await.contains(token_hash))
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -1049,7 +1108,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
-        spawn_log: Arc::new(Mutex::new(HashMap::new())),
+        spawn_log: Arc::new(MemSpawnLogRepository::default()),
         agent_stacks: Arc::new(Mutex::new(HashMap::new())),
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
     })
