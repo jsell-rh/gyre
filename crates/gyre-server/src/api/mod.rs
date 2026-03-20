@@ -192,6 +192,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/admin/snapshots/:id",
             delete(admin::admin_delete_snapshot),
         )
+        // Seed data
+        .route("/api/v1/admin/seed", post(admin::admin_seed))
         // Data Export
         .route("/api/v1/admin/export", get(admin::admin_export))
         // Retention Policies
