@@ -8,7 +8,6 @@ use tracing::info;
 
 use gyre_common::Id;
 use gyre_domain::{AuditEvent, AuditEventType};
-use gyre_ports::AgentRepository;
 
 use crate::AppState;
 

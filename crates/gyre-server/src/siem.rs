@@ -33,6 +33,7 @@ impl std::fmt::Display for TargetType {
 }
 
 impl TargetType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "syslog" => Some(Self::Syslog),
@@ -50,6 +51,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "cef" => Self::Cef,
