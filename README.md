@@ -92,9 +92,9 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M11: Agent Execution | Done | Real agent processes, TTY attach, agent logs, execution lifecycle |
 | M12: Quality Gates | In Progress | Merge queue gates, repo mirroring, diff viewer |
 | M13: Forge Native | In Progress | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
-| M14: Supply Chain Security | Planned | Agent stack fingerprinting, push attestation, AIBOM generation |
+| M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
 
-541 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+554 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
