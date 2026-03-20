@@ -52,6 +52,10 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M6: Infrastructure & Operations | Done | Product analytics, cost tracking, BCP snapshot/restore, background job framework, M6 dashboard |
 | M7: Production Hardening | Done | eBPF audit, SIEM forwarding, NixOS packaging, remote compute targets, WireGuard mesh, production hardening |
 | M8: Frontend Excellence | Done | Red Hat brand design system, polished dashboard UX, component library, consistent user journeys, dark theme |
+| M9: Functional UI | In Progress | Seed data endpoint, CRUD modals (projects/repos/tasks), auth token integration, end-to-end user journeys |
+| M10: Persistent Storage | Planned | SQLite persistence, real-time WebSocket events, git repo management |
+| M11: Agent Execution | Planned | Real agent processes, TTY attach, agent logs, execution lifecycle |
+| M12: Quality Gates | Planned | Merge queue gates, repo mirroring, diff viewer |
 
 476 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
