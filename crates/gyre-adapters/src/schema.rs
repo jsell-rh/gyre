@@ -39,6 +39,7 @@ diesel::table! {
         spawned_at -> BigInt,
         last_heartbeat -> Nullable<BigInt>,
         tenant_id -> Text,
+        spawned_by -> Nullable<Text>,
     }
 }
 
