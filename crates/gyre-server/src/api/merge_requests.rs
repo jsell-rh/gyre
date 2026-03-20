@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
+use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -240,6 +241,7 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
+    let _ = state.event_tx.send(DomainEvent::MrCreated { id: mr.id.to_string() });
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
@@ -288,6 +290,10 @@ pub async fn transition_mr_status(
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
+    let _ = state.event_tx.send(DomainEvent::MrStatusChanged {
+        id: mr.id.to_string(),
+        status: req.status.clone(),
+    });
 
     // Auto-track mr.merged analytics event
     if is_merge {
