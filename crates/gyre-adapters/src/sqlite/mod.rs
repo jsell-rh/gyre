@@ -11,6 +11,7 @@ pub mod analytics;
 pub mod merge_queue;
 pub mod merge_request;
 mod migrations;
+pub mod network_peer;
 pub mod project;
 pub mod repository;
 pub mod review;
@@ -95,6 +96,7 @@ mod tests {
             "api_keys",
             "analytics_events",
             "cost_entries",
+            "network_peers",
         ];
         for table in &tables {
             let count: i64 = conn

@@ -26,8 +26,8 @@ prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
+tower = { workspace = true, features = ["limit"] }
+tower-http = { workspace = true, features = ["cors", "trace", "catch-panic"] }
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 futures-util = { workspace = true }
