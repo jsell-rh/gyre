@@ -150,6 +150,8 @@ pub struct AppState {
     /// Speculative merge results: (repo_id, branch) -> SpeculativeResult (M13.5).
     pub speculative_results:
         Arc<Mutex<HashMap<(String, String), speculative_merge::SpeculativeResult>>>,
+    /// Spawn log: agent_id -> Vec<(step, status, detail, timestamp)> (M13.7).
+    pub spawn_log: Arc<Mutex<HashMap<String, Vec<serde_json::Value>>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -386,6 +388,7 @@ pub fn build_state(
         push_gate_registry: Arc::new(pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
+        spawn_log: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
