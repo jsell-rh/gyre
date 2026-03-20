@@ -153,9 +153,10 @@ pub async fn git_info_refs(
     };
 
     if !output.status.success() {
+        // Log stderr internally; do NOT expose it in the HTTP response (information disclosure).
         let stderr = String::from_utf8_lossy(&output.stderr);
         error!(%repo_path, %stderr, "git advertise-refs failed");
-        return git_err(format!("git {subcommand} failed: {stderr}"));
+        return git_err("git operation failed");
     }
 
     let mut body = service_header(&service);
@@ -447,9 +448,10 @@ async fn run_git_stateless(
         .map_err(|e| format!("git {subcommand} wait failed: {e}"))?;
 
     if !out.status.success() {
+        // Log stderr internally; do NOT expose it to callers (information disclosure).
         let stderr = String::from_utf8_lossy(&out.stderr);
         error!(subcommand, %repo_path, %stderr, "git command failed");
-        return Err(format!("git {subcommand} failed: {stderr}"));
+        return Err(format!("git {subcommand} failed"));
     }
 
     Ok(out.stdout)

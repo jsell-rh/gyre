@@ -183,17 +183,19 @@ async fn require_auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match token {
-        Some(t) if t == state.auth_token => next.run(req).await,
+        Some(t) if auth::tokens_equal(t, &state.auth_token) => next.run(req).await,
         Some(t) => {
-            // Check per-agent tokens.
+            // Check per-agent tokens using constant-time compare.
             let agent_tokens = state.agent_tokens.lock().await;
-            let valid = agent_tokens.values().any(|v| v.as_str() == t);
+            let valid = agent_tokens
+                .values()
+                .any(|v| auth::tokens_equal(v.as_str(), t));
             drop(agent_tokens);
             if valid {
                 return next.run(req).await;
             }
-            // Check API keys via the key repository.
-            if let Ok(Some(_)) = state.api_keys.find_user_id(t).await {
+            // Check API keys via the hashed key repository.
+            if let Ok(Some(_)) = state.api_keys.find_user_id(&auth::hash_api_key(t)).await {
                 return next.run(req).await;
             }
             // Check JWT (Keycloak/OIDC) if configured.

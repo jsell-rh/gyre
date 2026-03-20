@@ -33,17 +33,19 @@ pub async fn create_api_key(
     })?;
 
     let key = format!("gyre_{}", Uuid::new_v4().simple());
+    // Store the SHA-256 hash so raw keys are never persisted to DB.
+    let key_hash = crate::auth::hash_api_key(&key);
 
     state
         .api_keys
-        .create(&key, &user_id, &req.name)
+        .create(&key_hash, &user_id, &req.name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
         StatusCode::CREATED,
         Json(CreateApiKeyResponse {
-            key,
+            key, // return raw key to caller once; hash is stored
             name: req.name,
         }),
     ))
