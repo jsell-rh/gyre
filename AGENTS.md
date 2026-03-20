@@ -47,6 +47,9 @@ cargo test --all
 # Run frontend component tests (vitest — requires Node/npm)
 cd web && npm test && cd ..
 
+# Run Playwright E2E tests (M17.5 — auto-starts gyre-server on port 2222)
+cd web && npm run test:e2e && cd ..
+
 # Format check
 cargo fmt --all -- --check
 
