@@ -13,6 +13,19 @@ use crate::AppState;
 use super::error::ApiError;
 use super::{new_id, now_secs};
 
+/// Strip credentials from a URL to prevent leaking secrets in API responses (H-5).
+fn redact_url_credentials(url: String) -> String {
+    // Match https://user:pass@host/path or https://token@host/path
+    if let Some(at_pos) = url.find('@') {
+        if let Some(scheme_end) = url.find("://") {
+            let prefix = &url[..scheme_end + 3]; // "https://"
+            let after_at = &url[at_pos + 1..]; // "host/path"
+            return format!("{prefix}***@{after_at}");
+        }
+    }
+    url
+}
+
 #[derive(Deserialize)]
 pub struct CreateRepoRequest {
     pub project_id: String,
@@ -60,7 +73,7 @@ impl From<Repository> for RepoResponse {
             default_branch: r.default_branch,
             created_at: r.created_at,
             is_mirror: r.is_mirror,
-            mirror_url: r.mirror_url,
+            mirror_url: r.mirror_url.map(redact_url_credentials),
             mirror_interval_secs: r.mirror_interval_secs,
             last_mirror_sync: r.last_mirror_sync,
         }
