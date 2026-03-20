@@ -27,6 +27,7 @@ What Gyre does - the product.
 | Admin Panel | [`system/admin-panel.md`](system/admin-panel.md) | Credentials, secrets, background jobs, logs |
 | SDLC Philosophy | [`system/sdlc.md`](system/sdlc.md) | Challenge every ceremony, engineer the need away |
 | Business Continuity | [`system/business-continuity.md`](system/business-continuity.md) | BCP primitives, snapshot/restore, retention |
+| Supply Chain Security | [`system/supply-chain.md`](system/supply-chain.md) | Agent stack attestation, gyre-stack.lock, AIBOM, SLSA provenance, attestation levels |
 
 ## Development of This System
 
