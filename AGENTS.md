@@ -106,6 +106,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`) (M12.2) |
 | `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields) |
+| `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync) (M12.2) |
+| `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
