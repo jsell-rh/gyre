@@ -234,6 +234,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
+| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | SQLite database URL, e.g. `sqlite://gyre.db`. When set, all 16 port traits persist to SQLite with WAL mode. Unset = in-memory (default, stateless). (M10.1) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
