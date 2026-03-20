@@ -81,3 +81,36 @@ impl StoragePort for PgStorage {
         Ok(())
     }
 }
+
+/// Stub implementation of SpawnLogRepository for PgStorage.
+/// Full Diesel-backed implementation deferred until M15.3.
+#[async_trait]
+impl gyre_ports::SpawnLogRepository for PgStorage {
+    async fn append_spawn_step(
+        &self,
+        _agent_id: &str,
+        _step: &str,
+        _status: &str,
+        _detail: Option<&str>,
+        _occurred_at: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_spawn_log(&self, _agent_id: &str) -> Result<Vec<gyre_ports::SpawnLogEntry>> {
+        Ok(vec![])
+    }
+
+    async fn revoke_token(
+        &self,
+        _token_hash: &str,
+        _agent_id: &str,
+        _revoked_at: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn is_token_revoked(&self, _token_hash: &str) -> Result<bool> {
+        Ok(false)
+    }
+}
