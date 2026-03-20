@@ -1,111 +1,130 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::NetworkPeer;
 use gyre_ports::NetworkPeerRepository;
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::network_peers;
 
-fn row_to_peer(row: &rusqlite::Row<'_>) -> Result<NetworkPeer> {
-    let allowed_ips_json: String = row.get(4)?;
-    let allowed_ips: Vec<String> =
-        serde_json::from_str(&allowed_ips_json).context("parse allowed_ips JSON")?;
-    Ok(NetworkPeer {
-        id: Id::new(row.get::<_, String>(0)?),
-        agent_id: Id::new(row.get::<_, String>(1)?),
-        wireguard_pubkey: row.get(2)?,
-        endpoint: row.get(3)?,
-        allowed_ips,
-        registered_at: row.get::<_, i64>(5)? as u64,
-        last_seen: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
-    })
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = network_peers)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct NetworkPeerRow {
+    id: String,
+    agent_id: String,
+    wireguard_pubkey: String,
+    endpoint: Option<String>,
+    allowed_ips: String,
+    registered_at: i64,
+    last_seen: Option<i64>,
+}
+
+impl NetworkPeerRow {
+    fn into_peer(self) -> Result<NetworkPeer> {
+        let allowed_ips: Vec<String> =
+            serde_json::from_str(&self.allowed_ips).context("parse allowed_ips JSON")?;
+        Ok(NetworkPeer {
+            id: Id::new(self.id),
+            agent_id: Id::new(self.agent_id),
+            wireguard_pubkey: self.wireguard_pubkey,
+            endpoint: self.endpoint,
+            allowed_ips,
+            registered_at: self.registered_at as u64,
+            last_seen: self.last_seen.map(|v| v as u64),
+        })
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = network_peers)]
+struct NetworkPeerRecord<'a> {
+    id: &'a str,
+    agent_id: &'a str,
+    wireguard_pubkey: &'a str,
+    endpoint: Option<&'a str>,
+    allowed_ips: String,
+    registered_at: i64,
+    last_seen: Option<i64>,
 }
 
 #[async_trait]
 impl NetworkPeerRepository for SqliteStorage {
     async fn register(&self, peer: &NetworkPeer) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let p = peer.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            let allowed_ips_json = serde_json::to_string(&p.allowed_ips)?;
-            conn.execute(
-                "INSERT INTO network_peers
-                     (id, agent_id, wireguard_pubkey, endpoint, allowed_ips,
-                      registered_at, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    p.id.as_str(),
-                    p.agent_id.as_str(),
-                    p.wireguard_pubkey,
-                    p.endpoint,
-                    allowed_ips_json,
-                    p.registered_at as i64,
-                    p.last_seen.map(|v| v as i64),
-                ],
-            )
-            .context("insert network_peer")?;
+            let mut conn = pool.get().context("get db connection")?;
+            let allowed_ips = serde_json::to_string(&p.allowed_ips)?;
+            let record = NetworkPeerRecord {
+                id: p.id.as_str(),
+                agent_id: p.agent_id.as_str(),
+                wireguard_pubkey: &p.wireguard_pubkey,
+                endpoint: p.endpoint.as_deref(),
+                allowed_ips,
+                registered_at: p.registered_at as i64,
+                last_seen: p.last_seen.map(|v| v as i64),
+            };
+            diesel::insert_into(network_peers::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert network_peer")?;
             Ok(())
         })
         .await?
     }
 
     async fn list(&self) -> Result<Vec<NetworkPeer>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<NetworkPeer>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, wireguard_pubkey, endpoint, allowed_ips,
-                        registered_at, last_seen
-                 FROM network_peers ORDER BY registered_at",
-            )?;
-            let rows = stmt.query_map([], |row| Ok(row_to_peer(row).unwrap()))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = network_peers::table
+                .order(network_peers::registered_at.asc())
+                .load::<NetworkPeerRow>(&mut *conn)
+                .context("list network_peers")?;
+            rows.into_iter().map(|r| r.into_peer()).collect()
         })
         .await?
     }
 
     async fn find_by_agent(&self, agent_id: &Id) -> Result<Option<NetworkPeer>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<NetworkPeer>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, wireguard_pubkey, endpoint, allowed_ips,
-                        registered_at, last_seen
-                 FROM network_peers WHERE agent_id = ?1",
-            )?;
-            let mut rows = stmt.query([agent_id.as_str()])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_peer(row)?))
-            } else {
-                Ok(None)
-            }
+            let mut conn = pool.get().context("get db connection")?;
+            let result = network_peers::table
+                .filter(network_peers::agent_id.eq(agent_id.as_str()))
+                .first::<NetworkPeerRow>(&mut *conn)
+                .optional()
+                .context("find network_peer by agent")?;
+            result.map(|r| r.into_peer()).transpose()
         })
         .await?
     }
 
     async fn update_last_seen(&self, id: &Id, now: u64) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "UPDATE network_peers SET last_seen = ?1 WHERE id = ?2",
-                rusqlite::params![now as i64, id.as_str()],
-            )
-            .context("update_last_seen")?;
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(network_peers::table.find(id.as_str()))
+                .set(network_peers::last_seen.eq(Some(now as i64)))
+                .execute(&mut *conn)
+                .context("update_last_seen")?;
             Ok(())
         })
         .await?
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute("DELETE FROM network_peers WHERE id = ?1", [id.as_str()])
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(network_peers::table.find(id.as_str()))
+                .execute(&mut *conn)
                 .context("delete network_peer")?;
             Ok(())
         })

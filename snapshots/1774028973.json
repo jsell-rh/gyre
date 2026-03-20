@@ -1,0 +1,154 @@
+{
+  "created_at": 1774028973,
+  "projects": [
+    {
+      "id": "seed-proj-1",
+      "name": "Gyre Platform",
+      "description": "Core platform services and agent infrastructure",
+      "created_at": 1774025289,
+      "updated_at": 1774025289
+    },
+    {
+      "id": "seed-proj-2",
+      "name": "Infrastructure",
+      "description": "NixOS configs, CI/CD pipelines, and tooling",
+      "created_at": 1774025289,
+      "updated_at": 1774025289
+    },
+    {
+      "id": "e370c90e-7b9a-47e3-bf25-c4a8ee0e3eb0",
+      "name": "test",
+      "description": null,
+      "created_at": 1774028907,
+      "updated_at": 1774028907
+    }
+  ],
+  "agents": [
+    {
+      "id": "seed-agent-2",
+      "name": "worker-backend",
+      "status": "Dead",
+      "parent_id": null,
+      "current_task_id": null,
+      "lifetime_budget_secs": null,
+      "spawned_at": 1774027689,
+      "last_heartbeat": 1774028874
+    },
+    {
+      "id": "seed-agent-1",
+      "name": "orchestrator",
+      "status": "Dead",
+      "parent_id": null,
+      "current_task_id": null,
+      "lifetime_budget_secs": null,
+      "spawned_at": 1774027089,
+      "last_heartbeat": 1774028859
+    },
+    {
+      "id": "seed-agent-3",
+      "name": "worker-frontend",
+      "status": "Dead",
+      "parent_id": null,
+      "current_task_id": null,
+      "lifetime_budget_secs": null,
+      "spawned_at": 1774027989,
+      "last_heartbeat": null
+    },
+    {
+      "id": "seed-agent-4",
+      "name": "reviewer",
+      "status": "Dead",
+      "parent_id": null,
+      "current_task_id": null,
+      "lifetime_budget_secs": null,
+      "spawned_at": 1774021689,
+      "last_heartbeat": null
+    }
+  ],
+  "tasks": [
+    {
+      "id": "seed-task-1",
+      "title": "Set up NixOS flake for CI",
+      "description": null,
+      "status": "Backlog",
+      "priority": "Medium",
+      "assigned_to": null,
+      "parent_task_id": null,
+      "labels": [],
+      "branch": null,
+      "pr_link": null,
+      "created_at": 1774025889,
+      "updated_at": 1774025889
+    },
+    {
+      "id": "seed-task-2",
+      "title": "Implement agent spawn API",
+      "description": null,
+      "status": "InProgress",
+      "priority": "High",
+      "assigned_to": "seed-agent-1",
+      "parent_task_id": null,
+      "labels": [],
+      "branch": null,
+      "pr_link": null,
+      "created_at": 1774026089,
+      "updated_at": 1774026089
+    },
+    {
+      "id": "seed-task-4",
+      "title": "Add Prometheus metrics endpoint",
+      "description": null,
+      "status": "Review",
+      "priority": "Medium",
+      "assigned_to": null,
+      "parent_task_id": null,
+      "labels": [],
+      "branch": null,
+      "pr_link": null,
+      "created_at": 1774026489,
+      "updated_at": 1774026489
+    },
+    {
+      "id": "seed-task-6",
+      "title": "Integrate Keycloak OIDC auth",
+      "description": null,
+      "status": "Blocked",
+      "priority": "Medium",
+      "assigned_to": null,
+      "parent_task_id": null,
+      "labels": [],
+      "branch": null,
+      "pr_link": null,
+      "created_at": 1774027089,
+      "updated_at": 1774027089
+    },
+    {
+      "id": "seed-task-5",
+      "title": "Write E2E Ralph loop test",
+      "description": null,
+      "status": "Done",
+      "priority": "Critical",
+      "assigned_to": null,
+      "parent_task_id": null,
+      "labels": [],
+      "branch": null,
+      "pr_link": null,
+      "created_at": 1774023889,
+      "updated_at": 1774023889
+    },
+    {
+      "id": "seed-task-3",
+      "title": "Build Svelte dashboard components",
+      "description": null,
+      "status": "InProgress",
+      "priority": "Medium",
+      "assigned_to": "seed-agent-2",
+      "parent_task_id": null,
+      "labels": [],
+      "branch": null,
+      "pr_link": null,
+      "created_at": 1774026289,
+      "updated_at": 1774026289
+    }
+  ]
+}
