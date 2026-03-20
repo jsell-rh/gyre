@@ -56,10 +56,10 @@ pub struct CompleteAgentRequest {
 /// 3. Creates a git worktree on the repo for the agent's branch
 /// 4. Assigns the task to the agent, advances task to InProgress
 /// 5. Records the worktree in DB (linked to agent + task)
-#[instrument(skip(state, _auth, req), fields(agent_name = %req.name, branch = %req.branch))]
+#[instrument(skip(state, auth, req), fields(agent_name = %req.name, branch = %req.branch))]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Json(req): Json<SpawnAgentRequest>,
 ) -> Result<(StatusCode, Json<SpawnAgentResponse>), ApiError> {
     // Verify repo exists
@@ -91,6 +91,7 @@ pub async fn spawn_agent(
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
+    agent.spawned_by = Some(auth.agent_id.clone());
     agent.assign_task(Id::new(&req.task_id));
     agent
         .transition_status(AgentStatus::Active)
