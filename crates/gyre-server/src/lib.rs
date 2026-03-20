@@ -14,6 +14,7 @@ pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
+pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
@@ -33,8 +34,8 @@ use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, ProcessHandle, ProjectRepository, RepoRepository, ReviewRepository,
-    TaskRepository, UserRepository, WorktreeRepository,
+    NetworkPeerRepository, PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository,
+    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -141,6 +142,10 @@ pub struct AppState {
     pub quality_gates: Arc<Mutex<HashMap<String, gyre_domain::QualityGate>>>,
     /// Gate execution results: result_id -> GateResult.
     pub gate_results: Arc<Mutex<HashMap<String, gyre_domain::GateResult>>>,
+    /// Pre-accept gate registry: built-in gate implementations.
+    pub push_gate_registry: Arc<Vec<Box<dyn PreAcceptGate>>>,
+    /// Per-repo active push gate names: repo_id -> list of gate names.
+    pub repo_push_gates: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -315,6 +320,8 @@ pub fn build_state(
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(Mutex::new(HashMap::new())),
         gate_results: Arc::new(Mutex::new(HashMap::new())),
+        push_gate_registry: Arc::new(pre_accept::builtin_gates()),
+        repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

@@ -17,6 +17,7 @@ pub mod merge_queue;
 pub mod merge_requests;
 pub mod network;
 pub mod projects;
+pub mod push_gates;
 pub mod repos;
 pub mod spawn;
 pub mod tasks;
@@ -92,6 +93,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/gates/:gate_id",
             delete(gates::delete_gate),
+        )
+        // Pre-accept push gates
+        .route(
+            "/api/v1/repos/:id/push-gates",
+            get(push_gates::get_push_gates).put(push_gates::set_push_gates),
         )
         // jj VCS integration
         .route("/api/v1/repos/:id/jj/init", post(jj::jj_init))

@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use gyre_common::Id;
+use gyre_ports::{GateOutcome, PushContext};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -225,6 +226,7 @@ pub async fn git_receive_pack(
         )
             .into_response();
     }
+    let repo_id = resolved.id.to_string();
     let repo_path = resolved.path;
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
@@ -239,6 +241,28 @@ pub async fn git_receive_pack(
         Ok(o) => o,
         Err(e) => return git_err(e),
     };
+
+    // Pre-accept gate checks: run after git accepts packfile, undo refs on failure.
+    if !ref_updates.is_empty() {
+        if let Err(rejection) =
+            check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates).await
+        {
+            undo_ref_updates(&repo_path, &ref_updates).await;
+            // Broadcast PushRejected domain event.
+            let _ = state
+                .event_tx
+                .send(crate::domain_events::DomainEvent::PushRejected {
+                    repo_id: repo_id.clone(),
+                    branch: ref_updates
+                        .first()
+                        .map(|u| u.refname.clone())
+                        .unwrap_or_default(),
+                    agent_id: auth.agent_id.clone(),
+                    reason: rejection.clone(),
+                });
+            return (StatusCode::FORBIDDEN, rejection).into_response();
+        }
+    }
 
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
@@ -437,6 +461,167 @@ async fn record_pushed_commits(
             );
             if let Err(e) = state.agent_commits.record(&mapping).await {
                 warn!(%sha, "post-receive: failed to record commit: {e}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pre-accept gate enforcement
+// ---------------------------------------------------------------------------
+
+/// Run the configured pre-accept gates for a repository against the pushed commits.
+/// Returns `Ok(())` if all gates pass, or `Err(reason)` if any gate rejects the push.
+async fn check_pre_accept_gates(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    ref_updates: &[RefUpdate],
+) -> Result<(), String> {
+    // Get gate names configured for this repo.
+    let gate_names = {
+        let gates = state.repo_push_gates.lock().await;
+        gates.get(repo_id).cloned().unwrap_or_default()
+    };
+    if gate_names.is_empty() {
+        return Ok(());
+    }
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    for update in ref_updates {
+        // Collect commit messages for this ref update.
+        let range = if update.old_sha.starts_with("00000000") {
+            update.new_sha.clone()
+        } else {
+            format!("{}..{}", update.old_sha, update.new_sha)
+        };
+
+        let msg_out = Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("log")
+            .arg("--format=%s")
+            .arg(&range)
+            .output()
+            .await
+            .ok();
+
+        let commit_messages: Vec<String> = msg_out
+            .as_ref()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Collect changed files.
+        let files_out = Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("diff")
+            .arg("--name-only")
+            .arg(&range)
+            .output()
+            .await
+            .ok();
+
+        let changed_files: Vec<String> = files_out
+            .as_ref()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let branch = update
+            .refname
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&update.refname)
+            .to_string();
+
+        let ctx = PushContext {
+            repo_id: repo_id.to_string(),
+            refname: update.refname.clone(),
+            branch,
+            commit_messages,
+            changed_files,
+        };
+
+        // Run each configured gate.
+        for gate_name in &gate_names {
+            if let Some(gate) = state
+                .push_gate_registry
+                .iter()
+                .find(|g| g.name() == gate_name)
+            {
+                match gate.check(&ctx) {
+                    GateOutcome::Passed => {}
+                    GateOutcome::Failed(reason) => {
+                        warn!(
+                            repo_id,
+                            gate = gate_name,
+                            refname = %update.refname,
+                            %reason,
+                            "pre-accept gate rejected push"
+                        );
+                        return Err(format!("push rejected by gate '{gate_name}': {reason}"));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Undo ref updates in the repository (e.g., after a gate rejection).
+/// For new branches (old sha is zeros), deletes the ref. For updates, restores to old sha.
+async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let zeros = "0000000000000000000000000000000000000000";
+
+    for update in ref_updates {
+        let result = if update.old_sha == zeros || update.old_sha.starts_with("00000000") {
+            // New branch — delete it.
+            Command::new(&git_bin)
+                .arg("-C")
+                .arg(repo_path)
+                .arg("update-ref")
+                .arg("-d")
+                .arg(&update.refname)
+                .output()
+                .await
+        } else {
+            // Existing branch — restore old sha.
+            Command::new(&git_bin)
+                .arg("-C")
+                .arg(repo_path)
+                .arg("update-ref")
+                .arg(&update.refname)
+                .arg(&update.old_sha)
+                .output()
+                .await
+        };
+
+        match result {
+            Ok(o) if o.status.success() => {
+                info!(repo_path, refname = %update.refname, "undid ref update after gate rejection");
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                warn!(repo_path, refname = %update.refname, %err, "failed to undo ref update");
+            }
+            Err(e) => {
+                warn!(repo_path, refname = %update.refname, "undo ref update error: {e}");
             }
         }
     }
