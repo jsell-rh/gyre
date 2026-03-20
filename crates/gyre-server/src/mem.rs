@@ -100,6 +100,14 @@ impl GitOpsPort for NoopGitOps {
     async fn create_initial_commit(&self, _repo_path: &str, _branch: &str) -> Result<String> {
         Ok("0000000000000000000000000000000000000000".to_string())
     }
+
+    async fn clone_mirror(&self, _url: &str, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn fetch_mirror(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

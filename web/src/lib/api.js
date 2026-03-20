@@ -49,6 +49,7 @@ export const api = {
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
   mrDiff: (id) => request(`/merge-requests/${id}/diff`),
+  mrGates: (id) => request(`/merge-requests/${id}/gates`),
   submitReview: (mrId, data) =>
     request(`/merge-requests/${mrId}/reviews`, {
       method: 'POST',
@@ -137,12 +138,19 @@ export const api = {
     request('/projects', { method: 'POST', body: JSON.stringify(data) }),
   createRepo: (data) =>
     request('/repos', { method: 'POST', body: JSON.stringify(data) }),
+  createMirrorRepo: (data) =>
+    request('/repos/mirror', { method: 'POST', body: JSON.stringify(data) }),
+  syncMirror: (id) =>
+    request(`/repos/${id}/mirror/sync`, { method: 'POST' }),
   createTask: (data) =>
     request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
   createMr: (data) =>
     request('/merge-requests', { method: 'POST', body: JSON.stringify(data) }),
   seedData: () =>
     request('/admin/seed', { method: 'POST' }),
+  // Agent TTY WebSocket URL
+  agentTtyUrl: (id) =>
+    `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/agents/${id}/tty`,
   // Agent logs
   agentLogs: (id, limit = 100, offset = 0) =>
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),

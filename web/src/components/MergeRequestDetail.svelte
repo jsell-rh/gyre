@@ -10,8 +10,15 @@
   let mr = $state(initialMr);
   let reviews = $state([]);
   let comments = $state([]);
+  let gates = $state([]);
   let loading = $state(true);
   let enqueueing = $state(false);
+
+  // Diff / Files tab state
+  let activeTab = $state('overview'); // 'overview' | 'files'
+  let diff = $state(null);
+  let diffLoading = $state(false);
+  let selectedFile = $state(null);
 
   $effect(() => {
     loadDetails();
@@ -20,12 +27,42 @@
   async function loadDetails() {
     loading = true;
     try {
-      [reviews, comments] = await Promise.all([
+      [reviews, comments, gates] = await Promise.all([
         api.mrReviews(mr.id),
         api.mrComments(mr.id),
+        api.mrGates(mr.id),
       ]);
     } catch { /* ignore */ }
     loading = false;
+  }
+
+  async function loadDiff() {
+    if (diff) return;
+    diffLoading = true;
+    try {
+      diff = await api.mrDiff(mr.id);
+      if (diff.files && diff.files.length > 0) {
+        selectedFile = diff.files[0].path;
+      }
+    } catch (e) {
+      toastError('Failed to load diff: ' + e.message);
+    } finally {
+      diffLoading = false;
+    }
+  }
+
+  function switchTab(tab) {
+    activeTab = tab;
+    if (tab === 'files') loadDiff();
+  }
+
+  function gateStatusColor(status) {
+    switch (status) {
+      case 'passed': return 'var(--color-success)';
+      case 'failed': return 'var(--color-danger)';
+      case 'running': return 'var(--color-warning)';
+      default: return 'var(--color-text-muted)';
+    }
   }
 
   async function submitReview(decision) {
@@ -92,7 +129,17 @@
     <Badge value={mr.status} />
   </div>
 
-  <div class="content">
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')}>Overview</button>
+    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')}>
+      Files
+      {#if mr.diff_stats}<span class="tab-badge">{mr.diff_stats.files_changed}</span>{/if}
+    </button>
+  </div>
+
+  <div class="content" class:content-files={activeTab === 'files'}>
+    {#if activeTab === 'overview'}
     <!-- Two-column layout -->
     <div class="two-col">
       <!-- Sidebar: meta info -->
@@ -141,6 +188,22 @@
             </div>
           {/if}
         </div>
+
+        <!-- Quality Gates -->
+        {#if gates.length > 0}
+          <div class="sidebar-card">
+            <h4 class="sidebar-section-title">Quality Gates</h4>
+            <div class="gates-list">
+              {#each gates as gate (gate.id)}
+                <div class="gate-row">
+                  <span class="gate-dot" style:background={gateStatusColor(gate.status)}></span>
+                  <span class="gate-label">{gate.gate_id}</span>
+                  <span class="gate-status" style:color={gateStatusColor(gate.status)}>{gate.status}</span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
 
         <!-- Actions -->
         <div class="sidebar-card">
@@ -260,6 +323,75 @@
         </section>
       </div>
     </div>
+
+    {:else}
+    <!-- Files tab: diff viewer -->
+    <div class="files-layout">
+      {#if diffLoading}
+        <div class="diff-skeleton">
+          <Skeleton height="2rem" />
+          <Skeleton height="10rem" />
+        </div>
+      {:else if !diff || diff.files.length === 0}
+        <EmptyState title="No files changed" description="This merge request has no diff to display." />
+      {:else}
+        <!-- File list sidebar -->
+        <aside class="file-list">
+          <div class="file-list-header">
+            <span class="file-list-title">Changed Files</span>
+            <span class="file-list-count">{diff.files.length}</span>
+          </div>
+          {#each diff.files as file (file.path)}
+            <button
+              class="file-item"
+              class:selected={selectedFile === file.path}
+              onclick={() => selectedFile = file.path}
+            >
+              <span class="file-status-dot" class:modified={file.status === 'Modified'} class:added={file.status === 'Added'} class:deleted={file.status === 'Deleted'}></span>
+              <span class="file-path-text">{file.path}</span>
+            </button>
+          {/each}
+        </aside>
+
+        <!-- Diff panel -->
+        <div class="diff-panel">
+          {#each diff.files as file (file.path)}
+            {#if file.path === selectedFile}
+              <div class="file-diff">
+                <div class="file-diff-header">
+                  <code class="file-diff-path">{file.path}</code>
+                  <span class="file-diff-status">{file.status}</span>
+                </div>
+                {#each file.hunks as hunk, hi (hi)}
+                  <div class="hunk">
+                    <div class="hunk-header">{hunk.header}</div>
+                    <div class="hunk-lines">
+                      {#each hunk.lines as line, li (li)}
+                        <div
+                          class="diff-line"
+                          class:line-add={line.type === 'add'}
+                          class:line-delete={line.type === 'delete'}
+                          class:line-context={line.type === 'context'}
+                        >
+                          <span class="line-gutter">
+                            {line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
+                          </span>
+                          <code class="line-content">{line.content}</code>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/each}
+                {#if file.hunks.length === 0}
+                  <div class="hunk-empty">No content to display.</div>
+                {/if}
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
+    </div>
+    {/if}
   </div>
 </div>
 
@@ -319,6 +451,14 @@
     flex: 1;
     overflow-y: auto;
     padding: var(--space-6);
+    min-height: 0;
+  }
+
+  .content.content-files {
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
   /* Two-column layout */
@@ -659,5 +799,283 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.6;
+  }
+
+  /* Tab bar */
+  .tab-bar {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border);
+    padding: 0 var(--space-6);
+    flex-shrink: 0;
+  }
+
+  .tab-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    font-weight: 500;
+    margin-bottom: -1px;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .tab-btn:hover { color: var(--color-text); }
+
+  .tab-btn.active {
+    color: var(--color-text);
+    border-bottom-color: var(--color-primary);
+  }
+
+  .tab-badge {
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 9999px;
+    font-size: 0.65rem;
+    padding: 0 var(--space-1);
+    color: var(--color-text-muted);
+  }
+
+  /* Quality gates */
+  .gates-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gate-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .gate-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .gate-label {
+    flex: 1;
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+  }
+
+  .gate-status {
+    font-weight: 600;
+    text-transform: capitalize;
+    font-size: 0.65rem;
+  }
+
+  /* Files tab layout */
+  .files-layout {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .diff-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    grid-column: 1 / -1;
+  }
+
+  /* File list sidebar */
+  .file-list {
+    border-right: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .file-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .file-list-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .file-list-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 9999px;
+    padding: 0 var(--space-2);
+  }
+
+  .file-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    transition: background var(--transition-fast), color var(--transition-fast);
+    overflow: hidden;
+  }
+
+  .file-item:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .file-item.selected {
+    background: rgba(238, 0, 0, 0.08);
+    color: var(--color-text);
+  }
+
+  .file-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--color-text-muted);
+  }
+
+  .file-status-dot.modified { background: var(--color-warning); }
+  .file-status-dot.added { background: var(--color-success); }
+  .file-status-dot.deleted { background: var(--color-danger); }
+
+  .file-path-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Diff panel */
+  .diff-panel {
+    overflow-y: auto;
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .file-diff {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .file-diff-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .file-diff-path {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text);
+  }
+
+  .file-diff-status {
+    font-size: 0.65rem;
+    color: var(--color-text-muted);
+    text-transform: lowercase;
+  }
+
+  .hunk {
+    border-top: 1px solid var(--color-border);
+  }
+
+  .hunk:first-child { border-top: none; }
+
+  .hunk-header {
+    background: rgba(0, 102, 204, 0.06);
+    padding: var(--space-1) var(--space-4);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-link);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .hunk-lines {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .diff-line {
+    display: flex;
+    align-items: flex-start;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    min-height: 1.5em;
+  }
+
+  .diff-line.line-add {
+    background: rgba(99, 153, 61, 0.12);
+  }
+
+  .diff-line.line-delete {
+    background: rgba(238, 0, 0, 0.1);
+  }
+
+  .diff-line.line-context {
+    background: transparent;
+  }
+
+  .line-gutter {
+    width: 1.5rem;
+    flex-shrink: 0;
+    text-align: center;
+    color: var(--color-text-muted);
+    user-select: none;
+    padding: 0 var(--space-2);
+  }
+
+  .diff-line.line-add .line-gutter { color: var(--color-success); }
+  .diff-line.line-delete .line-gutter { color: var(--color-danger); }
+
+  .line-content {
+    flex: 1;
+    white-space: pre;
+    overflow-x: auto;
+    padding-right: var(--space-4);
+    color: var(--color-text);
+  }
+
+  .hunk-empty {
+    padding: var(--space-4);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    text-align: center;
   }
 </style>

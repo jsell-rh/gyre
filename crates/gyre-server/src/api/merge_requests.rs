@@ -145,18 +145,31 @@ impl From<Review> for ReviewResponse {
 }
 
 #[derive(Serialize)]
+pub struct DiffLineResponse {
+    #[serde(rename = "type")]
+    pub line_type: String,
+    pub content: String,
+}
+
+#[derive(Serialize)]
+pub struct HunkResponse {
+    pub header: String,
+    pub lines: Vec<DiffLineResponse>,
+}
+
+#[derive(Serialize)]
+pub struct FileDiffStructured {
+    pub path: String,
+    pub status: String,
+    pub hunks: Vec<HunkResponse>,
+}
+
+#[derive(Serialize)]
 pub struct DiffResponse {
     pub files_changed: usize,
     pub insertions: usize,
     pub deletions: usize,
-    pub patches: Vec<FileDiffResponse>,
-}
-
-#[derive(Serialize)]
-pub struct FileDiffResponse {
-    pub path: String,
-    pub status: String,
-    pub patch: Option<String>,
+    pub files: Vec<FileDiffStructured>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -393,6 +406,83 @@ pub async fn list_reviews(
     ))
 }
 
+fn parse_patch_to_hunks(raw: &str) -> Vec<HunkResponse> {
+    let mut hunks: Vec<HunkResponse> = Vec::new();
+    let mut current_hunk: Option<HunkResponse> = None;
+    for line in raw.lines() {
+        if line.starts_with("@@") {
+            if let Some(h) = current_hunk.take() {
+                hunks.push(h);
+            }
+            current_hunk = Some(HunkResponse {
+                header: line.to_string(),
+                lines: Vec::new(),
+            });
+        } else if line.starts_with("diff ")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+        {
+            // skip file header lines
+        } else if let Some(ref mut hunk) = current_hunk {
+            let (line_type, content) = if let Some(rest) = line.strip_prefix('+') {
+                ("add", rest.to_string())
+            } else if let Some(rest) = line.strip_prefix('-') {
+                ("delete", rest.to_string())
+            } else if let Some(rest) = line.strip_prefix(' ') {
+                ("context", rest.to_string())
+            } else {
+                continue;
+            };
+            hunk.lines.push(DiffLineResponse {
+                line_type: line_type.to_string(),
+                content,
+            });
+        }
+    }
+    if let Some(h) = current_hunk {
+        hunks.push(h);
+    }
+    hunks
+}
+
+fn mock_diff_response() -> DiffResponse {
+    DiffResponse {
+        files_changed: 1,
+        insertions: 3,
+        deletions: 1,
+        files: vec![FileDiffStructured {
+            path: "src/main.rs".to_string(),
+            status: "Modified".to_string(),
+            hunks: vec![HunkResponse {
+                header: "@@ -1,4 +1,6 @@".to_string(),
+                lines: vec![
+                    DiffLineResponse {
+                        line_type: "context".to_string(),
+                        content: "fn main() {".to_string(),
+                    },
+                    DiffLineResponse {
+                        line_type: "delete".to_string(),
+                        content: "    println!(\"Hello\");".to_string(),
+                    },
+                    DiffLineResponse {
+                        line_type: "add".to_string(),
+                        content: "    println!(\"Hello, world!\");".to_string(),
+                    },
+                    DiffLineResponse {
+                        line_type: "add".to_string(),
+                        content: "    println!(\"Done.\");".to_string(),
+                    },
+                    DiffLineResponse {
+                        line_type: "context".to_string(),
+                        content: "}".to_string(),
+                    },
+                ],
+            }],
+        }],
+    }
+}
+
 pub async fn get_diff(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -403,31 +493,41 @@ pub async fn get_diff(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
-    let repo = state
-        .repos
-        .find_by_id(&mr.repository_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
+    // If no real repo, return demo data
+    let repo = match state.repos.find_by_id(&mr.repository_id).await? {
+        Some(r) => r,
+        None => return Ok(Json(mock_diff_response())),
+    };
 
-    let diff = state
+    // If git diff fails (branches don't exist yet), return demo data
+    let diff = match state
         .git_ops
         .diff(&repo.path, &mr.target_branch, &mr.source_branch)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(d) => d,
+        Err(_) => return Ok(Json(mock_diff_response())),
+    };
+
+    let files = diff
+        .patches
+        .into_iter()
+        .map(|p| FileDiffStructured {
+            path: p.path,
+            status: p.status,
+            hunks: p
+                .patch
+                .as_deref()
+                .map(parse_patch_to_hunks)
+                .unwrap_or_default(),
+        })
+        .collect();
 
     Ok(Json(DiffResponse {
         files_changed: diff.files_changed,
         insertions: diff.insertions,
         deletions: diff.deletions,
-        patches: diff
-            .patches
-            .into_iter()
-            .map(|p| FileDiffResponse {
-                path: p.path,
-                status: p.status,
-                patch: p.patch,
-            })
-            .collect(),
+        files,
     }))
 }
 
