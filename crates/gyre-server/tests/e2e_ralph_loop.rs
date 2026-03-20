@@ -166,14 +166,16 @@ async fn full_ralph_loop_via_gyre() {
         git_local(&["config", "user.email", "ralph@gyre.local"], &work_dir);
         git_local(&["config", "user.name", "Ralph Worker"], &work_dir);
 
-        // After cloning an empty repo with git 2.28+, we are already on the unborn
-        // `main` branch — `git checkout -b main` would fail. Skip directly to commits.
+        // After cloning an empty repo the local branch name depends on the git
+        // client's `init.defaultBranch` setting (may be "master" or "main").
+        // Use `HEAD:main` to push to the remote `main` ref regardless of the
+        // local branch name.
         std::fs::write(work_dir.join("README.md"), "# gyre-e2e\n").unwrap();
         git_local(&["add", "."], &work_dir);
         git_local(&["commit", "-m", "chore: initial commit"], &work_dir);
 
-        // Push main to establish the base branch
-        let push_main = git_with_token(&["push", "origin", "main"], &work_dir, &agent_token_c);
+        // Push HEAD to establish the base branch as `main` on the remote.
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &work_dir, &agent_token_c);
         assert!(
             push_main.status.success(),
             "git push main failed: {}",

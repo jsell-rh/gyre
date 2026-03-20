@@ -216,7 +216,7 @@ async fn push_valid_conventional_commit_accepted() {
         );
 
         // Push main.
-        git_with_token(&["push", "origin", "main"], &dir, &token_owned)
+        git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned)
     })
     .await
     .unwrap();
@@ -274,7 +274,7 @@ async fn push_nonconventional_commit_rejected_by_gate() {
         std::fs::write(dir.join("init.md"), "init\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let init_push = git_with_token(&["push", "origin", "main"], &dir, &token_owned);
+        let init_push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
         let init_stderr = String::from_utf8_lossy(&init_push.stderr).to_string();
         assert!(
             init_push.status.success(),
@@ -358,7 +358,7 @@ async fn push_em_dash_commit_rejected_by_gate() {
         std::fs::write(dir.join("init.md"), "init\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let init_push = git_with_token(&["push", "origin", "main"], &dir, &token_owned);
+        let init_push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
         let init_stderr = String::from_utf8_lossy(&init_push.stderr).to_string();
         assert!(
             init_push.status.success(),
@@ -459,7 +459,7 @@ async fn push_records_agent_commit_provenance() {
         std::fs::write(dir.join("readme.md"), "# prov\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let push_main = git_with_token(&["push", "origin", "main"], &dir, &agent_token_c);
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
         let push_stderr = String::from_utf8_lossy(&push_main.stderr).to_string();
         assert!(
             push_main.status.success(),
@@ -581,7 +581,7 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
         std::fs::write(dir.join("readme.md"), "# mq\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let push_main = git_with_token(&["push", "origin", "main"], &dir, &agent_token_c);
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
         assert!(push_main.status.success(), "push main failed");
 
         // Feature branch.
@@ -846,7 +846,7 @@ async fn push_non_hex_sha_rejected_in_ref_update() {
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
 
-        let push = git_with_token(&["push", "origin", "main"], &dir, &token_owned);
+        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
         let push_stderr = String::from_utf8_lossy(&push.stderr).to_string();
         assert!(push.status.success(), "initial push failed: {push_stderr}");
     })
