@@ -137,7 +137,9 @@ pub async fn create_task(
     task.parent_task_id = req.parent_task_id.map(Id::new);
     task.labels = req.labels.unwrap_or_default();
     state.tasks.create(&task).await?;
-    let _ = state.event_tx.send(DomainEvent::TaskCreated { id: task.id.to_string() });
+    let _ = state.event_tx.send(DomainEvent::TaskCreated {
+        id: task.id.to_string(),
+    });
     Ok((StatusCode::CREATED, Json(TaskResponse::from(task))))
 }
 

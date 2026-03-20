@@ -349,14 +349,8 @@ impl GitOpsPort for Git2OpsAdapter {
             let tree_oid = builder.write()?;
             let tree = repo.find_tree(tree_oid)?;
             let refname = format!("refs/heads/{branch}");
-            let commit_oid = repo.commit(
-                Some(&refname),
-                &sig,
-                &sig,
-                "Initial commit",
-                &tree,
-                &[],
-            )?;
+            let commit_oid =
+                repo.commit(Some(&refname), &sig, &sig, "Initial commit", &tree, &[])?;
             repo.set_head(&refname)?;
             Ok(commit_oid.to_string())
         })
@@ -447,10 +441,7 @@ mod tests {
             .await
             .unwrap();
 
-        let branches = adapter
-            .list_branches(path.to_str().unwrap())
-            .await
-            .unwrap();
+        let branches = adapter.list_branches(path.to_str().unwrap()).await.unwrap();
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].name, "main");
         assert!(branches[0].is_default);
