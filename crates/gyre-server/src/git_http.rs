@@ -894,7 +894,7 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
         let is_watched = SPEC_WATCHED_PATHS
             .iter()
             .any(|prefix| new_path.starts_with(prefix));
-        let old_is_watched = old_path.map_or(false, |p| {
+        let old_is_watched = old_path.is_some_and(|p| {
             SPEC_WATCHED_PATHS
                 .iter()
                 .any(|prefix| p.starts_with(prefix))
