@@ -93,6 +93,6 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M12: Quality Gates | In Progress | Merge queue gates, repo mirroring, diff viewer |
 | M13: Forge Native | Planned | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
 
-497 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+498 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
