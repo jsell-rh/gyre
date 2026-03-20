@@ -1007,5 +1007,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
+        quality_gates: Arc::new(Mutex::new(HashMap::new())),
+        gate_results: Arc::new(Mutex::new(HashMap::new())),
     })
 }

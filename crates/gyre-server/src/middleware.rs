@@ -143,6 +143,8 @@ mod tests {
             process_registry: base.process_registry.clone(),
             agent_logs: base.agent_logs.clone(),
             agent_log_tx: base.agent_log_tx.clone(),
+            quality_gates: base.quality_gates.clone(),
+            gate_results: base.gate_results.clone(),
         });
         crate::build_router(state)
     }
