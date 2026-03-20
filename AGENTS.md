@@ -257,7 +257,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
-| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | SQLite database URL, e.g. `sqlite://gyre.db`. When set, all 16 port traits persist to SQLite with WAL mode. Unset = in-memory (default, stateless). (M10.1) |
+| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | SQLite database URL, e.g. `sqlite://gyre.db`. When set, all port traits persist to SQLite with WAL mode; Diesel runs pending migrations automatically on startup. Unset = in-memory (default, stateless). (M10.1, M15.1) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
@@ -630,6 +630,8 @@ Key specs to read before making changes:
 | M12 milestone deliverables | [specs/milestones/m12-quality-gates.md](specs/milestones/m12-quality-gates.md) |
 | M13 milestone deliverables | [specs/milestones/m13-forge-native.md](specs/milestones/m13-forge-native.md) |
 | M14 milestone deliverables | [specs/milestones/m14-supply-chain.md](specs/milestones/m14-supply-chain.md) |
+| M15 milestone deliverables | [specs/milestones/m15-diesel-migrations.md](specs/milestones/m15-diesel-migrations.md) |
+| Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
