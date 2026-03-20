@@ -28,8 +28,12 @@
 
         src = craneLib.cleanCargoSource ./.;
 
+        # Native build inputs required for git2, openssl, etc.
+        nativeBuildInputs = with pkgs; [ pkg-config ];
+        buildInputs = with pkgs; [ openssl ];
+
         commonArgs = {
-          inherit src;
+          inherit src nativeBuildInputs buildInputs;
           strictDeps = true;
         };
 
@@ -45,17 +49,23 @@
           cargoExtraArgs = "-p gyre-cli";
         });
 
-        dockerImage = pkgs.dockerTools.buildImage {
+        # Docker image via Nix — uses nix build .#dockerImage
+        # For CI/CD, prefer the Dockerfile for faster builds with layer caching.
+        dockerImage = pkgs.dockerTools.buildLayeredImage {
           name = "gyre-server";
           tag = "latest";
-          copyToRoot = pkgs.buildEnv {
-            name = "image-root";
-            paths = [ gyreServer pkgs.cacert ];
-            pathsToLink = [ "/bin" "/etc" ];
-          };
+          contents = [
+            gyreServer
+            pkgs.cacert
+            pkgs.git          # gyre-server shells out to git
+          ];
           config = {
-            Cmd = [ "/bin/gyre-server" ];
-            ExposedPorts = { "8080/tcp" = {}; };
+            Cmd = [ "${gyreServer}/bin/gyre-server" ];
+            ExposedPorts = { "3000/tcp" = {}; };
+            Env = [
+              "GYRE_BASE_URL=http://localhost:3000"
+              "RUST_LOG=info"
+            ];
           };
         };
       in
@@ -63,7 +73,7 @@
         packages = {
           gyre-server = gyreServer;
           gyre-cli = gyreCli;
-          docker = dockerImage;
+          dockerImage = dockerImage;
           default = gyreServer;
         };
 
@@ -75,6 +85,8 @@
             pre-commit
             actionlint
             git
+            pkg-config
+            openssl
           ];
 
           shellHook = ''

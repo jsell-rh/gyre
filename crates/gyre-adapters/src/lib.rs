@@ -8,10 +8,12 @@
 //! Adapters depend on ports, not the other way around.
 //! Domain logic MUST NOT import this crate.
 
+pub mod compute;
 pub mod git2_ops;
 pub mod jj_ops;
 pub mod sqlite;
 
+pub use compute::{DockerTarget, LocalTarget, SshTarget};
 pub use git2_ops::Git2OpsAdapter;
 pub use jj_ops::JjOpsAdapter;
 pub use sqlite::SqliteStorage;

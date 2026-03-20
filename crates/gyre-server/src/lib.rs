@@ -116,6 +116,8 @@ pub struct AppState {
     pub siem_store: SiemStore,
     /// Broadcast channel for live audit event SSE stream.
     pub audit_broadcast_tx: broadcast::Sender<String>,
+    /// Admin-configured compute targets: id -> ComputeTargetConfig.
+    pub compute_targets: Arc<Mutex<HashMap<String, api::compute::ComputeTargetConfig>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -201,6 +203,7 @@ pub fn build_state(
         audit: Arc::new(mem::MemAuditRepository::default()),
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
+        compute_targets: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
