@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::{MergeQueueEntry, MergeQueueEntryStatus};
 use gyre_ports::MergeQueueRepository;
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::merge_queue;
 
 fn status_to_str(s: &MergeQueueEntryStatus) -> &'static str {
     match s {
@@ -27,62 +30,82 @@ fn str_to_status(s: &str) -> Result<MergeQueueEntryStatus> {
     }
 }
 
-fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<MergeQueueEntry> {
-    let status_str: String = row.get(3)?;
-    Ok(MergeQueueEntry {
-        id: Id::new(row.get::<_, String>(0)?),
-        merge_request_id: Id::new(row.get::<_, String>(1)?),
-        priority: row.get::<_, i64>(2)? as u32,
-        status: str_to_status(&status_str)?,
-        enqueued_at: row.get::<_, i64>(4)? as u64,
-        processed_at: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-        error_message: row.get(6)?,
-    })
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = merge_queue)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct MergeQueueRow {
+    id: String,
+    merge_request_id: String,
+    priority: i32,
+    status: String,
+    enqueued_at: i64,
+    processed_at: Option<i64>,
+    error_message: Option<String>,
+}
+
+impl MergeQueueRow {
+    fn into_entry(self) -> Result<MergeQueueEntry> {
+        Ok(MergeQueueEntry {
+            id: Id::new(self.id),
+            merge_request_id: Id::new(self.merge_request_id),
+            priority: self.priority as u32,
+            status: str_to_status(&self.status)?,
+            enqueued_at: self.enqueued_at as u64,
+            processed_at: self.processed_at.map(|v| v as u64),
+            error_message: self.error_message,
+        })
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = merge_queue)]
+struct MergeQueueRecord<'a> {
+    id: &'a str,
+    merge_request_id: &'a str,
+    priority: i32,
+    status: &'a str,
+    enqueued_at: i64,
+    processed_at: Option<i64>,
+    error_message: Option<&'a str>,
 }
 
 #[async_trait]
 impl MergeQueueRepository for SqliteStorage {
     async fn enqueue(&self, entry: &MergeQueueEntry) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let e = entry.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO merge_queue (id, merge_request_id, priority, status, enqueued_at, processed_at, error_message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    e.id.as_str(),
-                    e.merge_request_id.as_str(),
-                    e.priority as i64,
-                    status_to_str(&e.status),
-                    e.enqueued_at as i64,
-                    e.processed_at.map(|v| v as i64),
-                    e.error_message,
-                ],
-            )
-            .context("insert merge_queue entry")?;
+            let mut conn = pool.get().context("get db connection")?;
+            let record = MergeQueueRecord {
+                id: e.id.as_str(),
+                merge_request_id: e.merge_request_id.as_str(),
+                priority: e.priority as i32,
+                status: status_to_str(&e.status),
+                enqueued_at: e.enqueued_at as i64,
+                processed_at: e.processed_at.map(|v| v as i64),
+                error_message: e.error_message.as_deref(),
+            };
+            diesel::insert_into(merge_queue::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert merge_queue entry")?;
             Ok(())
         })
         .await?
     }
 
     async fn next_pending(&self) -> Result<Option<MergeQueueEntry>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Option<MergeQueueEntry>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, merge_request_id, priority, status, enqueued_at, processed_at, error_message
-                 FROM merge_queue
-                 WHERE status = 'Queued'
-                 ORDER BY priority DESC, enqueued_at ASC
-                 LIMIT 1",
-            )?;
-            let mut rows = stmt.query([])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_entry(row)?))
-            } else {
-                Ok(None)
-            }
+            let mut conn = pool.get().context("get db connection")?;
+            let result = merge_queue::table
+                .filter(merge_queue::status.eq("Queued"))
+                .order((merge_queue::priority.desc(), merge_queue::enqueued_at.asc()))
+                .limit(1)
+                .first::<MergeQueueRow>(&mut *conn)
+                .optional()
+                .context("next pending merge queue entry")?;
+            result.map(|r| r.into_entry()).transpose()
         })
         .await?
     }
@@ -93,7 +116,7 @@ impl MergeQueueRepository for SqliteStorage {
         status: MergeQueueEntryStatus,
         error: Option<String>,
     ) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -106,52 +129,65 @@ impl MergeQueueRepository for SqliteStorage {
                 | MergeQueueEntryStatus::Cancelled
         );
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            let processed_at: Option<i64> = if is_terminal { Some(now as i64) } else { None };
-            conn.execute(
-                "UPDATE merge_queue SET status=?1, error_message=?2, processed_at=COALESCE(?3, processed_at) WHERE id=?4",
-                rusqlite::params![
-                    status_to_str(&status),
-                    error,
-                    processed_at,
-                    id.as_str(),
-                ],
-            )
-            .context("update merge_queue status")?;
+            let mut conn = pool.get().context("get db connection")?;
+            let status_str = status_to_str(&status);
+            if is_terminal {
+                diesel::update(merge_queue::table.find(id.as_str()))
+                    .set((
+                        merge_queue::status.eq(status_str),
+                        merge_queue::error_message.eq(error.as_deref()),
+                        merge_queue::processed_at.eq(Some(now as i64)),
+                    ))
+                    .execute(&mut *conn)
+                    .context("update merge_queue status (terminal)")?;
+            } else {
+                diesel::update(merge_queue::table.find(id.as_str()))
+                    .set((
+                        merge_queue::status.eq(status_str),
+                        merge_queue::error_message.eq(error.as_deref()),
+                    ))
+                    .execute(&mut *conn)
+                    .context("update merge_queue status")?;
+            }
             Ok(())
         })
         .await?
     }
 
     async fn list_queue(&self) -> Result<Vec<MergeQueueEntry>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeQueueEntry>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, merge_request_id, priority, status, enqueued_at, processed_at, error_message
-                 FROM merge_queue
-                 WHERE status NOT IN ('Merged', 'Failed', 'Cancelled')
-                 ORDER BY priority DESC, enqueued_at ASC",
-            )?;
-            let rows = stmt.query_map([], |row| Ok(row_to_entry(row).unwrap()))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let terminal = ["Merged", "Failed", "Cancelled"];
+            let rows = merge_queue::table
+                .filter(diesel::dsl::not(merge_queue::status.eq_any(terminal)))
+                .order((merge_queue::priority.desc(), merge_queue::enqueued_at.asc()))
+                .load::<MergeQueueRow>(&mut *conn)
+                .context("list merge_queue")?;
+            rows.into_iter().map(|r| r.into_entry()).collect()
         })
         .await?
     }
 
     async fn cancel(&self, id: &Id) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "UPDATE merge_queue SET status='Cancelled', processed_at=?1 WHERE id=?2 AND status IN ('Queued', 'Processing')",
-                rusqlite::params![now as i64, id.as_str()],
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(
+                merge_queue::table
+                    .filter(merge_queue::id.eq(id.as_str()))
+                    .filter(merge_queue::status.eq_any(["Queued", "Processing"])),
             )
+            .set((
+                merge_queue::status.eq("Cancelled"),
+                merge_queue::processed_at.eq(Some(now as i64)),
+            ))
+            .execute(&mut *conn)
             .context("cancel merge_queue entry")?;
             Ok(())
         })
@@ -159,20 +195,16 @@ impl MergeQueueRepository for SqliteStorage {
     }
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<MergeQueueEntry>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<MergeQueueEntry>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, merge_request_id, priority, status, enqueued_at, processed_at, error_message
-                 FROM merge_queue WHERE id = ?1",
-            )?;
-            let mut rows = stmt.query([id.as_str()])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_entry(row)?))
-            } else {
-                Ok(None)
-            }
+            let mut conn = pool.get().context("get db connection")?;
+            let result = merge_queue::table
+                .find(id.as_str())
+                .first::<MergeQueueRow>(&mut *conn)
+                .optional()
+                .context("find merge_queue entry by id")?;
+            result.map(|r| r.into_entry()).transpose()
         })
         .await?
     }

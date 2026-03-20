@@ -1,49 +1,86 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
+use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AuditEvent, AuditEventType};
 use gyre_ports::AuditRepository;
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::audit_events;
 
-fn row_to_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEvent> {
-    let details_str: String = row.get(4)?;
-    let details: serde_json::Value =
-        serde_json::from_str(&details_str).unwrap_or(serde_json::Value::Object(Default::default()));
-    let event_type_str: String = row.get(2)?;
-    Ok(AuditEvent {
-        id: Id::new(row.get::<_, String>(0)?),
-        agent_id: Id::new(row.get::<_, String>(1)?),
-        event_type: AuditEventType::from_str(&event_type_str),
-        path: row.get(3)?,
-        details,
-        pid: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
-        timestamp: row.get::<_, i64>(6)? as u64,
-    })
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = audit_events)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct AuditEventRow {
+    id: String,
+    agent_id: String,
+    event_type: String,
+    path: Option<String>,
+    details: String,
+    pid: Option<i32>,
+    timestamp: i64,
+}
+
+impl From<AuditEventRow> for AuditEvent {
+    fn from(r: AuditEventRow) -> Self {
+        let details: serde_json::Value = serde_json::from_str(&r.details)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        AuditEvent {
+            id: Id::new(r.id),
+            agent_id: Id::new(r.agent_id),
+            event_type: AuditEventType::from_str(&r.event_type),
+            path: r.path,
+            details,
+            pid: r.pid.map(|v| v as u32),
+            timestamp: r.timestamp as u64,
+        }
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = audit_events)]
+struct AuditEventRecord<'a> {
+    id: &'a str,
+    agent_id: &'a str,
+    event_type: &'a str,
+    path: Option<&'a str>,
+    details: String,
+    pid: Option<i32>,
+    timestamp: i64,
+}
+
+#[derive(QueryableByName)]
+struct EventTypeStat {
+    #[diesel(sql_type = Text)]
+    event_type: String,
+    #[diesel(sql_type = BigInt)]
+    cnt: i64,
 }
 
 #[async_trait]
 impl AuditRepository for SqliteStorage {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let e = event.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
             let details = serde_json::to_string(&e.details)?;
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO audit_events (id, agent_id, event_type, path, details, pid, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    e.id.as_str(),
-                    e.agent_id.as_str(),
-                    e.event_type.as_str(),
-                    e.path,
-                    details,
-                    e.pid.map(|p| p as i64),
-                    e.timestamp as i64,
-                ],
-            )
-            .context("insert audit_event")?;
+            let event_type_str = e.event_type.as_str().to_string();
+            let record = AuditEventRecord {
+                id: e.id.as_str(),
+                agent_id: e.agent_id.as_str(),
+                event_type: &event_type_str,
+                path: e.path.as_deref(),
+                details,
+                pid: e.pid.map(|p| p as i32),
+                timestamp: e.timestamp as i64,
+            };
+            diesel::insert_into(audit_events::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert audit_event")?;
             Ok(())
         })
         .await?
@@ -57,94 +94,76 @@ impl AuditRepository for SqliteStorage {
         until: Option<u64>,
         limit: usize,
     ) -> Result<Vec<AuditEvent>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.map(|s| s.to_string());
         let event_type = event_type.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || -> Result<Vec<AuditEvent>> {
-            let conn = open_conn(&path)?;
-            let mut conditions: Vec<String> = Vec::new();
-            if since.is_some() {
-                conditions.push(format!("timestamp >= ?{}", conditions.len() + 1));
-            }
-            if until.is_some() {
-                conditions.push(format!("timestamp <= ?{}", conditions.len() + 1));
-            }
-            if agent_id.is_some() {
-                conditions.push(format!("agent_id = ?{}", conditions.len() + 1));
-            }
-            if event_type.is_some() {
-                conditions.push(format!("event_type = ?{}", conditions.len() + 1));
-            }
-            let where_clause = if conditions.is_empty() {
-                String::new()
-            } else {
-                format!("WHERE {}", conditions.join(" AND "))
-            };
-            let sql = format!(
-                "SELECT id, agent_id, event_type, path, details, pid, timestamp
-                 FROM audit_events {} ORDER BY timestamp DESC LIMIT {}",
-                where_clause, limit
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = audit_events::table.into_boxed();
             if let Some(s) = since {
-                bind_values.push(Box::new(s as i64));
+                query = query.filter(audit_events::timestamp.ge(s as i64));
             }
             if let Some(u) = until {
-                bind_values.push(Box::new(u as i64));
+                query = query.filter(audit_events::timestamp.le(u as i64));
             }
             if let Some(ref a) = agent_id {
-                bind_values.push(Box::new(a.clone()));
+                query = query.filter(audit_events::agent_id.eq(a.as_str()));
             }
             if let Some(ref et) = event_type {
-                bind_values.push(Box::new(et.clone()));
+                query = query.filter(audit_events::event_type.eq(et.as_str()));
             }
-            let refs: Vec<&dyn rusqlite::types::ToSql> =
-                bind_values.iter().map(|b| b.as_ref()).collect();
-            let rows = stmt.query_map(refs.as_slice(), row_to_audit_event)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let rows = query
+                .order(audit_events::timestamp.desc())
+                .limit(limit as i64)
+                .load::<AuditEventRow>(&mut *conn)
+                .context("query audit_events")?;
+            Ok(rows.into_iter().map(AuditEvent::from).collect())
         })
         .await?
     }
 
     async fn count(&self) -> Result<u64> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<u64> {
-            let conn = open_conn(&path)?;
-            let n: i64 =
-                conn.query_row("SELECT COUNT(*) FROM audit_events", [], |row| row.get(0))?;
+            let mut conn = pool.get().context("get db connection")?;
+            let n = audit_events::table
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("count audit_events")?;
             Ok(n as u64)
         })
         .await?
     }
 
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT event_type, COUNT(*) as cnt FROM audit_events GROUP BY event_type ORDER BY cnt DESC",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = diesel::sql_query(
+                "SELECT event_type, COUNT(*) as cnt \
+                 FROM audit_events GROUP BY event_type ORDER BY cnt DESC",
+            )
+            .load::<EventTypeStat>(&mut *conn)
+            .context("stats_by_type")?;
+            Ok(rows
+                .into_iter()
+                .map(|r| (r.event_type, r.cnt as u64))
+                .collect())
         })
         .await?
     }
 
     async fn since_timestamp(&self, since: u64, limit: usize) -> Result<Vec<AuditEvent>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<AuditEvent>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(&format!(
-                "SELECT id, agent_id, event_type, path, details, pid, timestamp
-                 FROM audit_events WHERE timestamp > ?1
-                 ORDER BY timestamp ASC LIMIT {}",
-                limit
-            ))?;
-            let rows = stmt.query_map(rusqlite::params![since as i64], row_to_audit_event)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = audit_events::table
+                .filter(audit_events::timestamp.gt(since as i64))
+                .order(audit_events::timestamp.asc())
+                .limit(limit as i64)
+                .load::<AuditEventRow>(&mut *conn)
+                .context("since_timestamp audit_events")?;
+            Ok(rows.into_iter().map(AuditEvent::from).collect())
         })
         .await?
     }
