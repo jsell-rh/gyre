@@ -51,7 +51,7 @@ enum Commands {
     /// Register this CLI as a Gyre agent and save credentials to ~/.gyre/config
     Init {
         /// Gyre server base URL
-        #[arg(long, default_value = "http://localhost:3333")]
+        #[arg(long, default_value = "http://localhost:3000")]
         server: String,
         /// Agent name to register
         #[arg(long)]
