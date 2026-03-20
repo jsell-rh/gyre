@@ -155,11 +155,131 @@ The spec-to-code binding (from `agent-gates.md`) extends to IRs:
 | SBOM computed after the fact | SBOM is the IR's `components:` block (built in) |
 | Code review is the bottleneck | IR review is tractable; compiler is trusted |
 
+## Hooks: The Trust Boundary Seam
+
+TSF's `hooks:` block is the escape hatch for business logic the IR can't express. Hook code is **copied unchanged** by the compiler - it is not generated from audited components and is **outside the trust boundary**.
+
+### What Hooks Are
+
+A hook is a custom code file at a well-defined entry point in the application lifecycle. The IR declares where hooks exist:
+
+```yaml
+hooks:
+  - name: validate-order
+    trigger: before_create
+    resource: Order
+    file: hooks/validate_order.go
+```
+
+The compiler copies `hooks/validate_order.go` into the output unchanged. It does not validate, audit, or transform it. The hook runs with the same permissions as the compiled application.
+
+### Why This Matters for Gyre
+
+Hooks break the clean trust model. With pure IR:
+- Agent writes IR -> schema validates -> compiler deterministically produces code -> trusted
+- Review surface: the IR (small, declarative)
+
+With hooks:
+- Agent writes IR + arbitrary hook code -> IR is validated, hook code is NOT -> compiler copies hook unchanged -> hook is untrusted
+- Review surface: the IR (small) + all hook files (arbitrary size and complexity)
+
+### Split Review Model
+
+Gyre's gate chain should distinguish between IR-only changes and changes that touch hooks:
+
+| MR Contains | Review Path |
+|---|---|
+| IR changes only (version bumps, resources, config) | Fast path: gate agent reviews IR, foundry validation gate verifies deterministic output. Minimal review. |
+| Hook code changes | Full path: security gate agent reviews hook code, accountability gate checks hook against spec, all standard gates apply. |
+| Both IR and hook changes | Full path applies to the entire MR. |
+
+The forge can detect this automatically by checking which files in the MR are under `hooks/` vs. changes to `app.foundry.yaml`.
+
+### AIBOM Distinction
+
+The AIBOM should clearly separate trusted and untrusted code provenance:
+
+```json
+{
+  "foundry": {
+    "trusted_code": {
+      "source": "compiler",
+      "components": [...],
+      "deterministic": true,
+      "review_required": false
+    },
+    "untrusted_code": {
+      "source": "agent-written hooks",
+      "files": [
+        {
+          "path": "hooks/validate_order.go",
+          "agent_id": "worker-42",
+          "commit_sha": "abc123",
+          "review_status": "approved",
+          "gate_results": ["security: passed", "accountability: passed"]
+        }
+      ],
+      "deterministic": false,
+      "review_required": true
+    }
+  }
+}
+```
+
+Consumers of the AIBOM can immediately see: 95% of this binary came from audited components via deterministic compilation. 5% is custom hook code written by agent worker-42, reviewed by security and accountability gates.
+
+### Hook Minimization as a Quality Signal
+
+The ratio of trusted (compiler-generated) to untrusted (hook) code is a quality metric. A high hook ratio means the IR isn't expressive enough for the use case, or agents are working around the IR instead of extending it.
+
+Gyre's analytics system could track this:
+- Hook LOC / total LOC per application
+- Hook count trend over time
+- Which resources have the most hooks (candidates for new IR features)
+
+## Component Lifecycle
+
+### Routine Version Bump
+
+1. Component maintainer publishes `foundry-postgres v1.0.1`
+2. New version audited, SHA-256 computed, added to registry as a new immutable entry
+3. `v1.0.0` remains unchanged - nothing breaks for existing consumers
+4. Someone (human, agent, or automated) updates `app.foundry.yaml` to pin `v1.0.1`
+5. `forge compile` resolves new version, verifies audit hash, generates wiring code
+6. Diff is minimal: one version string in IR + deterministic regenerated code
+
+### Security Vulnerability
+
+1. CVE discovered in `foundry-http v1.0.0`
+2. Patched `v1.0.1` published with fix, audited, hashed
+3. With Gyre: the forge knows every repo and every `app.foundry.yaml`
+4. Forge auto-creates a task per affected repo: "Update foundry-http v1.0.0 -> v1.0.1"
+5. Agent dispatched per repo: update version pin, recompile, run tests
+6. Diff is mechanically verifiable - only the version pin changed, output is deterministic
+7. Fleet-wide patching becomes: N parallel agents updating N repos with identical, verifiable changes
+
+### Breaking Change (Major Version)
+
+1. `foundry-postgres v2.0.0` changes the component interface
+2. Requires IR changes (new config fields, changed semantics) - not just a version bump
+3. Agent needs to understand the migration path and update IR accordingly
+4. Gate agent reviews IR changes against the component's changelog
+5. The compiler catches IR/component mismatches at compile time (schema validation fails if new required fields are missing)
+
+### Speculative Upgrade Preview
+
+Because the compiler is deterministic, Gyre can preview upgrades without committing:
+- Run `forge compile` with the new component version against every repo's current IR
+- Diff the output against current compiled code
+- Report: "upgrading foundry-http to v1.0.1 across 12 repos changes 47 files with 0 conflicts"
+- Or: "upgrading foundry-postgres to v2.0.0 across 12 repos fails compilation in 3 repos due to missing config fields"
+
+This is dependency upgrade impact analysis for free.
+
 ## What This Does NOT Change
 
 - **Gyre's core architecture stays the same.** TSF is an optional integration, not a replacement for any Gyre component.
 - **Not all code goes through TSF.** Gyre itself (the platform) is written in Rust, not compiled from IR. TSF applies to applications built on Gyre, not Gyre itself.
-- **Hooks are still arbitrary code.** TSF's `hooks:` block allows custom logic at defined entry points. These hooks are NOT covered by the trust boundary and still need traditional review.
 - **The agent still needs to understand the domain.** Writing a good IR requires understanding what resources exist, what operations they need, and how they relate. TSF constrains the output format, not the design thinking.
 
 ## Compatibility Requirements
