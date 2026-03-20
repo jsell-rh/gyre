@@ -75,7 +75,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
 - **Rust** - server, CLI, agent runtime
 - **Svelte 5 + shadcn-svelte** - web UI (pre-built, no Node required to run)
-- **SQLite** - default storage; WAL mode, full persistence when `GYRE_DATABASE_URL` is set
+- **SQLite + Diesel ORM** - default storage; WAL mode, type-safe queries, auto-migrations, full persistence when `GYRE_DATABASE_URL` is set
 - **NixOS** - single definition builds server, Docker image, QEMU VM, LXC container
 - **WireGuard** - agent networking mesh
 
