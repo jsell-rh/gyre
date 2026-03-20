@@ -23,7 +23,10 @@ use tempfile::TempDir;
 /// Generate a unique project/entity ID prefix to avoid on-disk repo collisions
 /// between successive test runs (repos persist on disk; each run must use fresh paths).
 fn uniq(base: &str) -> String {
-    format!("{base}-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..8])
+    format!(
+        "{base}-{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -39,7 +42,10 @@ fn git_with_token(args: &[&str], dir: &std::path::Path, token: &str) -> std::pro
         .env("GIT_ASKPASS", "true")
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-        .env("GIT_CONFIG_VALUE_0", format!("Authorization: Bearer {token}"))
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Bearer {token}"),
+        )
         .output()
         .expect("failed to run git")
 }
@@ -130,7 +136,11 @@ async fn clone_via_smart_http() {
 
     let (clone_ok, clone_target_exists) = tokio::task::spawn_blocking(move || {
         let target = clone_dir_c.path().join("cloned");
-        let result = git_with_token(&["clone", &clone_url, "cloned"], clone_dir_c.path(), &token_owned);
+        let result = git_with_token(
+            &["clone", &clone_url, "cloned"],
+            clone_dir_c.path(),
+            &token_owned,
+        );
         let stderr = String::from_utf8_lossy(&result.stderr).to_string();
         let ok = result.status.success()
             || stderr.contains("empty repository")
@@ -145,7 +155,10 @@ async fn clone_via_smart_http() {
     assert!(clone_ok, "git clone failed");
 
     // After clone, the directory exists (Arc keeps TempDir alive through the closure).
-    assert!(clone_target_exists, "clone target directory should exist after clone");
+    assert!(
+        clone_target_exists,
+        "clone target directory should exist after clone"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +210,10 @@ async fn push_valid_conventional_commit_accepted() {
 
         std::fs::write(dir.join("readme.md"), "# test\n").unwrap();
         git_local(&["add", "."], &dir);
-        git_local(&["commit", "-m", "feat: initial commit with valid message"], &dir);
+        git_local(
+            &["commit", "-m", "feat: initial commit with valid message"],
+            &dir,
+        );
 
         // Push main.
         git_with_token(&["push", "origin", "main"], &dir, &token_owned)
@@ -275,11 +291,7 @@ async fn push_nonconventional_commit_rejected_by_gate() {
             &dir,
         );
 
-        let push_out = git_with_token(
-            &["push", "origin", "feat/bad-msg"],
-            &dir,
-            &token_owned,
-        );
+        let push_out = git_with_token(&["push", "origin", "feat/bad-msg"], &dir, &token_owned);
         let stderr = String::from_utf8_lossy(&push_out.stderr).to_string();
         (push_out.status.success(), stderr)
     })
@@ -367,8 +379,7 @@ async fn push_em_dash_commit_rejected_by_gate() {
             &dir,
         );
 
-        let push_out =
-            git_with_token(&["push", "origin", "feat/emdash"], &dir, &token_owned);
+        let push_out = git_with_token(&["push", "origin", "feat/emdash"], &dir, &token_owned);
         let stderr = String::from_utf8_lossy(&push_out.stderr).to_string();
         (push_out.status.success(), stderr)
     })
@@ -450,14 +461,21 @@ async fn push_records_agent_commit_provenance() {
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
         let push_main = git_with_token(&["push", "origin", "main"], &dir, &agent_token_c);
         let push_stderr = String::from_utf8_lossy(&push_main.stderr).to_string();
-        assert!(push_main.status.success(), "push main failed: {push_stderr}");
+        assert!(
+            push_main.status.success(),
+            "push main failed: {push_stderr}"
+        );
 
         // Feature branch commit.
         git_local(&["checkout", "-b", "feat/prov-feature"], &dir);
         std::fs::write(dir.join("prov.txt"), "provenance\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(
-            &["commit", "-m", "feat: add provenance tracking file TASK-001"],
+            &[
+                "commit",
+                "-m",
+                "feat: add provenance tracking file TASK-001",
+            ],
             &dir,
         );
         let push_feat = git_with_token(
@@ -466,7 +484,10 @@ async fn push_records_agent_commit_provenance() {
             &agent_token_c,
         );
         let push_stderr = String::from_utf8_lossy(&push_feat.stderr).to_string();
-        assert!(push_feat.status.success(), "push feature failed: {push_stderr}");
+        assert!(
+            push_feat.status.success(),
+            "push feature failed: {push_stderr}"
+        );
     })
     .await
     .unwrap();
@@ -567,12 +588,12 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
         git_local(&["checkout", "-b", "feat/mq-feature"], &dir);
         std::fs::write(dir.join("feature.txt"), "merge queue feature\n").unwrap();
         git_local(&["add", "."], &dir);
-        git_local(&["commit", "-m", "feat: implement merge queue feature"], &dir);
-        let push_feat = git_with_token(
-            &["push", "origin", "feat/mq-feature"],
+        git_local(
+            &["commit", "-m", "feat: implement merge queue feature"],
             &dir,
-            &agent_token_c,
         );
+        let push_feat =
+            git_with_token(&["push", "origin", "feat/mq-feature"], &dir, &agent_token_c);
         assert!(push_feat.status.success(), "push feat failed");
     })
     .await
@@ -629,7 +650,10 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
         }
     }
 
-    assert_eq!(final_status, "merged", "MR should be auto-merged by the queue processor");
+    assert_eq!(
+        final_status, "merged",
+        "MR should be auto-merged by the queue processor"
+    );
 
     // Verify the feature commit appears on main.
     let commits: serde_json::Value = client
@@ -643,14 +667,19 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
         .unwrap();
 
     let commit_list = commits.as_array().unwrap();
-    assert!(!commit_list.is_empty(), "main branch should have commits after merge");
+    assert!(
+        !commit_list.is_empty(),
+        "main branch should have commits after merge"
+    );
 
     let messages: Vec<&str> = commit_list
         .iter()
         .filter_map(|c| c["message"].as_str())
         .collect();
     assert!(
-        messages.iter().any(|m| m.contains("feat") || m.contains("initial")),
+        messages
+            .iter()
+            .any(|m| m.contains("feat") || m.contains("initial")),
         "feature commit should appear on main after merge: {:?}",
         messages
     );
@@ -764,13 +793,17 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
         .unwrap();
 
     let nodes = graph["nodes"].as_array().unwrap();
-    let mr_b_node = nodes
-        .iter()
-        .find(|n| n["mr_id"].as_str() == Some(&mr_b_id));
-    assert!(mr_b_node.is_some(), "MR-B should still be in the queue graph");
+    let mr_b_node = nodes.iter().find(|n| n["mr_id"].as_str() == Some(&mr_b_id));
+    assert!(
+        mr_b_node.is_some(),
+        "MR-B should still be in the queue graph"
+    );
     let b_node = mr_b_node.unwrap();
     assert!(
-        b_node["depends_on"].as_array().unwrap().contains(&serde_json::json!(mr_a_id)),
+        b_node["depends_on"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(mr_a_id)),
         "MR-B dependency on MR-A should be visible in the graph"
     );
 }
@@ -832,7 +865,9 @@ async fn push_non_hex_sha_rejected_in_ref_update() {
     // The server may return a non-200 status (git receive-pack may fail on invalid input).
     // The critical assertion is that refs/heads/injected is NOT recorded in agent-commits.
     let resp = client
-        .post(format!("{base_url}/git/{proj}/sha-repo.git/git-receive-pack"))
+        .post(format!(
+            "{base_url}/git/{proj}/sha-repo.git/git-receive-pack"
+        ))
         .header("Authorization", &auth_hdr)
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(pkt_body.into_bytes())
@@ -885,9 +920,8 @@ async fn clone_without_auth_rejected() {
     let proj = uniq("proj-noauth");
     create_repo(&client, &api, &auth_hdr, &proj, "noauth-repo").await;
 
-    let info_refs_url = format!(
-        "{base_url}/git/{proj}/noauth-repo.git/info/refs?service=git-upload-pack"
-    );
+    let info_refs_url =
+        format!("{base_url}/git/{proj}/noauth-repo.git/info/refs?service=git-upload-pack");
 
     // Request without Authorization header.
     let resp = client.get(&info_refs_url).send().await.unwrap();
@@ -968,8 +1002,7 @@ async fn push_to_mirror_repo_rejected() {
     // (the mirror-check is already covered by server unit tests), but we DO
     // verify the receive-pack endpoint for non-mirror repos returns 200.
     let proj = uniq("proj-mirror");
-    let _repo_id =
-        create_repo(&client, &api, &auth_hdr, &proj, "mirror-repo").await;
+    let _repo_id = create_repo(&client, &api, &auth_hdr, &proj, "mirror-repo").await;
 
     let info_refs_resp = client
         .get(format!(
