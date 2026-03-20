@@ -109,10 +109,194 @@ MR enters merge queue
     -> RequiredApprovals gates check review count
   -> Merge processor polls gate status every cycle
     -> All passed: proceed with merge
-    -> Any failed: block, notify author agent with failure details
+    -> Any failed: notify author, create task if session ended
     -> Any pending/running: requeue, check next cycle
-  -> On merge: record which gates passed, with gate agent identities
+  -> On merge: produce signed merge attestation bundle
 ```
+
+### Gate Failure Feedback
+
+When a gate fails, the forge must get feedback to the right agent as fast as possible. Speed matters - a gate failure is a Ralph loop event, not a separate workflow.
+
+#### Immediate: Typed Message to Author Agent
+
+The forge sends a `GateFailure` message to the MR's author agent via WebSocket:
+
+```json
+{
+  "type": "GateFailure",
+  "mr_id": "MR-042",
+  "gate_name": "security-review",
+  "gate_type": "AgentReview",
+  "status": "Failed",
+  "output": "ChangesRequested: SQL query in handlers.rs:47 uses string interpolation...",
+  "spec_ref": "specs/system/identity-security.md@abc123",
+  "attempt": 2,
+  "gate_agent_id": "security-gate-7"
+}
+```
+
+If the author agent's session is still alive, it can react in the same Ralph loop cycle: read the feedback, fix the issue, re-push, gates re-run. Zero human intervention.
+
+#### Deferred: Task Creation
+
+If the author agent's session has ended (lifetime expired, context exhausted) OR the gate has failed 3+ times on the same MR, the forge creates a task:
+
+```
+title: "Gate failure: {gate_name} on MR #{mr_id} (attempt {n})"
+status: Backlog
+priority: High
+labels: ["gate-failure", "auto-created"]
+description: |
+  Gate '{gate_name}' failed on MR #{mr_id}.
+
+  Failure output:
+  {gate output}
+
+  Spec reference: {spec_ref}
+  Attempts: {n}
+  Author agent: {agent_id} (session ended)
+
+  Fix the issue and re-push to trigger gate re-evaluation.
+```
+
+The CEO agent picks this up in its next OBSERVE cycle and dispatches a new agent.
+
+#### Escalation
+
+- **Security gate failure:** The Security agent persona is notified in addition to the author. Critical security findings escalate to the Overseer (human).
+- **3+ consecutive failures on the same gate:** The CEO agent is notified directly. This is a signal that the task may need re-scoping or the spec may be ambiguous.
+- **All gates failed:** The MR is removed from the merge queue. A task is created to reassess the approach.
+
+---
+
+## Part 3: Cryptographic Gate Attestation
+
+### The Problem
+
+Gate results are currently just database records. There's no cryptographic proof that gates actually ran and passed. An admin with database access could mark a gate as passed without it running. A compromised merge processor could skip gate checks.
+
+### Merge Attestation Bundle
+
+When all gates pass and a merge executes, the forge produces a **merge attestation bundle** - a signed document attached to the merge commit:
+
+```json
+{
+  "merge_attestation_version": "1.0",
+  "mr_id": "MR-042",
+  "merge_commit_sha": "789abc",
+  "merged_at": "2026-03-20T14:30:00Z",
+  "spec_ref": "specs/system/identity-security.md@abc123",
+  "spec_approval": {
+    "approver": "user:jsell",
+    "approved_at": "2026-03-19T10:00:00Z",
+    "signature": "<sigstore signature on spec approval>"
+  },
+  "author": {
+    "agent_id": "worker-42",
+    "oidc_sub": "agent:worker-42",
+    "stack_attestation": "sha256:stack-fingerprint...",
+    "attestation_level": 3
+  },
+  "gates": [
+    {
+      "name": "tests",
+      "type": "TestCommand",
+      "status": "Passed",
+      "output_hash": "sha256:...",
+      "started_at": "2026-03-20T14:20:00Z",
+      "finished_at": "2026-03-20T14:22:00Z",
+      "signed_by": "forge",
+      "signature": "<sigstore signature by forge OIDC identity>"
+    },
+    {
+      "name": "architecture-lint",
+      "type": "LintCommand",
+      "status": "Passed",
+      "output_hash": "sha256:...",
+      "started_at": "2026-03-20T14:20:00Z",
+      "finished_at": "2026-03-20T14:20:30Z",
+      "signed_by": "forge",
+      "signature": "<sigstore signature by forge OIDC identity>"
+    },
+    {
+      "name": "security-review",
+      "type": "AgentReview",
+      "status": "Passed",
+      "reviewer_agent_id": "security-gate-7",
+      "reviewer_oidc_sub": "agent:security-gate-7",
+      "reviewer_stack_attestation": "sha256:...",
+      "review_decision": "Approved",
+      "review_body_hash": "sha256:...",
+      "signed_by": "agent:security-gate-7",
+      "signature": "<sigstore signature by gate agent's OIDC identity>"
+    },
+    {
+      "name": "spec-alignment-review",
+      "type": "AgentReview",
+      "status": "Passed",
+      "reviewer_agent_id": "accountability-gate-3",
+      "reviewer_oidc_sub": "agent:accountability-gate-3",
+      "reviewer_stack_attestation": "sha256:...",
+      "review_decision": "Approved",
+      "review_body_hash": "sha256:...",
+      "signed_by": "agent:accountability-gate-3",
+      "signature": "<sigstore signature by gate agent's OIDC identity>"
+    }
+  ],
+  "bundle_signature": "<sigstore signature by forge over entire bundle>"
+}
+```
+
+### What Gets Signed and By Whom
+
+| Component | Signed By | Proves |
+|---|---|---|
+| Spec approval | Approver (human or agent) | This version of the spec was reviewed and approved |
+| Author commits | Author agent (Sigstore/OIDC) | This agent produced this code with this stack |
+| TestCommand/LintCommand results | Forge (Sigstore/OIDC) | The forge ran this command and it passed |
+| AgentReview results | Gate agent (Sigstore/OIDC) | This agent reviewed the code and approved it |
+| Merge attestation bundle | Forge (Sigstore/OIDC) | All of the above is true and the merge was legitimate |
+
+Each signer uses their own OIDC identity. The forge signs with its server identity. Gate agents sign with their scoped OIDC tokens. The result is a **multi-party attestation** where no single entity can forge the complete bundle.
+
+### Verification
+
+Anyone who trusts Gyre's OIDC issuer can verify the entire bundle:
+
+1. Verify bundle_signature against Gyre's OIDC issuer
+2. For each gate, verify its signature against the signer's OIDC identity
+3. Verify the spec approval signature
+4. Verify the author's commit signatures via Rekor transparency log
+5. Check that all gate results reference the same MR and spec
+
+This can be done offline, after the fact, by auditors, compliance teams, or other Gyre instances (federation).
+
+### Storage
+
+Merge attestation bundles are stored:
+- As a **git note** on the merge commit (accessible via `git notes show`)
+- In the **audit_events** table for queryability
+- In **Rekor** transparency log for non-repudiation
+- In the **AIBOM** for each release that includes the merge commit
+
+### The Complete Provenance Chain
+
+```
+spec@SHA (approved, signed by approver)
+  -> task (references spec@SHA)
+    -> agent dispatched (OIDC identity, stack attested)
+      -> commits (Sigstore signed by agent)
+        -> gate: tests passed (signed by forge)
+        -> gate: lint passed (signed by forge)
+        -> gate: security agent approved (signed by gate agent)
+        -> gate: accountability agent approved (signed by gate agent)
+      -> merge attestation bundle (signed by forge, contains all above)
+        -> merge commit (bundle attached as git note)
+          -> release AIBOM (includes all bundles)
+```
+
+Every link is cryptographic. Every signer is independently verifiable. No single point of trust.
 
 ---
 
