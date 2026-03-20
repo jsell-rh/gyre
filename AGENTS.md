@@ -255,10 +255,23 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 // 4. Query activity log over WebSocket:
 {"type":"ActivityQuery","since":1234567800,"limit":50}
 {"type":"ActivityResponse","events":[...]}
+
+// 5. Domain event push (server → client, M10.2) — emitted automatically on mutations:
+{"type":"DomainEvent","event":"AgentCreated","id":"<uuid>"}
+{"type":"DomainEvent","event":"AgentStatusChanged","id":"<uuid>","status":"Active"}
+{"type":"DomainEvent","event":"TaskCreated","id":"<uuid>"}
+{"type":"DomainEvent","event":"TaskTransitioned","id":"<uuid>","status":"in_progress"}
+{"type":"DomainEvent","event":"MrCreated","id":"<uuid>"}
+{"type":"DomainEvent","event":"MrStatusChanged","id":"<uuid>","status":"merged"}
+{"type":"DomainEvent","event":"ActivityRecorded","id":"<uuid>","event_type":"RUN_STARTED"}
+{"type":"DomainEvent","event":"QueueUpdated"}
+{"type":"DomainEvent","event":"DataSeeded"}
 ```
 
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
 The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n>`.
+
+**Domain events (M10.2):** After authenticating, clients receive server-push `DomainEvent` frames whenever agents, tasks, or MRs are mutated via REST. No client request needed — the server broadcasts to all connected sessions automatically. See `crates/gyre-server/src/domain_events.rs` for the full enum.
 
 #### AG-UI Event Taxonomy (`gyre-common::AgEventType`)
 
