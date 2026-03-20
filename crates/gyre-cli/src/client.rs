@@ -203,6 +203,36 @@ impl GyreClient {
         }
         serde_json::from_str(&text).context("parsing MR response")
     }
+
+    /// Call POST /api/v1/release/prepare and return the JSON response.
+    pub async fn release_prepare(
+        &self,
+        repo_id: &str,
+        branch: Option<&str>,
+        from: Option<&str>,
+        create_mr: bool,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "repo_id": repo_id,
+            "branch": branch,
+            "from": from,
+            "create_mr": create_mr,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/release/prepare", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("release prepare failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing release prepare response")
+    }
 }
 
 #[cfg(test)]
