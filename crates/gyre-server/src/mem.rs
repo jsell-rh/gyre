@@ -1049,5 +1049,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
+        spawn_log: Arc::new(Mutex::new(HashMap::new())),
     })
 }

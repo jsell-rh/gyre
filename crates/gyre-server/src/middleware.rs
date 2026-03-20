@@ -148,6 +148,7 @@ mod tests {
             push_gate_registry: base.push_gate_registry.clone(),
             repo_push_gates: base.repo_push_gates.clone(),
             speculative_results: base.speculative_results.clone(),
+            spawn_log: base.spawn_log.clone(),
         });
         crate::build_router(state)
     }
