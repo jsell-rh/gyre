@@ -158,6 +158,11 @@ pub struct AppState {
     pub agent_stacks: Arc<Mutex<HashMap<String, api::stack_attest::AgentStack>>>,
     /// Repo stack attestation policies: repo_id -> required fingerprint (M14.2).
     pub repo_stack_policies: Arc<Mutex<HashMap<String, String>>>,
+    /// Base SQLite storage instance (the "default" tenant).
+    /// When set, handlers may call `.with_tenant(tenant_id)` to obtain a
+    /// per-request tenant-scoped repository handle without re-opening the DB.
+    /// None when running with in-memory stores (dev/test without GYRE_DATABASE_URL).
+    pub db_storage: Option<Arc<gyre_adapters::SqliteStorage>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -342,6 +347,7 @@ pub fn build_state(
                     .unwrap_or_else(|e| panic!("Failed to connect to PostgreSQL: {e}")),
             )
         });
+    let db_storage = sqlite_db.clone();
 
     macro_rules! store {
         ($trait:ty, $mem:expr) => {
@@ -421,6 +427,7 @@ pub fn build_state(
         ),
         agent_stacks: Arc::new(Mutex::new(HashMap::new())),
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
+        db_storage,
     })
 }
 

@@ -1111,5 +1111,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         agent_stacks: Arc::new(Mutex::new(HashMap::new())),
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
+        db_storage: None,
     })
 }
