@@ -4,6 +4,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+  import { detectLang, highlightLine } from '../lib/syntaxHighlight.js';
 
   let { mr: initialMr, repo, onBack } = $props();
 
@@ -113,6 +114,9 @@
     if (reviews.length > 0) return 1;
     return 0;
   });
+
+  // Syntax highlighting language
+  let selectedLang = $derived(selectedFile ? detectLang(selectedFile) : 'text');
 </script>
 
 <div class="panel">
@@ -376,7 +380,7 @@
                           <span class="line-gutter">
                             {line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
                           </span>
-                          <code class="line-content">{line.content}</code>
+                          <code class="line-content">{@html highlightLine(line.content, selectedLang)}</code>
                         </div>
                       {/each}
                     </div>
@@ -1078,4 +1082,10 @@
     font-size: var(--text-sm);
     text-align: center;
   }
+
+  /* Syntax highlighting token colors */
+  :global(.hl-kw)  { color: #cc99ff; }
+  :global(.hl-str) { color: #99cc88; }
+  :global(.hl-cmt) { color: #6b7a8d; font-style: italic; }
+  :global(.hl-num) { color: #f09a3e; }
 </style>
