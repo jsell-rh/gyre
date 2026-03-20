@@ -685,70 +685,70 @@ mod tests {
 
     #[test]
     fn cli_verify() {
-        #[test]
-        fn cli_release_prepare_parses() {
-            let args = Cli::try_parse_from(["gyre", "release", "prepare", "--repo-id", "repo-123"]);
-            assert!(args.is_ok());
-            if let Commands::Release {
-                command:
-                    ReleaseCommands::Prepare {
-                        repo_id,
-                        branch,
-                        from,
-                        create_mr,
-                        markdown,
-                        ..
-                    },
-            } = args.unwrap().command
-            {
-                assert_eq!(repo_id, "repo-123");
-                assert!(branch.is_none());
-                assert!(from.is_none());
-                assert!(!create_mr);
-                assert!(!markdown);
-            } else {
-                panic!("Expected Release Prepare");
-            }
-        }
-
-        #[test]
-        fn cli_release_prepare_with_options_parses() {
-            let args = Cli::try_parse_from([
-                "gyre",
-                "release",
-                "prepare",
-                "--repo-id",
-                "repo-456",
-                "--branch",
-                "main",
-                "--from",
-                "v1.2.3",
-                "--create-mr",
-                "--markdown",
-            ]);
-            assert!(args.is_ok());
-            if let Commands::Release {
-                command:
-                    ReleaseCommands::Prepare {
-                        repo_id,
-                        branch,
-                        from,
-                        create_mr,
-                        markdown,
-                        ..
-                    },
-            } = args.unwrap().command
-            {
-                assert_eq!(repo_id, "repo-456");
-                assert_eq!(branch.as_deref(), Some("main"));
-                assert_eq!(from.as_deref(), Some("v1.2.3"));
-                assert!(create_mr);
-                assert!(markdown);
-            } else {
-                panic!("Expected Release Prepare with options");
-            }
-        }
-
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_release_prepare_parses() {
+        let args = Cli::try_parse_from(["gyre", "release", "prepare", "--repo-id", "repo-123"]);
+        assert!(args.is_ok());
+        if let Commands::Release {
+            command:
+                ReleaseCommands::Prepare {
+                    repo_id,
+                    branch,
+                    from,
+                    create_mr,
+                    markdown,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(repo_id, "repo-123");
+            assert!(branch.is_none());
+            assert!(from.is_none());
+            assert!(!create_mr);
+            assert!(!markdown);
+        } else {
+            panic!("Expected Release Prepare");
+        }
+    }
+
+    #[test]
+    fn cli_release_prepare_with_options_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "release",
+            "prepare",
+            "--repo-id",
+            "repo-456",
+            "--branch",
+            "main",
+            "--from",
+            "v1.2.3",
+            "--create-mr",
+            "--markdown",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Release {
+            command:
+                ReleaseCommands::Prepare {
+                    repo_id,
+                    branch,
+                    from,
+                    create_mr,
+                    markdown,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(repo_id, "repo-456");
+            assert_eq!(branch.as_deref(), Some("main"));
+            assert_eq!(from.as_deref(), Some("v1.2.3"));
+            assert!(create_mr);
+            assert!(markdown);
+        } else {
+            panic!("Expected Release Prepare with options");
+        }
     }
 }
