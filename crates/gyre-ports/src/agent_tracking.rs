@@ -16,6 +16,12 @@ pub trait AgentCommitRepository: Send + Sync {
 
     /// Find the commit mapping for a specific SHA.
     async fn find_by_commit(&self, sha: &str) -> Result<Option<AgentCommit>>;
+
+    /// Find all commits associated with a given task ID.
+    async fn find_by_task(&self, task_id: &str) -> Result<Vec<AgentCommit>>;
+
+    /// Find all commits in a repository at a specific Ralph loop step.
+    async fn find_by_ralph_step(&self, repo_id: &Id, ralph_step: &str) -> Result<Vec<AgentCommit>>;
 }
 
 #[async_trait]

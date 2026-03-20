@@ -1,12 +1,18 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::AgentCommit;
+use gyre_domain::{AgentCommit, RalphStep};
 use gyre_ports::AgentCommitRepository;
 
 use super::{open_conn, SqliteStorage};
 
+const COLS: &str = "id, agent_id, repository_id, commit_sha, branch, timestamp, \
+     task_id, ralph_step, spawned_by_user_id, parent_agent_id, model_context";
+
 fn row_to_agent_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommit> {
+    let ralph_step_str: Option<String> = row.get(7)?;
+    let ralph_step = ralph_step_str.as_deref().and_then(RalphStep::from_str);
+
     Ok(AgentCommit {
         id: Id::new(row.get::<_, String>(0)?),
         agent_id: Id::new(row.get::<_, String>(1)?),
@@ -14,6 +20,11 @@ fn row_to_agent_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommit>
         commit_sha: row.get(3)?,
         branch: row.get(4)?,
         timestamp: row.get::<_, i64>(5)? as u64,
+        task_id: row.get(6)?,
+        ralph_step,
+        spawned_by_user_id: row.get(8)?,
+        parent_agent_id: row.get(9)?,
+        model_context: row.get(10)?,
     })
 }
 
@@ -25,8 +36,10 @@ impl AgentCommitRepository for SqliteStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let conn = open_conn(&path)?;
             conn.execute(
-                "INSERT INTO agent_commits (id, agent_id, repository_id, commit_sha, branch, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                &format!(
+                    "INSERT INTO agent_commits ({COLS}) VALUES \
+                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                ),
                 rusqlite::params![
                     m.id.as_str(),
                     m.agent_id.as_str(),
@@ -34,6 +47,11 @@ impl AgentCommitRepository for SqliteStorage {
                     m.commit_sha,
                     m.branch,
                     m.timestamp as i64,
+                    m.task_id,
+                    m.ralph_step.as_ref().map(|s| s.as_str()),
+                    m.spawned_by_user_id,
+                    m.parent_agent_id,
+                    m.model_context,
                 ],
             )
             .context("insert agent_commit")?;
@@ -47,10 +65,9 @@ impl AgentCommitRepository for SqliteStorage {
         let agent_id = agent_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
             let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, repository_id, commit_sha, branch, timestamp
-                 FROM agent_commits WHERE agent_id = ?1 ORDER BY timestamp DESC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLS} FROM agent_commits WHERE agent_id = ?1 ORDER BY timestamp DESC"
+            ))?;
             let rows = stmt.query_map([agent_id.as_str()], row_to_agent_commit)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
@@ -62,10 +79,9 @@ impl AgentCommitRepository for SqliteStorage {
         let repo_id = repo_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
             let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, repository_id, commit_sha, branch, timestamp
-                 FROM agent_commits WHERE repository_id = ?1 ORDER BY timestamp DESC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLS} FROM agent_commits WHERE repository_id = ?1 ORDER BY timestamp DESC"
+            ))?;
             let rows = stmt.query_map([repo_id.as_str()], row_to_agent_commit)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
@@ -77,16 +93,48 @@ impl AgentCommitRepository for SqliteStorage {
         let sha = sha.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<AgentCommit>> {
             let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, repository_id, commit_sha, branch, timestamp
-                 FROM agent_commits WHERE commit_sha = ?1",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLS} FROM agent_commits WHERE commit_sha = ?1"
+            ))?;
             let mut rows = stmt.query([sha.as_str()])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(row_to_agent_commit(row)?))
             } else {
                 Ok(None)
             }
+        })
+        .await?
+    }
+
+    async fn find_by_task(&self, task_id: &str) -> Result<Vec<AgentCommit>> {
+        let path = self.db_path();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
+            let conn = open_conn(&path)?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLS} FROM agent_commits WHERE task_id = ?1 ORDER BY timestamp DESC"
+            ))?;
+            let rows = stmt.query_map([task_id.as_str()], row_to_agent_commit)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await?
+    }
+
+    async fn find_by_ralph_step(&self, repo_id: &Id, ralph_step: &str) -> Result<Vec<AgentCommit>> {
+        let path = self.db_path();
+        let repo_id = repo_id.clone();
+        let ralph_step = ralph_step.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
+            let conn = open_conn(&path)?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COLS} FROM agent_commits \
+                 WHERE repository_id = ?1 AND ralph_step = ?2 ORDER BY timestamp DESC"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params![repo_id.as_str(), ralph_step.as_str()],
+                row_to_agent_commit,
+            )?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await?
     }
@@ -186,5 +234,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn provenance_fields_round_trip() {
+        let (_tmp, s) = setup();
+        let ac = make_commit("c1", "agent1", "repo1", "abc").with_provenance(
+            Some("task-42".to_string()),
+            Some(RalphStep::Implement),
+            Some("user-7".to_string()),
+            Some("parent-agent".to_string()),
+            Some(r#"{"model":"claude-sonnet"}"#.to_string()),
+        );
+        AgentCommitRepository::record(&s, &ac).await.unwrap();
+
+        let found = AgentCommitRepository::find_by_commit(&s, "abc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.task_id.as_deref(), Some("task-42"));
+        assert_eq!(found.ralph_step, Some(RalphStep::Implement));
+        assert_eq!(found.spawned_by_user_id.as_deref(), Some("user-7"));
+        assert_eq!(found.parent_agent_id.as_deref(), Some("parent-agent"));
+        assert!(found.model_context.is_some());
+    }
+
+    #[tokio::test]
+    async fn find_by_task_id() {
+        let (_tmp, s) = setup();
+        let ac1 = make_commit("c1", "agent1", "repo1", "sha1").with_provenance(
+            Some("task-A".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let ac2 = make_commit("c2", "agent2", "repo1", "sha2").with_provenance(
+            Some("task-A".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let ac3 = make_commit("c3", "agent1", "repo1", "sha3").with_provenance(
+            Some("task-B".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        AgentCommitRepository::record(&s, &ac1).await.unwrap();
+        AgentCommitRepository::record(&s, &ac2).await.unwrap();
+        AgentCommitRepository::record(&s, &ac3).await.unwrap();
+
+        let results = AgentCommitRepository::find_by_task(&s, "task-A")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn find_by_ralph_step_filters_correctly() {
+        let (_tmp, s) = setup();
+        let ac1 = make_commit("c1", "agent1", "repo1", "sha1").with_provenance(
+            None,
+            Some(RalphStep::Implement),
+            None,
+            None,
+            None,
+        );
+        let ac2 = make_commit("c2", "agent1", "repo1", "sha2").with_provenance(
+            None,
+            Some(RalphStep::Review),
+            None,
+            None,
+            None,
+        );
+        AgentCommitRepository::record(&s, &ac1).await.unwrap();
+        AgentCommitRepository::record(&s, &ac2).await.unwrap();
+
+        let results = AgentCommitRepository::find_by_ralph_step(&s, &Id::new("repo1"), "implement")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].ralph_step, Some(RalphStep::Implement));
     }
 }
