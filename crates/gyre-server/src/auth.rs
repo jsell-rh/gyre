@@ -199,6 +199,15 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
     }
 }
 
+/// Public wrapper for middleware JWT validation (checks token validity only).
+pub async fn validate_jwt_middleware(
+    token: &str,
+    jwt_cfg: &crate::JwtConfig,
+    state: &Arc<crate::AppState>,
+) -> Result<(), String> {
+    validate_jwt(token, jwt_cfg, state).await.map(|_| ())
+}
+
 async fn validate_jwt(
     token: &str,
     jwt_cfg: &crate::JwtConfig,
