@@ -68,6 +68,7 @@ How Gyre gets built - process and standards for the agent team.
 | M5: Agent Protocols | [`milestones/m5-agent-protocols.md`](milestones/m5-agent-protocols.md) | MCP server, A2A discovery, AG-UI events, jj, agent-compose |
 | M6: Infrastructure | [`milestones/m6-infrastructure.md`](milestones/m6-infrastructure.md) | Analytics, BCP, cost tracking, job framework |
 | M7: Production Hardening | [`milestones/m7-production-hardening.md`](milestones/m7-production-hardening.md) | eBPF audit, SIEM, NixOS, compute targets, WireGuard, hardening |
+| M8: Frontend Excellence | [`milestones/m8-frontend-excellence.md`](milestones/m8-frontend-excellence.md) | Red Hat brand, design system, polished UX, component library |
 
 ## Open Questions
 
