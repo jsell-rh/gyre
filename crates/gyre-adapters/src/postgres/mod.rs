@@ -81,3 +81,5 @@ impl StoragePort for PgStorage {
         Ok(())
     }
 }
+
+// SpawnLogRepository for PgStorage is implemented in spawn_log.rs (merged via PR #136).

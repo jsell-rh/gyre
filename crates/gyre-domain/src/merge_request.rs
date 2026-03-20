@@ -35,6 +35,12 @@ pub struct MergeRequest {
     pub reviewers: Vec<Id>,
     pub diff_stats: Option<DiffStats>,
     pub has_conflicts: Option<bool>,
+    /// Optional spec reference "path/to/spec.md@<40-char-sha>" for cryptographic binding.
+    pub spec_ref: Option<String>,
+    /// MR IDs that must be merged before this MR can be processed.
+    pub depends_on: Vec<Id>,
+    /// Atomic group identifier — all members of the group must merge together.
+    pub atomic_group: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -59,6 +65,9 @@ impl MergeRequest {
             reviewers: Vec::new(),
             diff_stats: None,
             has_conflicts: None,
+            spec_ref: None,
+            depends_on: Vec::new(),
+            atomic_group: None,
             created_at,
             updated_at: created_at,
         }
@@ -150,5 +159,13 @@ mod tests {
     fn test_open_to_merged_invalid() {
         let mut mr = make_mr();
         assert!(mr.transition_status(MrStatus::Merged).is_err());
+    }
+
+    #[test]
+    fn test_spec_ref_field() {
+        let mut mr = make_mr();
+        assert!(mr.spec_ref.is_none());
+        mr.spec_ref = Some("specs/system/agent-gates.md@abc1234".to_string());
+        assert!(mr.spec_ref.is_some());
     }
 }

@@ -24,10 +24,67 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
     process_next(state).await
 }
 
+/// Check if all `depends_on` for the given MR have status `Merged`.
+/// Returns `Ok(true)` if all dependencies are satisfied, `Ok(false)` if any are pending.
+async fn dependencies_satisfied(state: &AppState, mr_id: &Id) -> anyhow::Result<bool> {
+    let mr = match state.merge_requests.find_by_id(mr_id).await? {
+        Some(m) => m,
+        None => return Ok(true), // MR not found — let the processor handle the error
+    };
+    for dep_id in &mr.depends_on {
+        match state.merge_requests.find_by_id(dep_id).await? {
+            Some(dep) if dep.status == MrStatus::Merged => continue,
+            Some(_) => return Ok(false), // dependency not yet merged
+            None => return Ok(false),    // missing dep — block until resolved
+        }
+    }
+    Ok(true)
+}
+
+/// Check if all members of an atomic group are ready (all gates passed, deps satisfied).
+/// Returns `Ok(true)` if no group or all members are ready.
+async fn atomic_group_ready(state: &AppState, group: &str, mr_id: &Id) -> anyhow::Result<bool> {
+    let all_mrs = state.merge_requests.list().await?;
+    let members: Vec<_> = all_mrs
+        .iter()
+        .filter(|m| m.atomic_group.as_deref() == Some(group))
+        .collect();
+
+    for member in &members {
+        if member.id == *mr_id {
+            continue; // the current MR is handled by the caller
+        }
+        // Check deps satisfied for each group member
+        if !dependencies_satisfied(state, &member.id).await? {
+            return Ok(false);
+        }
+        // Check if the member is in the queue and gates are ready
+        match crate::gate_executor::check_gates_for_mr(state, &member.id).await {
+            Ok(true) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 async fn process_next(state: &AppState) -> anyhow::Result<()> {
-    let entry = match state.merge_queue.next_pending().await? {
-        Some(e) => e,
-        None => return Ok(()),
+    // Get all queued entries and find the first one whose dependencies are all merged.
+    let all_queued = state.merge_queue.list_queue().await?;
+    let entry = {
+        let mut found = None;
+        for candidate in all_queued {
+            if candidate.status != MergeQueueEntryStatus::Queued {
+                continue;
+            }
+            if dependencies_satisfied(state, &candidate.merge_request_id).await? {
+                found = Some(candidate);
+                break;
+            }
+        }
+        match found {
+            Some(e) => e,
+            None => return Ok(()),
+        }
     };
 
     info!(entry_id = %entry.id, mr_id = %entry.merge_request_id, "processing merge queue entry");
@@ -75,6 +132,24 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // If this MR is part of an atomic group, ensure all group members are ready.
+    if let Some(ref group) = mr.atomic_group {
+        match atomic_group_ready(state, group, &mr.id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                info!(entry_id = %entry.id, group = %group, "atomic group not ready, requeueing");
+                state
+                    .merge_queue
+                    .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
+                    .await?;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(entry_id = %entry.id, error = %e, "error checking atomic group");
+            }
+        }
+    }
 
     // Check quality gates before merging.
     match crate::gate_executor::check_gates_for_mr(state, &mr.id).await {

@@ -541,6 +541,20 @@ impl MergeRequestRepository for MemMrRepository {
         self.store.lock().await.remove(id.as_str());
         Ok(())
     }
+
+    async fn list_dependents(&self, mr_id: &Id) -> Result<Vec<Id>> {
+        let store = self.store.lock().await;
+        let dependents = store
+            .values()
+            .filter(|mr| {
+                mr.depends_on
+                    .iter()
+                    .any(|dep| dep.as_str() == mr_id.as_str())
+            })
+            .map(|mr| mr.id.clone())
+            .collect();
+        Ok(dependents)
+    }
 }
 
 #[derive(Default)]
@@ -1112,5 +1126,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         agent_stacks: Arc::new(Mutex::new(HashMap::new())),
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
         db_storage: None,
+        spec_approvals: Arc::new(Mutex::new(HashMap::new())),
     })
 }

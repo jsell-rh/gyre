@@ -30,6 +30,8 @@ What Gyre does - the product.
 | Supply Chain Security | [`system/supply-chain.md`](system/supply-chain.md) | Agent stack attestation, gyre-stack.lock, AIBOM, SLSA provenance, attestation levels |
 | Agent Gates & Spec Binding | [`system/agent-gates.md`](system/agent-gates.md) | Agents as merge gates, composable gate chains, spec-to-code cryptographic binding, spec approval ledger |
 | Spec Lifecycle | [`system/spec-lifecycle.md`](system/spec-lifecycle.md) | Auto-task on spec change, approval invalidation, drift detection, forge-native hooks |
+| Merge Dependencies | [`system/merge-dependencies.md`](system/merge-dependencies.md) | MR dependency DAG, atomic groups, auto-detection from branch lineage, dependency-aware merge queue |
+| Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
 

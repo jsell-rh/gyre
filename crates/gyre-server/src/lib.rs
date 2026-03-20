@@ -28,6 +28,7 @@ pub mod speculative_merge;
 pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod tty;
+pub mod version_compute;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -159,10 +160,9 @@ pub struct AppState {
     /// Repo stack attestation policies: repo_id -> required fingerprint (M14.2).
     pub repo_stack_policies: Arc<Mutex<HashMap<String, String>>>,
     /// Base SQLite storage instance (the "default" tenant).
-    /// When set, handlers may call `.with_tenant(tenant_id)` to obtain a
-    /// per-request tenant-scoped repository handle without re-opening the DB.
-    /// None when running with in-memory stores (dev/test without GYRE_DATABASE_URL).
     pub db_storage: Option<Arc<gyre_adapters::SqliteStorage>>,
+    /// Spec approval ledger: approval_id -> SpecApproval (agent-gates).
+    pub spec_approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -428,6 +428,7 @@ pub fn build_state(
         agent_stacks: Arc::new(Mutex::new(HashMap::new())),
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
         db_storage,
+        spec_approvals: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

@@ -15,12 +15,14 @@ pub mod discover;
 pub mod error;
 pub mod gates;
 pub mod jj;
+pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
 pub mod network;
 pub mod projects;
 pub mod provenance;
 pub mod push_gates;
+pub mod release;
 pub mod repos;
 pub mod spawn;
 pub mod speculative;
@@ -223,8 +225,31 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/merge-requests/:id/gates",
             get(gates::list_mr_gate_results),
         )
+        // MR dependency graph (TASK-100)
+        .route(
+            "/api/v1/merge-requests/:id/dependencies",
+            put(merge_deps::set_dependencies).get(merge_deps::get_dependencies),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/dependencies/:dep_id",
+            delete(merge_deps::remove_dependency),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/atomic-group",
+            put(merge_deps::set_atomic_group),
+        )
+        // Release automation (Admin only)
+        .route("/api/v1/release/prepare", post(release::release_prepare))
+        // Spec approval ledger (agent-gates spec)
+        .route("/api/v1/specs/approve", post(gates::approve_spec))
+        .route("/api/v1/specs/approvals", get(gates::list_spec_approvals))
+        .route("/api/v1/specs/revoke", post(gates::revoke_spec_approval))
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
+        .route(
+            "/api/v1/merge-queue/graph",
+            get(merge_deps::get_queue_graph),
+        )
         .route("/api/v1/merge-queue", get(merge_queue::list_queue))
         .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
         // Auth / API keys

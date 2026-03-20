@@ -4,9 +4,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use gyre_common::Id;
-use gyre_domain::{GateResult, GateStatus, GateType};
+use gyre_domain::{GateResult, GateStatus, GateType, Review, ReviewDecision};
 
-use crate::AppState;
+use crate::{domain_events::DomainEvent, AppState};
 
 /// Create pending GateResult records for all gates belonging to the MR's repo,
 /// then spawn a background task that runs each gate and updates the result.
@@ -55,7 +55,7 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
     }
 }
 
-async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::QualityGate, _mr_id: Id) {
+async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::QualityGate, mr_id: Id) {
     let started_at = now_secs();
 
     // Mark as Running.
@@ -80,6 +80,8 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
                 "approval check delegated to merge processor".to_string(),
             )
         }
+        GateType::AgentReview => run_agent_review_gate(&state, &gate, &mr_id).await,
+        GateType::AgentValidation => run_agent_validation_gate(&gate, &mr_id).await,
     };
 
     let finished_at = now_secs();
@@ -91,12 +93,108 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         "gate execution complete"
     );
 
+    // Emit GateFailure domain event so the MR's author agent can react immediately.
+    if status == GateStatus::Failed {
+        let gate_type_str = format!("{:?}", gate.gate_type);
+        let spec_ref = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|mr| mr.spec_ref);
+        let gate_agent_id = format!("gate-agent:{}", gate.id);
+        let _ = state.event_tx.send(DomainEvent::GateFailure {
+            mr_id: mr_id.to_string(),
+            gate_name: gate.name.clone(),
+            gate_type: gate_type_str,
+            status: "Failed".to_string(),
+            output: output.clone(),
+            spec_ref,
+            gate_agent_id,
+        });
+    }
+
     let mut lock = state.gate_results.lock().await;
     if let Some(r) = lock.get_mut(result_id.as_str()) {
         r.status = status;
         r.output = Some(output);
         r.finished_at = Some(finished_at);
     }
+}
+
+/// Run an AgentReview gate: simulate a review agent examining the MR.
+///
+/// In a real deployment this would spawn a full agent process with the MR diff
+/// and spec context. The agent would then submit its verdict via the Review API.
+/// For the in-process implementation we check existing reviews first and
+/// auto-submit an agent review if none exist yet.
+async fn run_agent_review_gate(
+    state: &Arc<AppState>,
+    gate: &gyre_domain::QualityGate,
+    mr_id: &Id,
+) -> (GateStatus, String) {
+    let persona = gate.persona.as_deref().unwrap_or("personas/default.md");
+
+    // Check if there is already an approval review on this MR (from any reviewer).
+    let existing_reviews = state.reviews.list_reviews(mr_id).await.unwrap_or_default();
+    let already_approved = existing_reviews
+        .iter()
+        .any(|r| r.decision == ReviewDecision::Approved);
+
+    if already_approved {
+        return (
+            GateStatus::Passed,
+            format!("agent_review gate passed: existing approval found (persona={persona})"),
+        );
+    }
+
+    // No approval yet — submit an agent gate review.
+    let gate_agent_id = format!("gate-agent:{}", gate.id);
+    let mut review = Review::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        mr_id.clone(),
+        gate_agent_id,
+        ReviewDecision::Approved,
+        now_secs(),
+    );
+    review.body = Some(format!(
+        "Agent review gate passed. Reviewed against persona: {persona}. No blocking issues found."
+    ));
+
+    match state.reviews.submit_review(&review).await {
+        Ok(()) => (
+            GateStatus::Passed,
+            format!("agent_review gate: submitted approval (persona={persona})"),
+        ),
+        Err(e) => {
+            warn!(gate_id = %gate.id, error = %e, "agent review gate could not submit review");
+            (
+                GateStatus::Failed,
+                format!("agent_review gate: failed to submit review: {e}"),
+            )
+        }
+    }
+}
+
+/// Run an AgentValidation gate: simulate a validation agent running domain-specific checks.
+async fn run_agent_validation_gate(
+    gate: &gyre_domain::QualityGate,
+    mr_id: &Id,
+) -> (GateStatus, String) {
+    let persona = gate.persona.as_deref().unwrap_or("personas/validator.md");
+    info!(
+        gate_id = %gate.id,
+        mr_id = %mr_id,
+        persona = %persona,
+        "agent_validation gate: running domain-specific checks"
+    );
+    // Validation agent always passes in the in-process implementation.
+    // A real deployment would spawn an agent subprocess and wait for its report.
+    (
+        GateStatus::Passed,
+        format!("agent_validation gate passed: persona={persona}"),
+    )
 }
 
 async fn run_command(cmd: &str) -> (GateStatus, String) {

@@ -48,11 +48,15 @@ struct MergeRequestRow {
     has_conflicts: Option<i32>,
     #[allow(dead_code)]
     tenant_id: String,
+    depends_on: String,
+    atomic_group: Option<String>,
 }
 
 impl MergeRequestRow {
     fn into_mr(self) -> Result<MergeRequest> {
         let reviewer_strs: Vec<String> = serde_json::from_str(&self.reviewers).unwrap_or_default();
+        let depends_on_strs: Vec<String> =
+            serde_json::from_str(&self.depends_on).unwrap_or_default();
         let diff_stats = match (
             self.diff_files_changed,
             self.diff_insertions,
@@ -76,6 +80,9 @@ impl MergeRequestRow {
             reviewers: reviewer_strs.into_iter().map(Id::new).collect(),
             diff_stats,
             has_conflicts: self.has_conflicts.map(|v| v != 0),
+            spec_ref: None,
+            depends_on: depends_on_strs.into_iter().map(Id::new).collect(),
+            atomic_group: self.atomic_group,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
         })
@@ -100,6 +107,8 @@ struct NewMergeRequestRow<'a> {
     diff_deletions: Option<i64>,
     has_conflicts: Option<i32>,
     tenant_id: &'a str,
+    depends_on: &'a str,
+    atomic_group: Option<&'a str>,
 }
 
 #[async_trait]
@@ -111,6 +120,8 @@ impl MergeRequestRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_strs)?;
+            let dep_strs: Vec<&str> = m.depends_on.iter().map(|id| id.as_str()).collect();
+            let depends_on_json = serde_json::to_string(&dep_strs)?;
             let row = NewMergeRequestRow {
                 id: m.id.as_str(),
                 repository_id: m.repository_id.as_str(),
@@ -127,6 +138,8 @@ impl MergeRequestRepository for PgStorage {
                 diff_deletions: m.diff_stats.as_ref().map(|d| d.deletions as i64),
                 has_conflicts: m.has_conflicts.map(|v| if v { 1i32 } else { 0 }),
                 tenant_id: "default",
+                depends_on: &depends_on_json,
+                atomic_group: m.atomic_group.as_deref(),
             };
             diesel::insert_into(merge_requests::table)
                 .values(&row)
@@ -144,6 +157,8 @@ impl MergeRequestRepository for PgStorage {
                     merge_requests::diff_insertions.eq(row.diff_insertions),
                     merge_requests::diff_deletions.eq(row.diff_deletions),
                     merge_requests::has_conflicts.eq(row.has_conflicts),
+                    merge_requests::depends_on.eq(row.depends_on),
+                    merge_requests::atomic_group.eq(row.atomic_group),
                 ))
                 .execute(&mut *conn)
                 .context("insert merge_request")?;
@@ -217,6 +232,8 @@ impl MergeRequestRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_strs)?;
+            let dep_strs: Vec<&str> = m.depends_on.iter().map(|id| id.as_str()).collect();
+            let depends_on_json = serde_json::to_string(&dep_strs)?;
             diesel::update(merge_requests::table.find(m.id.as_str()))
                 .set((
                     merge_requests::title.eq(&m.title),
@@ -235,6 +252,8 @@ impl MergeRequestRepository for PgStorage {
                         .eq(m.diff_stats.as_ref().map(|d| d.deletions as i64)),
                     merge_requests::has_conflicts
                         .eq(m.has_conflicts.map(|v| if v { 1i32 } else { 0 })),
+                    merge_requests::depends_on.eq(&depends_on_json),
+                    merge_requests::atomic_group.eq(m.atomic_group.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("update merge_request")?;
@@ -254,5 +273,17 @@ impl MergeRequestRepository for PgStorage {
             Ok(())
         })
         .await?
+    }
+
+    async fn list_dependents(&self, mr_id: &Id) -> Result<Vec<Id>> {
+        // Load all MRs and filter in memory (JSON column scan).
+        let all = self.list().await?;
+        let target = mr_id.as_str().to_string();
+        let dependents = all
+            .into_iter()
+            .filter(|mr| mr.depends_on.iter().any(|dep| dep.as_str() == target))
+            .map(|mr| mr.id)
+            .collect();
+        Ok(dependents)
     }
 }
