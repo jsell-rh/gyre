@@ -541,6 +541,20 @@ impl MergeRequestRepository for MemMrRepository {
         self.store.lock().await.remove(id.as_str());
         Ok(())
     }
+
+    async fn list_dependents(&self, mr_id: &Id) -> Result<Vec<Id>> {
+        let store = self.store.lock().await;
+        let dependents = store
+            .values()
+            .filter(|mr| {
+                mr.depends_on
+                    .iter()
+                    .any(|dep| dep.as_str() == mr_id.as_str())
+            })
+            .map(|mr| mr.id.clone())
+            .collect();
+        Ok(dependents)
+    }
 }
 
 #[derive(Default)]
