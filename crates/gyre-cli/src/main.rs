@@ -86,6 +86,39 @@ enum Commands {
     },
     /// Show this agent's status and current task
     Status,
+    /// Release automation: compute next version and generate changelog
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommands {
+    /// Compute next semver version and generate changelog from conventional commits
+    Prepare {
+        /// Repository ID to analyze
+        #[arg(long)]
+        repo_id: String,
+        /// Branch to analyze (default: repo's default branch)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Override "from" tag/ref for changelog range
+        #[arg(long)]
+        from: Option<String>,
+        /// Create a release MR after computing the changelog
+        #[arg(long)]
+        create_mr: bool,
+        /// Gyre server base URL
+        #[arg(long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Auth token
+        #[arg(long, default_value = DEFAULT_TOKEN)]
+        token: String,
+        /// Output changelog markdown to stdout instead of summary
+        #[arg(long)]
+        markdown: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -377,6 +410,87 @@ async fn main() -> Result<()> {
                 println!("  Last Heartbeat: {hb}");
             }
         }
+
+        Commands::Release {
+            command:
+                ReleaseCommands::Prepare {
+                    repo_id,
+                    branch,
+                    from,
+                    create_mr,
+                    server,
+                    token,
+                    markdown: show_markdown,
+                },
+        } => {
+            let api = client::GyreClient::new(server.clone(), token.clone());
+            let result = api
+                .release_prepare(&repo_id, branch.as_deref(), from.as_deref(), create_mr)
+                .await?;
+
+            if show_markdown {
+                if let Some(md) = result["changelog"].as_str() {
+                    print!("{md}");
+                }
+            } else {
+                let current = result["current_tag"].as_str().unwrap_or("(none)");
+                let next = result["next_version"].as_str().unwrap_or("unknown");
+                let bump = result["bump_type"].as_str().unwrap_or("none");
+                let count = result["commit_count"].as_u64().unwrap_or(0);
+                let has_release = result["has_release"].as_bool().unwrap_or(false);
+
+                println!("Release Preparation");
+                println!("  Current tag:   {current}");
+                println!("  Next version:  {next}");
+                println!("  Bump type:     {bump}");
+                println!("  Commits since: {count}");
+                println!("  Has release:   {has_release}");
+                if let Some(mr_id) = result["mr_id"].as_str() {
+                    println!("  Release MR:    {mr_id}");
+                }
+                println!();
+
+                if let Some(sections) = result["sections"].as_array() {
+                    if sections.is_empty() {
+                        println!("No releasable changes found.");
+                    } else {
+                        for section in sections {
+                            let title = section["title"].as_str().unwrap_or("Other");
+                            println!("--- {title} ---");
+                            if let Some(entries) = section["entries"].as_array() {
+                                for e in entries {
+                                    let desc = e["description"].as_str().unwrap_or("");
+                                    let scope = e["scope"]
+                                        .as_str()
+                                        .map(|s| format!("({s}) "))
+                                        .unwrap_or_default();
+                                    let agent = e["agent_name"]
+                                        .as_str()
+                                        .or_else(|| e["agent_id"].as_str())
+                                        .unwrap_or("");
+                                    let task = e["task_id"].as_str().unwrap_or("");
+                                    let mut attrs = Vec::new();
+                                    if !agent.is_empty() {
+                                        attrs.push(agent.to_string());
+                                    }
+                                    if !task.is_empty() {
+                                        attrs.push(task.to_string());
+                                    }
+                                    let attr_str = if attrs.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" [{}]", attrs.join(", "))
+                                    };
+                                    println!("  - {scope}{desc}{attr_str}");
+                                }
+                            }
+                            println!();
+                        }
+                    }
+                }
+                println!("Run with --markdown to output full changelog markdown.");
+            }
+        }
     }
 
     Ok(())
@@ -572,5 +686,69 @@ mod tests {
     #[test]
     fn cli_verify() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_release_prepare_parses() {
+        let args = Cli::try_parse_from(["gyre", "release", "prepare", "--repo-id", "repo-123"]);
+        assert!(args.is_ok());
+        if let Commands::Release {
+            command:
+                ReleaseCommands::Prepare {
+                    repo_id,
+                    branch,
+                    from,
+                    create_mr,
+                    markdown,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(repo_id, "repo-123");
+            assert!(branch.is_none());
+            assert!(from.is_none());
+            assert!(!create_mr);
+            assert!(!markdown);
+        } else {
+            panic!("Expected Release Prepare");
+        }
+    }
+
+    #[test]
+    fn cli_release_prepare_with_options_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "release",
+            "prepare",
+            "--repo-id",
+            "repo-456",
+            "--branch",
+            "main",
+            "--from",
+            "v1.2.3",
+            "--create-mr",
+            "--markdown",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Release {
+            command:
+                ReleaseCommands::Prepare {
+                    repo_id,
+                    branch,
+                    from,
+                    create_mr,
+                    markdown,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(repo_id, "repo-456");
+            assert_eq!(branch.as_deref(), Some("main"));
+            assert_eq!(from.as_deref(), Some("v1.2.3"));
+            assert!(create_mr);
+            assert!(markdown);
+        } else {
+            panic!("Expected Release Prepare with options");
+        }
     }
 }

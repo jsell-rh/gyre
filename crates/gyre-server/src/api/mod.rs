@@ -21,6 +21,7 @@ pub mod network;
 pub mod projects;
 pub mod provenance;
 pub mod push_gates;
+pub mod release;
 pub mod repos;
 pub mod spawn;
 pub mod speculative;
@@ -223,6 +224,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/merge-requests/:id/gates",
             get(gates::list_mr_gate_results),
         )
+        // Release automation (Admin only)
+        .route("/api/v1/release/prepare", post(release::release_prepare))
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
         .route("/api/v1/merge-queue", get(merge_queue::list_queue))
