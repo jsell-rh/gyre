@@ -27,6 +27,9 @@
   let detailTab = $state('info');
   let agentLogLines = $state([]);
   let logsLoading = $state(false);
+  let ttyLines = $state([]);
+  let ttyWs = $state(null);
+  let ttyConnecting = $state(false);
 
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 
@@ -68,8 +71,15 @@
     api.tasks().then((data) => { tasks = data; }).catch(() => {});
   });
 
+  function closeTtyWs() {
+    if (ttyWs) { ttyWs.close(); ttyWs = null; }
+    ttyLines = [];
+    ttyConnecting = false;
+  }
+
   function selectAgent(a) {
-    if (selected?.id === a.id) { selected = null; return; }
+    if (selected?.id === a.id) { selected = null; closeTtyWs(); return; }
+    closeTtyWs();
     selected = a;
     detailTab = 'info';
     agentLogLines = [];
@@ -83,6 +93,23 @@
         .then((lines) => { agentLogLines = lines; })
         .catch(() => { agentLogLines = []; })
         .finally(() => { logsLoading = false; });
+    }
+    if (tab === 'terminal' && selected) {
+      closeTtyWs();
+      ttyConnecting = true;
+      const token = localStorage.getItem('gyre_auth_token') || 'test-token';
+      const ws = new WebSocket(api.agentTtyUrl(selected.id));
+      ttyWs = ws;
+      ws.onopen = () => { ws.send(JSON.stringify({ type: 'Auth', token })); };
+      ws.onmessage = (ev) => {
+        ttyConnecting = false;
+        try { const m = JSON.parse(ev.data); if (m.type === 'AuthResult') return; } catch (_) {}
+        ttyLines = [...ttyLines, ev.data];
+      };
+      ws.onclose = () => { ttyConnecting = false; };
+      ws.onerror = () => { ttyConnecting = false; };
+    } else if (tab !== 'terminal') {
+      closeTtyWs();
     }
   }
 
@@ -278,11 +305,12 @@
       <div class="detail-panel">
         <div class="detail-header">
           <h3>Agent: {selected.name}</h3>
-          <button class="close-btn" onclick={() => (selected = null)}>✕</button>
+          <button class="close-btn" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
         </div>
         <div class="detail-tabs">
           <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')}>Info</button>
           <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')}>Logs</button>
+          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')}>Terminal</button>
         </div>
         {#if detailTab === 'info'}
           <div class="detail-body">
@@ -297,7 +325,7 @@
             </dl>
             <AgentCardPanel agentId={selected.id} />
           </div>
-        {:else}
+        {:else if detailTab === 'logs'}
           <div class="logs-panel">
             {#if logsLoading}
               <p class="logs-empty">Loading logs…</p>
@@ -306,6 +334,20 @@
             {:else}
               <div class="logs-output">
                 {#each agentLogLines as line}
+                  <div class="log-line">{line}</div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="logs-panel tty-panel">
+            {#if ttyConnecting}
+              <p class="logs-empty">Connecting…</p>
+            {:else if ttyLines.length === 0}
+              <p class="logs-empty">No output yet.</p>
+            {:else}
+              <div class="logs-output tty-output">
+                {#each ttyLines as line}
                   <div class="log-line">{line}</div>
                 {/each}
               </div>
@@ -549,6 +591,10 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
+
+  .tty-panel { height: 360px; }
+  .tty-output { background: #0d0d0d; }
+  .tty-output .log-line { color: #d4d4d4; }
 
   .close-btn {
     background: none;
