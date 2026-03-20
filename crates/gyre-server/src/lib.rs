@@ -183,10 +183,19 @@ async fn require_auth_middleware(
                 return next.run(req).await;
             }
             // Check API keys via the key repository.
-            match state.api_keys.find_user_id(t).await {
-                Ok(Some(_)) => next.run(req).await,
-                _ => (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
+            if let Ok(Some(_)) = state.api_keys.find_user_id(t).await {
+                return next.run(req).await;
             }
+            // Check JWT (Keycloak/OIDC) if configured.
+            if let Some(jwt_cfg) = &state.jwt_config {
+                if auth::validate_jwt_middleware(t, jwt_cfg, &state)
+                    .await
+                    .is_ok()
+                {
+                    return next.run(req).await;
+                }
+            }
+            (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
         None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
     }

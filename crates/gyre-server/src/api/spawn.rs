@@ -27,10 +27,6 @@ pub struct SpawnAgentRequest {
     pub parent_id: Option<String>,
     /// Optional compute target to associate with this agent spawn.
     pub compute_target_id: Option<String>,
-    /// Command to execute in the spawned process. Defaults to `echo "Agent <id> started"`.
-    pub command: Option<String>,
-    /// Arguments for the command.
-    pub command_args: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -147,11 +143,9 @@ pub async fn spawn_agent(
 
     // Launch a real process via LocalTarget and monitor its lifecycle.
     {
-        let command = req.command.clone().unwrap_or_else(|| "echo".to_string());
-        let args = req
-            .command_args
-            .clone()
-            .unwrap_or_else(|| vec![format!("Agent {} started", agent.id)]);
+        // Command is server-controlled only — never from user input (C-1 RCE fix).
+        let command = "echo".to_string();
+        let args = vec![format!("Agent {} started", agent.id)];
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
             worktree_path.clone()
         } else {
