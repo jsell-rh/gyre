@@ -69,4 +69,15 @@ pub enum DomainEvent {
         change_kind: String,
         task_id: String,
     },
+    /// Emitted when a quality gate fails on an MR (M12.3).
+    /// Allows the MR's author agent to react in the same Ralph loop cycle.
+    GateFailure {
+        mr_id: String,
+        gate_name: String,
+        gate_type: String,
+        status: String,
+        output: String,
+        spec_ref: Option<String>,
+        gate_agent_id: String,
+    },
 }

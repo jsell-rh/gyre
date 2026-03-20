@@ -1,4 +1,4 @@
-//! Quality gate CRUD and gate-result endpoints.
+//! Quality gate CRUD, gate-result endpoints, and spec approval ledger.
 
 use axum::{
     extract::{Path, State},
@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{GateResult, GateStatus, GateType, QualityGate};
+use gyre_domain::{GateResult, GateStatus, GateType, QualityGate, SpecApproval};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -28,6 +28,8 @@ pub struct CreateGateRequest {
     pub command: Option<String>,
     /// Minimum approvals (required for RequiredApprovals).
     pub required_approvals: Option<u32>,
+    /// Persona path (used by AgentReview / AgentValidation).
+    pub persona: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -38,6 +40,7 @@ pub struct GateResponse {
     pub gate_type: String,
     pub command: Option<String>,
     pub required_approvals: Option<u32>,
+    pub persona: Option<String>,
     pub created_at: u64,
 }
 
@@ -50,6 +53,7 @@ impl From<QualityGate> for GateResponse {
             gate_type: gate_type_str(&g.gate_type),
             command: g.command,
             required_approvals: g.required_approvals,
+            persona: g.persona,
             created_at: g.created_at,
         }
     }
@@ -60,6 +64,8 @@ fn gate_type_str(t: &GateType) -> String {
         GateType::TestCommand => "test_command",
         GateType::LintCommand => "lint_command",
         GateType::RequiredApprovals => "required_approvals",
+        GateType::AgentReview => "agent_review",
+        GateType::AgentValidation => "agent_validation",
     }
     .to_string()
 }
@@ -100,7 +106,65 @@ fn gate_status_str(s: &GateStatus) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
+// Spec Approval types
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/v1/specs/approve.
+#[derive(Deserialize)]
+pub struct ApproveSpecRequest {
+    /// Relative spec path, e.g. "specs/system/agent-gates.md".
+    pub path: String,
+    /// Git blob SHA of the spec at approval time (must be 40-char hex).
+    pub sha: String,
+    /// Approver identity, e.g. "user:jsell" or "agent:<uuid>".
+    pub approver_id: String,
+    /// Optional Sigstore signature.
+    pub signature: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SpecApprovalResponse {
+    pub id: String,
+    pub spec_path: String,
+    pub spec_sha: String,
+    pub approver_id: String,
+    pub signature: Option<String>,
+    pub approved_at: u64,
+    pub revoked_at: Option<u64>,
+    pub revoked_by: Option<String>,
+    pub revocation_reason: Option<String>,
+    pub active: bool,
+}
+
+impl From<SpecApproval> for SpecApprovalResponse {
+    fn from(a: SpecApproval) -> Self {
+        let active = a.is_active();
+        Self {
+            id: a.id.to_string(),
+            spec_path: a.spec_path,
+            spec_sha: a.spec_sha,
+            approver_id: a.approver_id,
+            signature: a.signature,
+            approved_at: a.approved_at,
+            revoked_at: a.revoked_at,
+            revoked_by: a.revoked_by,
+            revocation_reason: a.revocation_reason,
+            active,
+        }
+    }
+}
+
+/// Request body for POST /api/v1/specs/revoke.
+#[derive(Deserialize)]
+pub struct RevokeSpecRequest {
+    /// Approval ID to revoke.
+    pub approval_id: String,
+    pub revoked_by: String,
+    pub reason: String,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — Quality Gates
 // ---------------------------------------------------------------------------
 
 /// POST /api/v1/repos/:id/gates — create a quality gate for a repo.
@@ -134,6 +198,9 @@ pub async fn create_gate(
                 ));
             }
         }
+        GateType::AgentReview | GateType::AgentValidation => {
+            // persona is optional — defaults to "personas/default.md" at execution time.
+        }
     }
 
     let gate = QualityGate {
@@ -143,6 +210,7 @@ pub async fn create_gate(
         gate_type: req.gate_type,
         command: req.command,
         required_approvals: req.required_approvals,
+        persona: req.persona,
         created_at: now_secs(),
     };
 
@@ -203,6 +271,121 @@ pub async fn list_mr_gate_results(
         .collect();
     out.sort_by_key(|r| r.started_at.unwrap_or(0));
     Ok(Json(out))
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — Spec Approval Ledger
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/specs/approve — record an approval of a spec at a specific SHA.
+///
+/// The SHA must be a 40-character hex string to prevent git argument injection.
+#[instrument(skip(state, req))]
+pub async fn approve_spec(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ApproveSpecRequest>,
+) -> Result<(StatusCode, Json<SpecApprovalResponse>), ApiError> {
+    // Validate SHA is 40-char hex (security: prevents git argument injection).
+    if req.sha.len() != 40 || !req.sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::InvalidInput(
+            "spec_sha must be a 40-character hex string".to_string(),
+        ));
+    }
+    if req.path.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "spec path must not be empty".to_string(),
+        ));
+    }
+    if req.approver_id.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "approver_id must not be empty".to_string(),
+        ));
+    }
+
+    let now = now_secs();
+    let mut approval = SpecApproval::new(new_id(), req.path, req.sha, req.approver_id, now);
+    approval.signature = req.signature;
+
+    state
+        .spec_approvals
+        .lock()
+        .await
+        .insert(approval.id.to_string(), approval.clone());
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SpecApprovalResponse::from(approval)),
+    ))
+}
+
+/// GET /api/v1/specs/approvals — list all spec approvals (optionally filter by ?path=).
+pub async fn list_spec_approvals(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<SpecApprovalResponse>>, ApiError> {
+    let path_filter = params.get("path").map(|s| s.as_str());
+    let approvals = state.spec_approvals.lock().await;
+    let mut result: Vec<SpecApprovalResponse> = approvals
+        .values()
+        .filter(|a| path_filter.is_none_or(|p| a.spec_path == p))
+        .cloned()
+        .map(SpecApprovalResponse::from)
+        .collect();
+    result.sort_by_key(|a| a.approved_at);
+    Ok(Json(result))
+}
+
+/// POST /api/v1/specs/revoke — revoke an existing spec approval.
+#[instrument(skip(state, req))]
+pub async fn revoke_spec_approval(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RevokeSpecRequest>,
+) -> Result<Json<SpecApprovalResponse>, ApiError> {
+    let mut approvals = state.spec_approvals.lock().await;
+    let approval = approvals
+        .get_mut(&req.approval_id)
+        .ok_or_else(|| ApiError::NotFound(format!("approval {} not found", req.approval_id)))?;
+
+    if approval.revoked_at.is_some() {
+        return Err(ApiError::InvalidInput(
+            "approval is already revoked".to_string(),
+        ));
+    }
+
+    approval.revoked_at = Some(now_secs());
+    approval.revoked_by = Some(req.revoked_by);
+    approval.revocation_reason = Some(req.reason);
+
+    Ok(Json(SpecApprovalResponse::from(approval.clone())))
+}
+
+/// Check that a spec_ref ("path@sha") has an active approval in the ledger.
+/// Returns Ok(()) if approved, Err(msg) if not.
+pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), String> {
+    // Parse "path@sha" format.
+    let (path, sha) = spec_ref
+        .rsplit_once('@')
+        .ok_or_else(|| format!("invalid spec_ref format '{spec_ref}': expected 'path@sha'"))?;
+
+    // Validate SHA is 40-char hex.
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "spec_ref SHA '{sha}' is not a valid 40-char hex SHA"
+        ));
+    }
+
+    let approvals = state.spec_approvals.lock().await;
+    let has_active_approval = approvals
+        .values()
+        .any(|a| a.spec_path == path && a.spec_sha == sha && a.is_active());
+
+    if has_active_approval {
+        Ok(())
+    } else {
+        Err(format!(
+            "spec '{path}' at SHA '{sha}' has no active approval in the ledger"
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +493,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_agent_review_gate() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "name": "security-review",
+            "gate_type": "agent_review",
+            "persona": "personas/security.md"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["gate_type"], "agent_review");
+        assert_eq!(json["persona"], "personas/security.md");
+    }
+
+    #[tokio::test]
+    async fn create_agent_validation_gate() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "name": "domain-validation",
+            "gate_type": "agent_validation",
+            "persona": "personas/accountability.md"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["gate_type"], "agent_validation");
+    }
+
+    #[tokio::test]
     async fn delete_gate() {
         let state = test_state();
         create_repo(state.clone()).await;
@@ -363,5 +605,121 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    // ---- Spec Approval tests ----
+
+    #[tokio::test]
+    async fn approve_spec_and_list() {
+        let app = app();
+        let body = serde_json::json!({
+            "path": "specs/system/agent-gates.md",
+            "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "approver_id": "user:jsell"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["spec_path"], "specs/system/agent-gates.md");
+        assert_eq!(json["active"], true);
+
+        // list all
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/approvals")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approve_spec_invalid_sha_rejected() {
+        let app = app();
+        let body = serde_json::json!({
+            "path": "specs/system/agent-gates.md",
+            "sha": "not-a-sha",
+            "approver_id": "user:jsell"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn revoke_spec_approval() {
+        let app = app();
+        // First approve
+        let body = serde_json::json!({
+            "path": "specs/system/agent-gates.md",
+            "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "approver_id": "user:jsell"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let approval_id = json["id"].as_str().unwrap().to_string();
+
+        // Then revoke
+        let revoke_body = serde_json::json!({
+            "approval_id": approval_id,
+            "revoked_by": "user:jsell",
+            "reason": "spec was superseded"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/revoke")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&revoke_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["active"], false);
+        assert_eq!(json["revocation_reason"], "spec was superseded");
     }
 }

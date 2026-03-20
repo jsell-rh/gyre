@@ -152,6 +152,7 @@ mod tests {
             agent_stacks: base.agent_stacks.clone(),
             repo_stack_policies: base.repo_stack_policies.clone(),
             db_storage: base.db_storage.clone(),
+            spec_approvals: base.spec_approvals.clone(),
         });
         crate::build_router(state)
     }
