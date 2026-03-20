@@ -143,6 +143,11 @@ export const api = {
     request('/merge-requests', { method: 'POST', body: JSON.stringify(data) }),
   seedData: () =>
     request('/admin/seed', { method: 'POST' }),
+  // Agent logs
+  agentLogs: (id, limit = 100, offset = 0) =>
+    request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
+  appendAgentLog: (id, message) =>
+    request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
   // Data export
   adminExport: () => request('/admin/export'),
   // Retention

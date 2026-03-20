@@ -140,6 +140,9 @@ mod tests {
             compute_targets: base.compute_targets.clone(),
             network_peers: base.network_peers.clone(),
             event_tx: base.event_tx.clone(),
+            process_registry: base.process_registry.clone(),
+            agent_logs: base.agent_logs.clone(),
+            agent_log_tx: base.agent_log_tx.clone(),
         });
         crate::build_router(state)
     }

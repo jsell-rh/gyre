@@ -1004,5 +1004,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         compute_targets: Arc::new(Mutex::new(HashMap::new())),
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
+        process_registry: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
     })
 }

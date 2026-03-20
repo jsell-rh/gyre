@@ -30,8 +30,8 @@ use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
-    UserRepository, WorktreeRepository,
+    NetworkPeerRepository, ProcessHandle, ProjectRepository, RepoRepository, ReviewRepository,
+    TaskRepository, UserRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -128,6 +128,12 @@ pub struct AppState {
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Request rate limiter (requests/sec).
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
+    /// Running agent processes: agent_id -> ProcessHandle.
+    pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
+    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
+    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent broadcast channels for live log SSE streaming.
+    pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -296,6 +302,9 @@ pub fn build_state(
             mem::MemNetworkPeerRepository::default()
         ),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
+        process_registry: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

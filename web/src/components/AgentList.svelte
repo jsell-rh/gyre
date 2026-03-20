@@ -24,6 +24,10 @@
   let spawnTaskId = $state('');
   let spawnBranch = $state('');
 
+  let detailTab = $state('info');
+  let agentLogLines = $state([]);
+  let logsLoading = $state(false);
+
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 
   const filtered = $derived(
@@ -65,7 +69,21 @@
   });
 
   function selectAgent(a) {
-    selected = selected?.id === a.id ? null : a;
+    if (selected?.id === a.id) { selected = null; return; }
+    selected = a;
+    detailTab = 'info';
+    agentLogLines = [];
+  }
+
+  function switchDetailTab(tab) {
+    detailTab = tab;
+    if (tab === 'logs' && selected) {
+      logsLoading = true;
+      api.agentLogs(selected.id, 200, 0)
+        .then((lines) => { agentLogLines = lines; })
+        .catch(() => { agentLogLines = []; })
+        .finally(() => { logsLoading = false; });
+    }
   }
 
   function openSpawnModal() {
@@ -262,18 +280,38 @@
           <h3>Agent: {selected.name}</h3>
           <button class="close-btn" onclick={() => (selected = null)}>✕</button>
         </div>
-        <div class="detail-body">
-          <dl class="detail-dl">
-            <dt>ID</dt><dd class="mono">{selected.id}</dd>
-            <dt>Status</dt><dd><Badge value={selected.status} /></dd>
-            <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
-            <dt>Current Task</dt><dd class="mono">{selected.current_task_id ?? '—'}</dd>
-            <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
-            <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
-            <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
-          </dl>
-          <AgentCardPanel agentId={selected.id} />
+        <div class="detail-tabs">
+          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')}>Info</button>
+          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')}>Logs</button>
         </div>
+        {#if detailTab === 'info'}
+          <div class="detail-body">
+            <dl class="detail-dl">
+              <dt>ID</dt><dd class="mono">{selected.id}</dd>
+              <dt>Status</dt><dd><Badge value={selected.status} /></dd>
+              <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
+              <dt>Current Task</dt><dd class="mono">{selected.current_task_id ?? '—'}</dd>
+              <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
+              <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
+              <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
+            </dl>
+            <AgentCardPanel agentId={selected.id} />
+          </div>
+        {:else}
+          <div class="logs-panel">
+            {#if logsLoading}
+              <p class="logs-empty">Loading logs…</p>
+            {:else if agentLogLines.length === 0}
+              <p class="logs-empty">No logs for this agent.</p>
+            {:else}
+              <div class="logs-output">
+                {#each agentLogLines as line}
+                  <div class="log-line">{line}</div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -457,6 +495,59 @@
     font-weight: 600;
     color: var(--color-text);
     margin: 0;
+  }
+
+  .detail-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--color-border);
+    padding: 0 var(--space-4);
+  }
+
+  .dtab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    margin-bottom: -1px;
+    padding: var(--space-2) var(--space-3);
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .dtab:hover { color: var(--color-text); }
+  .dtab.active { border-bottom-color: var(--color-primary); color: var(--color-primary); }
+
+  .logs-panel {
+    display: flex;
+    flex-direction: column;
+    height: 320px;
+    overflow: hidden;
+  }
+
+  .logs-empty {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    margin: var(--space-8) auto;
+    text-align: center;
+  }
+
+  .logs-output {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-bg);
+  }
+
+  .log-line {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 
   .close-btn {
