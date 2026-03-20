@@ -608,6 +608,8 @@ Key specs to read before making changes:
 | M10 milestone deliverables | [specs/milestones/m10-persistent-storage.md](specs/milestones/m10-persistent-storage.md) |
 | M11 milestone deliverables | [specs/milestones/m11-agent-execution.md](specs/milestones/m11-agent-execution.md) |
 | M12 milestone deliverables | [specs/milestones/m12-quality-gates.md](specs/milestones/m12-quality-gates.md) |
+| M13 milestone deliverables | [specs/milestones/m13-forge-native.md](specs/milestones/m13-forge-native.md) |
+| Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
