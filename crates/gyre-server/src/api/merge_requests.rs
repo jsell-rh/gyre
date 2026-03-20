@@ -241,7 +241,9 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
-    let _ = state.event_tx.send(DomainEvent::MrCreated { id: mr.id.to_string() });
+    let _ = state.event_tx.send(DomainEvent::MrCreated {
+        id: mr.id.to_string(),
+    });
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
