@@ -1,5 +1,6 @@
 pub(crate) mod activity;
 pub mod api;
+pub mod audit_simulator;
 pub(crate) mod auth;
 pub(crate) mod git_http;
 pub(crate) mod health;
@@ -12,6 +13,7 @@ pub mod metrics;
 pub mod middleware;
 pub(crate) mod rbac;
 pub mod retention;
+pub mod siem;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
 pub mod stale_agents;
@@ -22,13 +24,15 @@ use axum::{routing::get, Router};
 use gyre_common::ActivityEventData;
 use gyre_domain::AgentCard;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, CostRepository,
-    GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
-    RepoRepository, ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
+    CostRepository, GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository,
+    ProjectRepository, RepoRepository, ReviewRepository, TaskRepository, UserRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
 use retention::RetentionStore;
+use siem::SiemStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
@@ -106,6 +110,12 @@ pub struct AppState {
     pub analytics: Arc<dyn AnalyticsRepository>,
     /// Cost tracking store.
     pub costs: Arc<dyn CostRepository>,
+    /// Audit event store.
+    pub audit: Arc<dyn AuditRepository>,
+    /// SIEM target store and forwarding state.
+    pub siem_store: SiemStore,
+    /// Broadcast channel for live audit event SSE stream.
+    pub audit_broadcast_tx: broadcast::Sender<String>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -152,6 +162,7 @@ pub fn build_state(
     jwt_config: Option<Arc<JwtConfig>>,
 ) -> Arc<AppState> {
     let (broadcast_tx, _) = broadcast::channel(256);
+    let (audit_broadcast_tx, _) = broadcast::channel(1024);
     let metrics = Arc::new(metrics::Metrics::new().expect("failed to create Prometheus metrics"));
     let started_at_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -187,6 +198,9 @@ pub fn build_state(
         job_registry: Arc::new(JobRegistry::new()),
         analytics: Arc::new(mem::MemAnalyticsRepository::default()),
         costs: Arc::new(mem::MemCostRepository::default()),
+        audit: Arc::new(mem::MemAuditRepository::default()),
+        siem_store: SiemStore::new(),
+        audit_broadcast_tx,
     })
 }
 
