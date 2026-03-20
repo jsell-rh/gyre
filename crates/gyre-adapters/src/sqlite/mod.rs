@@ -12,6 +12,7 @@ pub mod audit;
 pub mod merge_queue;
 pub mod merge_request;
 mod migrations;
+pub mod network_peer;
 pub mod project;
 pub mod repository;
 pub mod review;
@@ -98,6 +99,7 @@ mod tests {
             "cost_entries",
             "audit_events",
             "siem_targets",
+            "network_peers",
         ];
         for table in &tables {
             let count: i64 = conn

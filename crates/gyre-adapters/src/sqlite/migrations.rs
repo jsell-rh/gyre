@@ -221,6 +221,18 @@ CREATE TABLE IF NOT EXISTS siem_targets (
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id);
 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_events(event_type);
+
+CREATE TABLE IF NOT EXISTS network_peers (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    wireguard_pubkey TEXT NOT NULL,
+    endpoint TEXT,
+    allowed_ips TEXT NOT NULL DEFAULT '[]',
+    registered_at INTEGER NOT NULL,
+    last_seen INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_network_peers_agent ON network_peers(agent_id);
 ";
 
 const MIGRATIONS: &[(i64, &str)] = &[

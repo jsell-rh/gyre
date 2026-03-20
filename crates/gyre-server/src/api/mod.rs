@@ -13,6 +13,7 @@ pub mod error;
 pub mod jj;
 pub mod merge_queue;
 pub mod merge_requests;
+pub mod network;
 pub mod projects;
 pub mod repos;
 pub mod spawn;
@@ -216,6 +217,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/admin/compute-targets/:id",
             get(get_compute_target).delete(delete_compute_target),
         )
+        // Network peers (WireGuard mesh)
+        .route(
+            "/api/v1/network/peers",
+            post(network::register_peer).get(network::list_peers),
+        )
+        .route(
+            "/api/v1/network/peers/agent/:agent_id",
+            get(network::get_peer_by_agent),
+        )
+        .route("/api/v1/network/peers/:id", delete(network::delete_peer))
+        .route("/api/v1/network/derp-map", get(network::derp_map))
 }
 
 pub(crate) fn now_secs() -> u64 {

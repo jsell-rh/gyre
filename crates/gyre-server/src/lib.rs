@@ -11,6 +11,7 @@ pub mod merge_processor;
 pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
+pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
 pub mod siem;
@@ -26,8 +27,8 @@ use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository,
-    ProjectRepository, RepoRepository, ReviewRepository, TaskRepository, UserRepository,
-    WorktreeRepository,
+    NetworkPeerRepository, ProjectRepository, RepoRepository, ReviewRepository, TaskRepository,
+    UserRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -118,11 +119,26 @@ pub struct AppState {
     pub audit_broadcast_tx: broadcast::Sender<String>,
     /// Admin-configured compute targets: id -> ComputeTargetConfig.
     pub compute_targets: Arc<Mutex<HashMap<String, api::compute::ComputeTargetConfig>>>,
+    /// WireGuard network peer registry.
+    pub network_peers: Arc<dyn NetworkPeerRepository>,
+    /// Request rate limiter (requests/sec).
+    pub rate_limiter: Arc<rate_limit::RateLimiter>,
 }
 
 /// Build the axum Router (extracted for testability).
 pub fn build_router(state: Arc<AppState>) -> Router {
+    use axum::extract::DefaultBodyLimit;
     use axum::routing::post;
+    use tower_http::catch_panic::CatchPanicLayer;
+
+    // Body size limit: configurable via GYRE_MAX_BODY_SIZE (bytes), default 10MB.
+    let max_body_bytes: usize = std::env::var("GYRE_MAX_BODY_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10 * 1024 * 1024);
+
+    // CORS: configurable via GYRE_CORS_ORIGINS (comma-separated), default "*".
+    let cors = build_cors_layer();
 
     Router::new()
         .route("/health", get(health::health_handler))
@@ -151,9 +167,39 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(api::api_router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
+            middleware::rate_limit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             middleware::request_tracing,
         ))
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(cors)
+        .layer(CatchPanicLayer::new())
         .with_state(state)
+}
+
+/// Build a CORS layer from `GYRE_CORS_ORIGINS` env var.
+fn build_cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+
+    let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| "*".to_string());
+
+    if origins_str == "*" {
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods(AllowMethods::any())
+            .allow_headers(AllowHeaders::any())
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = origins_str
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(AllowMethods::any())
+            .allow_headers(AllowHeaders::any())
+    }
 }
 
 /// Build application state with in-memory repositories and real git operations.
@@ -170,6 +216,10 @@ pub fn build_state(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let rate_per_sec: u64 = std::env::var("GYRE_RATE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -204,6 +254,8 @@ pub fn build_state(
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
         compute_targets: Arc::new(Mutex::new(HashMap::new())),
+        network_peers: Arc::new(mem::MemNetworkPeerRepository::default()),
+        rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
     })
 }
 
