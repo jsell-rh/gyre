@@ -76,6 +76,7 @@ pub async fn get_push_gates(
 /// PUT /api/v1/repos/:id/push-gates — set pre-accept gate list for this repo.
 pub async fn set_push_gates(
     State(state): State<Arc<AppState>>,
+    _admin: crate::auth::AdminOnly,
     Path(repo_id): Path<String>,
     Json(req): Json<SetPushGatesRequest>,
 ) -> Result<(StatusCode, Json<PushGatesResponse>), ApiError> {
@@ -194,6 +195,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/v1/repos/repo-1/push-gates")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -231,6 +233,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/v1/repos/repo-1/push-gates")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -251,6 +254,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/v1/repos/no-such-repo/push-gates")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

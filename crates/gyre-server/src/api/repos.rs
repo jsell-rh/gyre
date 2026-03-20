@@ -81,6 +81,14 @@ pub async fn create_repo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRepoRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
+    // Reject path traversal in project_id and name.
+    for field in [req.project_id.as_str(), req.name.as_str()] {
+        if field.contains("..") || field.contains('/') {
+            return Err(ApiError::InvalidInput(
+                "project_id and name must not contain '..' or '/'".to_string(),
+            ));
+        }
+    }
     let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
     let repo_path = req
         .path
@@ -181,6 +189,20 @@ pub async fn create_mirror_repo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateMirrorRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
+    // Reject path traversal in project_id and name.
+    for field in [req.project_id.as_str(), req.name.as_str()] {
+        if field.contains("..") || field.contains('/') {
+            return Err(ApiError::InvalidInput(
+                "project_id and name must not contain '..' or '/'.".to_string(),
+            ));
+        }
+    }
+    // Only allow https:// URLs to prevent SSRF.
+    if !req.url.starts_with("https://") {
+        return Err(ApiError::InvalidInput(
+            "mirror URL must use https:// scheme".to_string(),
+        ));
+    }
     let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
     let repo_path = format!("{}/{}/{}.git", repos_root, req.project_id, req.name);
 
