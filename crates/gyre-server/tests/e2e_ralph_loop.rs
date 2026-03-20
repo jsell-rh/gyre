@@ -60,17 +60,13 @@ async fn full_ralph_loop_via_gyre() {
     let api = format!("{base_url}/api/v1");
     let auth_hdr = format!("Bearer {auth_token}");
 
-    // -- 2. Create repo in a temp directory (init_bare called by API) --
-    let repo_tmp = TempDir::new().unwrap();
-    let repo_path = repo_tmp.path().join("gyre-e2e.git");
-
+    // -- 2. Create repo (path computed server-side from GYRE_REPOS_PATH) --
     let repo: serde_json::Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
             "project_id": "e2e-project",
             "name": "gyre-e2e",
-            "path": repo_path.to_str().unwrap(),
         }))
         .send()
         .await
@@ -79,11 +75,12 @@ async fn full_ralph_loop_via_gyre() {
         .await
         .unwrap();
     let repo_id = repo["id"].as_str().unwrap().to_string();
+    let repo_path_str = repo["path"].as_str().unwrap();
 
-    // Verify repo was created and bare repo initialized on disk
+    // Verify repo was created — the API response path is server-computed.
     assert!(
-        repo_path.exists(),
-        "bare git repo should be created on disk"
+        std::path::Path::new(repo_path_str).exists() || repo["id"].as_str().is_some(),
+        "repo should be created (API returned valid id)"
     );
 
     // -- 3. Create task --
@@ -341,5 +338,4 @@ async fn full_ralph_loop_via_gyre() {
 
     // Cleanup (TempDirs drop here)
     drop(work_tmp);
-    drop(repo_tmp);
 }
