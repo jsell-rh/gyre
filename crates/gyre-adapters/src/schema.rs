@@ -8,6 +8,7 @@ diesel::table! {
         description -> Nullable<Text>,
         created_at -> BigInt,
         updated_at -> BigInt,
+        tenant_id -> Text,
     }
 }
 
@@ -23,6 +24,7 @@ diesel::table! {
         mirror_url -> Nullable<Text>,
         mirror_interval_secs -> Nullable<BigInt>,
         last_mirror_sync -> Nullable<BigInt>,
+        tenant_id -> Text,
     }
 }
 
@@ -36,6 +38,7 @@ diesel::table! {
         lifetime_budget_secs -> Nullable<BigInt>,
         spawned_at -> BigInt,
         last_heartbeat -> Nullable<BigInt>,
+        tenant_id -> Text,
     }
 }
 
@@ -53,6 +56,7 @@ diesel::table! {
         pr_link -> Nullable<Text>,
         created_at -> BigInt,
         updated_at -> BigInt,
+        tenant_id -> Text,
     }
 }
 
@@ -72,6 +76,7 @@ diesel::table! {
         diff_insertions -> Nullable<BigInt>,
         diff_deletions -> Nullable<BigInt>,
         has_conflicts -> Nullable<Integer>,
+        tenant_id -> Text,
     }
 }
 
@@ -82,6 +87,7 @@ diesel::table! {
         event_type -> Text,
         description -> Text,
         timestamp -> BigInt,
+        tenant_id -> Text,
     }
 }
 
@@ -177,6 +183,7 @@ diesel::table! {
         agent_id -> Nullable<Text>,
         properties -> Text,
         timestamp -> BigInt,
+        tenant_id -> Text,
     }
 }
 
@@ -189,6 +196,7 @@ diesel::table! {
         amount -> Double,
         currency -> Text,
         timestamp -> BigInt,
+        tenant_id -> Text,
     }
 }
 

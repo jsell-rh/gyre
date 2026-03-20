@@ -65,6 +65,7 @@ struct TaskRow {
     pr_link: Option<String>,
     created_at: i64,
     updated_at: i64,
+    tenant_id: String,
 }
 
 impl TaskRow {
@@ -102,6 +103,7 @@ struct NewTaskRow<'a> {
     pr_link: Option<&'a str>,
     created_at: i64,
     updated_at: i64,
+    tenant_id: &'a str,
 }
 
 #[async_trait]
@@ -109,6 +111,7 @@ impl TaskRepository for SqliteStorage {
     async fn create(&self, task: &Task) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let t = task.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let labels_json = serde_json::to_string(&t.labels)?;
@@ -125,6 +128,7 @@ impl TaskRepository for SqliteStorage {
                 pr_link: t.pr_link.as_deref(),
                 created_at: t.created_at as i64,
                 updated_at: t.updated_at as i64,
+                tenant_id: &tenant,
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -152,10 +156,12 @@ impl TaskRepository for SqliteStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<Task>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Task>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = tasks::table
                 .find(id.as_str())
+                .filter(tasks::tenant_id.eq(&tenant))
                 .first::<TaskRow>(&mut *conn)
                 .optional()
                 .context("find task by id")?;
@@ -166,9 +172,11 @@ impl TaskRepository for SqliteStorage {
 
     async fn list(&self) -> Result<Vec<Task>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
                 .order(tasks::created_at.asc())
                 .load::<TaskRow>(&mut *conn)
                 .context("list tasks")?;
@@ -180,9 +188,11 @@ impl TaskRepository for SqliteStorage {
     async fn list_by_status(&self, status: &TaskStatus) -> Result<Vec<Task>> {
         let pool = Arc::clone(&self.pool);
         let status_str = status_to_str(status).to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
                 .filter(tasks::status.eq(&status_str))
                 .order(tasks::created_at.asc())
                 .load::<TaskRow>(&mut *conn)
@@ -195,9 +205,11 @@ impl TaskRepository for SqliteStorage {
     async fn list_by_assignee(&self, agent_id: &Id) -> Result<Vec<Task>> {
         let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
                 .filter(tasks::assigned_to.eq(agent_id.as_str()))
                 .order(tasks::created_at.asc())
                 .load::<TaskRow>(&mut *conn)
@@ -210,9 +222,11 @@ impl TaskRepository for SqliteStorage {
     async fn list_by_parent(&self, parent_task_id: &Id) -> Result<Vec<Task>> {
         let pool = Arc::clone(&self.pool);
         let parent_id = parent_task_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
                 .filter(tasks::parent_task_id.eq(parent_id.as_str()))
                 .order(tasks::created_at.asc())
                 .load::<TaskRow>(&mut *conn)
@@ -225,24 +239,29 @@ impl TaskRepository for SqliteStorage {
     async fn update(&self, task: &Task) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let t = task.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let labels_json = serde_json::to_string(&t.labels)?;
-            diesel::update(tasks::table.find(t.id.as_str()))
-                .set((
-                    tasks::title.eq(&t.title),
-                    tasks::description.eq(t.description.as_deref()),
-                    tasks::status.eq(status_to_str(&t.status)),
-                    tasks::priority.eq(priority_to_str(&t.priority)),
-                    tasks::assigned_to.eq(t.assigned_to.as_ref().map(|id| id.as_str())),
-                    tasks::parent_task_id.eq(t.parent_task_id.as_ref().map(|id| id.as_str())),
-                    tasks::labels.eq(&labels_json),
-                    tasks::branch.eq(t.branch.as_deref()),
-                    tasks::pr_link.eq(t.pr_link.as_deref()),
-                    tasks::updated_at.eq(t.updated_at as i64),
-                ))
-                .execute(&mut *conn)
-                .context("update task")?;
+            diesel::update(
+                tasks::table
+                    .find(t.id.as_str())
+                    .filter(tasks::tenant_id.eq(&tenant)),
+            )
+            .set((
+                tasks::title.eq(&t.title),
+                tasks::description.eq(t.description.as_deref()),
+                tasks::status.eq(status_to_str(&t.status)),
+                tasks::priority.eq(priority_to_str(&t.priority)),
+                tasks::assigned_to.eq(t.assigned_to.as_ref().map(|id| id.as_str())),
+                tasks::parent_task_id.eq(t.parent_task_id.as_ref().map(|id| id.as_str())),
+                tasks::labels.eq(&labels_json),
+                tasks::branch.eq(t.branch.as_deref()),
+                tasks::pr_link.eq(t.pr_link.as_deref()),
+                tasks::updated_at.eq(t.updated_at as i64),
+            ))
+            .execute(&mut *conn)
+            .context("update task")?;
             Ok(())
         })
         .await?
@@ -251,11 +270,16 @@ impl TaskRepository for SqliteStorage {
     async fn delete(&self, id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::delete(tasks::table.find(id.as_str()))
-                .execute(&mut *conn)
-                .context("delete task")?;
+            diesel::delete(
+                tasks::table
+                    .find(id.as_str())
+                    .filter(tasks::tenant_id.eq(&tenant)),
+            )
+            .execute(&mut *conn)
+            .context("delete task")?;
             Ok(())
         })
         .await?
@@ -423,5 +447,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.labels, t.labels);
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let t1 = SqliteStorage::new_for_tenant(path, "t1").unwrap();
+        let t2 = SqliteStorage::new_for_tenant(path, "t2").unwrap();
+
+        TaskRepository::create(&t1, &make_task("task1", "T1 task"))
+            .await
+            .unwrap();
+        TaskRepository::create(&t2, &make_task("task2", "T2 task"))
+            .await
+            .unwrap();
+
+        assert_eq!(TaskRepository::list(&t1).await.unwrap().len(), 1);
+        assert_eq!(TaskRepository::list(&t2).await.unwrap().len(), 1);
+        assert!(TaskRepository::find_by_id(&t1, &Id::new("task2"))
+            .await
+            .unwrap()
+            .is_none());
     }
 }

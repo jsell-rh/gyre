@@ -19,6 +19,7 @@ struct AnalyticsEventRow {
     agent_id: Option<String>,
     properties: String,
     timestamp: i64,
+    tenant_id: String,
 }
 
 impl From<AnalyticsEventRow> for AnalyticsEvent {
@@ -43,6 +44,7 @@ struct AnalyticsEventRecord<'a> {
     agent_id: Option<&'a str>,
     properties: String,
     timestamp: i64,
+    tenant_id: &'a str,
 }
 
 #[derive(Queryable, Selectable)]
@@ -56,6 +58,7 @@ struct CostEntryRow {
     amount: f64,
     currency: String,
     timestamp: i64,
+    tenant_id: String,
 }
 
 impl From<CostEntryRow> for CostEntry {
@@ -82,6 +85,7 @@ struct CostEntryRecord<'a> {
     amount: f64,
     currency: &'a str,
     timestamp: i64,
+    tenant_id: &'a str,
 }
 
 #[derive(QueryableByName)]
@@ -106,6 +110,7 @@ impl AnalyticsRepository for SqliteStorage {
                 agent_id: e.agent_id.as_deref(),
                 properties: props,
                 timestamp: e.timestamp as i64,
+                tenant_id: "default",
             };
             diesel::insert_into(analytics_events::table)
                 .values(&record)
@@ -202,6 +207,7 @@ impl CostRepository for SqliteStorage {
                 amount: e.amount,
                 currency: &e.currency,
                 timestamp: e.timestamp as i64,
+                tenant_id: "default",
             };
             diesel::insert_into(cost_entries::table)
                 .values(&record)

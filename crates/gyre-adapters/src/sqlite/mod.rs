@@ -42,14 +42,28 @@ pub(crate) type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 
 /// Diesel-backed storage adapter.
 /// Implements all port traits for local/development deployments.
+/// All queries are scoped to `tenant_id` for multi-tenant isolation.
+#[derive(Clone)]
 pub struct SqliteStorage {
     /// Diesel r2d2 connection pool.
     pub(crate) pool: Arc<DbPool>,
+    /// Tenant scope for all queries. Defaults to "default".
+    pub(crate) tenant_id: String,
 }
 
 impl SqliteStorage {
     /// Open (or create) the SQLite database and run Diesel migrations.
+    /// Uses the "default" tenant scope.
     pub fn new(db_path: impl Into<String>) -> Result<Self> {
+        Self::new_for_tenant(db_path, "default")
+    }
+
+    /// Open (or create) the SQLite database scoped to a specific tenant.
+    /// Security: "system" tenant should only be used by Admin-role callers.
+    pub fn new_for_tenant(
+        db_path: impl Into<String>,
+        tenant_id: impl Into<String>,
+    ) -> Result<Self> {
         let db_path: String = db_path.into();
 
         // Build r2d2 pool with WAL + foreign keys customizer.
@@ -67,6 +81,7 @@ impl SqliteStorage {
 
         Ok(Self {
             pool: Arc::new(pool),
+            tenant_id: tenant_id.into(),
         })
     }
 }
