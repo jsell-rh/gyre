@@ -235,6 +235,16 @@ CREATE TABLE IF NOT EXISTS network_peers (
 CREATE INDEX IF NOT EXISTS idx_network_peers_agent ON network_peers(agent_id);
 ";
 
+const MIGRATION_007: &str = "
+ALTER TABLE agent_commits ADD COLUMN task_id TEXT;
+ALTER TABLE agent_commits ADD COLUMN ralph_step TEXT;
+ALTER TABLE agent_commits ADD COLUMN spawned_by_user_id TEXT;
+ALTER TABLE agent_commits ADD COLUMN parent_agent_id TEXT;
+ALTER TABLE agent_commits ADD COLUMN model_context TEXT;
+CREATE INDEX IF NOT EXISTS idx_agent_commits_task ON agent_commits(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_commits_ralph_step ON agent_commits(ralph_step);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
@@ -242,6 +252,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, MIGRATION_004),
     (5, MIGRATION_005),
     (6, MIGRATION_006),
+    (7, MIGRATION_007),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

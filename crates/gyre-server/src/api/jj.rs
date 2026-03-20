@@ -174,6 +174,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/projects")
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&proj).unwrap()))
                     .unwrap(),
@@ -190,6 +191,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/repos")
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&repo).unwrap()))
                     .unwrap(),
@@ -212,6 +214,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/jj/log"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -233,6 +236,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/jj/init"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -253,6 +257,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/jj/new"))
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -275,6 +280,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -294,6 +300,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/jj/undo"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -314,6 +321,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/jj/bookmark"))
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -331,6 +339,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/repos/nonexistent/jj/init")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -349,6 +358,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/jj/log?limit=5"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

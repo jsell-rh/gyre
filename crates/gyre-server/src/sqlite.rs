@@ -9,8 +9,8 @@ use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, AuditEventType,
     CostEntry, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
-    Project, Repository, Review, ReviewComment, ReviewDecision, Task, TaskPriority, TaskStatus,
-    User, UserRole,
+    Project, RalphStep, Repository, Review, ReviewComment, ReviewDecision, Task, TaskPriority,
+    TaskStatus, User, UserRole,
 };
 use gyre_ports::{
     ActivityQuery, ActivityRepository, AgentCommitRepository, AgentRepository, AnalyticsRepository,
@@ -74,6 +74,28 @@ impl SqliteDb {
                 conn,
                 4,
                 "ALTER TABLE repos ADD COLUMN last_mirror_sync INTEGER",
+            )?;
+            // M13.2: rich commit provenance columns
+            apply_migration(conn, 5, "ALTER TABLE agent_commits ADD COLUMN task_id TEXT")?;
+            apply_migration(
+                conn,
+                6,
+                "ALTER TABLE agent_commits ADD COLUMN ralph_step TEXT",
+            )?;
+            apply_migration(
+                conn,
+                7,
+                "ALTER TABLE agent_commits ADD COLUMN spawned_by_user_id TEXT",
+            )?;
+            apply_migration(
+                conn,
+                8,
+                "ALTER TABLE agent_commits ADD COLUMN parent_agent_id TEXT",
+            )?;
+            apply_migration(
+                conn,
+                9,
+                "ALTER TABLE agent_commits ADD COLUMN model_context TEXT",
             )?;
             Ok(())
         })
@@ -1352,6 +1374,27 @@ impl ApiKeyRepository for SqliteDb {
 // AgentCommitRepository
 // ───────────────────────────────────────────────
 
+const AC_COLS: &str = "id, agent_id, repository_id, commit_sha, branch, timestamp, \
+     task_id, ralph_step, spawned_by_user_id, parent_agent_id, model_context";
+
+fn agent_commit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommit> {
+    let ralph_step_str: Option<String> = row.get(7)?;
+    let ralph_step = ralph_step_str.as_deref().and_then(RalphStep::from_str);
+    Ok(AgentCommit {
+        id: Id::new(row.get::<_, String>(0)?),
+        agent_id: Id::new(row.get::<_, String>(1)?),
+        repository_id: Id::new(row.get::<_, String>(2)?),
+        commit_sha: row.get(3)?,
+        branch: row.get(4)?,
+        timestamp: row.get::<_, i64>(5)? as u64,
+        task_id: row.get(6)?,
+        ralph_step,
+        spawned_by_user_id: row.get(8)?,
+        parent_agent_id: row.get(9)?,
+        model_context: row.get(10)?,
+    })
+}
+
 #[async_trait]
 impl AgentCommitRepository for SqliteDb {
     async fn record(&self, mapping: &AgentCommit) -> Result<()> {
@@ -1359,8 +1402,14 @@ impl AgentCommitRepository for SqliteDb {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
                 conn.execute(
-                    "INSERT OR REPLACE INTO agent_commits (id, agent_id, repository_id, commit_sha, branch, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![ac.id.as_str(), ac.agent_id.as_str(), ac.repository_id.as_str(), ac.commit_sha, ac.branch, ac.timestamp as i64],
+                    &format!("INSERT OR REPLACE INTO agent_commits ({AC_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
+                    params![
+                        ac.id.as_str(), ac.agent_id.as_str(), ac.repository_id.as_str(),
+                        ac.commit_sha, ac.branch, ac.timestamp as i64,
+                        ac.task_id,
+                        ac.ralph_step.as_ref().map(|s| s.as_str()),
+                        ac.spawned_by_user_id, ac.parent_agent_id, ac.model_context,
+                    ],
                 )?;
                 Ok(())
             })
@@ -1371,19 +1420,10 @@ impl AgentCommitRepository for SqliteDb {
         let aid = agent_id.clone();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, agent_id, repository_id, commit_sha, branch, timestamp FROM agent_commits WHERE agent_id = ?1",
-                )?;
-                let rows = stmt.query_map(params![aid.as_str()], |row| {
-                    Ok(AgentCommit {
-                        id: Id::new(row.get::<_, String>(0)?),
-                        agent_id: Id::new(row.get::<_, String>(1)?),
-                        repository_id: Id::new(row.get::<_, String>(2)?),
-                        commit_sha: row.get(3)?,
-                        branch: row.get(4)?,
-                        timestamp: row.get::<_, i64>(5)? as u64,
-                    })
-                })?;
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {AC_COLS} FROM agent_commits WHERE agent_id = ?1"
+                ))?;
+                let rows = stmt.query_map(params![aid.as_str()], agent_commit_from_row)?;
                 rows.map(|r| r.map_err(anyhow::Error::from)).collect()
             })
         })
@@ -1393,19 +1433,10 @@ impl AgentCommitRepository for SqliteDb {
         let rid = repo_id.clone();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, agent_id, repository_id, commit_sha, branch, timestamp FROM agent_commits WHERE repository_id = ?1",
-                )?;
-                let rows = stmt.query_map(params![rid.as_str()], |row| {
-                    Ok(AgentCommit {
-                        id: Id::new(row.get::<_, String>(0)?),
-                        agent_id: Id::new(row.get::<_, String>(1)?),
-                        repository_id: Id::new(row.get::<_, String>(2)?),
-                        commit_sha: row.get(3)?,
-                        branch: row.get(4)?,
-                        timestamp: row.get::<_, i64>(5)? as u64,
-                    })
-                })?;
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {AC_COLS} FROM agent_commits WHERE repository_id = ?1"
+                ))?;
+                let rows = stmt.query_map(params![rid.as_str()], agent_commit_from_row)?;
                 rows.map(|r| r.map_err(anyhow::Error::from)).collect()
             })
         })
@@ -1415,22 +1446,42 @@ impl AgentCommitRepository for SqliteDb {
         let sha = sha.to_string();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, agent_id, repository_id, commit_sha, branch, timestamp FROM agent_commits WHERE commit_sha = ?1",
-                )?;
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {AC_COLS} FROM agent_commits WHERE commit_sha = ?1"
+                ))?;
                 let mut rows = stmt.query(params![sha])?;
                 if let Some(row) = rows.next()? {
-                    Ok(Some(AgentCommit {
-                        id: Id::new(row.get::<_, String>(0)?),
-                        agent_id: Id::new(row.get::<_, String>(1)?),
-                        repository_id: Id::new(row.get::<_, String>(2)?),
-                        commit_sha: row.get(3)?,
-                        branch: row.get(4)?,
-                        timestamp: row.get::<_, i64>(5)? as u64,
-                    }))
+                    Ok(Some(agent_commit_from_row(row)?))
                 } else {
                     Ok(None)
                 }
+            })
+        })
+    }
+
+    async fn find_by_task(&self, task_id: &str) -> Result<Vec<AgentCommit>> {
+        let tid = task_id.to_string();
+        blocking!(self, |db: &SqliteDb| {
+            db.with_conn(|conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {AC_COLS} FROM agent_commits WHERE task_id = ?1"
+                ))?;
+                let rows = stmt.query_map(params![tid], agent_commit_from_row)?;
+                rows.map(|r| r.map_err(anyhow::Error::from)).collect()
+            })
+        })
+    }
+
+    async fn find_by_ralph_step(&self, repo_id: &Id, ralph_step: &str) -> Result<Vec<AgentCommit>> {
+        let rid = repo_id.clone();
+        let step = ralph_step.to_string();
+        blocking!(self, |db: &SqliteDb| {
+            db.with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    &format!("SELECT {AC_COLS} FROM agent_commits WHERE repository_id = ?1 AND ralph_step = ?2"),
+                )?;
+                let rows = stmt.query_map(params![rid.as_str(), step], agent_commit_from_row)?;
+                rows.map(|r| r.map_err(anyhow::Error::from)).collect()
             })
         })
     }
