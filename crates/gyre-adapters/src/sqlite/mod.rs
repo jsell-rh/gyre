@@ -59,6 +59,17 @@ impl SqliteStorage {
         Self::new_for_tenant(db_path, "default")
     }
 
+    /// Return a new handle scoped to `tenant_id`, reusing the same connection pool.
+    ///
+    /// This is cheap -- it only clones the `Arc` pointer to the pool. Use this
+    /// in request handlers to switch tenant scope without re-opening the DB.
+    pub fn with_tenant(&self, tenant_id: impl Into<String>) -> Self {
+        Self {
+            pool: Arc::clone(&self.pool),
+            tenant_id: tenant_id.into(),
+        }
+    }
+
     /// Open (or create) the SQLite database scoped to a specific tenant.
     /// Security: "system" tenant should only be used by Admin-role callers.
     pub fn new_for_tenant(
