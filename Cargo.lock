@@ -812,7 +812,7 @@ dependencies = [
  "gyre-common",
  "gyre-domain",
  "gyre-ports",
- "rusqlite",
+ "libsqlite3-sys",
  "serde",
  "serde_json",
  "tempfile",

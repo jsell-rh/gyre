@@ -1,86 +1,121 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::AgentWorktree;
 use gyre_ports::WorktreeRepository;
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::agent_worktrees;
 
-fn row_to_worktree(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentWorktree> {
-    let task_id: Option<String> = row.get(3)?;
-    Ok(AgentWorktree {
-        id: Id::new(row.get::<_, String>(0)?),
-        agent_id: Id::new(row.get::<_, String>(1)?),
-        repository_id: Id::new(row.get::<_, String>(2)?),
-        task_id: task_id.map(Id::new),
-        branch: row.get(4)?,
-        path: row.get(5)?,
-        created_at: row.get::<_, i64>(6)? as u64,
-    })
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = agent_worktrees)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct AgentWorktreeRow {
+    id: String,
+    agent_id: String,
+    repository_id: String,
+    task_id: Option<String>,
+    branch: String,
+    path: String,
+    created_at: i64,
+}
+
+impl From<AgentWorktreeRow> for AgentWorktree {
+    fn from(r: AgentWorktreeRow) -> Self {
+        AgentWorktree {
+            id: Id::new(r.id),
+            agent_id: Id::new(r.agent_id),
+            repository_id: Id::new(r.repository_id),
+            task_id: r.task_id.map(Id::new),
+            branch: r.branch,
+            path: r.path,
+            created_at: r.created_at as u64,
+        }
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = agent_worktrees)]
+struct AgentWorktreeRecord<'a> {
+    id: &'a str,
+    agent_id: &'a str,
+    repository_id: &'a str,
+    task_id: Option<&'a str>,
+    branch: &'a str,
+    path: &'a str,
+    created_at: i64,
+}
+
+impl<'a> From<&'a AgentWorktree> for AgentWorktreeRecord<'a> {
+    fn from(w: &'a AgentWorktree) -> Self {
+        AgentWorktreeRecord {
+            id: w.id.as_str(),
+            agent_id: w.agent_id.as_str(),
+            repository_id: w.repository_id.as_str(),
+            task_id: w.task_id.as_ref().map(|id| id.as_str()),
+            branch: &w.branch,
+            path: &w.path,
+            created_at: w.created_at as i64,
+        }
+    }
 }
 
 #[async_trait]
 impl WorktreeRepository for SqliteStorage {
     async fn create(&self, worktree: &AgentWorktree) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let w = worktree.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO agent_worktrees (id, agent_id, repository_id, task_id, branch, path, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    w.id.as_str(),
-                    w.agent_id.as_str(),
-                    w.repository_id.as_str(),
-                    w.task_id.as_ref().map(|id| id.as_str()),
-                    w.branch,
-                    w.path,
-                    w.created_at as i64,
-                ],
-            )
-            .context("insert agent_worktree")?;
+            let mut conn = pool.get().context("get db connection")?;
+            let record = AgentWorktreeRecord::from(&w);
+            diesel::insert_into(agent_worktrees::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert agent_worktree")?;
             Ok(())
         })
         .await?
     }
 
     async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<AgentWorktree>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AgentWorktree>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, repository_id, task_id, branch, path, created_at
-                 FROM agent_worktrees WHERE agent_id = ?1 ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([agent_id.as_str()], row_to_worktree)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agent_worktrees::table
+                .filter(agent_worktrees::agent_id.eq(agent_id.as_str()))
+                .order(agent_worktrees::created_at.asc())
+                .load::<AgentWorktreeRow>(&mut *conn)
+                .context("find worktrees by agent")?;
+            Ok(rows.into_iter().map(AgentWorktree::from).collect())
         })
         .await?
     }
 
     async fn find_by_repo(&self, repo_id: &Id) -> Result<Vec<AgentWorktree>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let repo_id = repo_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AgentWorktree>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, repository_id, task_id, branch, path, created_at
-                 FROM agent_worktrees WHERE repository_id = ?1 ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([repo_id.as_str()], row_to_worktree)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agent_worktrees::table
+                .filter(agent_worktrees::repository_id.eq(repo_id.as_str()))
+                .order(agent_worktrees::created_at.asc())
+                .load::<AgentWorktreeRow>(&mut *conn)
+                .context("find worktrees by repo")?;
+            Ok(rows.into_iter().map(AgentWorktree::from).collect())
         })
         .await?
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute("DELETE FROM agent_worktrees WHERE id = ?1", [id.as_str()])
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(agent_worktrees::table.find(id.as_str()))
+                .execute(&mut *conn)
                 .context("delete agent_worktree")?;
             Ok(())
         })
