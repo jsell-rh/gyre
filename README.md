@@ -50,7 +50,7 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M4: Identity & Observability | Done | Keycloak SSO + JWT auth, RBAC roles, OpenTelemetry tracing, Prometheus metrics |
 | M5: Agent Protocols | Done | MCP server, A2A protocol, AG-UI events, jj VCS, agent compose spec, M5 dashboard |
 | M6: Infrastructure & Operations | Done | Product analytics, cost tracking, BCP snapshot/restore, background job framework, M6 dashboard |
-| M7: Production Hardening | Planned | eBPF audit, SIEM forwarding, NixOS packaging, remote compute targets, WireGuard mesh, production hardening |
+| M7: Production Hardening | Done | eBPF audit, SIEM forwarding, NixOS packaging, remote compute targets, WireGuard mesh, production hardening |
 
 482 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
