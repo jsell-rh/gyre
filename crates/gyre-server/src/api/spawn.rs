@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{auth::AuthenticatedAgent, git_refs, AppState};
 
 use super::agents::AgentResponse;
 use super::error::ApiError;
@@ -116,6 +116,14 @@ pub async fn spawn_agent(
         .await
     {
         tracing::warn!("create_worktree failed: {e}");
+    }
+
+    // Write custom ref namespaces (best-effort)
+    if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
+        let agent_ref = format!("refs/agents/{}/head", agent.id);
+        let ralph_ref = format!("refs/ralph/{}/implement", task.id);
+        git_refs::write_ref(&repo.path, &agent_ref, &sha).await;
+        git_refs::write_ref(&repo.path, &ralph_ref, &sha).await;
     }
 
     // Record worktree in DB linked to agent and task
@@ -284,6 +292,17 @@ pub async fn complete_agent(
     // Transition agent to Idle
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
+
+    // Write snapshot ref for this agent (best-effort)
+    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
+        let snap_prefix = format!("refs/agents/{}/snapshots/", agent.id);
+        let n = git_refs::count_refs_under(&repo.path, &snap_prefix).await;
+        let snap_ref = format!("refs/agents/{}/snapshots/{}", agent.id, n);
+        let branch_ref = format!("refs/heads/{}", mr.source_branch);
+        if let Some(sha) = git_refs::resolve_ref(&repo.path, &branch_ref).await {
+            git_refs::write_ref(&repo.path, &snap_ref, &sha).await;
+        }
+    }
 
     // Auto-track agent completion
     let ev = AnalyticsEvent::new(
