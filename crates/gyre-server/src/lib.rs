@@ -18,6 +18,7 @@ pub mod retention;
 pub mod siem;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod sqlite;
 pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod ws;
@@ -206,7 +207,8 @@ fn build_cors_layer() -> tower_http::cors::CorsLayer {
     }
 }
 
-/// Build application state with in-memory repositories and real git operations.
+/// Build application state. When `GYRE_DATABASE_URL` is set (e.g. `sqlite://gyre.db`),
+/// uses SQLite-backed repositories; otherwise falls back to in-memory stores.
 /// Used by both production (main) and integration tests.
 pub fn build_state(
     auth_token: &str,
@@ -225,27 +227,45 @@ pub fn build_state(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
+
+    let db: Option<Arc<sqlite::SqliteDb>> =
+        std::env::var("GYRE_DATABASE_URL").ok().map(|url| {
+            let path = url.strip_prefix("sqlite://").unwrap_or(&url).to_string();
+            Arc::new(
+                sqlite::SqliteDb::open(&path)
+                    .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
+            )
+        });
+
+    macro_rules! store {
+        ($trait:ty, $mem:expr) => {
+            db.as_ref()
+                .map(|d| Arc::clone(d) as Arc<$trait>)
+                .unwrap_or_else(|| Arc::new($mem))
+        };
+    }
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
-        projects: Arc::new(mem::MemProjectRepository::default()),
-        repos: Arc::new(mem::MemRepoRepository::default()),
-        agents: Arc::new(mem::MemAgentRepository::default()),
-        tasks: Arc::new(mem::MemTaskRepository::default()),
-        merge_requests: Arc::new(mem::MemMrRepository::default()),
-        reviews: Arc::new(mem::MemReviewRepository::default()),
-        merge_queue: Arc::new(mem::MemMergeQueueRepository::default()),
+        projects: store!(dyn ProjectRepository, mem::MemProjectRepository::default()),
+        repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
+        agents: store!(dyn AgentRepository, mem::MemAgentRepository::default()),
+        tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
+        merge_requests: store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
+        reviews: store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        merge_queue: store!(dyn MergeQueueRepository, mem::MemMergeQueueRepository::default()),
         git_ops: Arc::new(gyre_adapters::Git2OpsAdapter::new()),
         jj_ops: Arc::new(gyre_adapters::JjOpsAdapter::new()),
-        agent_commits: Arc::new(mem::MemAgentCommitRepository::default()),
-        worktrees: Arc::new(mem::MemWorktreeRepository::default()),
+        agent_commits: store!(dyn AgentCommitRepository, mem::MemAgentCommitRepository::default()),
+        worktrees: store!(dyn WorktreeRepository, mem::MemWorktreeRepository::default()),
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
         event_tx,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
-        users: Arc::new(mem::MemUserRepository::default()),
-        api_keys: Arc::new(mem::MemApiKeyRepository::default()),
+        users: store!(dyn UserRepository, mem::MemUserRepository::default()),
+        api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
         http_client: reqwest::Client::new(),
         metrics,
@@ -254,13 +274,13 @@ pub fn build_state(
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
-        analytics: Arc::new(mem::MemAnalyticsRepository::default()),
-        costs: Arc::new(mem::MemCostRepository::default()),
-        audit: Arc::new(mem::MemAuditRepository::default()),
+        analytics: store!(dyn AnalyticsRepository, mem::MemAnalyticsRepository::default()),
+        costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
+        audit: store!(dyn AuditRepository, mem::MemAuditRepository::default()),
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
         compute_targets: Arc::new(Mutex::new(HashMap::new())),
-        network_peers: Arc::new(mem::MemNetworkPeerRepository::default()),
+        network_peers: store!(dyn NetworkPeerRepository, mem::MemNetworkPeerRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
     })
 }
