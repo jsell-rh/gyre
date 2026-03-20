@@ -19,6 +19,7 @@ struct AnalyticsEventRow {
     agent_id: Option<String>,
     properties: String,
     timestamp: i64,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 
@@ -58,6 +59,7 @@ struct CostEntryRow {
     amount: f64,
     currency: String,
     timestamp: i64,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 

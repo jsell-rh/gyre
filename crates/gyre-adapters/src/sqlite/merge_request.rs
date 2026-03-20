@@ -46,6 +46,7 @@ struct MergeRequestRow {
     diff_insertions: Option<i64>,
     diff_deletions: Option<i64>,
     has_conflicts: Option<i32>,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 
