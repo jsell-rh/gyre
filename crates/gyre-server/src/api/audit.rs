@@ -245,7 +245,6 @@ pub async fn delete_siem_target(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
