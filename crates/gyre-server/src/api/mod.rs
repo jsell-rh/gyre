@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod admin;
+pub mod agent_logs;
 pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
@@ -105,6 +106,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/agents/:id/messages",
             get(agent_messages::get_messages).post(agent_messages::send_message),
+        )
+        // Agent logs
+        .route(
+            "/api/v1/agents/:id/logs",
+            post(agent_logs::append_log).get(agent_logs::get_logs),
+        )
+        .route(
+            "/api/v1/agents/:id/logs/stream",
+            get(agent_logs::stream_logs),
         )
         // Compose
         .route("/api/v1/compose/apply", post(compose_apply))
