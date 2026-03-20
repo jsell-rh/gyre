@@ -9,6 +9,10 @@ pub struct Repository {
     pub path: String,
     pub default_branch: String,
     pub created_at: u64,
+    pub is_mirror: bool,
+    pub mirror_url: Option<String>,
+    pub mirror_interval_secs: Option<u64>,
+    pub last_mirror_sync: Option<u64>,
 }
 
 impl Repository {
@@ -26,6 +30,10 @@ impl Repository {
             path: path.into(),
             default_branch: "main".to_string(),
             created_at,
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
         }
     }
 }
