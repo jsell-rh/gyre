@@ -119,6 +119,9 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/review-routing?path={file}` | Ordered list of agents to request review from, ranked by recency and commit count (M13.4) |
 | `GET` | `/api/v1/repos/{id}/speculative` | List all speculative merge results for active branches (M13.5) |
 | `GET` | `/api/v1/repos/{id}/speculative/{branch}` | Speculative merge result for a specific branch against main (M13.5) |
+| `GET` | `/api/v1/repos/{id}/stack-policy` | Get repo's required stack fingerprint for push attestation (M14.2) |
+| `PUT` | `/api/v1/repos/{id}/stack-policy` | Set / clear required stack fingerprint (**Admin only**, M14.2) |
+| `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
@@ -128,6 +131,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/agents/{id}/logs` | Paginated agent log lines (`?limit=100&offset=0`) (M11.2) |
 | `GET` | `/api/v1/agents/{id}/logs/stream` | SSE live feed of new log lines for an agent (M11.2) |
 | `GET` | `/api/v1/agents/{id}/touched-paths` | All repo branches and file paths written to by this agent (M13.4) |
+| `POST` | `/api/v1/agents/{id}/stack` | Agent self-reports its runtime stack fingerprint at spawn (M14.1) |
+| `GET` | `/api/v1/agents/{id}/stack` | Query agent's registered stack fingerprint (M14.1) |
 | `GET` | `/ws/agents/{id}/tty` | WebSocket TTY attach — auth via first-message Bearer token; replays buffered logs then streams live PTY output (M11.2) |
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`) |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
