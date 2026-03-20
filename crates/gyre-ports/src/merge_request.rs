@@ -12,4 +12,6 @@ pub trait MergeRequestRepository: Send + Sync {
     async fn list_by_repo(&self, repository_id: &Id) -> Result<Vec<MergeRequest>>;
     async fn update(&self, mr: &MergeRequest) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
+    /// Return IDs of MRs that declare `mr_id` in their `depends_on` list.
+    async fn list_dependents(&self, mr_id: &Id) -> Result<Vec<Id>>;
 }
