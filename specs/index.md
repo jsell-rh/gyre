@@ -28,6 +28,7 @@ What Gyre does - the product.
 | SDLC Philosophy | [`system/sdlc.md`](system/sdlc.md) | Challenge every ceremony, engineer the need away |
 | Business Continuity | [`system/business-continuity.md`](system/business-continuity.md) | BCP primitives, snapshot/restore, retention |
 | Supply Chain Security | [`system/supply-chain.md`](system/supply-chain.md) | Agent stack attestation, gyre-stack.lock, AIBOM, SLSA provenance, attestation levels |
+| Agent Gates & Spec Binding | [`system/agent-gates.md`](system/agent-gates.md) | Agents as merge gates, composable gate chains, spec-to-code cryptographic binding, spec approval ledger |
 
 ## Development of This System
 
