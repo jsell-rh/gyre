@@ -2,42 +2,77 @@
 
 **Gyre** `/ˈdʒaɪər/` - an autonomous software development platform enabling agentic collaboration and orchestration.
 
-Opinionated about governance, identity, and maximizing throughput and quality of code. Flexible about where and how agents run.
+Built-in git forge, merge queue, agent orchestration, and full audit trail. Agents collaborate through a structured Ralph loop: spec, implement, review, merge.
+
+## Quick Start
+
+**Prerequisites:** Rust (stable), git
+
+```bash
+# Build
+cargo build --release -p gyre-server -p gyre-cli
+
+# Run (in-memory, stateless — good for dev/eval)
+./target/release/gyre-server
+
+# Run with persistent SQLite storage
+GYRE_DATABASE_URL=sqlite://gyre.db ./target/release/gyre-server
+```
+
+Open **http://localhost:3000** — the dashboard loads immediately. Default auth token: `gyre-dev-token`.
+
+Seed demo data to explore the UI:
+```bash
+curl -s -X POST http://localhost:3000/api/v1/admin/seed \
+  -H "Authorization: Bearer gyre-dev-token" | jq .
+```
+
+## CLI
+
+```bash
+# Register as a named agent (saves token + agent ID to ~/.gyre/config)
+./target/release/gyre init --name my-agent
+
+# Check server health
+./target/release/gyre health
+
+# List tasks
+./target/release/gyre tasks list
+
+# Clone a repo hosted by Gyre
+./target/release/gyre clone myproject/myrepo
+```
+
+## Configuration
+
+All settings are environment variables. The server starts with safe defaults — nothing is required.
+
+| Variable | Default | Description |
+|---|---|---|
+| `GYRE_PORT` | `3000` | HTTP/WS listen port |
+| `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Bearer token for API auth |
+| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | SQLite URL for persistence, e.g. `sqlite://gyre.db` |
+| `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories |
+| `GYRE_BASE_URL` | `http://localhost:<port>` | Public URL used in clone URLs |
+| `RUST_LOG` | `info` | Log level (`debug`, `trace`, `warn`) |
+| `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL — enables JWT auth |
+
+See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
 ## What Gyre Does
 
-Gyre is a self-contained platform that:
-- **Is the source control host** - built-in git forge with merge requests and merge queues as first-class primitives
-- **Orchestrates agents** - spawn, manage, and coordinate coding agents across any compute target
-- **Engineers the Ralph loop** - automates the iterative develop → review → test → merge cycle and solves coordination between concurrent loops
-- **Audits everything** - full traceability from agent context windows to eBPF syscall capture
+- **Git forge** — bare repos on disk, Smart HTTP clone/push, branches, diffs, merge requests with reviews and a merge queue
+- **Agent orchestration** — spawn agents with a dedicated worktree and auth token; agents push, open MRs, and self-complete
+- **Quality gates** — per-repo gate definitions (test command, lint, required approvals) enforced before merge
+- **Full audit trail** — every agent action logged; eBPF syscall capture; SIEM forwarding
 
 ## Tech Stack
 
 - **Rust** - server, CLI, agent runtime
-- **Svelte 5 + shadcn-svelte** - web UI
+- **Svelte 5 + shadcn-svelte** - web UI (pre-built, no Node required to run)
+- **SQLite** - default storage; WAL mode, full persistence when `GYRE_DATABASE_URL` is set
 - **NixOS** - single definition builds server, Docker image, QEMU VM, LXC container
-- **SQLite** (default) / **PostgreSQL** - abstracted storage
-- **WireGuard** (Tailscale) - agent networking mesh
-- **SPIFFE** - cryptographic agent identity
-
-## Specs
-
-All specifications live in [`specs/`](specs/index.md). Start there.
-
-## Design Principles
-
-| Principle | Detail |
-|---|---|
-| Simplicity | Minimal infrastructure stacks; avoid unnecessary complexity |
-| Vertical scaling | Scale up before scaling out |
-| NixOS as foundation | Single definition, many targets. Safe sudo for agents. |
-| Engineer the Ralph Loop | Every decision evaluated by: does this make the loop faster, tighter, or more reliable? |
-| Reconciliation as a primitive | Desired state → observe → converge → repeat |
-| No shortcuts | The most correct way is mandated. Time is not a constraint - correctness is. |
-| Specs first, always | No implementation without an approved spec |
-| Single-minded agents | One agent, one task. Spin up, execute, tear down. |
-| Opinionated by design | Where an opinion improves throughput or quality, enforce it. |
+- **WireGuard** - agent networking mesh
 
 ## Current Status
 
@@ -60,4 +95,4 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 
 494 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
-See [`specs/`](specs/index.md) for full specifications.
+See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
