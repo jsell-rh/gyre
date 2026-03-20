@@ -229,6 +229,7 @@ pub async fn git_receive_pack(
     }
     let repo_id = resolved.id.to_string();
     let repo_path = resolved.path;
+    let default_branch = resolved.default_branch;
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
@@ -317,6 +318,7 @@ pub async fn git_receive_pack(
     let repo_id_clone = repo_id.clone();
     let branch_clone = branch.clone();
     let attestation_level_clone = attestation_level.to_string();
+    let default_branch_clone = default_branch;
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
@@ -333,13 +335,22 @@ pub async fn git_receive_pack(
         let _ = state_clone
             .event_tx
             .send(crate::domain_events::DomainEvent::PushAccepted {
-                repo_id: repo_id_clone,
+                repo_id: repo_id_clone.clone(),
                 branch: branch_clone,
                 agent_id,
                 commit_count,
                 task_id: task_id_clone,
                 ralph_step: ralph_step_clone,
             });
+        // Spec lifecycle: auto-create tasks for spec changes on the default branch.
+        process_spec_lifecycle(
+            &state_clone,
+            &repo_id_clone,
+            &repo_path_clone,
+            &default_branch_clone,
+            &ref_updates,
+        )
+        .await;
     });
 
     Response::builder()
@@ -809,6 +820,215 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
 }
 
 // ---------------------------------------------------------------------------
+// Spec lifecycle: auto-create tasks on spec changes in the default branch
+// ---------------------------------------------------------------------------
+
+/// Spec path prefixes that trigger lifecycle task creation (per spec-lifecycle.md).
+const SPEC_WATCHED_PATHS: &[&str] = &["specs/system/", "specs/development/"];
+
+/// Classify a spec file change and return (title, labels, priority).
+fn classify_spec_change(
+    status_char: char,
+    path: &str,
+    old_path: Option<&str>,
+) -> Option<(String, Vec<String>, gyre_domain::TaskPriority)> {
+    match status_char {
+        'A' => Some((
+            format!("Implement spec: {path}"),
+            vec![
+                "spec-implementation".to_string(),
+                "auto-created".to_string(),
+            ],
+            gyre_domain::TaskPriority::Medium,
+        )),
+        'M' => Some((
+            format!("Review spec change: {path}"),
+            vec!["spec-drift-review".to_string(), "auto-created".to_string()],
+            gyre_domain::TaskPriority::High,
+        )),
+        'D' => Some((
+            format!("Handle spec removal: {path}"),
+            vec!["spec-deprecated".to_string(), "auto-created".to_string()],
+            gyre_domain::TaskPriority::High,
+        )),
+        'R' => {
+            let old = old_path.unwrap_or(path);
+            Some((
+                format!("Update spec references: {old} -> {path}"),
+                vec!["spec-housekeeping".to_string(), "auto-created".to_string()],
+                gyre_domain::TaskPriority::Medium,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Parse `git diff --name-status` output into (status_char, new_path, old_path) tuples.
+/// Only returns entries in watched spec paths.
+pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+    let mut changes = Vec::new();
+
+    for line in diff_output.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let status_char = parts[0].chars().next().unwrap_or(' ');
+
+        let (old_path, new_path) = if status_char == 'R' || status_char == 'C' {
+            if parts.len() < 3 {
+                continue;
+            }
+            (Some(parts[1]), parts[2])
+        } else {
+            if parts.len() < 2 {
+                continue;
+            }
+            (None, parts[1])
+        };
+
+        let is_watched = SPEC_WATCHED_PATHS
+            .iter()
+            .any(|prefix| new_path.starts_with(prefix));
+        let old_is_watched = old_path.map_or(false, |p| {
+            SPEC_WATCHED_PATHS
+                .iter()
+                .any(|prefix| p.starts_with(prefix))
+        });
+
+        if !is_watched && !old_is_watched {
+            continue;
+        }
+
+        changes.push((
+            status_char,
+            new_path.to_string(),
+            old_path.map(str::to_string),
+        ));
+    }
+
+    changes
+}
+
+/// After a successful push to the default branch, detect spec changes and create tasks.
+async fn process_spec_lifecycle(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    default_branch: &str,
+    ref_updates: &[RefUpdate],
+) {
+    let default_ref = format!("refs/heads/{default_branch}");
+    let relevant_updates: Vec<&RefUpdate> = ref_updates
+        .iter()
+        .filter(|u| u.refname == default_ref)
+        .collect();
+
+    if relevant_updates.is_empty() {
+        return;
+    }
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    // Well-known SHA for the empty git tree (used as base for initial pushes).
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    for update in relevant_updates {
+        let old = if update.old_sha.starts_with("00000000") {
+            EMPTY_TREE.to_string()
+        } else {
+            update.old_sha.clone()
+        };
+
+        let out = match Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("diff")
+            .arg("--name-status")
+            .arg("--diff-filter=AMDR")
+            .arg(format!("{old}..{}", update.new_sha))
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                warn!(repo_path, "spec-lifecycle: git diff failed: {err}");
+                continue;
+            }
+            Err(e) => {
+                warn!(repo_path, "spec-lifecycle: git diff spawn failed: {e}");
+                continue;
+            }
+        };
+
+        let diff_text = String::from_utf8_lossy(&out.stdout);
+        let changes = parse_spec_changes(&diff_text);
+        if changes.is_empty() {
+            continue;
+        }
+
+        let existing_tasks = state.tasks.list().await.unwrap_or_default();
+        let now = crate::api::now_secs();
+
+        for (status_char, path, old_path) in changes {
+            let Some((title, labels, priority)) =
+                classify_spec_change(status_char, &path, old_path.as_deref())
+            else {
+                continue;
+            };
+
+            // Dedup: skip if a non-Done task with the same title already exists.
+            let exists = existing_tasks
+                .iter()
+                .any(|t| t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done));
+            if exists {
+                info!(title, "spec-lifecycle: task already exists, skipping");
+                continue;
+            }
+
+            let task_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
+            let mut task = gyre_domain::Task::new(task_id.clone(), &title, now);
+            task.priority = priority;
+            task.labels = labels;
+            task.description = Some(format!(
+                "Auto-created by spec lifecycle hook.\nSpec: {path}\nRepo: {repo_id}"
+            ));
+
+            match state.tasks.create(&task).await {
+                Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
+                Ok(()) => {
+                    info!(title, "spec-lifecycle: created task for spec change");
+                    let _ = state
+                        .event_tx
+                        .send(crate::domain_events::DomainEvent::SpecChanged {
+                            repo_id: repo_id.to_string(),
+                            spec_path: path,
+                            change_kind: match status_char {
+                                'A' => "added",
+                                'M' => "modified",
+                                'D' => "deleted",
+                                'R' => "renamed",
+                                _ => "unknown",
+                            }
+                            .to_string(),
+                            task_id: task_id.to_string(),
+                        });
+                    let _ = state
+                        .event_tx
+                        .send(crate::domain_events::DomainEvent::TaskCreated {
+                            id: task_id.to_string(),
+                        });
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1142,5 +1362,114 @@ mod tests {
         // Deletion: new sha is zeros — skipped.
         let non_delete: Vec<_> = updates.iter().filter(|u| u.new_sha != zeros).collect();
         assert!(non_delete.is_empty());
+    }
+
+    // ── Spec lifecycle tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_spec_changes_empty_input() {
+        let changes = super::parse_spec_changes("");
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn parse_spec_changes_added_spec() {
+        let input = "A\tspecs/system/new-spec.md\n";
+        let changes = super::parse_spec_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, 'A');
+        assert_eq!(changes[0].1, "specs/system/new-spec.md");
+        assert!(changes[0].2.is_none());
+    }
+
+    #[test]
+    fn parse_spec_changes_modified_spec() {
+        let input = "M\tspecs/development/architecture.md\n";
+        let changes = super::parse_spec_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, 'M');
+        assert_eq!(changes[0].1, "specs/development/architecture.md");
+    }
+
+    #[test]
+    fn parse_spec_changes_deleted_spec() {
+        let input = "D\tspecs/system/old-spec.md\n";
+        let changes = super::parse_spec_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, 'D');
+        assert_eq!(changes[0].1, "specs/system/old-spec.md");
+    }
+
+    #[test]
+    fn parse_spec_changes_renamed_spec() {
+        let input = "R090\tspecs/system/old.md\tspecs/system/new.md\n";
+        let changes = super::parse_spec_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, 'R');
+        assert_eq!(changes[0].1, "specs/system/new.md");
+        assert_eq!(changes[0].2.as_deref(), Some("specs/system/old.md"));
+    }
+
+    #[test]
+    fn parse_spec_changes_ignores_non_watched_paths() {
+        // milestones and src changes should be ignored
+        let input = "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nA\tspecs/system/real.md\n";
+        let changes = super::parse_spec_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, "specs/system/real.md");
+    }
+
+    #[test]
+    fn parse_spec_changes_development_path_watched() {
+        let input = "A\tspecs/development/database-migrations.md\n";
+        let changes = super::parse_spec_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, "specs/development/database-migrations.md");
+    }
+
+    #[test]
+    fn classify_spec_change_added() {
+        let (title, labels, priority) =
+            super::classify_spec_change('A', "specs/system/foo.md", None).unwrap();
+        assert_eq!(title, "Implement spec: specs/system/foo.md");
+        assert!(labels.contains(&"spec-implementation".to_string()));
+        assert!(labels.contains(&"auto-created".to_string()));
+        assert_eq!(priority, gyre_domain::TaskPriority::Medium);
+    }
+
+    #[test]
+    fn classify_spec_change_modified() {
+        let (title, labels, priority) =
+            super::classify_spec_change('M', "specs/system/foo.md", None).unwrap();
+        assert_eq!(title, "Review spec change: specs/system/foo.md");
+        assert!(labels.contains(&"spec-drift-review".to_string()));
+        assert_eq!(priority, gyre_domain::TaskPriority::High);
+    }
+
+    #[test]
+    fn classify_spec_change_deleted() {
+        let (title, labels, priority) =
+            super::classify_spec_change('D', "specs/system/old.md", None).unwrap();
+        assert_eq!(title, "Handle spec removal: specs/system/old.md");
+        assert!(labels.contains(&"spec-deprecated".to_string()));
+        assert_eq!(priority, gyre_domain::TaskPriority::High);
+    }
+
+    #[test]
+    fn classify_spec_change_renamed() {
+        let (title, labels, priority) =
+            super::classify_spec_change('R', "specs/system/new.md", Some("specs/system/old.md"))
+                .unwrap();
+        assert_eq!(
+            title,
+            "Update spec references: specs/system/old.md -> specs/system/new.md"
+        );
+        assert!(labels.contains(&"spec-housekeeping".to_string()));
+        assert_eq!(priority, gyre_domain::TaskPriority::Medium);
+    }
+
+    #[test]
+    fn classify_spec_change_unknown_returns_none() {
+        assert!(super::classify_spec_change('X', "specs/system/foo.md", None).is_none());
     }
 }
