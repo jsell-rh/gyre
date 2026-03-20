@@ -14,6 +14,10 @@ fn row_to_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repository> {
         path: row.get(3)?,
         default_branch: row.get(4)?,
         created_at: row.get::<_, i64>(5)? as u64,
+        is_mirror: false,
+        mirror_url: None,
+        mirror_interval_secs: None,
+        last_mirror_sync: None,
     })
 }
 
