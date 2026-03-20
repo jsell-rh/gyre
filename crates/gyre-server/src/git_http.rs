@@ -452,6 +452,11 @@ struct RefUpdate {
 ///
 /// Format of each line (before NUL / capabilities on first line):
 ///   `{old-sha} {new-sha} {refname}\0{capabilities?}`  or  `{old-sha} {new-sha} {refname}`
+/// Validate that a string is a valid 40-character hex SHA (M-8 security fix).
+fn is_valid_sha(s: &str) -> bool {
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
     let mut updates = Vec::new();
     let mut pos = 0;
@@ -487,6 +492,11 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
             let zeros = "0000000000000000000000000000000000000000";
             let old = parts[0].to_string();
             let new = parts[1].to_string();
+            // M-8 fix: validate SHA format to prevent git argument injection.
+            if !is_valid_sha(&old) || !is_valid_sha(&new) {
+                tracing::warn!("invalid SHA in push ref-update: old={old} new={new}");
+                continue;
+            }
             // Only record pushes of real commits (not deletions).
             if new != zeros {
                 updates.push(RefUpdate {
