@@ -134,6 +134,10 @@ mod tests {
             job_registry: base.job_registry.clone(),
             analytics: base.analytics.clone(),
             costs: base.costs.clone(),
+            audit: base.audit.clone(),
+            siem_store: base.siem_store.clone(),
+            audit_broadcast_tx: base.audit_broadcast_tx.clone(),
+            compute_targets: base.compute_targets.clone(),
             network_peers: base.network_peers.clone(),
         });
         crate::build_router(state)
@@ -387,8 +391,11 @@ mod tests {
         use tower_http::catch_panic::CatchPanicLayer;
 
         // Build a minimal router with a panicking handler + CatchPanicLayer
+        async fn panicking_handler() -> axum::http::StatusCode {
+            panic!("test panic!")
+        }
         let panic_router: Router = Router::new()
-            .route("/panic", get(|| async { panic!("test panic!") }))
+            .route("/panic", get(panicking_handler))
             .layer(CatchPanicLayer::new());
 
         let resp = panic_router
