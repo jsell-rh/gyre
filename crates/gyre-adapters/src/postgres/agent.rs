@@ -44,6 +44,7 @@ struct AgentRow {
     last_heartbeat: Option<i64>,
     #[allow(dead_code)]
     tenant_id: String,
+    spawned_by: Option<String>,
 }
 
 impl AgentRow {
@@ -57,6 +58,7 @@ impl AgentRow {
             lifetime_budget_secs: self.lifetime_budget_secs.map(|v| v as u64),
             spawned_at: self.spawned_at as u64,
             last_heartbeat: self.last_heartbeat.map(|v| v as u64),
+            spawned_by: self.spawned_by,
         })
     }
 }
@@ -73,6 +75,7 @@ struct NewAgentRow<'a> {
     spawned_at: i64,
     last_heartbeat: Option<i64>,
     tenant_id: &'a str,
+    spawned_by: Option<&'a str>,
 }
 
 #[async_trait]
@@ -93,6 +96,7 @@ impl AgentRepository for PgStorage {
                 spawned_at: a.spawned_at as i64,
                 last_heartbeat: a.last_heartbeat.map(|v| v as i64),
                 tenant_id: &tenant,
+                spawned_by: a.spawned_by.as_deref(),
             };
             diesel::insert_into(agents::table)
                 .values(&row)
