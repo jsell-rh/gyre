@@ -47,4 +47,19 @@ pub enum DomainEvent {
         task_id: Option<String>,
         ralph_step: Option<String>,
     },
+    /// Emitted when a speculative merge detects a conflict between branches (M13.5).
+    SpeculativeConflict {
+        repo_id: String,
+        branch: String,
+        conflicting_files: Vec<String>,
+    },
+    /// Emitted when a speculative merge is clean (no conflicts) (M13.5).
+    SpeculativeMergeClean {
+        repo_id: String,
+        branch: String,
+    },
+    /// Emitted when hot-files list changes (M13.4).
+    HotFilesChanged {
+        repo_id: String,
+    },
 }
