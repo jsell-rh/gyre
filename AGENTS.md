@@ -104,8 +104,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
 | `POST/GET` | `/api/v1/projects` | Create / list projects |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
-| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`) |
-| `GET` | `/api/v1/repos/{id}` | Get repository |
+| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`) (M12.2) |
+| `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
@@ -455,7 +455,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Task Board** (M8.2 + M9.2): kanban columns with semantic color-coded top borders per status, `Badge` component for priority, `EmptyState` per empty column, skeleton loading. "New Task" button opens Modal (title, description, priority, status) -> POST `/api/v1/tasks`; card appears in the correct column immediately.
 - **Project List** (M8.2 + M9.2): responsive card grid, skeleton loading, `EmptyState` when no projects exist. "New Project" button opens Modal (name + description) -> POST `/api/v1/projects`. Selecting a project shows "Add Repo" button -> Modal -> POST `/api/v1/repos`. Toast notifications on success/error.
 - **Repo Detail** (M8.2): uses `lib/Tabs` + `lib/Table` components, `Badge` for MR status, relative timestamps, `EmptyState` per empty tab.
-- **Merge Request Detail** (M8.3): two-column layout — diff panel left, metadata + status timeline right. Status timeline shows each MR lifecycle step with timestamps and reviewer info.
+- **Merge Request Detail** (M8.3 + M12.3): two-column layout — diff panel left, metadata + status timeline right. Diff panel upgraded to side-by-side view with syntax highlighting (M12.3). Status timeline shows each MR lifecycle step with timestamps and reviewer info.
 - **Merge Queue View** (M8.3): visual flow lanes per queue position with progress bars, estimated wait indicators, and per-entry action buttons (cancel).
 - **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card.
 - **Auth Token UI** (M9.3): auth status dot in topbar (green = authenticated, red = error). Click opens Token modal to view/change the API token stored in `localStorage`; saving reconnects the WebSocket. All REST and MCP calls inject `Authorization: Bearer {token}`. Defaults to `gyre-dev-token` when no token is stored.
