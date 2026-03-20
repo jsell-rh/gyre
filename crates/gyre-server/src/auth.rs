@@ -1,10 +1,10 @@
 //! Authentication middleware for gyre-server.
 //!
 //! Auth chain (first match wins):
-//! 1. Global `auth_token` — for system/dev use, resolves as "system".
-//! 2. Per-agent tokens — issued at registration, resolves as the agent id.
-//! 3. API keys — resolves as the owning user's name.
-//! 4. JWT (OIDC/Keycloak) — validates RS256 token; auto-creates user on first login.
+//! 1. Global `auth_token` -- for system/dev use, resolves as "system".
+//! 2. Per-agent tokens -- issued at registration, resolves as the agent id.
+//! 3. API keys -- resolves as the owning user's name.
+//! 4. JWT (OIDC/Keycloak) -- validates RS256 token; auto-creates user on first login.
 //!
 //! If `jwt_config` is None the server runs without Keycloak (agent tokens only).
 
@@ -22,7 +22,7 @@ use subtle::ConstantTimeEq;
 
 use crate::AppState;
 
-// ── Security helpers ──────────────────────────────────────────────────────────
+// -- Security helpers ---------------------------------------------------------
 
 /// Compare two tokens in constant time to prevent timing attacks.
 pub(crate) fn tokens_equal(a: &str, b: &str) -> bool {
@@ -42,9 +42,13 @@ pub struct AuthenticatedAgent {
     /// Present when auth was performed via JWT or API key.
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
+    /// Tenant scope for this request.
+    /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
+    /// - All other auth methods: always "default".
+    pub tenant_id: String,
 }
 
-// ── JWT claim types ───────────────────────────────────────────────────────────
+// -- JWT claim types ----------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
@@ -55,12 +59,42 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
+    /// Tenant scope claim. Absent = "default".
+    #[serde(default)]
+    tenant_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RealmAccess {
     #[serde(default)]
     roles: Vec<String>,
+}
+
+/// Validate a tenant_id value extracted from a JWT claim.
+///
+/// Rules:
+/// - Must be 1-64 ASCII alphanumeric characters, hyphens, or underscores.
+/// - The value "system" is reserved for Admin-role callers only.
+fn validate_tenant_id(tenant_id: &str, roles: &[UserRole]) -> Result<(), String> {
+    if tenant_id.is_empty() || tenant_id.len() > 64 {
+        return Err(format!(
+            "tenant_id length must be 1-64 chars, got {}",
+            tenant_id.len()
+        ));
+    }
+    if !tenant_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "tenant_id '{tenant_id}' contains invalid characters (allowed: a-z A-Z 0-9 - _)"
+        ));
+    }
+    // "system" is a reserved tenant -- only Admin callers may use it.
+    if tenant_id == "system" && !roles.contains(&UserRole::Admin) {
+        return Err("tenant 'system' requires Admin role".to_string());
+    }
+    Ok(())
 }
 
 fn roles_from_claims(claims: &JwtClaims) -> Vec<UserRole> {
@@ -72,7 +106,7 @@ fn roles_from_claims(claims: &JwtClaims) -> Vec<UserRole> {
     raw.iter().filter_map(|s| UserRole::from_str(s)).collect()
 }
 
-// ── JWKS refresh ─────────────────────────────────────────────────────────────
+// -- JWKS refresh -------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct OidcDiscovery {
@@ -150,7 +184,7 @@ async fn refresh_jwks(
     }
 }
 
-// ── Auth extractor ────────────────────────────────────────────────────────────
+// -- Auth extractor -----------------------------------------------------------
 
 #[axum::async_trait]
 impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
@@ -173,6 +207,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
+                tenant_id: "default".to_string(),
             });
         }
 
@@ -188,17 +223,19 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
+                    tenant_id: "default".to_string(),
                 });
             }
         }
 
-        // 3. API keys — look up by SHA-256 hash of the raw token.
+        // 3. API keys -- look up by SHA-256 hash of the raw token.
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
                 return Ok(AuthenticatedAgent {
                     agent_id: user.name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
+                    tenant_id: "default".to_string(),
                 });
             }
         }
@@ -269,6 +306,10 @@ async fn validate_jwt(
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
+    // Extract and validate tenant_id from JWT claim.
+    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
+
     // Find or auto-create user.
     let user = find_or_create_user(
         state,
@@ -284,6 +325,7 @@ async fn validate_jwt(
         agent_id: user.name.clone(),
         user_id: Some(user.id),
         roles: user.roles,
+        tenant_id,
     })
 }
 
@@ -314,7 +356,7 @@ async fn find_or_create_user(
     Ok(user)
 }
 
-// ── AdminOnly extractor ───────────────────────────────────────────────────────
+// -- AdminOnly extractor ------------------------------------------------------
 
 /// Extractor that requires the caller to have Admin role (or be "system").
 pub struct AdminOnly {
@@ -342,7 +384,7 @@ impl FromRequestParts<Arc<AppState>> for AdminOnly {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
 pub mod test_helpers {
@@ -406,7 +448,7 @@ HKWsbrW0tHUPuMuz8Xgvs0yV";
     }
 
     /// Sign a test JWT using ring's RSA-PKCS1-SHA256 (RS256).
-    /// Does NOT use jsonwebtoken's PEM feature — no simple_asn1/time MSRV issue.
+    /// Does NOT use jsonwebtoken's PEM feature -- no simple_asn1/time MSRV issue.
     pub fn sign_test_jwt(claims: &serde_json::Value, exp_delta_secs: i64) -> String {
         use base64::engine::general_purpose::STANDARD;
         use ring::rand::SystemRandom;
@@ -805,6 +847,198 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ref(), b"agt-1");
+    }
+
+    // -- Tenant resolution tests ----------------------------------------------
+
+    #[tokio::test]
+    async fn jwt_tenant_id_extracted_from_claim() {
+        use super::AuthenticatedAgent;
+
+        let state = make_test_state_with_jwt();
+
+        async fn tenant_handler(auth: AuthenticatedAgent) -> String {
+            auth.tenant_id
+        }
+
+        let claims = serde_json::json!({
+            "sub": "tenant-test-sub",
+            "preferred_username": "grace",
+            "tenant_id": "acme-corp"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let app: Router = Router::new()
+            .route("/tenant", get(tenant_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tenant")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"acme-corp");
+    }
+
+    #[tokio::test]
+    async fn jwt_missing_tenant_id_defaults_to_default() {
+        use super::AuthenticatedAgent;
+
+        let state = make_test_state_with_jwt();
+
+        async fn tenant_handler(auth: AuthenticatedAgent) -> String {
+            auth.tenant_id
+        }
+
+        let claims = serde_json::json!({
+            "sub": "no-tenant-sub",
+            "preferred_username": "henry"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let app: Router = Router::new()
+            .route("/tenant", get(tenant_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tenant")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"default");
+    }
+
+    #[tokio::test]
+    async fn jwt_system_tenant_rejected_for_non_admin() {
+        let claims = serde_json::json!({
+            "sub": "attacker-sub",
+            "preferred_username": "attacker",
+            "realm_access": { "roles": ["developer"] },
+            "tenant_id": "system"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let resp = app_with_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn jwt_system_tenant_allowed_for_admin() {
+        use super::AuthenticatedAgent;
+
+        let state = make_test_state_with_jwt();
+
+        async fn tenant_handler(auth: AuthenticatedAgent) -> String {
+            auth.tenant_id
+        }
+
+        let claims = serde_json::json!({
+            "sub": "admin-sub",
+            "preferred_username": "alice-admin",
+            "realm_access": { "roles": ["admin"] },
+            "tenant_id": "system"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let app: Router = Router::new()
+            .route("/tenant", get(tenant_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tenant")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"system");
+    }
+
+    #[tokio::test]
+    async fn jwt_invalid_tenant_id_chars_rejected() {
+        let claims = serde_json::json!({
+            "sub": "bad-tenant-sub",
+            "preferred_username": "badguy",
+            "tenant_id": "acme; DROP TABLE tenants"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let resp = app_with_jwt()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn non_jwt_auth_uses_default_tenant() {
+        use super::AuthenticatedAgent;
+
+        let state = test_state();
+
+        async fn tenant_handler(auth: AuthenticatedAgent) -> String {
+            auth.tenant_id
+        }
+
+        let app = Router::new()
+            .route("/tenant", get(tenant_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tenant")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"default");
     }
 
     #[tokio::test]

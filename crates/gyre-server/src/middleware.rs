@@ -151,6 +151,7 @@ mod tests {
             spawn_log: base.spawn_log.clone(),
             agent_stacks: base.agent_stacks.clone(),
             repo_stack_policies: base.repo_stack_policies.clone(),
+            db_storage: base.db_storage.clone(),
         });
         crate::build_router(state)
     }
