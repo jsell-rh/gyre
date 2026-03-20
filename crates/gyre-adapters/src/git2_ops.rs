@@ -23,6 +23,10 @@ impl GitOpsPort for Git2OpsAdapter {
     async fn init_bare(&self, path: &str) -> Result<()> {
         let path = path.to_string();
         tokio::task::spawn_blocking(move || {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent)
+                    .context("failed to create parent directories for bare repo")?;
+            }
             Repository::init_bare(&path).context("failed to init bare repository")?;
             Ok(())
         })
@@ -333,6 +337,31 @@ impl GitOpsPort for Git2OpsAdapter {
         })
         .await?
     }
+
+    async fn create_initial_commit(&self, repo_path: &str, branch: &str) -> Result<String> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo =
+                Repository::open_bare(&repo_path).context("failed to open bare repository")?;
+            let sig = git2::Signature::now("Gyre", "gyre@local")?;
+            let builder = repo.treebuilder(None)?;
+            let tree_oid = builder.write()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let refname = format!("refs/heads/{branch}");
+            let commit_oid = repo.commit(
+                Some(&refname),
+                &sig,
+                &sig,
+                "Initial commit",
+                &tree,
+                &[],
+            )?;
+            repo.set_head(&refname)?;
+            Ok(commit_oid.to_string())
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +401,60 @@ mod tests {
 
         assert!(Path::new(&path).exists());
         assert!(Repository::open_bare(&path).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_init_bare_creates_parent_directories() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nested").join("deep").join("repo.git");
+        let adapter = Git2OpsAdapter::new();
+
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+
+        assert!(Path::new(&path).exists());
+        assert!(Repository::open_bare(&path).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_initial_commit_sets_branch_and_head() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        let sha = adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        assert!(!sha.is_empty());
+        let repo = Repository::open_bare(&path).unwrap();
+        let branch = repo.find_branch("main", git2::BranchType::Local).unwrap();
+        assert_eq!(branch.get().peel_to_commit().unwrap().id().to_string(), sha);
+        let head = repo.head().unwrap();
+        assert_eq!(head.shorthand().unwrap(), "main");
+    }
+
+    #[tokio::test]
+    async fn test_create_initial_commit_repo_shows_branch_in_list() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare2.git");
+        let adapter = Git2OpsAdapter::new();
+
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let branches = adapter
+            .list_branches(path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].name, "main");
+        assert!(branches[0].is_default);
+        assert!(!branches[0].head_sha.is_empty());
     }
 
     #[tokio::test]

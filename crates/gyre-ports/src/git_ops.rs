@@ -48,4 +48,8 @@ pub trait GitOpsPort: Send + Sync {
 
     /// List paths of all registered worktrees for the repository.
     async fn list_worktrees(&self, repo_path: &str) -> Result<Vec<String>>;
+
+    /// Create an initial empty commit on `branch` in a freshly-initialized bare repo.
+    /// Returns the commit SHA. Typically called right after `init_bare`.
+    async fn create_initial_commit(&self, repo_path: &str, branch: &str) -> Result<String>;
 }
