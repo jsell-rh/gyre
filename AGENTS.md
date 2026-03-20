@@ -253,7 +253,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
 | `GYRE_SNAPSHOT_PATH` | `./snapshots/` | Directory for DB snapshot files (`POST /api/v1/admin/snapshot`) |
 | `GYRE_MAX_BODY_SIZE` | `10485760` (10 MB) | Maximum HTTP request body size in bytes (M7.3) |
-| `GYRE_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins; `*` allows all (M7.3) |
+| `GYRE_CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated allowed CORS origins. Default: localhost:2222, localhost:3000, localhost:5173. Set to `*` to allow all (not recommended for production). (M7.3, M-5) |
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
