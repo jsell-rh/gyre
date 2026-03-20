@@ -24,6 +24,8 @@ pub struct CreateMrRequest {
     pub source_branch: String,
     pub target_branch: String,
     pub author_agent_id: Option<String>,
+    /// Optional spec reference "path/to/spec.md@<sha>" for cryptographic binding.
+    pub spec_ref: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +72,7 @@ pub struct MrResponse {
     pub author_agent_id: Option<String>,
     pub diff_stats: Option<DiffStatsResponse>,
     pub has_conflicts: Option<bool>,
+    pub spec_ref: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -90,6 +93,7 @@ impl From<MergeRequest> for MrResponse {
                 deletions: d.deletions,
             }),
             has_conflicts: mr.has_conflicts,
+            spec_ref: mr.spec_ref,
             created_at: mr.created_at,
             updated_at: mr.updated_at,
         }
@@ -219,6 +223,21 @@ pub async fn create_mr(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateMrRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
+    // Validate spec_ref SHA if provided ("path@sha" format, SHA must be 40-char hex).
+    if let Some(ref spec_ref) = req.spec_ref {
+        if let Some(sha) = spec_ref.rsplit_once('@').map(|(_, s)| s) {
+            if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(ApiError::InvalidInput(
+                    "spec_ref SHA must be a 40-character hex string".to_string(),
+                ));
+            }
+        } else {
+            return Err(ApiError::InvalidInput(
+                "spec_ref must be in format 'path@sha'".to_string(),
+            ));
+        }
+    }
+
     let now = now_secs();
     let repo_id = Id::new(req.repository_id);
     let mut mr = MergeRequest::new(
@@ -230,6 +249,7 @@ pub async fn create_mr(
         now,
     );
     mr.author_agent_id = req.author_agent_id.map(Id::new);
+    mr.spec_ref = req.spec_ref;
 
     // Compute diff stats and conflict detection if the repository has a path
     if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
