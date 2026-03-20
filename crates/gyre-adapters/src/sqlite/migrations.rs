@@ -197,12 +197,27 @@ CREATE INDEX IF NOT EXISTS idx_cost_agent_id ON cost_entries(agent_id);
 CREATE INDEX IF NOT EXISTS idx_cost_task_id ON cost_entries(task_id);
 ";
 
+const MIGRATION_006: &str = "
+CREATE TABLE IF NOT EXISTS network_peers (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    wireguard_pubkey TEXT NOT NULL,
+    endpoint TEXT,
+    allowed_ips TEXT NOT NULL DEFAULT '[]',
+    registered_at INTEGER NOT NULL,
+    last_seen INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_network_peers_agent ON network_peers(agent_id);
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
     (3, MIGRATION_003),
     (4, MIGRATION_004),
     (5, MIGRATION_005),
+    (6, MIGRATION_006),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
