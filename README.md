@@ -54,9 +54,9 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M8: Frontend Excellence | Done | Red Hat brand design system, polished dashboard UX, component library, consistent user journeys, dark theme |
 | M9: Functional UI | Done | Seed data endpoint, CRUD modals (projects/repos/tasks), auth token integration, end-to-end user journeys |
 | M10: Persistent Storage | Done | SQLite persistence, real-time WebSocket events, git repo management |
-| M11: Agent Execution | Planned | Real agent processes, TTY attach, agent logs, execution lifecycle |
+| M11: Agent Execution | In Progress | Real agent processes, TTY attach, agent logs, execution lifecycle |
 | M12: Quality Gates | Planned | Merge queue gates, repo mirroring, diff viewer |
 
-484 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+490 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications.

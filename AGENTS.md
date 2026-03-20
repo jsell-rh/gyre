@@ -114,6 +114,9 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
 | `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat |
 | `POST/GET` | `/api/v1/agents/{id}/messages` | Send/poll agent messages |
+| `POST` | `/api/v1/agents/{id}/logs` | Append a log line to the agent's log buffer (M11.2) |
+| `GET` | `/api/v1/agents/{id}/logs` | Paginated agent log lines (`?limit=100&offset=0`) (M11.2) |
+| `GET` | `/api/v1/agents/{id}/logs/stream` | SSE live feed of new log lines for an agent (M11.2) |
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`) |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
@@ -443,7 +446,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Sidebar** (M8.1): grouped nav sections (Overview / Source Control / Agents / Operations / Admin), collapsible to icon-only mode via chevron toggle, server status footer.
 - **Global Search** (M8.1): Cmd+K opens `SearchBar` overlay with keyboard navigation across agents, tasks, repos, and MRs.
 - **Activity Feed** (M8.2): timeline layout with colored event-type nodes, multi-select filter pills (toggle per event type), relative timestamps, skeleton loading, `EmptyState` when no events match.
-- **Agent List** (M8.2): 3-column card grid with table-view toggle, status filter pills, skeleton grid on load, slide-in detail panel with close button.
+- **Agent List** (M8.2 + M11.2): 3-column card grid with table-view toggle, status filter pills, skeleton grid on load, slide-in detail panel with tabbed Info/Logs view. Logs tab shows scrollable monospace agent output with live SSE streaming (M11.2).
 - **Task Board** (M8.2 + M9.2): kanban columns with semantic color-coded top borders per status, `Badge` component for priority, `EmptyState` per empty column, skeleton loading. "New Task" button opens Modal (title, description, priority, status) -> POST `/api/v1/tasks`; card appears in the correct column immediately.
 - **Project List** (M8.2 + M9.2): responsive card grid, skeleton loading, `EmptyState` when no projects exist. "New Project" button opens Modal (name + description) -> POST `/api/v1/projects`. Selecting a project shows "Add Repo" button -> Modal -> POST `/api/v1/repos`. Toast notifications on success/error.
 - **Repo Detail** (M8.2): uses `lib/Tabs` + `lib/Table` components, `Badge` for MR status, relative timestamps, `EmptyState` per empty tab.
