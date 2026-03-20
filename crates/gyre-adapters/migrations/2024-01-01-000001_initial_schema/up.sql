@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS cost_entries (
     agent_id TEXT NOT NULL,
     task_id TEXT,
     cost_type TEXT NOT NULL,
-    amount DOUBLE NOT NULL,
+    amount DOUBLE PRECISION NOT NULL,
     currency TEXT NOT NULL,
     timestamp BIGINT NOT NULL
 );
