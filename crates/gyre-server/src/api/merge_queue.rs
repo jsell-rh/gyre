@@ -62,13 +62,15 @@ pub async fn enqueue(
     Json(req): Json<EnqueueRequest>,
 ) -> Result<(StatusCode, Json<QueueEntryResponse>), ApiError> {
     let priority = req.priority.unwrap_or(50);
-    let entry = MergeQueueEntry::new(
-        new_id(),
-        Id::new(req.merge_request_id),
-        priority,
-        now_secs(),
-    );
+    let mr_id = Id::new(req.merge_request_id);
+    let entry = MergeQueueEntry::new(new_id(), mr_id.clone(), priority, now_secs());
     state.merge_queue.enqueue(&entry).await?;
+
+    // Trigger quality gate execution if this MR has an associated repo with gates.
+    if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
+        crate::gate_executor::trigger_gates_for_mr(state.clone(), mr_id, mr.repository_id).await;
+    }
+
     Ok((StatusCode::CREATED, Json(QueueEntryResponse::from(entry))))
 }
 

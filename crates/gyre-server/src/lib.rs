@@ -3,6 +3,7 @@ pub mod api;
 pub mod audit_simulator;
 pub(crate) mod auth;
 pub mod domain_events;
+pub mod gate_executor;
 pub(crate) mod git_http;
 pub(crate) mod health;
 pub mod jobs;
@@ -134,6 +135,10 @@ pub struct AppState {
     pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
+    /// Quality gates per repository: gate_id -> QualityGate.
+    pub quality_gates: Arc<Mutex<HashMap<String, gyre_domain::QualityGate>>>,
+    /// Gate execution results: result_id -> GateResult.
+    pub gate_results: Arc<Mutex<HashMap<String, gyre_domain::GateResult>>>,
 }
 
 /// Build the axum Router (extracted for testability).
@@ -305,6 +310,8 @@ pub fn build_state(
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
+        quality_gates: Arc::new(Mutex::new(HashMap::new())),
+        gate_results: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

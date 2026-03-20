@@ -11,6 +11,7 @@ pub mod compose;
 pub mod compute;
 pub mod discover;
 pub mod error;
+pub mod gates;
 pub mod jj;
 pub mod merge_queue;
 pub mod merge_requests;
@@ -80,6 +81,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/worktrees/:wt_id",
             delete(agent_tracking::delete_worktree),
+        )
+        // Quality gates
+        .route(
+            "/api/v1/repos/:id/gates",
+            post(gates::create_gate).get(gates::list_gates),
+        )
+        .route(
+            "/api/v1/repos/:id/gates/:gate_id",
+            delete(gates::delete_gate),
         )
         // jj VCS integration
         .route("/api/v1/repos/:id/jj/init", post(jj::jj_init))
@@ -154,6 +164,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/merge-requests/:id/diff",
             get(merge_requests::get_diff),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/gates",
+            get(gates::list_mr_gate_results),
         )
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
