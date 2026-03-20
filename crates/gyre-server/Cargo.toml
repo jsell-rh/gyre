@@ -40,7 +40,6 @@ uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde_yaml = { workspace = true }
-rusqlite = { workspace = true }
 sha2 = "0.10"
 
 [dev-dependencies]

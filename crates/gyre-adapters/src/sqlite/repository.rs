@@ -23,6 +23,7 @@ struct RepositoryRow {
     mirror_url: Option<String>,
     mirror_interval_secs: Option<i64>,
     last_mirror_sync: Option<i64>,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 

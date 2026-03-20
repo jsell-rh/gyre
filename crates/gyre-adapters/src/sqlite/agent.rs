@@ -42,6 +42,7 @@ struct AgentRow {
     lifetime_budget_secs: Option<i64>,
     spawned_at: i64,
     last_heartbeat: Option<i64>,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 

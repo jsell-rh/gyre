@@ -65,6 +65,7 @@ struct TaskRow {
     pr_link: Option<String>,
     created_at: i64,
     updated_at: i64,
+    #[allow(dead_code)]
     tenant_id: String,
 }
 
