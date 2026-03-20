@@ -19,12 +19,30 @@
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
+  import Modal from './lib/Modal.svelte';
+  import { setAuthToken } from './lib/api.js';
 
   let currentView = $state('dashboard');
   let selectedRepo = $state(null);
   let selectedMr = $state(null);
   let wsStatus = $state('disconnected');
   let wsStore = $state(null);
+  let tokenModalOpen = $state(false);
+  let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'test-token');
+
+  function saveToken() {
+    setAuthToken(tokenInput.trim() || 'test-token');
+    tokenInput = tokenInput.trim() || 'test-token';
+    tokenModalOpen = false;
+    // Reconnect WS with new token
+    if (wsStore) {
+      wsStore.destroy();
+      wsStore = createWsStore();
+      wsStore.onStatus((s) => (wsStatus = s));
+    }
+  }
+
+  let hasToken = $derived(!!localStorage.getItem('gyre_auth_token'));
 
   $effect(() => {
     wsStore = createWsStore();
@@ -101,6 +119,11 @@
           <span class="ws-label">{wsStatus}</span>
         </div>
 
+        <button class="auth-btn" class:auth-active={hasToken} onclick={() => { tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token'; tokenModalOpen = true; }} title="Configure API token">
+          <span class="auth-dot"></span>
+          <span>{hasToken ? 'Authenticated' : 'No Token'}</span>
+        </button>
+
         <span class="version">v0.1.0</span>
       </div>
     </header>
@@ -149,6 +172,25 @@
 
 <SearchBar onnavigate={(v) => navigate(v)} />
 <Toast />
+
+<Modal bind:open={tokenModalOpen} title="API Token" size="sm">
+  <div class="token-modal">
+    <p class="token-desc">Set the Bearer token used for all API and WebSocket requests. Leave blank to use the default <code>test-token</code>.</p>
+    <label class="token-label" for="token-input">Token</label>
+    <input
+      id="token-input"
+      class="token-input"
+      type="text"
+      bind:value={tokenInput}
+      placeholder="test-token"
+      onkeydown={(e) => e.key === 'Enter' && saveToken()}
+    />
+    <div class="token-actions">
+      <button class="btn-secondary" onclick={() => (tokenModalOpen = false)}>Cancel</button>
+      <button class="btn-primary" onclick={saveToken}>Save</button>
+    </div>
+  </div>
+</Modal>
 
 <style>
   .app {
@@ -268,6 +310,118 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
   }
+
+  /* Auth indicator button */
+  .auth-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    transition: border-color var(--transition-fast), color var(--transition-fast);
+  }
+
+  .auth-btn:hover {
+    border-color: var(--color-text-muted);
+    color: var(--color-text-secondary);
+  }
+
+  .auth-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-danger);
+    flex-shrink: 0;
+    transition: background var(--transition-fast);
+  }
+
+  .auth-btn.auth-active .auth-dot {
+    background: var(--color-success);
+    box-shadow: 0 0 5px rgba(99, 153, 61, 0.5);
+  }
+
+  /* Token modal */
+  .token-modal {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .token-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  .token-desc code {
+    font-family: var(--font-mono);
+    background: var(--color-surface-elevated);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .token-label {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .token-input {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    box-sizing: border-box;
+  }
+
+  .token-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+  }
+
+  .token-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .btn-primary {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
+  }
+
+  .btn-primary:hover { opacity: 0.85; }
+
+  .btn-secondary {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+
+  .btn-secondary:hover { border-color: var(--color-text-muted); }
 
   /* Content area */
   .content {

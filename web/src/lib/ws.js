@@ -1,4 +1,9 @@
 const RECONNECT_DELAY_MS = 3000;
+const AUTH_TOKEN_KEY = 'gyre_auth_token';
+
+function getAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY) || 'test-token';
+}
 
 export function createWsStore() {
   let ws = null;
@@ -17,7 +22,7 @@ export function createWsStore() {
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'Auth', token: 'gyre-dev-token' }));
+      ws.send(JSON.stringify({ type: 'Auth', token: getAuthToken() }));
     };
 
     ws.onmessage = (event) => {

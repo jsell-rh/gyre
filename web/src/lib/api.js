@@ -1,8 +1,21 @@
 const API_BASE = '/api/v1';
+const AUTH_TOKEN_KEY = 'gyre_auth_token';
+
+function getAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY) || 'test-token';
+}
+
+export function setAuthToken(token) {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
 
 async function request(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${getAuthToken()}`,
+      ...options.headers,
+    },
     ...options,
   });
   if (!res.ok) {
@@ -72,7 +85,7 @@ export const api = {
   mcpTools: async () => {
     const res = await fetch('/mcp', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getAuthToken()}` },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
@@ -119,6 +132,17 @@ export const api = {
     }),
   adminDeleteSnapshot: (id) =>
     request(`/admin/snapshots/${id}`, { method: 'DELETE' }),
+  // CRUD create methods
+  createProject: (data) =>
+    request('/projects', { method: 'POST', body: JSON.stringify(data) }),
+  createRepo: (data) =>
+    request('/repos', { method: 'POST', body: JSON.stringify(data) }),
+  createTask: (data) =>
+    request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+  createMr: (data) =>
+    request('/merge-requests', { method: 'POST', body: JSON.stringify(data) }),
+  seedData: () =>
+    request('/admin/seed', { method: 'POST' }),
   // Data export
   adminExport: () => request('/admin/export'),
   // Retention
