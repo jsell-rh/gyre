@@ -61,11 +61,16 @@ async fn full_ralph_loop_via_gyre() {
     let auth_hdr = format!("Bearer {auth_token}");
 
     // -- 2. Create repo (path computed server-side from GYRE_REPOS_PATH) --
+    // Use a UUID-derived project_id so each run uses a fresh bare repo on disk.
+    let project_id = format!(
+        "e2e-project-{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+    );
     let repo: serde_json::Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "project_id": "e2e-project",
+            "project_id": project_id,
             "name": "gyre-e2e",
         }))
         .send()
@@ -161,8 +166,8 @@ async fn full_ralph_loop_via_gyre() {
         git_local(&["config", "user.email", "ralph@gyre.local"], &work_dir);
         git_local(&["config", "user.name", "Ralph Worker"], &work_dir);
 
-        // Create initial commit on main branch
-        git_local(&["checkout", "-b", "main"], &work_dir);
+        // After cloning an empty repo with git 2.28+, we are already on the unborn
+        // `main` branch — `git checkout -b main` would fail. Skip directly to commits.
         std::fs::write(work_dir.join("README.md"), "# gyre-e2e\n").unwrap();
         git_local(&["add", "."], &work_dir);
         git_local(&["commit", "-m", "chore: initial commit"], &work_dir);
