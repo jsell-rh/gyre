@@ -149,7 +149,7 @@ pub async fn set_dependencies(
     }
 
     // Apply
-    mr.depends_on = req.depends_on.iter().map(|s| Id::new(s)).collect();
+    mr.depends_on = req.depends_on.iter().map(Id::new).collect();
     mr.updated_at = now_secs();
     state.merge_requests.update(&mr).await?;
 
