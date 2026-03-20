@@ -6,7 +6,7 @@
 use tokio::process::Command;
 
 /// Validate a refname: must not contain `..` and must not start with `-`.
-fn refname_safe(refname: &str) -> bool {
+pub fn refname_safe(refname: &str) -> bool {
     !refname.contains("..") && !refname.starts_with('-')
 }
 
