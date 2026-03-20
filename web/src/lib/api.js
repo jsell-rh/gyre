@@ -119,6 +119,17 @@ export const api = {
     }),
   adminDeleteSnapshot: (id) =>
     request(`/admin/snapshots/${id}`, { method: 'DELETE' }),
+  // CRUD create methods
+  createProject: (data) =>
+    request('/projects', { method: 'POST', body: JSON.stringify(data) }),
+  createRepo: (data) =>
+    request('/repos', { method: 'POST', body: JSON.stringify(data) }),
+  createTask: (data) =>
+    request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+  createMr: (data) =>
+    request('/merge-requests', { method: 'POST', body: JSON.stringify(data) }),
+  seedData: () =>
+    request('/admin/seed', { method: 'POST' }),
   // Data export
   adminExport: () => request('/admin/export'),
   // Retention
