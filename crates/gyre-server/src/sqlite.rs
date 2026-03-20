@@ -13,12 +13,12 @@ use gyre_domain::{
     User, UserRole,
 };
 use gyre_ports::{
-    ActivityQuery, ActivityRepository, AgentCommitRepository, AgentRepository,
-    AnalyticsRepository, ApiKeyRepository, AuditRepository, CostRepository,
-    MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository, ProjectRepository,
-    RepoRepository, ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    ActivityQuery, ActivityRepository, AgentCommitRepository, AgentRepository, AnalyticsRepository,
+    ApiKeyRepository, AuditRepository, CostRepository, MergeQueueRepository,
+    MergeRequestRepository, NetworkPeerRepository, ProjectRepository, RepoRepository,
+    ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 
 // ───────────────────────────────────────────────
@@ -33,8 +33,8 @@ pub struct SqliteDb {
 impl SqliteDb {
     /// Open (or create) a SQLite database at `path`. Pass `:memory:` for in-memory.
     pub fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("Failed to open SQLite at {path}"))?;
+        let conn =
+            Connection::open(path).with_context(|| format!("Failed to open SQLite at {path}"))?;
 
         // Enable WAL mode for better write concurrency
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
@@ -911,7 +911,10 @@ impl MergeRequestRepository for SqliteDb {
         let id = id.clone();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                conn.execute("DELETE FROM merge_requests WHERE id = ?1", params![id.as_str()])?;
+                conn.execute(
+                    "DELETE FROM merge_requests WHERE id = ?1",
+                    params![id.as_str()],
+                )?;
                 Ok(())
             })
         })
@@ -1012,7 +1015,9 @@ impl ReviewRepository for SqliteDb {
         if has_changes_requested {
             return Ok(false);
         }
-        Ok(reviews.iter().any(|r| r.decision == ReviewDecision::Approved))
+        Ok(reviews
+            .iter()
+            .any(|r| r.decision == ReviewDecision::Approved))
     }
 }
 
@@ -1067,7 +1072,12 @@ impl MergeQueueRepository for SqliteDb {
         })
     }
 
-    async fn update_status(&self, id: &Id, status: MergeQueueEntryStatus, error: Option<String>) -> Result<()> {
+    async fn update_status(
+        &self,
+        id: &Id,
+        status: MergeQueueEntryStatus,
+        error: Option<String>,
+    ) -> Result<()> {
         let id = id.clone();
         let status_str = mq_status_to_str(&status).to_string();
         blocking!(self, |db: &SqliteDb| {
@@ -1432,7 +1442,10 @@ impl WorktreeRepository for SqliteDb {
         let id = id.clone();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                conn.execute("DELETE FROM agent_worktrees WHERE id = ?1", params![id.as_str()])?;
+                conn.execute(
+                    "DELETE FROM agent_worktrees WHERE id = ?1",
+                    params![id.as_str()],
+                )?;
                 Ok(())
             })
         })
@@ -1459,7 +1472,12 @@ impl AnalyticsRepository for SqliteDb {
         })
     }
 
-    async fn query(&self, event_name: Option<&str>, since: Option<u64>, limit: usize) -> Result<Vec<AnalyticsEvent>> {
+    async fn query(
+        &self,
+        event_name: Option<&str>,
+        since: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<AnalyticsEvent>> {
         let event_name = event_name.map(|s| s.to_string());
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
@@ -1499,7 +1517,12 @@ impl AnalyticsRepository for SqliteDb {
         })
     }
 
-    async fn aggregate_by_day(&self, event_name: &str, since: u64, until: u64) -> Result<Vec<(String, u64)>> {
+    async fn aggregate_by_day(
+        &self,
+        event_name: &str,
+        since: u64,
+        until: u64,
+    ) -> Result<Vec<(String, u64)>> {
         let event_name = event_name.to_string();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
@@ -1676,7 +1699,8 @@ impl AuditRepository for SqliteDb {
     async fn count(&self) -> Result<u64> {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                let count: i64 = conn.query_row("SELECT COUNT(*) FROM audit_events", [], |row| row.get(0))?;
+                let count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM audit_events", [], |row| row.get(0))?;
                 Ok(count as u64)
             })
         })
@@ -1801,7 +1825,10 @@ impl NetworkPeerRepository for SqliteDb {
         let id = id.clone();
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
-                conn.execute("DELETE FROM network_peers WHERE id = ?1", params![id.as_str()])?;
+                conn.execute(
+                    "DELETE FROM network_peers WHERE id = ?1",
+                    params![id.as_str()],
+                )?;
                 Ok(())
             })
         })
@@ -1881,7 +1908,9 @@ mod tests {
 
         // Recreate a "new" reference pointing at same connection
         let db2 = db.clone();
-        let found = ProjectRepository::find_by_id(&db2, &Id::new("p1")).await.unwrap();
+        let found = ProjectRepository::find_by_id(&db2, &Id::new("p1"))
+            .await
+            .unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "My Project");
     }
@@ -1895,7 +1924,10 @@ mod tests {
         t.description = Some("A test task".to_string());
 
         TaskRepository::create(&db, &t).await.unwrap();
-        let found = TaskRepository::find_by_id(&db, &Id::new("t1")).await.unwrap().unwrap();
+        let found = TaskRepository::find_by_id(&db, &Id::new("t1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.title, "Test Task");
         assert_eq!(found.labels, vec!["backend", "rust"]);
         assert_eq!(found.description.as_deref(), Some("A test task"));
@@ -1914,11 +1946,15 @@ mod tests {
         AgentRepository::create(&db, &a1).await.unwrap();
         AgentRepository::create(&db, &a2).await.unwrap();
 
-        let active = AgentRepository::list_by_status(&db, &AgentStatus::Active).await.unwrap();
+        let active = AgentRepository::list_by_status(&db, &AgentStatus::Active)
+            .await
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "agent-one");
 
-        let idle = AgentRepository::list_by_status(&db, &AgentStatus::Idle).await.unwrap();
+        let idle = AgentRepository::list_by_status(&db, &AgentStatus::Idle)
+            .await
+            .unwrap();
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].name, "agent-two");
     }
@@ -1939,7 +1975,9 @@ mod tests {
         let next = db.next_pending().await.unwrap().unwrap();
         assert_eq!(next.id.as_str(), "e2"); // highest priority
 
-        db.update_status(&Id::new("e2"), MergeQueueEntryStatus::Merged, None).await.unwrap();
+        db.update_status(&Id::new("e2"), MergeQueueEntryStatus::Merged, None)
+            .await
+            .unwrap();
         let next2 = db.next_pending().await.unwrap().unwrap();
         assert_eq!(next2.id.as_str(), "e3"); // medium priority next
     }
@@ -1949,15 +1987,36 @@ mod tests {
         let db = make_db();
 
         // Two events on 2024-01-01 (unix: 1704067200), one on 2024-01-02 (1704153600)
-        let e1 = AnalyticsEvent::new(Id::new("ae1"), "task.done", None, serde_json::Value::Null, 1704067200);
-        let e2 = AnalyticsEvent::new(Id::new("ae2"), "task.done", None, serde_json::Value::Null, 1704067260);
-        let e3 = AnalyticsEvent::new(Id::new("ae3"), "task.done", None, serde_json::Value::Null, 1704153600);
+        let e1 = AnalyticsEvent::new(
+            Id::new("ae1"),
+            "task.done",
+            None,
+            serde_json::Value::Null,
+            1704067200,
+        );
+        let e2 = AnalyticsEvent::new(
+            Id::new("ae2"),
+            "task.done",
+            None,
+            serde_json::Value::Null,
+            1704067260,
+        );
+        let e3 = AnalyticsEvent::new(
+            Id::new("ae3"),
+            "task.done",
+            None,
+            serde_json::Value::Null,
+            1704153600,
+        );
 
         AnalyticsRepository::record(&db, &e1).await.unwrap();
         AnalyticsRepository::record(&db, &e2).await.unwrap();
         AnalyticsRepository::record(&db, &e3).await.unwrap();
 
-        let daily = db.aggregate_by_day("task.done", 1704067200, 1704153600 + 86400).await.unwrap();
+        let daily = db
+            .aggregate_by_day("task.done", 1704067200, 1704153600 + 86400)
+            .await
+            .unwrap();
         assert_eq!(daily.len(), 2);
         let (day1, count1) = &daily[0];
         let (day2, count2) = &daily[1];
