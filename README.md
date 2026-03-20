@@ -56,6 +56,7 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M10: Persistent Storage | Done | SQLite persistence, real-time WebSocket events, git repo management |
 | M11: Agent Execution | In Progress | Real agent processes, TTY attach, agent logs, execution lifecycle |
 | M12: Quality Gates | In Progress | Merge queue gates, repo mirroring, diff viewer |
+| M13: Forge Native | Planned | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness |
 
 494 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
