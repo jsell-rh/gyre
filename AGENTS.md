@@ -171,6 +171,18 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/admin/restore` | Restore DB from a named snapshot (Admin only) |
 | `DELETE` | `/api/v1/admin/snapshots/{id}` | Delete a snapshot (Admin only) |
 | `GET` | `/api/v1/admin/export` | Export all entities as JSON (Admin only) |
+| `GET/PUT` | `/api/v1/admin/retention` | List / update retention policies (Admin only) |
+| `POST/GET` | `/api/v1/admin/siem` | Create / list SIEM forwarding targets (Admin only) |
+| `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
+| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (Admin only) |
+| `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
+| `POST/GET` | `/api/v1/audit/events` | Record / query eBPF audit events (`?agent_id=&event_type=&since=`) |
+| `GET` | `/api/v1/audit/stream` | SSE stream of live audit events |
+| `GET` | `/api/v1/audit/stats` | Audit event statistics and counts |
+| `POST/GET` | `/api/v1/network/peers` | Register / list WireGuard mesh peers |
+| `GET` | `/api/v1/network/peers/agent/{agent_id}` | Get peer record for a specific agent |
+| `DELETE` | `/api/v1/network/peers/{id}` | Remove a peer from the mesh |
+| `GET` | `/api/v1/network/derp-map` | Get DERP relay map for WireGuard coordination |
 
 ### Authentication
 
@@ -216,6 +228,10 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_OIDC_AUDIENCE` | _(none)_ | Optional JWT audience claim for Keycloak token validation (M4.2) |
 | `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `gyre_server=trace`) |
 | `GYRE_SNAPSHOT_PATH` | `./snapshots/` | Directory for DB snapshot files (`POST /api/v1/admin/snapshot`) |
+| `GYRE_MAX_BODY_SIZE` | `10485760` (10 MB) | Maximum HTTP request body size in bytes (M7.3) |
+| `GYRE_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins; `*` allows all (M7.3) |
+| `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
+| `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
@@ -387,7 +403,7 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4 + M4.3 + M5 + M6)
+### Dashboard (M3.4 + M4.3 + M5 + M6 + M7)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
@@ -406,6 +422,10 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Analytics View** (M6.1): event counts bar chart and recent events list with property drill-down. Tracks auto-emitted events: `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`, `merge_queue.processed`.
 - **Cost View** (M6.1): agent cost breakdown table with total display and per-agent detail drill-down.
 - **Admin Panel — M6 additions** (M6.2): snapshot create/restore/delete controls, job history table with Run Now button, retention policy editor, full data export download.
+- **Audit View** (M7.1, sidebar: "Audit"): live SSE feed of eBPF audit events, event type filter, per-agent drill-down, aggregate stats card.
+- **SIEM Panel** (M7.1, Admin only): configure SIEM forwarding targets (webhook URL, format, filter), enable/disable per target.
+- **Compute Targets** (M7.2, Admin only): register and manage remote compute targets (local, Docker, SSH). Shows target type, host, and status.
+- **Network Panel** (M7.3, Admin only): WireGuard peer registry, DERP relay map viewer, per-agent peer status.
 
 ---
 

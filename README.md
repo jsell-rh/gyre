@@ -52,6 +52,6 @@ All specifications live in [`specs/`](specs/index.md). Start there.
 | M6: Infrastructure & Operations | Done | Product analytics, cost tracking, BCP snapshot/restore, background job framework, M6 dashboard |
 | M7: Production Hardening | Planned | eBPF audit, SIEM forwarding, NixOS packaging, remote compute targets, WireGuard mesh, production hardening |
 
-300 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+482 tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications.
