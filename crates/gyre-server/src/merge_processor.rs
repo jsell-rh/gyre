@@ -76,6 +76,32 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     };
 
+    // Check quality gates before merging.
+    match crate::gate_executor::check_gates_for_mr(state, &mr.id).await {
+        Ok(true) => {} // all passed or no gates
+        Ok(false) => {
+            // Gates still running — put the entry back to Queued to retry later.
+            info!(entry_id = %entry.id, "quality gates still running, requeueing");
+            state
+                .merge_queue
+                .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
+                .await?;
+            return Ok(());
+        }
+        Err(reason) => {
+            warn!(entry_id = %entry.id, reason = %reason, "quality gate failed, blocking merge");
+            state
+                .merge_queue
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Failed,
+                    Some(format!("quality gate failed: {reason}")),
+                )
+                .await?;
+            return Ok(());
+        }
+    }
+
     // Attempt the merge
     let result = state
         .git_ops
