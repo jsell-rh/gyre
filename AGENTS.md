@@ -549,6 +549,7 @@ Key specs to read before making changes:
 | M4 milestone deliverables | [specs/milestones/m4-identity-observability.md](specs/milestones/m4-identity-observability.md) |
 | M5 milestone deliverables | [specs/milestones/m5-agent-protocols.md](specs/milestones/m5-agent-protocols.md) |
 | M6 milestone deliverables | [specs/milestones/m6-infrastructure.md](specs/milestones/m6-infrastructure.md) |
+| M7 milestone deliverables | [specs/milestones/m7-production-hardening.md](specs/milestones/m7-production-hardening.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
