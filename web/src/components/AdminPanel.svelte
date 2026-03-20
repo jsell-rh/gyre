@@ -1,5 +1,10 @@
 <script>
   import { api } from '../lib/api.js';
+  import Tabs from '../lib/Tabs.svelte';
+  import Badge from '../lib/Badge.svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
+  import EmptyState from '../lib/EmptyState.svelte';
+  import { toastSuccess, toastError, toastInfo } from '../lib/toast.js';
 
   let health = $state(null);
   let jobs = $state([]);
@@ -9,14 +14,14 @@
   let retention = $state([]);
   let loading = $state(true);
   let error = $state(null);
-  let activeSection = $state('health');
+  let activeTab = $state('health');
 
   // Audit filter state
   let auditAgentFilter = $state('');
   let auditTypeFilter = $state('');
 
   // Kill/reassign modal state
-  let actionModal = $state(null); // { type: 'kill'|'reassign', agent }
+  let actionModal = $state(null);
   let reassignTargetId = $state('');
   let actionError = $state(null);
   let actionLoading = $state(false);
@@ -28,6 +33,15 @@
 
   // Job trigger state
   let triggerLoading = $state({});
+
+  const TABS = [
+    { id: 'health',    label: 'Health' },
+    { id: 'jobs',      label: 'Jobs' },
+    { id: 'audit',     label: 'Audit' },
+    { id: 'agents',    label: 'Agents' },
+    { id: 'snapshots', label: 'Snapshots' },
+    { id: 'retention', label: 'Retention' },
+  ];
 
   $effect(() => {
     loadAll();
@@ -66,7 +80,7 @@
       const result = await api.adminAudit(Object.fromEntries(params));
       auditEvents = result.events ?? [];
     } catch (e) {
-      error = e.message;
+      toastError(e.message);
     }
   }
 
@@ -91,9 +105,9 @@
     actionError = null;
     try {
       await api.adminKillAgent(actionModal.agent.id);
+      toastSuccess(`Agent ${actionModal.agent.name} killed.`);
       closeModal();
-      const ag = await api.agents();
-      agents = ag;
+      agents = await api.agents();
     } catch (e) {
       actionError = e.message;
     } finally {
@@ -102,14 +116,12 @@
   }
 
   async function confirmReassign() {
-    if (!reassignTargetId) {
-      actionError = 'Select a target agent.';
-      return;
-    }
+    if (!reassignTargetId) { actionError = 'Select a target agent.'; return; }
     actionLoading = true;
     actionError = null;
     try {
       await api.adminReassignAgent(actionModal.agent.id, reassignTargetId);
+      toastSuccess('Tasks reassigned.');
       closeModal();
     } catch (e) {
       actionError = e.message;
@@ -124,8 +136,10 @@
     try {
       await api.adminCreateSnapshot();
       snapshots = await api.adminListSnapshots();
+      toastSuccess('Snapshot created.');
     } catch (e) {
       snapshotError = e.message;
+      toastError(e.message);
     } finally {
       snapshotLoading = false;
     }
@@ -137,8 +151,10 @@
     try {
       await api.adminDeleteSnapshot(id);
       snapshots = await api.adminListSnapshots();
+      toastSuccess('Snapshot deleted.');
     } catch (e) {
       snapshotError = e.message;
+      toastError(e.message);
     } finally {
       snapshotLoading = false;
     }
@@ -150,9 +166,10 @@
     snapshotError = null;
     try {
       const result = await api.adminRestoreSnapshot(id);
-      alert(result.warning ?? 'Restored.');
+      toastInfo(result.warning ?? 'Snapshot restored.');
     } catch (e) {
       snapshotError = e.message;
+      toastError(e.message);
     } finally {
       snapshotLoading = false;
     }
@@ -169,8 +186,9 @@
       a.download = `gyre-export-${Date.now()}.json`;
       a.click();
       URL.revokeObjectURL(url);
+      toastSuccess('Export downloaded.');
     } catch (e) {
-      error = e.message;
+      toastError(e.message);
     } finally {
       exportLoading = false;
     }
@@ -181,8 +199,9 @@
     try {
       await api.adminRunJob(name);
       jobs = await api.adminJobs();
+      toastSuccess(`Job "${name}" triggered.`);
     } catch (e) {
-      error = e.message;
+      toastError(e.message);
     } finally {
       triggerLoading = { ...triggerLoading, [name]: false };
     }
@@ -191,8 +210,9 @@
   async function saveRetention() {
     try {
       await api.adminUpdateRetention(retention);
+      toastSuccess('Retention policies saved.');
     } catch (e) {
-      error = e.message;
+      toastError(e.message);
     }
   }
 
@@ -201,6 +221,15 @@
     return new Date(ts * 1000).toLocaleString([], {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
     });
+  }
+
+  function relativeTime(ts) {
+    if (!ts) return '—';
+    const diff = Math.floor((Date.now() - ts * 1000) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
   }
 
   function formatUptime(secs) {
@@ -219,346 +248,323 @@
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
-
-  const sections = [
-    { id: 'health', label: 'System Health' },
-    { id: 'jobs', label: 'Background Jobs' },
-    { id: 'snapshots', label: 'Snapshots' },
-    { id: 'retention', label: 'Retention' },
-    { id: 'audit', label: 'Audit Log' },
-    { id: 'agents', label: 'Agent Management' },
-  ];
 </script>
 
 <div class="panel">
   <div class="panel-header">
-    <h2>Admin Panel</h2>
+    <div class="header-left">
+      <h2>Admin Panel</h2>
+    </div>
     <button class="refresh-btn" onclick={loadAll} disabled={loading}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+        <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+      </svg>
       {loading ? 'Loading…' : 'Refresh'}
     </button>
   </div>
 
-  {#if error}
-    <p class="state-msg error">{error}</p>
-  {:else}
-    <div class="admin-layout">
-      <nav class="admin-nav">
-        {#each sections as sec}
-          <button
-            class="nav-item"
-            class:active={activeSection === sec.id}
-            onclick={() => (activeSection = sec.id)}
-          >
-            {sec.label}
-          </button>
-        {/each}
-      </nav>
+  <Tabs tabs={TABS} bind:active={activeTab} />
 
-      <div class="admin-content">
-        {#if activeSection === 'health'}
-          <div class="section">
-            <h3>System Health</h3>
-            {#if health}
-              <div class="health-grid">
-                <div class="health-card">
-                  <span class="card-label">Status</span>
-                  <span class="card-value status-ok">{health.status}</span>
-                </div>
-                <div class="health-card">
-                  <span class="card-label">Uptime</span>
-                  <span class="card-value">{formatUptime(health.uptime_secs)}</span>
-                </div>
-                <div class="health-card">
-                  <span class="card-label">Version</span>
-                  <span class="card-value mono">{health.version}</span>
-                </div>
-                <div class="health-card">
-                  <span class="card-label">Agents</span>
-                  <span class="card-value">{health.agent_count}</span>
-                </div>
-                <div class="health-card">
-                  <span class="card-label">Active Agents</span>
-                  <span class="card-value">{health.active_agents}</span>
-                </div>
-                <div class="health-card">
-                  <span class="card-label">Tasks</span>
-                  <span class="card-value">{health.task_count}</span>
-                </div>
-                <div class="health-card">
-                  <span class="card-label">Projects</span>
-                  <span class="card-value">{health.project_count}</span>
-                </div>
-              </div>
-            {:else if loading}
-              <p class="state-msg">Loading…</p>
-            {:else}
-              <p class="state-msg muted">No health data available (requires Admin role).</p>
-            {/if}
-          </div>
-
-        {:else if activeSection === 'jobs'}
-          <div class="section">
-            <h3>Background Jobs</h3>
-            {#if jobs.length === 0}
-              <p class="state-msg muted">No jobs data.</p>
-            {:else}
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Last Status</th>
-                    <th>Interval</th>
-                    <th>Description</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each jobs as job}
-                    <tr>
-                      <td class="name mono">{job.name}</td>
-                      <td>
-                        <span class="badge {job.status === 'success' ? 'running' : job.status === 'failed' ? 'dead' : 'idle'}">{job.status}</span>
-                      </td>
-                      <td class="dim">{job.interval_secs}s</td>
-                      <td class="dim">{job.description}</td>
-                      <td>
-                        <button
-                          class="action-btn reassign"
-                          onclick={() => triggerJob(job.name)}
-                          disabled={triggerLoading[job.name]}
-                        >
-                          {triggerLoading[job.name] ? 'Running…' : 'Run Now'}
-                        </button>
-                      </td>
-                    </tr>
-                    {#if job.recent_runs && job.recent_runs.length > 0}
-                      <tr class="history-row">
-                        <td colspan="5">
-                          <div class="run-history">
-                            <span class="history-label">Recent runs:</span>
-                            {#each job.recent_runs.slice(-5).reverse() as run}
-                              <span class="run-badge {run.status}">
-                                {formatTime(run.started_at)} — {run.status}
-                                {#if run.error}<span class="run-error" title={run.error}> ⚠</span>{/if}
-                              </span>
-                            {/each}
-                          </div>
-                        </td>
-                      </tr>
-                    {/if}
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-          </div>
-
-        {:else if activeSection === 'snapshots'}
-          <div class="section">
-            <div class="section-header">
-              <h3>Snapshots</h3>
-              <div class="section-actions">
-                <button
-                  class="action-primary"
-                  onclick={createSnapshot}
-                  disabled={snapshotLoading}
-                >
-                  {snapshotLoading ? 'Working…' : '+ Create Snapshot'}
-                </button>
-                <button
-                  class="action-secondary"
-                  onclick={downloadExport}
-                  disabled={exportLoading}
-                >
-                  {exportLoading ? 'Exporting…' : '⬇ Export All Data'}
-                </button>
-              </div>
-            </div>
-            {#if snapshotError}
-              <p class="form-error">{snapshotError}</p>
-            {/if}
-            {#if snapshots.length === 0}
-              <p class="state-msg muted">No snapshots yet. Create one to preserve current state.</p>
-            {:else}
-              <table>
-                <thead>
-                  <tr>
-                    <th>Snapshot ID</th>
-                    <th>Created</th>
-                    <th>Size</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each snapshots as snap}
-                    <tr>
-                      <td class="mono dim">{snap.snapshot_id}</td>
-                      <td class="dim">{formatTime(snap.created_at)}</td>
-                      <td class="dim">{formatBytes(snap.size_bytes)}</td>
-                      <td class="actions">
-                        <button
-                          class="action-btn reassign"
-                          onclick={() => restoreSnapshot(snap.snapshot_id)}
-                          disabled={snapshotLoading}
-                        >Restore</button>
-                        <button
-                          class="action-btn kill"
-                          onclick={() => deleteSnapshot(snap.snapshot_id)}
-                          disabled={snapshotLoading}
-                        >Delete</button>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-          </div>
-
-        {:else if activeSection === 'retention'}
-          <div class="section">
-            <div class="section-header">
-              <h3>Retention Policies</h3>
-              <button class="action-primary" onclick={saveRetention}>Save</button>
-            </div>
-            <p class="section-desc">Configure how long data is retained before automatic cleanup.</p>
-            {#if retention.length === 0}
-              <p class="state-msg muted">No policies loaded.</p>
-            {:else}
-              <table>
-                <thead>
-                  <tr>
-                    <th>Data Type</th>
-                    <th>Max Age (days)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each retention as policy, i}
-                    <tr>
-                      <td class="mono">{policy.data_type}</td>
-                      <td>
-                        <input
-                          type="number"
-                          class="age-input"
-                          bind:value={retention[i].max_age_days}
-                          min="1"
-                          max="3650"
-                        />
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-          </div>
-
-        {:else if activeSection === 'audit'}
-          <div class="section">
-            <h3>Audit Log</h3>
-            <div class="filters">
-              <input
-                bind:value={auditAgentFilter}
-                placeholder="Filter by agent ID…"
-                class="filter-input"
-              />
-              <input
-                bind:value={auditTypeFilter}
-                placeholder="Filter by event type…"
-                class="filter-input"
-              />
-              <button class="filter-btn" onclick={loadAudit}>Apply</button>
-            </div>
-            {#if auditEvents.length === 0}
-              <p class="state-msg muted">No events recorded.</p>
-            {:else}
-              <div class="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Time</th>
-                      <th>Agent</th>
-                      <th>Event</th>
-                      <th>Description</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each auditEvents as evt}
-                      <tr>
-                        <td class="dim">{formatTime(evt.timestamp)}</td>
-                        <td class="mono dim">{evt.agent_id}</td>
-                        <td><span class="badge event">{evt.event_type}</span></td>
-                        <td class="dim">{evt.description}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {/if}
-          </div>
-
-        {:else if activeSection === 'agents'}
-          <div class="section">
-            <h3>Agent Management</h3>
-            {#if agents.length === 0}
-              <p class="state-msg muted">No agents.</p>
-            {:else}
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Status</th>
-                    <th>Last Heartbeat</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each agents as agent}
-                    <tr>
-                      <td class="name">{agent.name}</td>
-                      <td>
-                        <span class="badge {agent.status}">{agent.status}</span>
-                      </td>
-                      <td class="dim">{formatTime(agent.last_heartbeat)}</td>
-                      <td class="actions">
-                        {#if agent.status !== 'dead'}
-                          <button class="action-btn kill" onclick={() => openKill(agent)}>
-                            Kill
-                          </button>
-                        {/if}
-                        <button class="action-btn reassign" onclick={() => openReassign(agent)}>
-                          Reassign
-                        </button>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-          </div>
-        {/if}
+  <div class="admin-content">
+    {#if error}
+      <div class="error-banner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        {error}
       </div>
-    </div>
-  {/if}
+    {/if}
+
+    <!-- HEALTH TAB -->
+    {#if activeTab === 'health'}
+      {#if loading}
+        <div class="skeleton-grid">
+          {#each Array(6) as _}
+            <Skeleton height="80px" />
+          {/each}
+        </div>
+      {:else if !health}
+        <EmptyState
+          title="No health data"
+          description="Health data requires Admin role."
+        />
+      {:else}
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span class="metric-label">Status</span>
+            <span class="metric-value success">{health.status}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Uptime</span>
+            <span class="metric-value">{formatUptime(health.uptime_secs)}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Version</span>
+            <span class="metric-value mono">{health.version}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Agents</span>
+            <span class="metric-value">{health.agent_count ?? '—'}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Active Agents</span>
+            <span class="metric-value success">{health.active_agents ?? '—'}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Tasks</span>
+            <span class="metric-value">{health.task_count ?? '—'}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Projects</span>
+            <span class="metric-value">{health.project_count ?? '—'}</span>
+          </div>
+        </div>
+      {/if}
+
+    <!-- JOBS TAB -->
+    {:else if activeTab === 'jobs'}
+      {#if loading}
+        <Skeleton height="200px" />
+      {:else if jobs.length === 0}
+        <EmptyState title="No background jobs" description="Scheduled jobs will appear here." />
+      {:else}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Interval</th>
+              <th>Description</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each jobs as job}
+              <tr>
+                <td class="mono">{job.name}</td>
+                <td>
+                  <Badge value={job.status === 'success' ? 'done' : job.status === 'failed' ? 'error' : 'idle'} />
+                </td>
+                <td class="dim">{job.interval_secs}s</td>
+                <td class="dim">{job.description}</td>
+                <td>
+                  <button
+                    class="run-btn"
+                    onclick={() => triggerJob(job.name)}
+                    disabled={triggerLoading[job.name]}
+                  >
+                    {triggerLoading[job.name] ? 'Running…' : 'Run Now'}
+                  </button>
+                </td>
+              </tr>
+              {#if job.recent_runs && job.recent_runs.length > 0}
+                <tr class="history-row">
+                  <td colspan="5">
+                    <div class="run-history">
+                      <span class="history-label">Recent runs:</span>
+                      {#each job.recent_runs.slice(-5).reverse() as run}
+                        <span class="run-pill {run.status}">
+                          {formatTime(run.started_at)} — {run.status}
+                          {#if run.error}<span title={run.error}> ⚠</span>{/if}
+                        </span>
+                      {/each}
+                    </div>
+                  </td>
+                </tr>
+              {/if}
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    <!-- AUDIT TAB -->
+    {:else if activeTab === 'audit'}
+      <div class="filter-bar">
+        <input
+          class="filter-input"
+          bind:value={auditAgentFilter}
+          placeholder="Filter by agent ID…"
+        />
+        <input
+          class="filter-input"
+          bind:value={auditTypeFilter}
+          placeholder="Filter by event type…"
+        />
+        <button class="filter-btn" onclick={loadAudit}>Apply</button>
+      </div>
+
+      {#if loading}
+        <Skeleton height="200px" />
+      {:else if auditEvents.length === 0}
+        <EmptyState title="No audit events" description="Audit events will appear here." />
+      {:else}
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Agent</th>
+                <th>Event</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each auditEvents as evt}
+                <tr>
+                  <td class="dim">{relativeTime(evt.timestamp)}</td>
+                  <td class="mono dim">{evt.agent_id}</td>
+                  <td><Badge value="info" /></td>
+                  <td class="dim">{evt.description}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
+    <!-- AGENTS TAB -->
+    {:else if activeTab === 'agents'}
+      {#if loading}
+        <Skeleton height="200px" />
+      {:else if agents.length === 0}
+        <EmptyState title="No agents" description="Registered agents will appear here." />
+      {:else}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Last Heartbeat</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each agents as agent}
+              <tr>
+                <td class="agent-name">{agent.name}</td>
+                <td><Badge value={agent.status} /></td>
+                <td class="dim">{relativeTime(agent.last_heartbeat)}</td>
+                <td>
+                  <div class="action-row">
+                    {#if agent.status !== 'dead'}
+                      <button class="kill-btn" onclick={() => openKill(agent)}>Kill</button>
+                    {/if}
+                    <button class="secondary-btn" onclick={() => openReassign(agent)}>Reassign</button>
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    <!-- SNAPSHOTS TAB -->
+    {:else if activeTab === 'snapshots'}
+      <div class="section-actions">
+        <button class="primary-btn" onclick={createSnapshot} disabled={snapshotLoading}>
+          {snapshotLoading ? 'Working…' : '+ Create Snapshot'}
+        </button>
+        <button class="secondary-btn" onclick={downloadExport} disabled={exportLoading}>
+          {exportLoading ? 'Exporting…' : '⬇ Export All Data'}
+        </button>
+      </div>
+
+      {#if snapshotError}
+        <div class="form-error">{snapshotError}</div>
+      {/if}
+
+      {#if snapshots.length === 0}
+        <EmptyState title="No snapshots" description="Create a snapshot to preserve current state." />
+      {:else}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Snapshot ID</th>
+              <th>Created</th>
+              <th>Size</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each snapshots as snap}
+              <tr>
+                <td class="mono dim">{snap.snapshot_id}</td>
+                <td class="dim">{formatTime(snap.created_at)}</td>
+                <td class="dim">{formatBytes(snap.size_bytes)}</td>
+                <td>
+                  <div class="action-row">
+                    <button class="secondary-btn" onclick={() => restoreSnapshot(snap.snapshot_id)} disabled={snapshotLoading}>
+                      Restore
+                    </button>
+                    <button class="kill-btn" onclick={() => deleteSnapshot(snap.snapshot_id)} disabled={snapshotLoading}>
+                      Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    <!-- RETENTION TAB -->
+    {:else if activeTab === 'retention'}
+      <div class="section-actions">
+        <p class="section-desc">Configure how long data is retained before automatic cleanup.</p>
+        <button class="primary-btn" onclick={saveRetention}>Save Policies</button>
+      </div>
+
+      {#if retention.length === 0}
+        <EmptyState title="No policies loaded" description="Retention policies will appear here." />
+      {:else}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Data Type</th>
+              <th>Max Age (days)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each retention as policy, i}
+              <tr>
+                <td class="mono">{policy.data_type}</td>
+                <td>
+                  <input
+                    type="number"
+                    class="age-input"
+                    bind:value={retention[i].max_age_days}
+                    min="1"
+                    max="3650"
+                  />
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    {/if}
+  </div>
 </div>
 
+<!-- Modal -->
 {#if actionModal}
   <div class="modal-backdrop" onclick={closeModal}>
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       {#if actionModal.type === 'kill'}
-        <h3>Force Kill Agent</h3>
+        <h3 class="modal-title">Force Kill Agent</h3>
         <p class="modal-desc">
           Kill <strong>{actionModal.agent.name}</strong>? This will set the agent status to Dead,
           clean its worktrees, and block its active task.
         </p>
         {#if actionError}
-          <p class="form-error">{actionError}</p>
+          <div class="form-error">{actionError}</div>
         {/if}
         <div class="modal-actions">
-          <button class="modal-btn secondary" onclick={closeModal}>Cancel</button>
-          <button class="modal-btn danger" onclick={confirmKill} disabled={actionLoading}>
+          <button class="secondary-btn" onclick={closeModal}>Cancel</button>
+          <button class="kill-btn modal-kill" onclick={confirmKill} disabled={actionLoading}>
             {actionLoading ? 'Killing…' : 'Kill Agent'}
           </button>
         </div>
       {:else if actionModal.type === 'reassign'}
-        <h3>Reassign Tasks</h3>
+        <h3 class="modal-title">Reassign Tasks</h3>
         <p class="modal-desc">
           Reassign all tasks from <strong>{actionModal.agent.name}</strong> to:
         </p>
@@ -569,11 +575,11 @@
           {/each}
         </select>
         {#if actionError}
-          <p class="form-error">{actionError}</p>
+          <div class="form-error">{actionError}</div>
         {/if}
         <div class="modal-actions">
-          <button class="modal-btn secondary" onclick={closeModal}>Cancel</button>
-          <button class="modal-btn primary" onclick={confirmReassign} disabled={actionLoading}>
+          <button class="secondary-btn" onclick={closeModal}>Cancel</button>
+          <button class="primary-btn" onclick={confirmReassign} disabled={actionLoading}>
             {actionLoading ? 'Reassigning…' : 'Reassign'}
           </button>
         </div>
@@ -583,181 +589,375 @@
 {/if}
 
 <style>
-  .panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
 
   .panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
   }
 
-  h2 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text); }
-  h3 { margin: 0 0 1rem; font-size: 0.9rem; font-weight: 600; color: var(--text); }
+  .header-left { display: flex; align-items: center; gap: var(--space-3); }
+
+  h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
 
   .refresh-btn {
-    background: var(--surface-hover); color: var(--text-muted); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.3rem 0.75rem; font-size: 0.82rem; cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    transition: border-color var(--transition-fast);
   }
+  .refresh-btn:hover:not(:disabled) { border-color: var(--color-border-strong); }
   .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .admin-layout { display: flex; flex: 1; overflow: hidden; }
-
-  .admin-nav {
-    width: 160px; min-width: 160px; border-right: 1px solid var(--border);
-    display: flex; flex-direction: column; padding: 0.5rem; gap: 2px;
+  .admin-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    max-width: 1000px;
   }
 
-  .nav-item {
-    text-align: left; padding: 0.5rem 0.75rem; border: none; border-radius: 4px;
-    background: transparent; color: var(--text-muted); font-size: 0.85rem; cursor: pointer;
-  }
-  .nav-item:hover { background: var(--surface-hover); color: var(--text); }
-  .nav-item.active { background: var(--accent-muted); color: var(--accent); font-weight: 500; }
-
-  .admin-content { flex: 1; overflow-y: auto; padding: 1.25rem; }
-
-  .section { max-width: 900px; }
-
-  .health-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.75rem;
+  .error-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--color-danger);
+    font-size: var(--text-sm);
+    background: rgba(240, 86, 29, 0.1);
+    border: 1px solid rgba(240, 86, 29, 0.3);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
   }
 
-  .health-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-    padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.35rem;
+  /* Health metrics */
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-4);
   }
 
-  .card-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
-  .card-value { font-size: 1.1rem; font-weight: 600; color: var(--text); }
-  .card-value.status-ok { color: #4ade80; }
-  .card-value.mono { font-family: monospace; font-size: 0.9rem; }
+  .metric-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    transition: border-color var(--transition-fast);
+  }
+  .metric-card:hover { border-color: var(--color-border-strong); }
 
-  .filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
-
-  .filter-input {
-    background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.35rem 0.65rem; font-size: 0.82rem; min-width: 200px;
+  .metric-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 
-  .filter-btn {
-    background: var(--accent-muted); color: var(--accent); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.35rem 0.75rem; font-size: 0.82rem; cursor: pointer;
+  .metric-value {
+    font-size: var(--text-xl);
+    font-weight: 700;
+    font-family: var(--font-display);
+    color: var(--color-text);
   }
+
+  .metric-value.success { color: var(--color-success); }
+  .metric-value.mono { font-family: var(--font-mono); font-size: var(--text-base); }
+
+  .skeleton-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-4);
+  }
+
+  /* Data tables */
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .data-table thead th {
+    text-align: left;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+  }
+
+  .data-table tbody tr {
+    border-bottom: 1px solid var(--color-border);
+    transition: background var(--transition-fast);
+  }
+  .data-table tbody tr:last-child { border-bottom: none; }
+  .data-table tbody tr:hover { background: var(--color-surface-elevated); }
+
+  .data-table td {
+    padding: var(--space-3) var(--space-4);
+    vertical-align: middle;
+    color: var(--color-text);
+  }
+
+  .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+  .dim { color: var(--color-text-muted); font-size: var(--text-xs); }
+  .agent-name { font-weight: 500; }
 
   .table-scroll { overflow-x: auto; }
 
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-
-  th {
-    text-align: left; padding: 0.4rem 0.6rem; color: var(--text-dim); font-weight: 500;
-    font-size: 0.78rem; border-bottom: 1px solid var(--border);
-    text-transform: uppercase; letter-spacing: 0.04em;
+  /* Filter bar */
+  .filter-bar {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    align-items: center;
   }
 
-  td { padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
-
-  .name { color: var(--text); font-weight: 500; }
-  .mono { font-family: monospace; font-size: 0.8rem; }
-  .dim { color: var(--text-muted); font-size: 0.82rem; }
-
-  .badge {
-    display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.75rem;
-    font-weight: 500; text-transform: lowercase; background: var(--surface-hover); color: var(--text-muted);
+  .filter-input {
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    min-width: 200px;
+    transition: border-color var(--transition-fast);
   }
-  .badge.running { background: #14532d44; color: #4ade80; }
-  .badge.active  { background: #14532d44; color: #4ade80; }
-  .badge.idle    { background: #1e2536; color: var(--text-muted); }
-  .badge.blocked { background: #7c2d1244; color: #f97316; }
-  .badge.dead    { background: #3f161644; color: #f87171; }
-  .badge.error   { background: #3f161644; color: #f87171; }
-  .badge.event   { background: var(--accent-muted); color: var(--accent); }
-
-  .actions { display: flex; gap: 0.4rem; }
-
-  .action-btn {
-    padding: 0.25rem 0.6rem; border-radius: 3px; font-size: 0.78rem; cursor: pointer;
-    border: 1px solid var(--border);
+  .filter-input:focus {
+    outline: none;
+    border-color: var(--color-link);
   }
-  .action-btn.kill { background: #3f161644; color: #f87171; border-color: #f8717144; }
-  .action-btn.kill:hover { background: #3f1616; }
-  .action-btn.reassign { background: var(--surface-hover); color: var(--text-muted); }
-  .action-btn.reassign:hover { color: var(--text); }
 
+  .filter-btn {
+    background: rgba(0, 102, 204, 0.1);
+    border: 1px solid rgba(0, 102, 204, 0.3);
+    border-radius: var(--radius);
+    color: var(--color-link);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-body);
+    transition: background var(--transition-fast);
+  }
+  .filter-btn:hover { background: rgba(0, 102, 204, 0.2); }
+
+  /* Section actions */
+  .section-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .section-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    flex: 1;
+  }
+
+  /* Buttons */
+  .primary-btn {
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-body);
+    font-weight: 500;
+    transition: opacity var(--transition-fast);
+    white-space: nowrap;
+  }
+  .primary-btn:hover { opacity: 0.88; }
+  .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .secondary-btn {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    transition: border-color var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
+  }
+  .secondary-btn:hover { border-color: var(--color-border-strong); color: var(--color-text); }
+  .secondary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .kill-btn {
+    background: rgba(240, 86, 29, 0.1);
+    border: 1px solid rgba(240, 86, 29, 0.3);
+    border-radius: var(--radius);
+    color: var(--color-danger);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    transition: background var(--transition-fast);
+    white-space: nowrap;
+  }
+  .kill-btn:hover:not(:disabled) { background: rgba(240, 86, 29, 0.2); }
+  .kill-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .run-btn {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-body);
+    transition: border-color var(--transition-fast);
+  }
+  .run-btn:hover:not(:disabled) { border-color: var(--color-border-strong); color: var(--color-text); }
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .action-row { display: flex; gap: var(--space-2); }
+
+  /* Run history */
+  .history-row td {
+    padding: 0 var(--space-4) var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .run-history {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .history-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .run-pill {
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+  }
+  .run-pill.success { background: rgba(99,153,61,0.15); color: #7dc25a; }
+  .run-pill.failed  { background: rgba(240,86,29,0.15); color: var(--color-danger); }
+  .run-pill.running { background: rgba(0,102,204,0.15); color: var(--color-link); }
+
+  /* Age input */
+  .age-input {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    width: 80px;
+  }
+
+  /* Form error */
+  .form-error {
+    color: var(--color-danger);
+    font-size: var(--text-sm);
+    background: rgba(240, 86, 29, 0.1);
+    border: 1px solid rgba(240, 86, 29, 0.2);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  /* Modal */
   .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100;
-    display: flex; align-items: center; justify-content: center;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .modal {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 1.5rem; min-width: 340px; max-width: 460px; width: 100%;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    min-width: 360px;
+    max-width: 480px;
+    width: 100%;
+    box-shadow: var(--shadow-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
   }
 
-  .modal-desc { font-size: 0.85rem; color: var(--text-muted); margin: 0.5rem 0 1rem; }
+  .modal-title {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .modal-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.6;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: flex-end;
+  }
+
+  .modal-kill { padding: var(--space-2) var(--space-6); }
 
   .target-select {
-    width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.4rem 0.6rem; font-size: 0.85rem; margin-bottom: 0.75rem;
-  }
-
-  .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
-
-  .modal-btn {
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.9rem;
-    font-size: 0.82rem; cursor: pointer; background: var(--surface); color: var(--text);
-  }
-  .modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .modal-btn.primary:hover { opacity: 0.88; }
-  .modal-btn.danger { background: #991b1b; color: #fff; border-color: #991b1b; }
-  .modal-btn.danger:hover { opacity: 0.88; }
-  .modal-btn.secondary:hover { background: var(--surface-hover); }
-  .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .form-error { color: #f87171; font-size: 0.82rem; margin: 0.5rem 0; }
-  .state-msg { padding: 2rem; color: var(--text-dim); text-align: center; }
-  .state-msg.error { color: #f87171; }
-  .state-msg.muted { font-style: italic; }
-
-  .section-header {
-    display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;
-  }
-  .section-header h3 { margin: 0; }
-  .section-actions { display: flex; gap: 0.5rem; }
-  .section-desc { font-size: 0.82rem; color: var(--text-muted); margin: -0.5rem 0 1rem; }
-
-  .action-primary {
-    background: var(--accent); color: #fff; border: none; border-radius: 4px;
-    padding: 0.35rem 0.85rem; font-size: 0.82rem; cursor: pointer;
-  }
-  .action-primary:hover { opacity: 0.88; }
-  .action-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .action-secondary {
-    background: var(--surface-hover); color: var(--text-muted); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.35rem 0.75rem; font-size: 0.82rem; cursor: pointer;
-  }
-  .action-secondary:hover { color: var(--text); }
-  .action-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .history-row td { padding: 0 0.6rem 0.5rem; border-bottom: 1px solid var(--border-subtle); }
-
-  .run-history {
-    display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
-    padding: 0.25rem 0;
-  }
-  .history-label { font-size: 0.75rem; color: var(--text-dim); }
-
-  .run-badge {
-    font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 3px;
-    background: var(--surface-hover); color: var(--text-muted);
-  }
-  .run-badge.success { background: #14532d44; color: #4ade80; }
-  .run-badge.failed  { background: #3f161644; color: #f87171; }
-  .run-badge.running { background: #1e3a5f44; color: #60a5fa; }
-
-  .run-error { cursor: help; }
-
-  .age-input {
-    background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.82rem; width: 80px;
+    width: 100%;
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
   }
 </style>
