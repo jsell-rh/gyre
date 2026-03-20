@@ -16,10 +16,12 @@ pub struct QualityGate {
     pub command: Option<String>,
     /// Minimum number of approvals required (used by RequiredApprovals).
     pub required_approvals: Option<u32>,
+    /// Persona file path for AgentReview / AgentValidation gates.
+    pub persona: Option<String>,
     pub created_at: u64,
 }
 
-/// Discriminant for a quality gate's check type.
+/// Discriminant for a quality gate check type.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateType {
@@ -29,6 +31,10 @@ pub enum GateType {
     LintCommand,
     /// Require N or more approved reviews.
     RequiredApprovals,
+    /// Spawn a review agent that examines the MR diff and spec; passes when approved.
+    AgentReview,
+    /// Spawn a validation agent for domain-specific checks; passes when agent reports pass.
+    AgentValidation,
 }
 
 /// Execution status of one gate check for a specific MR.

@@ -76,6 +76,7 @@ impl MergeRequestRow {
             reviewers: reviewer_strs.into_iter().map(Id::new).collect(),
             diff_stats,
             has_conflicts: self.has_conflicts.map(|v| v != 0),
+            spec_ref: None,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
         })

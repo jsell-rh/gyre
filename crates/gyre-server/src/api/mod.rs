@@ -226,6 +226,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         // Release automation (Admin only)
         .route("/api/v1/release/prepare", post(release::release_prepare))
+        // Spec approval ledger (agent-gates spec)
+        .route("/api/v1/specs/approve", post(gates::approve_spec))
+        .route("/api/v1/specs/approvals", get(gates::list_spec_approvals))
+        .route("/api/v1/specs/revoke", post(gates::revoke_spec_approval))
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
         .route("/api/v1/merge-queue", get(merge_queue::list_queue))

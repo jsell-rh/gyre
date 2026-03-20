@@ -24,6 +24,7 @@ pub mod project;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod spec_approval;
 pub mod task;
 pub mod user;
 
@@ -43,5 +44,6 @@ pub use project::Project;
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
 pub use repository::Repository;
 pub use review::{Review, ReviewComment, ReviewDecision};
+pub use spec_approval::SpecApproval;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
 pub use user::{User, UserRole};
