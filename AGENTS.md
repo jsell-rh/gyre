@@ -403,7 +403,7 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4 + M4.3 + M5 + M6 + M7)
+### Dashboard (M3.4 + M4.3 + M5 + M6 + M7 + M8.1)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
@@ -426,6 +426,10 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **SIEM Panel** (M7.1, Admin only): configure SIEM forwarding targets (webhook URL, format, filter), enable/disable per target.
 - **Compute Targets** (M7.2, Admin only): register and manage remote compute targets (local, Docker, SSH). Shows target type, host, and status.
 - **Network Panel** (M7.3, Admin only): WireGuard peer registry, DERP relay map viewer, per-agent peer status.
+- **Dashboard Home** (M8.1): redesigned landing view with metric cards (active agents, open tasks, pending MRs, queue depth), agent health grid with semantic status colors, recent activity feed, merge queue progress bar.
+- **Design System** (M8.1): Red Hat brand CSS variables in `web/src/lib/design-system.css` — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary actions, semantic status palette. 13-component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`.
+- **Sidebar** (M8.1): grouped nav sections (Overview / Source Control / Agents / Operations / Admin), collapsible to icon-only mode via chevron toggle, server status footer.
+- **Global Search** (M8.1): Cmd+K opens `SearchBar` overlay with keyboard navigation across agents, tasks, repos, and MRs.
 
 ---
 
@@ -570,6 +574,7 @@ Key specs to read before making changes:
 | M5 milestone deliverables | [specs/milestones/m5-agent-protocols.md](specs/milestones/m5-agent-protocols.md) |
 | M6 milestone deliverables | [specs/milestones/m6-infrastructure.md](specs/milestones/m6-infrastructure.md) |
 | M7 milestone deliverables | [specs/milestones/m7-production-hardening.md](specs/milestones/m7-production-hardening.md) |
+| M8 milestone deliverables | [specs/milestones/m8-frontend-excellence.md](specs/milestones/m8-frontend-excellence.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
