@@ -231,6 +231,13 @@ pub async fn git_receive_pack(
     let repo_path = resolved.path;
     let default_branch = resolved.default_branch;
 
+    // M13.2: Extract model context header before consuming the request body.
+    let model_context = req
+        .headers()
+        .get("x-gyre-model-context")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => return git_err(format!("failed to read request body: {e}")),
@@ -268,8 +275,8 @@ pub async fn git_receive_pack(
 
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
-    // M13.2: Resolve agent context (task_id, ralph_step, parent_agent_id) for provenance.
-    let (task_id, ralph_step, parent_agent_id) =
+    // M13.2: Resolve agent context (task_id, ralph_step, parent_agent_id, spawned_by) for provenance.
+    let (task_id, ralph_step, parent_agent_id, spawned_by_user_id) =
         resolve_agent_context(&state, &auth.agent_id).await;
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.
@@ -315,6 +322,8 @@ pub async fn git_receive_pack(
     let task_id_clone = task_id.clone();
     let ralph_step_clone = ralph_step.clone();
     let parent_agent_id_clone = parent_agent_id.clone();
+    let spawned_by_clone = spawned_by_user_id.clone();
+    let model_context_clone = model_context.clone();
     let repo_id_clone = repo_id.clone();
     let branch_clone = branch.clone();
     let attestation_level_clone = attestation_level.to_string();
@@ -328,6 +337,8 @@ pub async fn git_receive_pack(
             task_id_clone.as_deref(),
             ralph_step_clone.as_deref(),
             parent_agent_id_clone.as_deref(),
+            spawned_by_clone.as_deref(),
+            model_context_clone.as_deref(),
             &attestation_level_clone,
         )
         .await;
@@ -362,21 +373,27 @@ pub async fn git_receive_pack(
 }
 
 /// Resolve the task context for an agent to populate commit provenance (M13.2).
-/// Returns (task_id, ralph_step, parent_agent_id).
+/// Returns (task_id, ralph_step, parent_agent_id, spawned_by_user_id).
 async fn resolve_agent_context(
     state: &Arc<AppState>,
     agent_id: &str,
-) -> (Option<String>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let agent = match state.agents.find_by_id(&Id::new(agent_id)).await {
         Ok(Some(a)) => a,
-        _ => return (None, None, None),
+        _ => return (None, None, None, None),
     };
 
     let parent_agent_id = agent.parent_id.map(|id| id.to_string());
+    let spawned_by_user_id = agent.spawned_by.clone();
 
     let task_id = match &agent.current_task_id {
         Some(tid) => tid.to_string(),
-        None => return (None, None, parent_agent_id),
+        None => return (None, None, parent_agent_id, spawned_by_user_id),
     };
 
     // Derive ralph_step from the task's current status.
@@ -395,7 +412,12 @@ async fn resolve_agent_context(
         _ => None,
     };
 
-    (Some(task_id), ralph_step, parent_agent_id)
+    (
+        Some(task_id),
+        ralph_step,
+        parent_agent_id,
+        spawned_by_user_id,
+    )
 }
 
 /// Build git sideband-64k pkt-lines carrying human-readable push feedback (M13.3).
@@ -557,6 +579,8 @@ async fn record_pushed_commits(
     task_id: Option<&str>,
     ralph_step: Option<&str>,
     parent_agent_id: Option<&str>,
+    spawned_by_user_id: Option<&str>,
+    model_context: Option<&str>,
     attestation_level: &str,
 ) -> usize {
     if updates.is_empty() {
@@ -627,9 +651,9 @@ async fn record_pushed_commits(
             .with_provenance(
                 task_id.map(str::to_string),
                 ralph_step_enum.clone(),
-                None, // spawned_by_user_id: not available at push time
+                spawned_by_user_id.map(str::to_string),
                 parent_agent_id.map(str::to_string),
-                None, // model_context: not available at push time
+                model_context.map(str::to_string),
             )
             .with_attestation_level(attestation_level);
             if let Err(e) = state.agent_commits.record(&mapping).await {

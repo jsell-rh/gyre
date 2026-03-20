@@ -249,6 +249,10 @@ const MIGRATION_008: &str = "
 ALTER TABLE agent_commits ADD COLUMN attestation_level TEXT;
 ";
 
+const MIGRATION_009: &str = "
+ALTER TABLE agents ADD COLUMN spawned_by TEXT;
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
@@ -258,6 +262,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, MIGRATION_006),
     (7, MIGRATION_007),
     (8, MIGRATION_008),
+    (9, MIGRATION_009),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
