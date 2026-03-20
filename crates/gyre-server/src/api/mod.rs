@@ -7,6 +7,7 @@ pub mod agents;
 pub mod analytics;
 pub mod audit;
 pub mod auth;
+pub mod code_awareness;
 pub mod compose;
 pub mod compute;
 pub mod discover;
@@ -21,6 +22,7 @@ pub mod provenance;
 pub mod push_gates;
 pub mod repos;
 pub mod spawn;
+pub mod speculative;
 pub mod tasks;
 pub mod version;
 
@@ -105,6 +107,25 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/push-gates",
             get(push_gates::get_push_gates).put(push_gates::set_push_gates),
         )
+        // Cross-agent code awareness (M13.4)
+        .route("/api/v1/repos/:id/blame", get(code_awareness::get_blame))
+        .route(
+            "/api/v1/repos/:id/hot-files",
+            get(code_awareness::get_hot_files),
+        )
+        .route(
+            "/api/v1/repos/:id/review-routing",
+            get(code_awareness::get_review_routing),
+        )
+        // Speculative merging (M13.5)
+        .route(
+            "/api/v1/repos/:id/speculative",
+            get(speculative::list_speculative),
+        )
+        .route(
+            "/api/v1/repos/:id/speculative/:branch",
+            get(speculative::get_speculative_branch),
+        )
         // jj VCS integration
         .route("/api/v1/repos/:id/jj/init", post(jj::jj_init))
         .route("/api/v1/repos/:id/jj/log", get(jj::jj_log))
@@ -130,6 +151,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/agents/:id/messages",
             get(agent_messages::get_messages).post(agent_messages::send_message),
+        )
+        // Agent touched paths (M13.4)
+        .route(
+            "/api/v1/agents/:id/touched-paths",
+            get(code_awareness::get_touched_paths),
         )
         // Agent logs
         .route(

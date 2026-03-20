@@ -21,6 +21,7 @@ pub mod retention;
 pub mod siem;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod speculative_merge;
 pub mod sqlite;
 pub mod stale_agents;
 pub mod telemetry;
@@ -146,6 +147,9 @@ pub struct AppState {
     pub push_gate_registry: Arc<Vec<Box<dyn PreAcceptGate>>>,
     /// Per-repo active push gate names: repo_id -> list of gate names.
     pub repo_push_gates: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Speculative merge results: (repo_id, branch) -> SpeculativeResult (M13.5).
+    pub speculative_results:
+        Arc<Mutex<HashMap<(String, String), speculative_merge::SpeculativeResult>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -381,6 +385,7 @@ pub fn build_state(
         gate_results: Arc::new(Mutex::new(HashMap::new())),
         push_gate_registry: Arc::new(pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
+        speculative_results: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

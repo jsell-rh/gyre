@@ -279,12 +279,27 @@ pub async fn start_job_registry(state: Arc<AppState>) -> Arc<JobRegistry> {
         )
         .await;
 
+    // Register speculative merge job (runs every 60 seconds, M13.5)
+    registry
+        .register(
+            JobDefinition {
+                name: "speculative_merge".to_string(),
+                description: "Checks active agent branches for conflicts against main (M13.5)"
+                    .to_string(),
+                interval_secs: 60,
+                enabled: true,
+            },
+            |state| async move { crate::speculative_merge::run_once(&state).await },
+        )
+        .await;
+
     // Spawn schedulers for all registered jobs
     for job_name in [
         "merge_processor",
         "stale_agent_detector",
         "retention_cleanup",
         "mirror_sync",
+        "speculative_merge",
     ] {
         spawn_job(
             Arc::clone(&registry),
