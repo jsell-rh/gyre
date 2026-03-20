@@ -68,7 +68,7 @@ pub async fn record_audit_event(
     let event = AuditEvent::new(
         new_id(),
         gyre_common::Id::new(req.agent_id),
-        AuditEventType::from_str(&req.event_type),
+        AuditEventType::from_kind(&req.event_type),
         req.path,
         req.details
             .unwrap_or(serde_json::Value::Object(Default::default())),
@@ -186,7 +186,7 @@ pub async fn create_siem_target(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateSiemTargetRequest>,
 ) -> Result<(StatusCode, Json<SiemTargetResponse>), ApiError> {
-    let target_type = TargetType::from_str(&req.target_type).ok_or_else(|| {
+    let target_type = TargetType::from_kind(&req.target_type).ok_or_else(|| {
         ApiError::InvalidInput(format!("unknown target_type: {}", req.target_type))
     })?;
     let target = SiemTarget {

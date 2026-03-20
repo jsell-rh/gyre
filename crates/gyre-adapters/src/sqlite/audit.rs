@@ -14,7 +14,7 @@ fn row_to_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEvent> {
     Ok(AuditEvent {
         id: Id::new(row.get::<_, String>(0)?),
         agent_id: Id::new(row.get::<_, String>(1)?),
-        event_type: AuditEventType::from_str(&event_type_str),
+        event_type: AuditEventType::from_kind(&event_type_str),
         path: row.get(3)?,
         details,
         pid: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),

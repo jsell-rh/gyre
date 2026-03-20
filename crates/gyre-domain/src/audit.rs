@@ -23,7 +23,7 @@ impl AuditEventType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_kind(s: &str) -> Self {
         match s {
             "file_access" => Self::FileAccess,
             "network_connect" => Self::NetworkConnect,
@@ -82,7 +82,7 @@ mod tests {
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {
-            assert_eq!(AuditEventType::from_str(&t.as_str()), *t);
+            assert_eq!(AuditEventType::from_kind(&t.as_str()), *t);
         }
     }
 

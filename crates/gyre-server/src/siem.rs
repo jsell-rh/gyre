@@ -33,7 +33,7 @@ impl std::fmt::Display for TargetType {
 }
 
 impl TargetType {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_kind(s: &str) -> Option<Self> {
         match s {
             "syslog" => Some(Self::Syslog),
             "webhook" => Some(Self::Webhook),
@@ -50,7 +50,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_kind(s: &str) -> Self {
         match s {
             "cef" => Self::Cef,
             _ => Self::Json,
@@ -218,7 +218,7 @@ async fn forward_syslog(target: &SiemTarget, events: &[AuditEvent]) -> Result<()
         .config
         .get("format")
         .and_then(|v| v.as_str())
-        .map(OutputFormat::from_str)
+        .map(OutputFormat::from_kind)
         .unwrap_or(OutputFormat::Json);
 
     let addr = format!("{}:{}", host, port);
@@ -249,7 +249,7 @@ async fn forward_webhook(
         .config
         .get("format")
         .and_then(|v| v.as_str())
-        .map(OutputFormat::from_str)
+        .map(OutputFormat::from_kind)
         .unwrap_or(OutputFormat::Json);
 
     let body = match format {
@@ -413,8 +413,8 @@ mod tests {
 
     #[test]
     fn webhook_target_type_roundtrip() {
-        assert_eq!(TargetType::from_str("syslog"), Some(TargetType::Syslog));
-        assert_eq!(TargetType::from_str("webhook"), Some(TargetType::Webhook));
-        assert_eq!(TargetType::from_str("unknown"), None);
+        assert_eq!(TargetType::from_kind("syslog"), Some(TargetType::Syslog));
+        assert_eq!(TargetType::from_kind("webhook"), Some(TargetType::Webhook));
+        assert_eq!(TargetType::from_kind("unknown"), None);
     }
 }
