@@ -5,15 +5,16 @@ use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
-    MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, Project, Repository, Review,
-    ReviewComment, ReviewDecision, Task, TaskStatus, User,
+    MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer, Project,
+    Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus, User,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    CostRepository, MergeQueueRepository, MergeRequestRepository, ProjectRepository,
-    RepoRepository, ReviewRepository, TaskRepository, UserRepository, WorktreeRepository,
+    CostRepository, MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository,
+    ProjectRepository, RepoRepository, ReviewRepository, TaskRepository, UserRepository,
+    WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -913,6 +914,47 @@ impl AuditRepository for MemAuditRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemNetworkPeerRepository {
+    store: Arc<Mutex<Vec<NetworkPeer>>>,
+}
+
+#[async_trait]
+impl NetworkPeerRepository for MemNetworkPeerRepository {
+    async fn register(&self, peer: &NetworkPeer) -> Result<()> {
+        self.store.lock().await.push(peer.clone());
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<NetworkPeer>> {
+        Ok(self.store.lock().await.clone())
+    }
+
+    async fn find_by_agent(&self, agent_id: &Id) -> Result<Option<NetworkPeer>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|p| p.agent_id.as_str() == agent_id.as_str())
+            .cloned())
+    }
+
+    async fn update_last_seen(&self, id: &Id, now: u64) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(p) = store.iter_mut().find(|p| p.id.as_str() == id.as_str()) {
+            p.last_seen = Some(now);
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        let mut store = self.store.lock().await;
+        store.retain(|p| p.id.as_str() != id.as_str());
+        Ok(())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -955,5 +997,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
         compute_targets: Arc::new(Mutex::new(HashMap::new())),
+        network_peers: Arc::new(MemNetworkPeerRepository::default()),
+        rate_limiter: crate::rate_limit::RateLimiter::new(1000),
     })
 }
