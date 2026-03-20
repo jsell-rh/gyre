@@ -1,6 +1,8 @@
 <script>
   import { api } from '../lib/api.js';
-  import StatusBadge from './StatusBadge.svelte';
+  import Badge from '../lib/Badge.svelte';
+  import EmptyState from '../lib/EmptyState.svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
 
   let tasks = $state([]);
   let loading = $state(true);
@@ -9,14 +11,14 @@
   let filterPriority = $state('');
 
   const columns = [
-    { key: 'Backlog',    label: 'Backlog' },
-    { key: 'InProgress', label: 'In Progress' },
-    { key: 'Review',     label: 'Review' },
-    { key: 'Done',       label: 'Done' },
-    { key: 'Blocked',    label: 'Blocked' },
+    { key: 'Backlog',    label: 'Backlog',      colorClass: 'col-backlog' },
+    { key: 'InProgress', label: 'In Progress',  colorClass: 'col-inprogress' },
+    { key: 'Review',     label: 'Review',       colorClass: 'col-review' },
+    { key: 'Done',       label: 'Done',         colorClass: 'col-done' },
+    { key: 'Blocked',    label: 'Blocked',      colorClass: 'col-blocked' },
   ];
 
-  const priorities = ['Low', 'Medium', 'High', 'Critical'];
+  const priorities = ['Critical', 'High', 'Medium', 'Low'];
 
   const agents = $derived([...new Set(tasks.map((t) => t.assigned_to).filter(Boolean))].sort());
 
@@ -32,10 +34,6 @@
     return filtered.filter((t) => t.status === key);
   }
 
-  function formatDate(ts) {
-    return new Date(ts * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  }
-
   $effect(() => {
     api.tasks()
       .then((data) => { tasks = data; loading = false; })
@@ -43,15 +41,18 @@
   });
 </script>
 
-<div class="panel">
-  <div class="panel-header">
-    <h2>Task Board</h2>
-    <div class="controls">
-      <select bind:value={filterPriority}>
+<div class="page">
+  <div class="page-hdr">
+    <div>
+      <h1 class="page-title">Task Board</h1>
+      <p class="page-desc">{tasks.length} task{tasks.length !== 1 ? 's' : ''} total</p>
+    </div>
+    <div class="filters">
+      <select bind:value={filterPriority} class="filter-select">
         <option value="">All priorities</option>
         {#each priorities as p}<option value={p}>{p}</option>{/each}
       </select>
-      <select bind:value={filterAgent}>
+      <select bind:value={filterAgent} class="filter-select">
         <option value="">All agents</option>
         {#each agents as a}<option value={a}>{a}</option>{/each}
       </select>
@@ -59,42 +60,60 @@
   </div>
 
   {#if loading}
-    <p class="state-msg">Loading…</p>
-  {:else if error}
-    <p class="state-msg error">{error}</p>
-  {:else}
     <div class="board">
       {#each columns as col}
         <div class="column">
-          <div class="col-header">
+          <div class="col-header {col.colorClass}">
             <span class="col-title">{col.label}</span>
-            <span class="col-count">{columnTasks(col.key).length}</span>
+            <span class="col-count col-count-skel"><Skeleton width="20px" height="1rem" /></span>
           </div>
           <div class="cards">
-            {#each columnTasks(col.key) as task (task.id)}
-              <div class="card">
-                <div class="card-title">{task.title}</div>
+            {#each Array(2) as _}
+              <div class="task-card">
+                <Skeleton lines={2} height="0.875rem" />
+                <div class="card-meta"><Skeleton width="60px" height="1.1rem" /></div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
+  {:else if error}
+    <div class="error-msg">Error: {error}</div>
+  {:else}
+    <div class="board">
+      {#each columns as col}
+        {@const colTasks = columnTasks(col.key)}
+        <div class="column">
+          <div class="col-header {col.colorClass}">
+            <span class="col-title">{col.label}</span>
+            <span class="col-count">{colTasks.length}</span>
+          </div>
+          <div class="cards">
+            {#each colTasks as task (task.id)}
+              <div class="task-card">
+                <p class="card-title">{task.title}</p>
                 <div class="card-meta">
-                  <StatusBadge value={task.priority} type="priority" />
+                  <Badge value={task.priority} />
                   {#if task.assigned_to}
                     <span class="assignee">{task.assigned_to}</span>
                   {/if}
                 </div>
                 {#if task.labels?.length}
-                  <div class="labels">
-                    {#each task.labels as label}
-                      <span class="label-tag">{label}</span>
+                  <div class="label-pills">
+                    {#each task.labels as lbl}
+                      <span class="label-pill">{lbl}</span>
                     {/each}
                   </div>
                 {/if}
                 {#if task.pr_link}
-                  <div class="pr-link">
-                    <a href={task.pr_link} target="_blank" rel="noreferrer">PR ↗</a>
-                  </div>
+                  <a class="pr-link" href={task.pr_link} target="_blank" rel="noreferrer">PR ↗</a>
                 {/if}
               </div>
             {:else}
-              <p class="empty-col">—</p>
+              <div class="empty-col">
+                <EmptyState title="" description="No tasks" />
+              </div>
             {/each}
           </div>
         </div>
@@ -104,72 +123,178 @@
 </div>
 
 <style>
-  .panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-
-  .panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    padding: var(--space-6);
+    gap: var(--space-4);
   }
 
-  h2 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text); }
-
-  .controls { display: flex; gap: 0.5rem; }
-
-  select {
-    background: var(--surface); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.82rem; cursor: pointer;
-  }
-
-  .board {
-    flex: 1; overflow-x: auto; overflow-y: hidden;
-    display: flex; gap: 1rem; padding: 1rem 1.25rem;
-  }
-
-  .column {
-    min-width: 220px; flex: 1;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; display: flex; flex-direction: column; max-height: 100%;
-  }
-
-  .col-header {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border);
+  .page-hdr {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
     flex-shrink: 0;
   }
 
-  .col-title { font-size: 0.82rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .col-count { font-size: 0.78rem; color: var(--text-dim); background: var(--surface-hover); padding: 0.1rem 0.4rem; border-radius: 3px; }
-
-  .cards { flex: 1; overflow-y: auto; padding: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
-
-  .card {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: 5px; padding: 0.6rem 0.75rem;
-    display: flex; flex-direction: column; gap: 0.4rem;
-    transition: border-color 0.1s;
+  .page-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: var(--space-1);
   }
 
-  .card:hover { border-color: var(--accent-muted); }
+  .page-desc { font-size: var(--text-sm); color: var(--color-text-secondary); }
 
-  .card-title { font-size: 0.85rem; color: var(--text); line-height: 1.3; }
+  .filters { display: flex; gap: var(--space-2); align-items: center; }
 
-  .card-meta { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-
-  .assignee { font-size: 0.75rem; color: var(--text-dim); }
-
-  .labels { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-
-  .label-tag {
-    font-size: 0.7rem; color: var(--text-dim);
-    background: var(--surface-hover); border: 1px solid var(--border);
-    padding: 0.05rem 0.35rem; border-radius: 3px;
+  .filter-select {
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
   }
 
-  .pr-link a { font-size: 0.75rem; color: var(--accent); text-decoration: none; }
-  .pr-link a:hover { text-decoration: underline; }
+  .board {
+    flex: 1;
+    overflow-x: auto;
+    overflow-y: hidden;
+    display: flex;
+    gap: var(--space-4);
+  }
 
-  .empty-col { font-size: 0.82rem; color: var(--text-dim); text-align: center; padding: 1rem 0; font-style: italic; }
+  .column {
+    min-width: 220px;
+    flex: 1;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    max-height: 100%;
+    overflow: hidden;
+  }
 
-  .state-msg { padding: 2rem; color: var(--text-dim); text-align: center; }
-  .state-msg.error { color: #f87171; }
+  .col-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    border-top: 3px solid transparent;
+    flex-shrink: 0;
+  }
+
+  .col-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .col-count {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 99px;
+    background: var(--color-surface-elevated);
+    color: var(--color-text-secondary);
+  }
+
+  .col-count-skel { background: transparent; }
+
+  /* Column color themes */
+  .col-backlog    { border-top-color: var(--color-text-muted); }
+  .col-backlog .col-title { color: var(--color-text-muted); }
+
+  .col-inprogress { border-top-color: var(--color-warning); }
+  .col-inprogress .col-title { color: var(--color-warning); }
+
+  .col-review     { border-top-color: var(--color-info); }
+  .col-review .col-title { color: var(--color-info); }
+
+  .col-done       { border-top-color: var(--color-success); }
+  .col-done .col-title { color: var(--color-success); }
+
+  .col-blocked    { border-top-color: var(--color-blocked); }
+  .col-blocked .col-title { color: var(--color-blocked); }
+
+  .cards {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .task-card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    transition: border-color var(--transition-fast);
+  }
+
+  .task-card:hover { border-color: var(--color-border-strong); }
+
+  .card-title {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    line-height: 1.4;
+    margin: 0;
+  }
+
+  .card-meta { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+
+  .assignee {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .label-pills { display: flex; gap: var(--space-1); flex-wrap: wrap; }
+
+  .label-pill {
+    font-size: 0.7rem;
+    color: var(--color-text-secondary);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    padding: 0.05rem 0.4rem;
+    border-radius: var(--radius-sm);
+  }
+
+  .pr-link {
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    text-decoration: none;
+  }
+
+  .pr-link:hover { text-decoration: underline; color: var(--color-link-hover); }
+
+  .empty-col {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .error-msg {
+    padding: var(--space-8);
+    color: var(--color-danger);
+    text-align: center;
+    font-size: var(--text-sm);
+  }
 </style>
