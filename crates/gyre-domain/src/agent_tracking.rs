@@ -59,6 +59,9 @@ pub struct AgentCommit {
     pub parent_agent_id: Option<String>,
     /// JSON-encoded model context at time of commit.
     pub model_context: Option<String>,
+    /// Attestation level for this commit (M14.2).
+    /// Values: "unattested", "self-reported", "server-verified".
+    pub attestation_level: Option<String>,
 }
 
 impl AgentCommit {
@@ -82,6 +85,7 @@ impl AgentCommit {
             spawned_by_user_id: None,
             parent_agent_id: None,
             model_context: None,
+            attestation_level: None,
         }
     }
 
@@ -99,6 +103,12 @@ impl AgentCommit {
         self.spawned_by_user_id = spawned_by_user_id;
         self.parent_agent_id = parent_agent_id;
         self.model_context = model_context;
+        self
+    }
+
+    /// Set the attestation level for this commit.
+    pub fn with_attestation_level(mut self, level: impl Into<String>) -> Self {
+        self.attestation_level = Some(level.into());
         self
     }
 }

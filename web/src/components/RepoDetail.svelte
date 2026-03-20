@@ -23,6 +23,10 @@
   let jjInitLoading = $state(false);
   let jjInitMsg = $state(null);
 
+  let aibom = $state(null);
+  let aibomLoading = $state(false);
+  let aibomError = $state(null);
+
   const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
 
   const tabs = $derived([
@@ -30,6 +34,7 @@
     { id: 'commits',  label: 'Commits' },
     { id: 'mrs',      label: 'Merge Requests', count: mrs.length || undefined },
     { id: 'jj',       label: 'jj' },
+    { id: 'aibom',    label: 'AIBOM' },
   ]);
 
   async function copyCloneUrl() {
@@ -51,6 +56,10 @@
 
   $effect(() => {
     if (activeTab === 'jj') loadJjLog();
+  });
+
+  $effect(() => {
+    if (activeTab === 'aibom') loadAibom();
   });
 
   async function loadJjLog() {
@@ -119,6 +128,23 @@
 
   function shortSha(sha) {
     return sha ? sha.slice(0, 8) : '—';
+  }
+
+  async function loadAibom() {
+    aibomLoading = true; aibomError = null;
+    try {
+      aibom = await api.repoAibom(repo.id);
+    } catch (e) {
+      aibomError = e.message;
+    } finally {
+      aibomLoading = false;
+    }
+  }
+
+  function attestationVariant(level) {
+    if (level === 'server-verified') return 'success';
+    if (level === 'self-reported') return 'warning';
+    return 'default';
   }
 </script>
 
@@ -233,6 +259,93 @@
             {/each}
           {/snippet}
         </Table>
+      {/if}
+    {:else if activeTab === 'aibom'}
+      {#if aibomError}
+        <div class="error-msg">Error: {aibomError}</div>
+      {:else if aibomLoading}
+        <Skeleton lines={6} height="2.5rem" />
+      {:else if !aibom}
+        <EmptyState title="AIBOM not loaded" description="Loading AI Bill of Materials…" />
+      {:else}
+        <div class="aibom-header">
+          <div class="aibom-stat">
+            <span class="aibom-stat-value">{aibom.total_commits}</span>
+            <span class="aibom-stat-label">AI Commits</span>
+          </div>
+          <div class="aibom-stat">
+            <span class="aibom-stat-value">{aibom.agents.length}</span>
+            <span class="aibom-stat-label">Agents</span>
+          </div>
+          <div class="aibom-stat">
+            <span class="aibom-stat-value">{aibom.attested_percentage.toFixed(1)}%</span>
+            <span class="aibom-stat-label">Attested</span>
+          </div>
+          <div class="aibom-stat aibom-version">
+            <span class="aibom-stat-label">AIBOM {aibom.aibom_version}</span>
+          </div>
+        </div>
+
+        {#if aibom.agents.length === 0}
+          <EmptyState title="No AI commits" description="No agent-authored commits recorded for this repository." />
+        {:else}
+          <h3 class="aibom-section-title">Agent Contributions</h3>
+          <Table
+            columns={[
+              { key: 'name', label: 'Agent' },
+              { key: 'commits', label: 'Commits' },
+              { key: 'model', label: 'Model' },
+              { key: 'level', label: 'Attestation' },
+            ]}
+          >
+            {#snippet children()}
+              {#each aibom.agents as agent (agent.id)}
+                {@const barPct = aibom.total_commits > 0 ? (agent.commit_count / aibom.total_commits * 100) : 0}
+                <tr>
+                  <td class="agent-name-cell">
+                    <div class="agent-name">{agent.name}</div>
+                    <div class="agent-id secondary-cell">{agent.id}</div>
+                  </td>
+                  <td>
+                    <div class="commit-bar-wrap">
+                      <div class="commit-bar" style="width: {barPct}%"></div>
+                      <span class="commit-count">{agent.commit_count}</span>
+                    </div>
+                  </td>
+                  <td class="secondary-cell">{agent.model ?? '—'}</td>
+                  <td><Badge value={agent.attestation_level} variant={attestationVariant(agent.attestation_level)} /></td>
+                </tr>
+              {/each}
+            {/snippet}
+          </Table>
+
+          {#if aibom.commits.length > 0}
+            <h3 class="aibom-section-title">Commit Attribution</h3>
+            <Table
+              columns={[
+                { key: 'sha', label: 'SHA' },
+                { key: 'agent', label: 'Agent' },
+                { key: 'task', label: 'Task' },
+                { key: 'step', label: 'Ralph Step' },
+                { key: 'level', label: 'Attestation' },
+                { key: 'time', label: 'Time' },
+              ]}
+            >
+              {#snippet children()}
+                {#each aibom.commits as c (c.sha)}
+                  <tr>
+                    <td><code class="sha">{shortSha(c.sha)}</code></td>
+                    <td class="secondary-cell">{c.agent_id}</td>
+                    <td class="secondary-cell">{c.task_id ?? '—'}</td>
+                    <td class="secondary-cell">{c.ralph_step ?? '—'}</td>
+                    <td><Badge value={c.attestation_level} variant={attestationVariant(c.attestation_level)} /></td>
+                    <td class="secondary-cell">{relativeTime(c.timestamp)}</td>
+                  </tr>
+                {/each}
+              {/snippet}
+            </Table>
+          {/if}
+        {/if}
       {/if}
     {:else if activeTab === 'jj'}
       <div class="jj-toolbar">
@@ -468,5 +581,72 @@
     color: var(--color-danger);
     text-align: center;
     font-size: var(--text-sm);
+  }
+
+  /* AIBOM tab */
+  .aibom-header {
+    display: flex;
+    gap: var(--space-6);
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: var(--space-4);
+    flex-shrink: 0;
+  }
+
+  .aibom-stat {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .aibom-stat-value {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text);
+  }
+
+  .aibom-stat-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .aibom-version { justify-content: flex-end; margin-left: auto; }
+
+  .aibom-section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: var(--space-4) 0 var(--space-2);
+  }
+
+  .agent-name-cell { min-width: 160px; }
+  .agent-name { font-weight: 500; color: var(--color-text); }
+  .agent-id { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  .commit-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 120px;
+  }
+
+  .commit-bar {
+    height: 6px;
+    background: var(--color-primary);
+    border-radius: 3px;
+    min-width: 2px;
+    flex-shrink: 0;
+  }
+
+  .commit-count {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
   }
 </style>

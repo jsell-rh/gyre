@@ -245,7 +245,7 @@ pub async fn git_receive_pack(
     // Pre-accept gate checks: run after git accepts packfile, undo refs on failure.
     if !ref_updates.is_empty() {
         if let Err(rejection) =
-            check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates).await
+            check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates, &auth.agent_id).await
         {
             undo_ref_updates(&repo_path, &ref_updates).await;
             // Broadcast PushRejected domain event.
@@ -290,6 +290,23 @@ pub async fn git_receive_pack(
     output_with_feedback.extend_from_slice(&feedback);
 
     // Post-receive: record agent-commit mappings + broadcast PushAccepted event.
+    // M14.2: Compute attestation level for commit provenance.
+    let attestation_level = {
+        let stacks = state.agent_stacks.lock().await;
+        let has_stack = stacks.contains_key(auth.agent_id.as_str());
+        drop(stacks);
+        if has_stack {
+            let policies = state.repo_stack_policies.lock().await;
+            if policies.contains_key(repo_id.as_str()) {
+                "server-verified"
+            } else {
+                "self-reported"
+            }
+        } else {
+            "unattested"
+        }
+    };
+
     let state_clone = state.clone();
     let repo_path_clone = repo_path.clone();
     let agent_id = auth.agent_id.clone();
@@ -298,6 +315,7 @@ pub async fn git_receive_pack(
     let parent_agent_id_clone = parent_agent_id.clone();
     let repo_id_clone = repo_id.clone();
     let branch_clone = branch.clone();
+    let attestation_level_clone = attestation_level.to_string();
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
@@ -307,6 +325,7 @@ pub async fn git_receive_pack(
             task_id_clone.as_deref(),
             ralph_step_clone.as_deref(),
             parent_agent_id_clone.as_deref(),
+            &attestation_level_clone,
         )
         .await;
         // Broadcast PushAccepted domain event.
@@ -516,6 +535,7 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
 // ---------------------------------------------------------------------------
 
 /// Returns the number of commits successfully recorded.
+#[allow(clippy::too_many_arguments)]
 async fn record_pushed_commits(
     state: &Arc<AppState>,
     repo_path: &str,
@@ -524,6 +544,7 @@ async fn record_pushed_commits(
     task_id: Option<&str>,
     ralph_step: Option<&str>,
     parent_agent_id: Option<&str>,
+    attestation_level: &str,
 ) -> usize {
     if updates.is_empty() {
         return 0;
@@ -596,7 +617,8 @@ async fn record_pushed_commits(
                 None, // spawned_by_user_id: not available at push time
                 parent_agent_id.map(str::to_string),
                 None, // model_context: not available at push time
-            );
+            )
+            .with_attestation_level(attestation_level);
             if let Err(e) = state.agent_commits.record(&mapping).await {
                 warn!(%sha, "post-receive: failed to record commit: {e}");
             } else {
@@ -618,6 +640,7 @@ async fn check_pre_accept_gates(
     repo_id: &str,
     repo_path: &str,
     ref_updates: &[RefUpdate],
+    agent_id: &str,
 ) -> Result<(), String> {
     // Get gate names configured for this repo.
     let gate_names = {
@@ -627,6 +650,16 @@ async fn check_pre_accept_gates(
     if gate_names.is_empty() {
         return Ok(());
     }
+
+    // M14.2: Resolve agent stack fingerprint and repo policy once for all ref updates.
+    let stack_fingerprint = {
+        let stacks = state.agent_stacks.lock().await;
+        stacks.get(agent_id).map(|s| s.fingerprint())
+    };
+    let required_fingerprint = {
+        let policies = state.repo_stack_policies.lock().await;
+        policies.get(repo_id).cloned()
+    };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -695,6 +728,9 @@ async fn check_pre_accept_gates(
             branch,
             commit_messages,
             changed_files,
+            agent_id: Some(agent_id.to_string()),
+            stack_fingerprint: stack_fingerprint.clone(),
+            required_fingerprint: required_fingerprint.clone(),
         };
 
         // Run each configured gate.

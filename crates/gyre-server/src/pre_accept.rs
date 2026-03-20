@@ -178,6 +178,47 @@ impl PreAcceptGate for NoEmDashGate {
 }
 
 // ---------------------------------------------------------------------------
+// StackAttestationGate (M14.2)
+// ---------------------------------------------------------------------------
+
+/// Enforces agent stack attestation on push.
+///
+/// When a repo has a configured stack policy (a required fingerprint), only
+/// agents whose registered stack fingerprint matches that policy are allowed
+/// to push. If no policy is set for the repo the gate always passes (the
+/// stack is recorded for informational purposes only).
+pub struct StackAttestationGate;
+
+impl PreAcceptGate for StackAttestationGate {
+    fn name(&self) -> &str {
+        "stack-attestation"
+    }
+
+    fn check(&self, ctx: &PushContext) -> GateOutcome {
+        // No repo-level policy → attestation is informational; always pass.
+        let required = match &ctx.required_fingerprint {
+            Some(fp) => fp,
+            None => return GateOutcome::Passed,
+        };
+
+        match &ctx.stack_fingerprint {
+            Some(fp) if fp == required => GateOutcome::Passed,
+            Some(fp) => GateOutcome::Failed(format!(
+                "stack-attestation: agent stack fingerprint '{fp}' does not match \
+                 the repo policy fingerprint '{required}'. \
+                 Update your stack or ask an admin to update the policy."
+            )),
+            None => GateOutcome::Failed(
+                "stack-attestation: this repo requires stack attestation but the \
+                 pushing agent has no registered stack. \
+                 POST /api/v1/agents/{id}/stack before pushing."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registry helpers
 // ---------------------------------------------------------------------------
 
@@ -187,6 +228,7 @@ pub fn builtin_gates() -> Vec<Box<dyn PreAcceptGate>> {
         Box::new(ConventionalCommitGate),
         Box::new(TaskRefGate),
         Box::new(NoEmDashGate),
+        Box::new(StackAttestationGate),
     ]
 }
 
@@ -206,6 +248,9 @@ mod tests {
             branch: branch.to_string(),
             commit_messages: messages.into_iter().map(|s| s.to_string()).collect(),
             changed_files: vec![],
+            agent_id: None,
+            stack_fingerprint: None,
+            required_fingerprint: None,
         }
     }
 
@@ -326,11 +371,59 @@ mod tests {
     // --- builtin_gates ---
 
     #[test]
-    fn builtin_gates_includes_all_three() {
+    fn builtin_gates_includes_all_four() {
         let gates = builtin_gates();
         let names: Vec<&str> = gates.iter().map(|g| g.name()).collect();
         assert!(names.contains(&"conventional-commit"));
         assert!(names.contains(&"task-ref"));
         assert!(names.contains(&"no-em-dash"));
+        assert!(names.contains(&"stack-attestation"));
+    }
+
+    // --- StackAttestationGate ---
+
+    fn ctx_with_stack(
+        stack_fingerprint: Option<&str>,
+        required_fingerprint: Option<&str>,
+    ) -> PushContext {
+        PushContext {
+            repo_id: "repo-1".to_string(),
+            refname: "refs/heads/main".to_string(),
+            branch: "main".to_string(),
+            commit_messages: vec!["feat: something".to_string()],
+            changed_files: vec![],
+            agent_id: Some("agent-1".to_string()),
+            stack_fingerprint: stack_fingerprint.map(|s| s.to_string()),
+            required_fingerprint: required_fingerprint.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn stack_attestation_passes_no_policy() {
+        let gate = StackAttestationGate;
+        let c = ctx_with_stack(None, None);
+        assert!(matches!(gate.check(&c), GateOutcome::Passed));
+    }
+
+    #[test]
+    fn stack_attestation_passes_matching_fingerprint() {
+        let gate = StackAttestationGate;
+        let fp = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let c = ctx_with_stack(Some(fp), Some(fp));
+        assert!(matches!(gate.check(&c), GateOutcome::Passed));
+    }
+
+    #[test]
+    fn stack_attestation_fails_mismatched_fingerprint() {
+        let gate = StackAttestationGate;
+        let c = ctx_with_stack(Some("aaaa"), Some("bbbb"));
+        assert!(matches!(gate.check(&c), GateOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn stack_attestation_fails_no_stack_with_policy() {
+        let gate = StackAttestationGate;
+        let c = ctx_with_stack(None, Some("required-fp"));
+        assert!(matches!(gate.check(&c), GateOutcome::Failed(_)));
     }
 }

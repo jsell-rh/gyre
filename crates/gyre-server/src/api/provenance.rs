@@ -34,6 +34,7 @@ pub struct ProvenanceRecord {
     pub spawned_by_user_id: Option<String>,
     pub parent_agent_id: Option<String>,
     pub model_context: Option<serde_json::Value>,
+    pub attestation_level: Option<String>,
 }
 
 impl From<AgentCommit> for ProvenanceRecord {
@@ -54,6 +55,7 @@ impl From<AgentCommit> for ProvenanceRecord {
             spawned_by_user_id: ac.spawned_by_user_id,
             parent_agent_id: ac.parent_agent_id,
             model_context,
+            attestation_level: ac.attestation_level,
         }
     }
 }
