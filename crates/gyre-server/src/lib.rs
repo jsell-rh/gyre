@@ -5,6 +5,7 @@ pub(crate) mod auth;
 pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
+pub mod git_refs;
 pub(crate) mod health;
 pub mod jobs;
 pub(crate) mod mcp;
