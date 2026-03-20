@@ -1,56 +1,116 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
+use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, CostEntry};
 use gyre_ports::analytics::{AnalyticsRepository, CostRepository};
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::{analytics_events, cost_entries};
 
-fn row_to_analytics_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnalyticsEvent> {
-    let props_str: String = row.get(3)?;
-    let properties: serde_json::Value =
-        serde_json::from_str(&props_str).unwrap_or(serde_json::Value::Object(Default::default()));
-    Ok(AnalyticsEvent {
-        id: Id::new(row.get::<_, String>(0)?),
-        event_name: row.get(1)?,
-        agent_id: row.get(2)?,
-        properties,
-        timestamp: row.get::<_, i64>(4)? as u64,
-    })
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = analytics_events)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct AnalyticsEventRow {
+    id: String,
+    event_name: String,
+    agent_id: Option<String>,
+    properties: String,
+    timestamp: i64,
 }
 
-fn row_to_cost_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CostEntry> {
-    Ok(CostEntry {
-        id: Id::new(row.get::<_, String>(0)?),
-        agent_id: Id::new(row.get::<_, String>(1)?),
-        task_id: row.get::<_, Option<String>>(2)?.map(Id::new),
-        cost_type: row.get(3)?,
-        amount: row.get(4)?,
-        currency: row.get(5)?,
-        timestamp: row.get::<_, i64>(6)? as u64,
-    })
+impl From<AnalyticsEventRow> for AnalyticsEvent {
+    fn from(r: AnalyticsEventRow) -> Self {
+        let properties: serde_json::Value = serde_json::from_str(&r.properties)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        AnalyticsEvent {
+            id: Id::new(r.id),
+            event_name: r.event_name,
+            agent_id: r.agent_id,
+            properties,
+            timestamp: r.timestamp as u64,
+        }
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = analytics_events)]
+struct AnalyticsEventRecord<'a> {
+    id: &'a str,
+    event_name: &'a str,
+    agent_id: Option<&'a str>,
+    properties: String,
+    timestamp: i64,
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = cost_entries)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct CostEntryRow {
+    id: String,
+    agent_id: String,
+    task_id: Option<String>,
+    cost_type: String,
+    amount: f64,
+    currency: String,
+    timestamp: i64,
+}
+
+impl From<CostEntryRow> for CostEntry {
+    fn from(r: CostEntryRow) -> Self {
+        CostEntry {
+            id: Id::new(r.id),
+            agent_id: Id::new(r.agent_id),
+            task_id: r.task_id.map(Id::new),
+            cost_type: r.cost_type,
+            amount: r.amount,
+            currency: r.currency,
+            timestamp: r.timestamp as u64,
+        }
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = cost_entries)]
+struct CostEntryRecord<'a> {
+    id: &'a str,
+    agent_id: &'a str,
+    task_id: Option<&'a str>,
+    cost_type: &'a str,
+    amount: f64,
+    currency: &'a str,
+    timestamp: i64,
+}
+
+#[derive(QueryableByName)]
+struct DayCount {
+    #[diesel(sql_type = Text)]
+    day: String,
+    #[diesel(sql_type = BigInt)]
+    cnt: i64,
 }
 
 #[async_trait]
 impl AnalyticsRepository for SqliteStorage {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let e = event.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
             let props = serde_json::to_string(&e.properties)?;
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO analytics_events (id, event_name, agent_id, properties, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    e.id.as_str(),
-                    e.event_name,
-                    e.agent_id,
-                    props,
-                    e.timestamp as i64,
-                ],
-            )
-            .context("insert analytics_event")?;
+            let record = AnalyticsEventRecord {
+                id: e.id.as_str(),
+                event_name: &e.event_name,
+                agent_id: e.agent_id.as_deref(),
+                properties: props,
+                timestamp: e.timestamp as i64,
+            };
+            diesel::insert_into(analytics_events::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert analytics_event")?;
             Ok(())
         })
         .await?
@@ -62,54 +122,39 @@ impl AnalyticsRepository for SqliteStorage {
         since: Option<u64>,
         limit: usize,
     ) -> Result<Vec<AnalyticsEvent>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let event_name = event_name.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || -> Result<Vec<AnalyticsEvent>> {
-            let conn = open_conn(&path)?;
-            let mut conditions: Vec<String> = Vec::new();
-            if since.is_some() {
-                conditions.push("timestamp >= ?1".to_string());
-            }
-            if event_name.is_some() {
-                conditions.push(format!("event_name = ?{}", conditions.len() + 1));
-            }
-            let where_clause = if conditions.is_empty() {
-                String::new()
-            } else {
-                format!("WHERE {}", conditions.join(" AND "))
-            };
-            let sql = format!(
-                "SELECT id, event_name, agent_id, properties, timestamp
-                 FROM analytics_events {} ORDER BY timestamp DESC LIMIT {}",
-                where_clause, limit
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = analytics_events::table.into_boxed();
             if let Some(s) = since {
-                bind_values.push(Box::new(s as i64));
+                query = query.filter(analytics_events::timestamp.ge(s as i64));
             }
             if let Some(ref name) = event_name {
-                bind_values.push(Box::new(name.clone()));
+                query = query.filter(analytics_events::event_name.eq(name.as_str()));
             }
-            let refs: Vec<&dyn rusqlite::types::ToSql> =
-                bind_values.iter().map(|b| b.as_ref()).collect();
-            let rows = stmt.query_map(refs.as_slice(), row_to_analytics_event)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let rows = query
+                .order(analytics_events::timestamp.desc())
+                .limit(limit as i64)
+                .load::<AnalyticsEventRow>(&mut *conn)
+                .context("query analytics_events")?;
+            Ok(rows.into_iter().map(AnalyticsEvent::from).collect())
         })
         .await?
     }
 
     async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let event_name = event_name.to_string();
         tokio::task::spawn_blocking(move || -> Result<u64> {
-            let conn = open_conn(&path)?;
-            let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM analytics_events
-                 WHERE event_name = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
-                rusqlite::params![event_name, since as i64, until as i64],
-                |row| row.get(0),
-            )?;
+            let mut conn = pool.get().context("get db connection")?;
+            let n = analytics_events::table
+                .filter(analytics_events::event_name.eq(event_name.as_str()))
+                .filter(analytics_events::timestamp.ge(since as i64))
+                .filter(analytics_events::timestamp.le(until as i64))
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("count analytics_events")?;
             Ok(n as u64)
         })
         .await?
@@ -121,21 +166,22 @@ impl AnalyticsRepository for SqliteStorage {
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let event_name = event_name.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT date(timestamp, 'unixepoch') as day, COUNT(*) as cnt
-                 FROM analytics_events
-                 WHERE event_name = ?1 AND timestamp >= ?2 AND timestamp <= ?3
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = diesel::sql_query(
+                "SELECT date(timestamp, 'unixepoch') as day, COUNT(*) as cnt \
+                 FROM analytics_events \
+                 WHERE event_name = ? AND timestamp >= ? AND timestamp <= ? \
                  GROUP BY day ORDER BY day",
-            )?;
-            let rows = stmt.query_map(
-                rusqlite::params![event_name, since as i64, until as i64],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)),
-            )?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            )
+            .bind::<Text, _>(event_name)
+            .bind::<BigInt, _>(since as i64)
+            .bind::<BigInt, _>(until as i64)
+            .load::<DayCount>(&mut *conn)
+            .context("aggregate analytics_events by day")?;
+            Ok(rows.into_iter().map(|r| (r.day, r.cnt as u64)).collect())
         })
         .await?
     }
@@ -144,106 +190,89 @@ impl AnalyticsRepository for SqliteStorage {
 #[async_trait]
 impl CostRepository for SqliteStorage {
     async fn record(&self, entry: &CostEntry) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let e = entry.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO cost_entries (id, agent_id, task_id, cost_type, amount, currency, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    e.id.as_str(),
-                    e.agent_id.as_str(),
-                    e.task_id.as_ref().map(|id| id.as_str()),
-                    e.cost_type,
-                    e.amount,
-                    e.currency,
-                    e.timestamp as i64,
-                ],
-            )
-            .context("insert cost_entry")?;
+            let mut conn = pool.get().context("get db connection")?;
+            let record = CostEntryRecord {
+                id: e.id.as_str(),
+                agent_id: e.agent_id.as_str(),
+                task_id: e.task_id.as_ref().map(|id| id.as_str()),
+                cost_type: &e.cost_type,
+                amount: e.amount,
+                currency: &e.currency,
+                timestamp: e.timestamp as i64,
+            };
+            diesel::insert_into(cost_entries::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert cost_entry")?;
             Ok(())
         })
         .await?
     }
 
     async fn query_by_agent(&self, agent_id: &Id, since: Option<u64>) -> Result<Vec<CostEntry>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<CostEntry>> {
-            let conn = open_conn(&path)?;
-            let (sql, use_since) = if since.is_some() {
-                (
-                    "SELECT id, agent_id, task_id, cost_type, amount, currency, timestamp
-                     FROM cost_entries WHERE agent_id = ?1 AND timestamp >= ?2
-                     ORDER BY timestamp DESC",
-                    true,
-                )
-            } else {
-                (
-                    "SELECT id, agent_id, task_id, cost_type, amount, currency, timestamp
-                     FROM cost_entries WHERE agent_id = ?1
-                     ORDER BY timestamp DESC",
-                    false,
-                )
-            };
-            let mut stmt = conn.prepare(sql)?;
-            let rows = if use_since {
-                stmt.query_map(
-                    rusqlite::params![agent_id.as_str(), since.unwrap() as i64],
-                    row_to_cost_entry,
-                )?
-                .collect::<Result<Vec<_>, _>>()?
-            } else {
-                stmt.query_map(rusqlite::params![agent_id.as_str()], row_to_cost_entry)?
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            Ok(rows)
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = cost_entries::table
+                .filter(cost_entries::agent_id.eq(agent_id.as_str()))
+                .order(cost_entries::timestamp.desc())
+                .into_boxed();
+            if let Some(s) = since {
+                query = query.filter(cost_entries::timestamp.ge(s as i64));
+            }
+            let rows = query
+                .load::<CostEntryRow>(&mut *conn)
+                .context("query cost_entries by agent")?;
+            Ok(rows.into_iter().map(CostEntry::from).collect())
         })
         .await?
     }
 
     async fn query_by_task(&self, task_id: &Id) -> Result<Vec<CostEntry>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let task_id = task_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<CostEntry>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, agent_id, task_id, cost_type, amount, currency, timestamp
-                 FROM cost_entries WHERE task_id = ?1 ORDER BY timestamp DESC",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![task_id.as_str()], row_to_cost_entry)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = cost_entries::table
+                .filter(cost_entries::task_id.eq(task_id.as_str()))
+                .order(cost_entries::timestamp.desc())
+                .load::<CostEntryRow>(&mut *conn)
+                .context("query cost_entries by task")?;
+            Ok(rows.into_iter().map(CostEntry::from).collect())
         })
         .await?
     }
 
     async fn total_by_agent(&self, agent_id: &Id) -> Result<f64> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
         tokio::task::spawn_blocking(move || -> Result<f64> {
-            let conn = open_conn(&path)?;
-            let total: f64 = conn.query_row(
-                "SELECT COALESCE(SUM(amount), 0.0) FROM cost_entries WHERE agent_id = ?1",
-                rusqlite::params![agent_id.as_str()],
-                |row| row.get(0),
-            )?;
-            Ok(total)
+            let mut conn = pool.get().context("get db connection")?;
+            let total = cost_entries::table
+                .filter(cost_entries::agent_id.eq(agent_id.as_str()))
+                .select(diesel::dsl::sum(cost_entries::amount))
+                .get_result::<Option<f64>>(&mut *conn)
+                .context("total cost by agent")?;
+            Ok(total.unwrap_or(0.0))
         })
         .await?
     }
 
     async fn total_by_period(&self, since: u64, until: u64) -> Result<f64> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<f64> {
-            let conn = open_conn(&path)?;
-            let total: f64 = conn.query_row(
-                "SELECT COALESCE(SUM(amount), 0.0) FROM cost_entries
-                 WHERE timestamp >= ?1 AND timestamp <= ?2",
-                rusqlite::params![since as i64, until as i64],
-                |row| row.get(0),
-            )?;
-            Ok(total)
+            let mut conn = pool.get().context("get db connection")?;
+            let total = cost_entries::table
+                .filter(cost_entries::timestamp.ge(since as i64))
+                .filter(cost_entries::timestamp.le(until as i64))
+                .select(diesel::dsl::sum(cost_entries::amount))
+                .get_result::<Option<f64>>(&mut *conn)
+                .context("total cost by period")?;
+            Ok(total.unwrap_or(0.0))
         })
         .await?
     }

@@ -43,19 +43,17 @@ pub(crate) type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 /// Diesel-backed storage adapter.
 /// Implements all port traits for local/development deployments.
 pub struct SqliteStorage {
-    /// Keep db_path for the remaining rusqlite adapters (to be migrated later).
-    db_path: Arc<str>,
-    /// Diesel r2d2 connection pool — used by the core Diesel adapters.
+    /// Diesel r2d2 connection pool.
     pub(crate) pool: Arc<DbPool>,
 }
 
 impl SqliteStorage {
     /// Open (or create) the SQLite database and run Diesel migrations.
     pub fn new(db_path: impl Into<String>) -> Result<Self> {
-        let db_path: Arc<str> = db_path.into().into();
+        let db_path: String = db_path.into();
 
         // Build r2d2 pool with WAL + foreign keys customizer.
-        let manager = ConnectionManager::<SqliteConnection>::new(db_path.as_ref());
+        let manager = ConnectionManager::<SqliteConnection>::new(&db_path);
         let pool = Pool::builder()
             .connection_customizer(Box::new(SqliteCustomizer))
             .build(manager)?;
@@ -68,22 +66,9 @@ impl SqliteStorage {
         }
 
         Ok(Self {
-            db_path,
             pool: Arc::new(pool),
         })
     }
-
-    pub(crate) fn db_path(&self) -> Arc<str> {
-        Arc::clone(&self.db_path)
-    }
-}
-
-/// Open a rusqlite connection with foreign keys enabled.
-/// Used by adapters not yet migrated to Diesel.
-pub(crate) fn open_conn(path: &str) -> Result<rusqlite::Connection> {
-    let conn = rusqlite::Connection::open(path)?;
-    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-    Ok(conn)
 }
 
 #[async_trait]

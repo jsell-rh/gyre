@@ -24,3 +24,4 @@ gyre-ports = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+libsqlite3-sys = { workspace = true }
