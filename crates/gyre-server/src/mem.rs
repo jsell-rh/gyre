@@ -195,6 +195,35 @@ impl AgentCommitRepository for MemAgentCommitRepository {
             .find(|ac| ac.commit_sha == sha)
             .cloned())
     }
+
+    async fn find_by_task(&self, task_id: &str) -> Result<Vec<AgentCommit>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| ac.task_id.as_deref() == Some(task_id))
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_ralph_step(&self, repo_id: &Id, ralph_step: &str) -> Result<Vec<AgentCommit>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| {
+                ac.repository_id.as_str() == repo_id.as_str()
+                    && ac
+                        .ralph_step
+                        .as_ref()
+                        .map(|s| s.as_str() == ralph_step)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Default)]

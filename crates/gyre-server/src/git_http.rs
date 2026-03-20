@@ -266,19 +266,132 @@ pub async fn git_receive_pack(
 
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
-    // Post-receive: record agent-commit mappings for newly pushed commits.
+    // M13.2: Resolve agent context (task_id, ralph_step, parent_agent_id) for provenance.
+    let (task_id, ralph_step, parent_agent_id) =
+        resolve_agent_context(&state, &auth.agent_id).await;
+
+    // M13.3: Build X-Gyre-Push-Result JSON header value.
+    let branch = ref_updates
+        .first()
+        .map(|u| u.refname.trim_start_matches("refs/heads/").to_string())
+        .unwrap_or_default();
+    let push_result = serde_json::json!({
+        "repo_id": repo_id,
+        "branch": branch,
+        "agent_id": auth.agent_id,
+        "commit_count": ref_updates.len(),
+        "task_id": task_id,
+        "ralph_step": ralph_step,
+    });
+
+    // M13.3: Append sideband feedback to git output.
+    let mut output_with_feedback = output;
+    let feedback = build_feedback_sideband(&branch, task_id.as_deref(), ralph_step.as_deref());
+    output_with_feedback.extend_from_slice(&feedback);
+
+    // Post-receive: record agent-commit mappings + broadcast PushAccepted event.
     let state_clone = state.clone();
     let repo_path_clone = repo_path.clone();
     let agent_id = auth.agent_id.clone();
+    let task_id_clone = task_id.clone();
+    let ralph_step_clone = ralph_step.clone();
+    let parent_agent_id_clone = parent_agent_id.clone();
+    let repo_id_clone = repo_id.clone();
+    let branch_clone = branch.clone();
     tokio::spawn(async move {
-        record_pushed_commits(&state_clone, &repo_path_clone, &ref_updates, &agent_id).await;
+        let commit_count = record_pushed_commits(
+            &state_clone,
+            &repo_path_clone,
+            &ref_updates,
+            &agent_id,
+            task_id_clone.as_deref(),
+            ralph_step_clone.as_deref(),
+            parent_agent_id_clone.as_deref(),
+        )
+        .await;
+        // Broadcast PushAccepted domain event.
+        let _ = state_clone
+            .event_tx
+            .send(crate::domain_events::DomainEvent::PushAccepted {
+                repo_id: repo_id_clone,
+                branch: branch_clone,
+                agent_id,
+                commit_count,
+                task_id: task_id_clone,
+                ralph_step: ralph_step_clone,
+            });
     });
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/x-git-receive-pack-result")
-        .body(Body::from(output))
+        .header("X-Gyre-Push-Result", push_result.to_string())
+        .body(Body::from(output_with_feedback))
         .unwrap()
+}
+
+/// Resolve the task context for an agent to populate commit provenance (M13.2).
+/// Returns (task_id, ralph_step, parent_agent_id).
+async fn resolve_agent_context(
+    state: &Arc<AppState>,
+    agent_id: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let agent = match state.agents.find_by_id(&Id::new(agent_id)).await {
+        Ok(Some(a)) => a,
+        _ => return (None, None, None),
+    };
+
+    let parent_agent_id = agent.parent_id.map(|id| id.to_string());
+
+    let task_id = match &agent.current_task_id {
+        Some(tid) => tid.to_string(),
+        None => return (None, None, parent_agent_id),
+    };
+
+    // Derive ralph_step from the task's current status.
+    let ralph_step = match state.tasks.find_by_id(&Id::new(&task_id)).await {
+        Ok(Some(task)) => {
+            use gyre_domain::TaskStatus;
+            let step = match task.status {
+                TaskStatus::Backlog => "spec",
+                TaskStatus::InProgress => "implement",
+                TaskStatus::Review => "review",
+                TaskStatus::Done => "merge",
+                TaskStatus::Blocked => "implement",
+            };
+            Some(step.to_string())
+        }
+        _ => None,
+    };
+
+    (Some(task_id), ralph_step, parent_agent_id)
+}
+
+/// Build git sideband-64k pkt-lines carrying human-readable push feedback (M13.3).
+fn build_feedback_sideband(
+    branch: &str,
+    task_id: Option<&str>,
+    ralph_step: Option<&str>,
+) -> Vec<u8> {
+    let mut lines = vec![format!(
+        "remote: [GYRE] Push accepted for branch {branch}\n"
+    )];
+    if let Some(tid) = task_id {
+        lines.push(format!("remote: [GYRE] Task: {tid}\n"));
+    }
+    if let Some(step) = ralph_step {
+        lines.push(format!("remote: [GYRE] Ralph step: {step}\n"));
+    }
+
+    let mut out = Vec::new();
+    for line in lines {
+        // Sideband 2 = progress channel; prefix with \x02
+        let payload = format!("\x02{line}");
+        let len = payload.len() + 4;
+        out.extend_from_slice(format!("{len:04x}").as_bytes());
+        out.extend_from_slice(payload.as_bytes());
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -392,14 +505,18 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
 // Post-receive commit recording
 // ---------------------------------------------------------------------------
 
+/// Returns the number of commits successfully recorded.
 async fn record_pushed_commits(
     state: &Arc<AppState>,
     repo_path: &str,
     updates: &[RefUpdate],
     agent_id: &str,
-) {
+    task_id: Option<&str>,
+    ralph_step: Option<&str>,
+    parent_agent_id: Option<&str>,
+) -> usize {
     if updates.is_empty() {
-        return;
+        return 0;
     }
 
     // Find the repo record by path.
@@ -407,18 +524,22 @@ async fn record_pushed_commits(
         Ok(r) => r,
         Err(e) => {
             warn!("post-receive: failed to list repos: {e}");
-            return;
+            return 0;
         }
     };
     let repo = match all_repos.iter().find(|r| r.path == repo_path) {
         Some(r) => r.clone(),
         None => {
             warn!(%repo_path, "post-receive: repo not found");
-            return;
+            return 0;
         }
     };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let mut total_recorded = 0usize;
+
+    // Derive RalphStep from the string for provenance.
+    let ralph_step_enum = ralph_step.and_then(gyre_domain::RalphStep::from_str);
 
     for update in updates {
         // Walk new commits: git log {old}..{new} --format="%H"
@@ -458,12 +579,22 @@ async fn record_pushed_commits(
                 sha,
                 &update.refname,
                 crate::api::now_secs(),
+            )
+            .with_provenance(
+                task_id.map(str::to_string),
+                ralph_step_enum.clone(),
+                None, // spawned_by_user_id: not available at push time
+                parent_agent_id.map(str::to_string),
+                None, // model_context: not available at push time
             );
             if let Err(e) = state.agent_commits.record(&mapping).await {
                 warn!(%sha, "post-receive: failed to record commit: {e}");
+            } else {
+                total_recorded += 1;
             }
         }
     }
+    total_recorded
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +728,7 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
                 .arg(repo_path)
                 .arg("update-ref")
                 .arg("-d")
+                .arg("--")
                 .arg(&update.refname)
                 .output()
                 .await
@@ -606,6 +738,7 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
                 .arg("-C")
                 .arg(repo_path)
                 .arg("update-ref")
+                .arg("--")
                 .arg(&update.refname)
                 .arg(&update.old_sha)
                 .output()

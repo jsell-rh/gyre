@@ -17,6 +17,7 @@ pub mod merge_queue;
 pub mod merge_requests;
 pub mod network;
 pub mod projects;
+pub mod provenance;
 pub mod push_gates;
 pub mod repos;
 pub mod spawn;
@@ -67,6 +68,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
+        // Commit provenance (M13.2)
+        .route(
+            "/api/v1/repos/:id/provenance",
+            get(provenance::get_provenance),
+        )
         // Agent-commit tracking
         .route(
             "/api/v1/repos/:id/commits/record",

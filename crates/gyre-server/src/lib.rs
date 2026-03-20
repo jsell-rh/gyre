@@ -148,6 +148,50 @@ pub struct AppState {
     pub repo_push_gates: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
+/// Global authentication middleware for all `/api/v1/` routes.
+///
+/// Rejects any request without a valid `Authorization: Bearer <token>` header
+/// with `401 Unauthorized`. The `/api/v1/version` endpoint is public.
+/// Per-handler extractors (`AuthenticatedAgent`, `AdminOnly`, etc.) still
+/// enforce finer-grained role checks on top of this.
+async fn require_auth_middleware(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    // /api/v1/version is intentionally public.
+    if req.uri().path() == "/api/v1/version" {
+        return next.run(req).await;
+    }
+
+    let token = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match token {
+        Some(t) if t == state.auth_token => next.run(req).await,
+        Some(t) => {
+            // Check per-agent tokens.
+            let agent_tokens = state.agent_tokens.lock().await;
+            let valid = agent_tokens.values().any(|v| v.as_str() == t);
+            drop(agent_tokens);
+            if valid {
+                return next.run(req).await;
+            }
+            // Check API keys via the key repository.
+            match state.api_keys.find_user_id(t).await {
+                Ok(Some(_)) => next.run(req).await,
+                _ => (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
+            }
+        }
+        None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
+    }
+}
+
 /// Build the axum Router (extracted for testability).
 pub fn build_router(state: Arc<AppState>) -> Router {
     use axum::extract::DefaultBodyLimit;
@@ -162,6 +206,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // CORS: configurable via GYRE_CORS_ORIGINS (comma-separated), default "*".
     let cors = build_cors_layer();
+
+    // Apply global API auth middleware to all /api/v1/ routes.
+    let api = api::api_router().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_auth_middleware,
+    ));
 
     Router::new()
         .route("/health", get(health::health_handler))
@@ -188,7 +238,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/mcp/sse", get(mcp::mcp_sse_handler))
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
-        .merge(api::api_router())
+        .merge(api)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit_middleware,

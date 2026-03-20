@@ -38,4 +38,13 @@ pub enum DomainEvent {
         agent_id: String,
         reason: String,
     },
+    /// Emitted when a git push is accepted (M13.3).
+    PushAccepted {
+        repo_id: String,
+        branch: String,
+        agent_id: String,
+        commit_count: usize,
+        task_id: Option<String>,
+        ralph_step: Option<String>,
+    },
 }

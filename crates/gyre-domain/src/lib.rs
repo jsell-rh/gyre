@@ -30,7 +30,7 @@ pub mod user;
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
 pub use agent_card::AgentCard;
-pub use agent_tracking::{AgentCommit, AgentWorktree};
+pub use agent_tracking::{AgentCommit, AgentWorktree, RalphStep};
 pub use analytics::{AnalyticsEvent, CostEntry};
 pub use audit::{AuditEvent, AuditEventType};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};

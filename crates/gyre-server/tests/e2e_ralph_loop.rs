@@ -128,6 +128,7 @@ async fn full_ralph_loop_via_gyre() {
     // Verify task was assigned and moved to InProgress
     let task_check: serde_json::Value = client
         .get(format!("{api}/tasks/{task_id}"))
+        .header("Authorization", &auth_hdr)
         .send()
         .await
         .unwrap()
@@ -225,6 +226,7 @@ async fn full_ralph_loop_via_gyre() {
     // Verify agent and task transitioned
     let agent_check: serde_json::Value = client
         .get(format!("{api}/agents/{agent_id}"))
+        .header("Authorization", &auth_hdr)
         .send()
         .await
         .unwrap()
@@ -235,6 +237,7 @@ async fn full_ralph_loop_via_gyre() {
 
     let task_review: serde_json::Value = client
         .get(format!("{api}/tasks/{task_id}"))
+        .header("Authorization", &auth_hdr)
         .send()
         .await
         .unwrap()
@@ -262,6 +265,7 @@ async fn full_ralph_loop_via_gyre() {
     // Verify queue is listed
     let queue_list: serde_json::Value = client
         .get(format!("{api}/merge-queue"))
+        .header("Authorization", &auth_hdr)
         .send()
         .await
         .unwrap()
@@ -276,6 +280,7 @@ async fn full_ralph_loop_via_gyre() {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let mr_poll: serde_json::Value = client
             .get(format!("{api}/merge-requests/{mr_id}"))
+            .header("Authorization", &auth_hdr)
             .send()
             .await
             .unwrap()
@@ -297,6 +302,7 @@ async fn full_ralph_loop_via_gyre() {
     // -- 13. Verify: commit on target branch (main) after merge --
     let commits: serde_json::Value = client
         .get(format!("{api}/repos/{repo_id}/commits?branch=main"))
+        .header("Authorization", &auth_hdr)
         .send()
         .await
         .unwrap()
@@ -324,6 +330,7 @@ async fn full_ralph_loop_via_gyre() {
     // -- 14. Verify: activity log is accessible --
     let activity_resp = client
         .get(format!("{api}/activity?limit=50"))
+        .header("Authorization", &auth_hdr)
         .send()
         .await
         .unwrap();
