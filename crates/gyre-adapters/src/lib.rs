@@ -11,6 +11,7 @@
 pub mod compute;
 pub mod git2_ops;
 pub mod jj_ops;
+pub mod schema;
 pub mod sqlite;
 
 pub use compute::{DockerTarget, LocalTarget, SshTarget};

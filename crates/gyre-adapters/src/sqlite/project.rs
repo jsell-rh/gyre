@@ -1,104 +1,137 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::Project;
 use gyre_ports::ProjectRepository;
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::projects;
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = projects)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct ProjectRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl From<ProjectRow> for Project {
+    fn from(r: ProjectRow) -> Self {
+        Project {
+            id: Id::new(r.id),
+            name: r.name,
+            description: r.description,
+            created_at: r.created_at as u64,
+            updated_at: r.updated_at as u64,
+        }
+    }
+}
+
+#[derive(Insertable, AsChangeset)]
+#[diesel(table_name = projects)]
+struct ProjectRecord<'a> {
+    id: &'a str,
+    name: &'a str,
+    description: Option<&'a str>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl<'a> From<&'a Project> for ProjectRecord<'a> {
+    fn from(p: &'a Project) -> Self {
+        ProjectRecord {
+            id: p.id.as_str(),
+            name: &p.name,
+            description: p.description.as_deref(),
+            created_at: p.created_at as i64,
+            updated_at: p.updated_at as i64,
+        }
+    }
+}
 
 #[async_trait]
 impl ProjectRepository for SqliteStorage {
     async fn create(&self, project: &Project) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let p = project.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO projects (id, name, description, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    p.id.as_str(),
-                    p.name,
-                    p.description,
-                    p.created_at as i64,
-                    p.updated_at as i64,
-                ],
-            )
-            .context("insert project")?;
+            let mut conn = pool.get().context("get db connection")?;
+            let record = ProjectRecord::from(&p);
+            diesel::insert_into(projects::table)
+                .values(&record)
+                .on_conflict(projects::id)
+                .do_update()
+                .set(&record)
+                .execute(&mut *conn)
+                .context("insert project")?;
             Ok(())
         })
         .await?
     }
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<Project>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Project>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?1",
-            )?;
-            let mut rows = stmt.query([id.as_str()])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_project(row)?))
-            } else {
-                Ok(None)
-            }
+            let mut conn = pool.get().context("get db connection")?;
+            let result = projects::table
+                .find(id.as_str())
+                .first::<ProjectRow>(&mut *conn)
+                .optional()
+                .context("find project by id")?;
+            Ok(result.map(Project::from))
         })
         .await?
     }
 
     async fn list(&self) -> Result<Vec<Project>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<Project>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, name, description, created_at, updated_at FROM projects ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(row_to_project(row).unwrap())
-            })?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = projects::table
+                .order(projects::created_at.asc())
+                .load::<ProjectRow>(&mut *conn)
+                .context("list projects")?;
+            Ok(rows.into_iter().map(Project::from).collect())
         })
         .await?
     }
 
     async fn update(&self, project: &Project) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let p = project.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "UPDATE projects SET name=?1, description=?2, updated_at=?3 WHERE id=?4",
-                rusqlite::params![p.name, p.description, p.updated_at as i64, p.id.as_str()],
-            )
-            .context("update project")?;
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(projects::table.find(p.id.as_str()))
+                .set((
+                    projects::name.eq(&p.name),
+                    projects::description.eq(p.description.as_deref()),
+                    projects::updated_at.eq(p.updated_at as i64),
+                ))
+                .execute(&mut *conn)
+                .context("update project")?;
             Ok(())
         })
         .await?
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute("DELETE FROM projects WHERE id=?1", [id.as_str()])
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(projects::table.find(id.as_str()))
+                .execute(&mut *conn)
                 .context("delete project")?;
             Ok(())
         })
         .await?
     }
-}
-
-fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
-    Ok(Project {
-        id: Id::new(row.get::<_, String>(0)?),
-        name: row.get(1)?,
-        description: row.get(2)?,
-        created_at: row.get::<_, i64>(3)? as u64,
-        updated_at: row.get::<_, i64>(4)? as u64,
-    })
 }
 
 #[cfg(test)]

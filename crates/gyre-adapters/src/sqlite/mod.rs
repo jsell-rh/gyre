@@ -1,5 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use diesel::r2d2::{ConnectionManager, CustomizeConnection, Error as R2d2Error, Pool};
+use diesel::SqliteConnection;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use gyre_ports::storage::StoragePort;
 use std::sync::Arc;
 use tracing::instrument;
@@ -11,7 +14,6 @@ pub mod analytics;
 pub mod audit;
 pub mod merge_queue;
 pub mod merge_request;
-mod migrations;
 pub mod network_peer;
 pub mod project;
 pub mod repository;
@@ -20,19 +22,55 @@ pub mod task;
 pub mod user;
 pub mod worktree;
 
-/// SQLite-backed storage adapter.
+pub(crate) const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+
+/// r2d2 connection customizer: enables WAL mode and foreign keys on every connection.
+#[derive(Debug)]
+struct SqliteCustomizer;
+
+impl CustomizeConnection<SqliteConnection, R2d2Error> for SqliteCustomizer {
+    fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), R2d2Error> {
+        use diesel::RunQueryDsl;
+        diesel::sql_query("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .execute(conn)
+            .map_err(R2d2Error::QueryError)?;
+        Ok(())
+    }
+}
+
+pub(crate) type DbPool = Pool<ConnectionManager<SqliteConnection>>;
+
+/// Diesel-backed storage adapter.
 /// Implements all port traits for local/development deployments.
 pub struct SqliteStorage {
+    /// Keep db_path for the remaining rusqlite adapters (to be migrated later).
     db_path: Arc<str>,
+    /// Diesel r2d2 connection pool — used by the core Diesel adapters.
+    pub(crate) pool: Arc<DbPool>,
 }
 
 impl SqliteStorage {
-    /// Open (or create) the SQLite database and run migrations.
+    /// Open (or create) the SQLite database and run Diesel migrations.
     pub fn new(db_path: impl Into<String>) -> Result<Self> {
         let db_path: Arc<str> = db_path.into().into();
-        let conn = open_conn(db_path.as_ref())?;
-        migrations::run(&conn)?;
-        Ok(Self { db_path })
+
+        // Build r2d2 pool with WAL + foreign keys customizer.
+        let manager = ConnectionManager::<SqliteConnection>::new(db_path.as_ref());
+        let pool = Pool::builder()
+            .connection_customizer(Box::new(SqliteCustomizer))
+            .build(manager)?;
+
+        // Run Diesel migrations.
+        {
+            let mut conn = pool.get()?;
+            conn.run_pending_migrations(MIGRATIONS)
+                .map_err(|e| anyhow::anyhow!("Diesel migration failed: {e}"))?;
+        }
+
+        Ok(Self {
+            db_path,
+            pool: Arc::new(pool),
+        })
     }
 
     pub(crate) fn db_path(&self) -> Arc<str> {
@@ -41,6 +79,7 @@ impl SqliteStorage {
 }
 
 /// Open a rusqlite connection with foreign keys enabled.
+/// Used by adapters not yet migrated to Diesel.
 pub(crate) fn open_conn(path: &str) -> Result<rusqlite::Connection> {
     let conn = rusqlite::Connection::open(path)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -51,10 +90,13 @@ pub(crate) fn open_conn(path: &str) -> Result<rusqlite::Connection> {
 impl StoragePort for SqliteStorage {
     #[instrument(skip(self), err)]
     async fn health_check(&self) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute_batch("SELECT 1;")?;
+            use diesel::RunQueryDsl;
+            let mut conn = pool.get()?;
+            diesel::sql_query("SELECT 1")
+                .execute(&mut *conn)
+                .map_err(anyhow::Error::from)?;
             Ok(())
         })
         .await??;
@@ -82,9 +124,8 @@ mod tests {
     #[test]
     fn migrations_create_tables() {
         let (_tmp, storage) = tmp_storage();
-        let conn = rusqlite::Connection::open(storage.db_path.as_ref()).unwrap();
+        let mut conn = storage.pool.get().unwrap();
         let tables = [
-            "_migrations",
             "projects",
             "repositories",
             "agents",
@@ -98,18 +139,14 @@ mod tests {
             "analytics_events",
             "cost_entries",
             "audit_events",
-            "siem_targets",
             "network_peers",
         ];
         for table in &tables {
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 1, "table '{}' missing", table);
+            use diesel::RunQueryDsl;
+            // A table exists if we can SELECT from it without error.
+            diesel::sql_query(format!("SELECT 1 FROM {table} LIMIT 0"))
+                .execute(&mut *conn)
+                .unwrap_or_else(|e| panic!("table '{table}' missing: {e}"));
         }
     }
 

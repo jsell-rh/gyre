@@ -13,6 +13,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
 git2 = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
