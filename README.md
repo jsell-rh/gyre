@@ -24,10 +24,15 @@ Open **http://localhost:3000** — the dashboard loads immediately. Default auth
 Seed demo data to explore the UI:
 ```bash
 curl -s -X POST http://localhost:3000/api/v1/admin/seed \
-  -H "Authorization: Bearer gyre-dev-token" | jq .
+  -H "Authorization: Bearer gyre-dev-token"
 ```
+_(Pipe through `jq .` for pretty output if you have jq installed.)_
 
 ## CLI
+
+The CLI commands below require the server to be running. `gyre init` registers
+this CLI instance and saves credentials to `~/.gyre/config`; all other commands
+use those saved credentials automatically.
 
 ```bash
 # Register as a named agent (saves token + agent ID to ~/.gyre/config)
@@ -39,7 +44,7 @@ curl -s -X POST http://localhost:3000/api/v1/admin/seed \
 # List tasks
 ./target/release/gyre tasks list
 
-# Clone a repo hosted by Gyre
+# Clone a repo hosted by Gyre (use project/repo names from the dashboard)
 ./target/release/gyre clone myproject/myrepo
 ```
 
