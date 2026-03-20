@@ -13,6 +13,7 @@ pub mod merge_processor;
 pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
+pub mod mirror_sync;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
@@ -22,6 +23,7 @@ pub(crate) mod spa;
 pub mod sqlite;
 pub mod stale_agents;
 pub mod telemetry;
+pub(crate) mod tty;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -162,6 +164,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(health::readyz_handler))
         .route("/metrics", get(metrics::metrics_handler))
         .route("/ws", get(ws::ws_handler))
+        .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
         .route(
             "/git/:project/:repo/info/refs",
