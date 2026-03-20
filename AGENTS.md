@@ -150,7 +150,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
@@ -408,9 +408,8 @@ Agents are created in dependency order (parents before children). Parent links a
   "repo_id": "<repo-uuid>",
   "task_id": "<task-uuid>",
   "branch": "feat/my-feature",
-  "parent_id": "<orchestrator-agent-uuid>",  // optional
-  "command": "claude",                        // optional — process to launch (M11.1)
-  "command_args": ["--task", "<task-uuid>"]   // optional — args for command (M11.1)
+  "parent_id": "<orchestrator-agent-uuid>",    // optional
+  "compute_target_id": "<target-uuid>"         // optional — remote compute target
 }
 
 // Response 201
