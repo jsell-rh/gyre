@@ -109,6 +109,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
+| `POST/GET` | `/api/v1/repos/{id}/gates` | Create / list quality gates for a repo (`GateType`: TestCommand, LintCommand, RequiredApprovals) (M12.1) |
+| `DELETE` | `/api/v1/repos/{id}/gates/{gate_id}` | Delete a quality gate (M12.1) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
@@ -126,7 +128,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
 | `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
-| `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue |
+| `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
+| `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |
 | `GET` | `/api/v1/merge-queue` | List merge queue entries (priority ordered) |
 | `DELETE` | `/api/v1/merge-queue/{id}` | Cancel queued entry |
 | `POST` | `/api/v1/repos/{id}/commits/record` | Record agent-commit mapping |
