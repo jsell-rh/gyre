@@ -403,22 +403,18 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4 + M4.3 + M5 + M6 + M7 + M8.1)
+### Dashboard (M3.4 + M4.3 + M5 + M6 + M7 + M8.3)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
 - **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, branch dropdowns). On success, displays the agent token and clone URL for use by the spawned agent.
 - **Repo Detail**: shows a clone URL bar with one-click copy, pre-filled with the correct `Authorization: Bearer` git credential command.
-- **Admin Panel** (M4.3, Admin role required): accessible via sidebar. Shows:
-  - Health cards: uptime, agent count, task count, project count
-  - Background jobs table: merge processor + stale agent detector status
-  - Audit log: searchable activity feed with agent_id / event_type filters
-  - Agent management: Kill and Reassign action buttons per agent
+- **Admin Panel** (M4.3 + M8.3, Admin role required): tab-based navigation (Health / Jobs / Audit / Agents / Snapshots / Retention) via `Tabs` component. Health tab: uptime, agent/task/project metric cards. Jobs tab: merge processor + stale agent detector status table. Audit tab: searchable activity feed with agent_id / event_type filters. Agents tab: Kill and Reassign action buttons per agent.
 
 Access at `http://localhost:3000` after starting the server. Admin Panel requires `Admin` role via Keycloak JWT (`GYRE_OIDC_ISSUER`) or the global `GYRE_AUTH_TOKEN`.
-- **MCP Tool Catalog** (M5.1, sidebar: "MCP Tools"): lists all 8 MCP tools available on `/mcp`, with per-tool schema details.
-- **Compose View** (M5.2, sidebar: "Compose"): paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states, and teardown the session.
-- **Agent Card Panel** (M5.2): per-agent panel to view and edit the agent's A2A AgentCard (capabilities, protocols, endpoint).
+- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 8 MCP tools available on `/mcp`.
+- **Compose View** (M5.2 + M8.3, sidebar: "Compose"): structured section cards with a mono textarea editor. Paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states in an interactive tree visualization, and teardown the session.
+- **Agent Card Panel** (M5.2 + M8.3): per-agent panel to view and edit the A2A AgentCard (capabilities as `Badge` pills, protocols, endpoint). Improved empty state when no card is published.
 - **Analytics View** (M6.1): event counts bar chart and recent events list with property drill-down. Tracks auto-emitted events: `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`, `merge_queue.processed`.
 - **Cost View** (M6.1): agent cost breakdown table with total display and per-agent detail drill-down.
 - **Admin Panel — M6 additions** (M6.2): snapshot create/restore/delete controls, job history table with Run Now button, retention policy editor, full data export download.
@@ -430,6 +426,14 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Design System** (M8.1): Red Hat brand CSS variables in `web/src/lib/design-system.css` — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary actions, semantic status palette. 13-component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`.
 - **Sidebar** (M8.1): grouped nav sections (Overview / Source Control / Agents / Operations / Admin), collapsible to icon-only mode via chevron toggle, server status footer.
 - **Global Search** (M8.1): Cmd+K opens `SearchBar` overlay with keyboard navigation across agents, tasks, repos, and MRs.
+- **Activity Feed** (M8.2): timeline layout with colored event-type nodes, multi-select filter pills (toggle per event type), relative timestamps, skeleton loading, `EmptyState` when no events match.
+- **Agent List** (M8.2): 3-column card grid with table-view toggle, status filter pills, skeleton grid on load, slide-in detail panel with close button.
+- **Task Board** (M8.2): kanban columns with semantic color-coded top borders per status, `Badge` component for priority, `EmptyState` per empty column, skeleton loading.
+- **Project List** (M8.2): responsive card grid, skeleton loading, `EmptyState` when no projects exist.
+- **Repo Detail** (M8.2): uses `lib/Tabs` + `lib/Table` components, `Badge` for MR status, relative timestamps, `EmptyState` per empty tab.
+- **Merge Request Detail** (M8.3): two-column layout — diff panel left, metadata + status timeline right. Status timeline shows each MR lifecycle step with timestamps and reviewer info.
+- **Merge Queue View** (M8.3): visual flow lanes per queue position with progress bars, estimated wait indicators, and per-entry action buttons (cancel).
+- **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card.
 
 ---
 
