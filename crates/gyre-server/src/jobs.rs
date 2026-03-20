@@ -266,11 +266,25 @@ pub async fn start_job_registry(state: Arc<AppState>) -> Arc<JobRegistry> {
         )
         .await;
 
+    // Register mirror sync job (runs every 60 seconds)
+    registry
+        .register(
+            JobDefinition {
+                name: "mirror_sync".to_string(),
+                description: "Fetches latest refs for all mirror repositories".to_string(),
+                interval_secs: 60,
+                enabled: true,
+            },
+            |state| async move { crate::mirror_sync::run_once(&state).await },
+        )
+        .await;
+
     // Spawn schedulers for all registered jobs
     for job_name in [
         "merge_processor",
         "stale_agent_detector",
         "retention_cleanup",
+        "mirror_sync",
     ] {
         spawn_job(
             Arc::clone(&registry),

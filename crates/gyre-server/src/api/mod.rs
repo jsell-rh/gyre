@@ -60,10 +60,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos",
             post(repos::create_repo).get(repos::list_repos),
         )
+        .route("/api/v1/repos/mirror", post(repos::create_mirror_repo))
         .route("/api/v1/repos/:id", get(repos::get_repo))
         .route("/api/v1/repos/:id/branches", get(repos::list_branches))
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
+        .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
         // Agent-commit tracking
         .route(
             "/api/v1/repos/:id/commits/record",

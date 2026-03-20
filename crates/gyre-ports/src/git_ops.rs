@@ -52,4 +52,12 @@ pub trait GitOpsPort: Send + Sync {
     /// Create an initial empty commit on `branch` in a freshly-initialized bare repo.
     /// Returns the commit SHA. Typically called right after `init_bare`.
     async fn create_initial_commit(&self, repo_path: &str, branch: &str) -> Result<String>;
+
+    /// Clone a remote repository as a bare mirror into `path`.
+    /// Equivalent to `git clone --mirror <url> <path>`.
+    async fn clone_mirror(&self, url: &str, path: &str) -> Result<()>;
+
+    /// Fetch all refs for a mirror repository.
+    /// Equivalent to `git fetch --all` in the mirror repo directory.
+    async fn fetch_mirror(&self, path: &str) -> Result<()>;
 }
