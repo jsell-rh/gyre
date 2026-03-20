@@ -480,7 +480,7 @@ impl RepoRepository for SqliteDb {
                         name: row.get(2)?,
                         path: row.get(3)?,
                         default_branch: row.get(4)?,
-                        created_at: row.get::<_, i64>(5)? as u64,
+                        created_at: row.get::<_, i64>(5)? as u64, is_mirror: false, mirror_url: None, mirror_interval_secs: None, last_mirror_sync: None,
                     }))
                 } else {
                     Ok(None)
@@ -503,6 +503,10 @@ impl RepoRepository for SqliteDb {
                         path: row.get(3)?,
                         default_branch: row.get(4)?,
                         created_at: row.get::<_, i64>(5)? as u64,
+                        is_mirror: false,
+                        mirror_url: None,
+                        mirror_interval_secs: None,
+                        last_mirror_sync: None,
                     })
                 })?;
                 rows.map(|r| r.map_err(anyhow::Error::from)).collect()
@@ -524,7 +528,7 @@ impl RepoRepository for SqliteDb {
                         name: row.get(2)?,
                         path: row.get(3)?,
                         default_branch: row.get(4)?,
-                        created_at: row.get::<_, i64>(5)? as u64,
+                        created_at: row.get::<_, i64>(5)? as u64, is_mirror: false, mirror_url: None, mirror_interval_secs: None, last_mirror_sync: None,
                     })
                 })?;
                 rows.map(|r| r.map_err(anyhow::Error::from)).collect()
