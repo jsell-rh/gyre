@@ -82,6 +82,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, change_id }),
     }),
+  // AIBOM (AI Bill of Materials) — M14.3
+  repoAibom: (id, from, to) => {
+    const qs = from ? `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to || '')}` : '';
+    return request(`/repos/${id}/aibom${qs}`);
+  },
   // MCP tools catalog (endpoint is /mcp, not under /api/v1/)
   mcpTools: async () => {
     const res = await fetch('/mcp', {

@@ -16,6 +16,14 @@ pub struct PushContext {
     pub commit_messages: Vec<String>,
     /// File paths changed across all commits in this push.
     pub changed_files: Vec<String>,
+    /// ID of the agent performing the push (M14.2).
+    pub agent_id: Option<String>,
+    /// SHA-256 fingerprint of the pushing agent's registered stack (M14.2).
+    /// None if the agent has not registered a stack.
+    pub stack_fingerprint: Option<String>,
+    /// SHA-256 fingerprint required by the repo's stack policy (M14.2).
+    /// None if no policy is set for this repo.
+    pub required_fingerprint: Option<String>,
 }
 
 /// Result of a single gate check.

@@ -4,6 +4,7 @@ pub mod agent_logs;
 pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
+pub mod aibom;
 pub mod analytics;
 pub mod audit;
 pub mod auth;
@@ -23,6 +24,7 @@ pub mod push_gates;
 pub mod repos;
 pub mod spawn;
 pub mod speculative;
+pub mod stack_attest;
 pub mod tasks;
 pub mod version;
 
@@ -75,6 +77,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/provenance",
             get(provenance::get_provenance),
         )
+        // AI Bill of Materials (M14.3)
+        .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))
         // Agent-commit tracking
         .route(
             "/api/v1/repos/:id/commits/record",
@@ -106,6 +110,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/push-gates",
             get(push_gates::get_push_gates).put(push_gates::set_push_gates),
+        )
+        // Stack attestation policy (M14.2)
+        .route(
+            "/api/v1/repos/:id/stack-policy",
+            get(stack_attest::get_stack_policy).put(stack_attest::set_stack_policy),
         )
         // Cross-agent code awareness (M13.4)
         .route("/api/v1/repos/:id/blame", get(code_awareness::get_blame))
@@ -165,6 +174,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/agents/:id/logs/stream",
             get(agent_logs::stream_logs),
+        )
+        // Agent stack fingerprinting (M14.1)
+        .route(
+            "/api/v1/agents/:id/stack",
+            post(stack_attest::register_stack).get(stack_attest::get_stack),
         )
         // Compose
         .route("/api/v1/compose/apply", post(compose_apply))
