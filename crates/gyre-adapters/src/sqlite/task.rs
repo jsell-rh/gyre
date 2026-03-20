@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::{Task, TaskPriority, TaskStatus};
 use gyre_ports::TaskRepository;
+use std::sync::Arc;
 
-use super::{open_conn, SqliteStorage};
+use super::SqliteStorage;
+use crate::schema::tasks;
 
 fn status_to_str(s: &TaskStatus) -> &'static str {
     match s {
@@ -46,181 +49,212 @@ fn str_to_priority(s: &str) -> Result<TaskPriority> {
     }
 }
 
-fn row_to_task(row: &rusqlite::Row<'_>) -> Result<Task> {
-    let status_str: String = row.get(3)?;
-    let priority_str: String = row.get(4)?;
-    let labels_json: String = row.get(7)?;
-    let labels: Vec<String> = serde_json::from_str(&labels_json).unwrap_or_default();
-    Ok(Task {
-        id: Id::new(row.get::<_, String>(0)?),
-        title: row.get(1)?,
-        description: row.get(2)?,
-        status: str_to_status(&status_str)?,
-        priority: str_to_priority(&priority_str)?,
-        assigned_to: row.get::<_, Option<String>>(5)?.map(Id::new),
-        parent_task_id: row.get::<_, Option<String>>(6)?.map(Id::new),
-        labels,
-        branch: row.get(8)?,
-        pr_link: row.get(9)?,
-        created_at: row.get::<_, i64>(10)? as u64,
-        updated_at: row.get::<_, i64>(11)? as u64,
-    })
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = tasks)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct TaskRow {
+    id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    priority: String,
+    assigned_to: Option<String>,
+    parent_task_id: Option<String>,
+    labels: String,
+    branch: Option<String>,
+    pr_link: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl TaskRow {
+    fn into_task(self) -> Result<Task> {
+        let labels: Vec<String> = serde_json::from_str(&self.labels).unwrap_or_default();
+        Ok(Task {
+            id: Id::new(self.id),
+            title: self.title,
+            description: self.description,
+            status: str_to_status(&self.status)?,
+            priority: str_to_priority(&self.priority)?,
+            assigned_to: self.assigned_to.map(Id::new),
+            parent_task_id: self.parent_task_id.map(Id::new),
+            labels,
+            branch: self.branch,
+            pr_link: self.pr_link,
+            created_at: self.created_at as u64,
+            updated_at: self.updated_at as u64,
+        })
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = tasks)]
+struct NewTaskRow<'a> {
+    id: &'a str,
+    title: &'a str,
+    description: Option<&'a str>,
+    status: &'a str,
+    priority: &'a str,
+    assigned_to: Option<&'a str>,
+    parent_task_id: Option<&'a str>,
+    labels: &'a str,
+    branch: Option<&'a str>,
+    pr_link: Option<&'a str>,
+    created_at: i64,
+    updated_at: i64,
 }
 
 #[async_trait]
 impl TaskRepository for SqliteStorage {
     async fn create(&self, task: &Task) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let t = task.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
             let labels_json = serde_json::to_string(&t.labels)?;
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "INSERT INTO tasks (id, title, description, status, priority,
-                                    assigned_to, parent_task_id, labels, branch, pr_link,
-                                    created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                rusqlite::params![
-                    t.id.as_str(),
-                    t.title,
-                    t.description,
-                    status_to_str(&t.status),
-                    priority_to_str(&t.priority),
-                    t.assigned_to.as_ref().map(|id| id.as_str()),
-                    t.parent_task_id.as_ref().map(|id| id.as_str()),
-                    labels_json,
-                    t.branch,
-                    t.pr_link,
-                    t.created_at as i64,
-                    t.updated_at as i64,
-                ],
-            )
-            .context("insert task")?;
+            let row = NewTaskRow {
+                id: t.id.as_str(),
+                title: &t.title,
+                description: t.description.as_deref(),
+                status: status_to_str(&t.status),
+                priority: priority_to_str(&t.priority),
+                assigned_to: t.assigned_to.as_ref().map(|id| id.as_str()),
+                parent_task_id: t.parent_task_id.as_ref().map(|id| id.as_str()),
+                labels: &labels_json,
+                branch: t.branch.as_deref(),
+                pr_link: t.pr_link.as_deref(),
+                created_at: t.created_at as i64,
+                updated_at: t.updated_at as i64,
+            };
+            diesel::insert_into(tasks::table)
+                .values(&row)
+                .on_conflict(tasks::id)
+                .do_update()
+                .set((
+                    tasks::title.eq(row.title),
+                    tasks::description.eq(row.description),
+                    tasks::status.eq(row.status),
+                    tasks::priority.eq(row.priority),
+                    tasks::assigned_to.eq(row.assigned_to),
+                    tasks::parent_task_id.eq(row.parent_task_id),
+                    tasks::labels.eq(row.labels),
+                    tasks::branch.eq(row.branch),
+                    tasks::pr_link.eq(row.pr_link),
+                    tasks::updated_at.eq(row.updated_at),
+                ))
+                .execute(&mut *conn)
+                .context("insert task")?;
             Ok(())
         })
         .await?
     }
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<Task>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Task>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, assigned_to, parent_task_id,
-                        labels, branch, pr_link, created_at, updated_at
-                 FROM tasks WHERE id = ?1",
-            )?;
-            let mut rows = stmt.query([id.as_str()])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_task(row)?))
-            } else {
-                Ok(None)
-            }
+            let mut conn = pool.get().context("get db connection")?;
+            let result = tasks::table
+                .find(id.as_str())
+                .first::<TaskRow>(&mut *conn)
+                .optional()
+                .context("find task by id")?;
+            result.map(TaskRow::into_task).transpose()
         })
         .await?
     }
 
     async fn list(&self) -> Result<Vec<Task>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, assigned_to, parent_task_id,
-                        labels, branch, pr_link, created_at, updated_at
-                 FROM tasks ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([], |row| Ok(row_to_task(row).unwrap()))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
         })
         .await?
     }
 
     async fn list_by_status(&self, status: &TaskStatus) -> Result<Vec<Task>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let status_str = status_to_str(status).to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, assigned_to, parent_task_id,
-                        labels, branch, pr_link, created_at, updated_at
-                 FROM tasks WHERE status = ?1 ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([&status_str], |row| Ok(row_to_task(row).unwrap()))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .filter(tasks::status.eq(&status_str))
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks by status")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
         })
         .await?
     }
 
     async fn list_by_assignee(&self, agent_id: &Id) -> Result<Vec<Task>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, assigned_to, parent_task_id,
-                        labels, branch, pr_link, created_at, updated_at
-                 FROM tasks WHERE assigned_to = ?1 ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([agent_id.as_str()], |row| Ok(row_to_task(row).unwrap()))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .filter(tasks::assigned_to.eq(agent_id.as_str()))
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks by assignee")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
         })
         .await?
     }
 
     async fn list_by_parent(&self, parent_task_id: &Id) -> Result<Vec<Task>> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let parent_id = parent_task_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
-            let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, assigned_to, parent_task_id,
-                        labels, branch, pr_link, created_at, updated_at
-                 FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([parent_id.as_str()], |row| Ok(row_to_task(row).unwrap()))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .filter(tasks::parent_task_id.eq(parent_id.as_str()))
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks by parent")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
         })
         .await?
     }
 
     async fn update(&self, task: &Task) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let t = task.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
             let labels_json = serde_json::to_string(&t.labels)?;
-            let conn = open_conn(&path)?;
-            conn.execute(
-                "UPDATE tasks SET title=?1, description=?2, status=?3, priority=?4,
-                          assigned_to=?5, parent_task_id=?6, labels=?7, branch=?8,
-                          pr_link=?9, updated_at=?10
-                 WHERE id=?11",
-                rusqlite::params![
-                    t.title,
-                    t.description,
-                    status_to_str(&t.status),
-                    priority_to_str(&t.priority),
-                    t.assigned_to.as_ref().map(|id| id.as_str()),
-                    t.parent_task_id.as_ref().map(|id| id.as_str()),
-                    labels_json,
-                    t.branch,
-                    t.pr_link,
-                    t.updated_at as i64,
-                    t.id.as_str(),
-                ],
-            )
-            .context("update task")?;
+            diesel::update(tasks::table.find(t.id.as_str()))
+                .set((
+                    tasks::title.eq(&t.title),
+                    tasks::description.eq(t.description.as_deref()),
+                    tasks::status.eq(status_to_str(&t.status)),
+                    tasks::priority.eq(priority_to_str(&t.priority)),
+                    tasks::assigned_to.eq(t.assigned_to.as_ref().map(|id| id.as_str())),
+                    tasks::parent_task_id.eq(t.parent_task_id.as_ref().map(|id| id.as_str())),
+                    tasks::labels.eq(&labels_json),
+                    tasks::branch.eq(t.branch.as_deref()),
+                    tasks::pr_link.eq(t.pr_link.as_deref()),
+                    tasks::updated_at.eq(t.updated_at as i64),
+                ))
+                .execute(&mut *conn)
+                .context("update task")?;
             Ok(())
         })
         .await?
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
-        let path = self.db_path();
+        let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open_conn(&path)?;
-            conn.execute("DELETE FROM tasks WHERE id=?1", [id.as_str()])
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(tasks::table.find(id.as_str()))
+                .execute(&mut *conn)
                 .context("delete task")?;
             Ok(())
         })
