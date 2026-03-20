@@ -41,8 +41,11 @@ cargo build --all
 # Build release binaries
 cargo build --release -p gyre-server -p gyre-cli
 
-# Run all tests
+# Run all Rust tests
 cargo test --all
+
+# Run frontend component tests (vitest — requires Node/npm)
+cd web && npm test && cd ..
 
 # Format check
 cargo fmt --all -- --check
