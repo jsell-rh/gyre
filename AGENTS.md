@@ -176,6 +176,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
 | `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (Admin only) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
+| `POST` | `/api/v1/admin/seed` | Idempotent demo data seed: 2 projects, 3 repos, 4 agents, 6 tasks, 2 MRs, 1 queue entry, 5 activity events. Returns `{already_seeded:true}` on repeat. AdminOnly. (M9.1) |
 | `POST/GET` | `/api/v1/audit/events` | Record / query eBPF audit events (`?agent_id=&event_type=&since=`) |
 | `GET` | `/api/v1/audit/stream` | SSE stream of live audit events |
 | `GET` | `/api/v1/audit/stats` | Audit event statistics and counts |
@@ -403,7 +404,7 @@ The server automatically: opens the MR, marks the task done, removes the git wor
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
 
-### Dashboard (M3.4 + M4.3 + M5 + M6 + M7 + M8.3)
+### Dashboard (M3.4 + M4.3 + M5 + M6 + M7 + M8.3 + M9)
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
@@ -422,14 +423,14 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **SIEM Panel** (M7.1, Admin only): configure SIEM forwarding targets (webhook URL, format, filter), enable/disable per target.
 - **Compute Targets** (M7.2, Admin only): register and manage remote compute targets (local, Docker, SSH). Shows target type, host, and status.
 - **Network Panel** (M7.3, Admin only): WireGuard peer registry, DERP relay map viewer, per-agent peer status.
-- **Dashboard Home** (M8.1): redesigned landing view with metric cards (active agents, open tasks, pending MRs, queue depth), agent health grid with semantic status colors, recent activity feed, merge queue progress bar.
+- **Dashboard Home** (M8.1 + M9.2): redesigned landing view with metric cards (active agents, open tasks, pending MRs, queue depth), agent health grid with semantic status colors, recent activity feed, merge queue progress bar. Quick Actions row: New Project, New Task, and Seed Demo Data (POST `/api/v1/admin/seed`) buttons for fast task entry without navigating away.
 - **Design System** (M8.1): Red Hat brand CSS variables in `web/src/lib/design-system.css` — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary actions, semantic status palette. 13-component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`.
 - **Sidebar** (M8.1): grouped nav sections (Overview / Source Control / Agents / Operations / Admin), collapsible to icon-only mode via chevron toggle, server status footer.
 - **Global Search** (M8.1): Cmd+K opens `SearchBar` overlay with keyboard navigation across agents, tasks, repos, and MRs.
 - **Activity Feed** (M8.2): timeline layout with colored event-type nodes, multi-select filter pills (toggle per event type), relative timestamps, skeleton loading, `EmptyState` when no events match.
 - **Agent List** (M8.2): 3-column card grid with table-view toggle, status filter pills, skeleton grid on load, slide-in detail panel with close button.
-- **Task Board** (M8.2): kanban columns with semantic color-coded top borders per status, `Badge` component for priority, `EmptyState` per empty column, skeleton loading.
-- **Project List** (M8.2): responsive card grid, skeleton loading, `EmptyState` when no projects exist.
+- **Task Board** (M8.2 + M9.2): kanban columns with semantic color-coded top borders per status, `Badge` component for priority, `EmptyState` per empty column, skeleton loading. "New Task" button opens Modal (title, description, priority, status) -> POST `/api/v1/tasks`; card appears in the correct column immediately.
+- **Project List** (M8.2 + M9.2): responsive card grid, skeleton loading, `EmptyState` when no projects exist. "New Project" button opens Modal (name + description) -> POST `/api/v1/projects`. Selecting a project shows "Add Repo" button -> Modal -> POST `/api/v1/repos`. Toast notifications on success/error.
 - **Repo Detail** (M8.2): uses `lib/Tabs` + `lib/Table` components, `Badge` for MR status, relative timestamps, `EmptyState` per empty tab.
 - **Merge Request Detail** (M8.3): two-column layout — diff panel left, metadata + status timeline right. Status timeline shows each MR lifecycle step with timestamps and reviewer info.
 - **Merge Queue View** (M8.3): visual flow lanes per queue position with progress bars, estimated wait indicators, and per-entry action buttons (cancel).
