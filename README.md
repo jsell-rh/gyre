@@ -103,6 +103,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | Done | Diesel ORM + migrations, SQLite + PostgreSQL adapters, full persistence, multi-tenancy (tenant_id scoping) |
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
+| M17: Integration Testing | In Progress | REST API contract tests, git smart HTTP tests, merge queue system tests, auth matrix, Playwright E2E |
 
 606 Rust + 86 frontend component tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 

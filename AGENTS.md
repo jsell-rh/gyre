@@ -695,6 +695,7 @@ Key specs to read before making changes:
 | M17 milestone deliverables | [specs/milestones/m17-integration-testing.md](specs/milestones/m17-integration-testing.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
+| Trusted Foundry integration (future pattern) | [specs/system/trusted-foundry-integration.md](specs/system/trusted-foundry-integration.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
