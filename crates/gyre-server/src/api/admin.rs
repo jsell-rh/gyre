@@ -460,9 +460,17 @@ pub async fn admin_seed(
     state.agents.create(&agent4).await?;
 
     // ── Tasks ─────────────────────────────────────────────────────────────────
-    let task1 = Task::new(Id::new("seed-task-1"), "Set up NixOS flake for CI", now - 3000);
+    let task1 = Task::new(
+        Id::new("seed-task-1"),
+        "Set up NixOS flake for CI",
+        now - 3000,
+    );
 
-    let mut task2 = Task::new(Id::new("seed-task-2"), "Implement agent spawn API", now - 2800);
+    let mut task2 = Task::new(
+        Id::new("seed-task-2"),
+        "Implement agent spawn API",
+        now - 2800,
+    );
     task2.status = TaskStatus::InProgress;
     task2.priority = TaskPriority::High;
     task2.assigned_to = Some(Id::new("seed-agent-1"));
@@ -482,7 +490,11 @@ pub async fn admin_seed(
     );
     task4.status = TaskStatus::Review;
 
-    let mut task5 = Task::new(Id::new("seed-task-5"), "Write E2E Ralph loop test", now - 5000);
+    let mut task5 = Task::new(
+        Id::new("seed-task-5"),
+        "Write E2E Ralph loop test",
+        now - 5000,
+    );
     task5.status = TaskStatus::Done;
     task5.priority = TaskPriority::Critical;
 
@@ -522,12 +534,8 @@ pub async fn admin_seed(
     state.merge_requests.create(&mr_merged).await?;
 
     // ── Merge Queue ───────────────────────────────────────────────────────────
-    let queue_entry = MergeQueueEntry::new(
-        Id::new("seed-queue-1"),
-        Id::new("seed-mr-1"),
-        50,
-        now - 600,
-    );
+    let queue_entry =
+        MergeQueueEntry::new(Id::new("seed-queue-1"), Id::new("seed-mr-1"), 50, now - 600);
     state.merge_queue.enqueue(&queue_entry).await?;
 
     // ── Activity Events ───────────────────────────────────────────────────────
