@@ -356,6 +356,43 @@ impl GitOpsPort for Git2OpsAdapter {
         })
         .await?
     }
+
+    async fn clone_mirror(&self, url: &str, path: &str) -> Result<()> {
+        let url = url.to_string();
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent)
+                    .context("failed to create parent directories for mirror")?;
+            }
+            let output = std::process::Command::new("git")
+                .args(["clone", "--mirror", &url, &path])
+                .output()
+                .context("failed to run git clone --mirror")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git clone --mirror failed: {stderr}");
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn fetch_mirror(&self, path: &str) -> Result<()> {
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("git")
+                .args(["-C", &path, "fetch", "--all"])
+                .output()
+                .context("failed to run git fetch --all")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git fetch --all failed: {stderr}");
+            }
+            Ok(())
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]

@@ -61,15 +61,15 @@ fn service_header(service: &str) -> Vec<u8> {
 // Repo lookup
 // ---------------------------------------------------------------------------
 
-/// Resolve `:project` + `:repo` URL segments to a filesystem path.
+/// Resolve `:project` + `:repo` URL segments to a Repository record.
 ///
 /// * `project`  — the project_id (UUID string) used when the repo was created.
 /// * `repo_seg` — the repo segment from the URL, e.g. `my-repo.git`.
-async fn resolve_repo_path(
+async fn resolve_repo(
     state: &Arc<AppState>,
     project: &str,
     repo_seg: &str,
-) -> Result<String, Response> {
+) -> Result<gyre_domain::Repository, Response> {
     let repo_name = repo_seg.strip_suffix(".git").unwrap_or(repo_seg);
 
     let repos = state
@@ -78,16 +78,23 @@ async fn resolve_repo_path(
         .await
         .map_err(|e| git_err(format!("db error: {e}")))?;
 
-    let repo = repos
+    repos
         .into_iter()
         .find(|r| r.name == repo_name)
         .ok_or_else(|| {
             not_found(format!(
                 "repo '{repo_name}' not found in project '{project}'"
             ))
-        })?;
+        })
+}
 
-    Ok(repo.path)
+/// Resolve to just the filesystem path (convenience wrapper).
+async fn resolve_repo_path(
+    state: &Arc<AppState>,
+    project: &str,
+    repo_seg: &str,
+) -> Result<String, Response> {
+    resolve_repo(state, project, repo_seg).await.map(|r| r.path)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,10 +214,18 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let repo_path = match resolve_repo_path(&state, &project, &repo).await {
-        Ok(p) => p,
+    let resolved = match resolve_repo(&state, &project, &repo).await {
+        Ok(r) => r,
         Err(r) => return r,
     };
+    if resolved.is_mirror {
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: repository is a read-only mirror".to_string(),
+        )
+            .into_response();
+    }
+    let repo_path = resolved.path;
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,

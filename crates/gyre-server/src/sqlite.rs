@@ -58,9 +58,60 @@ impl SqliteDb {
     fn run_migrations(&self) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute_batch(MIGRATIONS)?;
+            // Versioned migrations for schema additions to existing tables.
+            apply_migration(
+                conn,
+                1,
+                "ALTER TABLE repos ADD COLUMN is_mirror INTEGER NOT NULL DEFAULT 0",
+            )?;
+            apply_migration(conn, 2, "ALTER TABLE repos ADD COLUMN mirror_url TEXT")?;
+            apply_migration(
+                conn,
+                3,
+                "ALTER TABLE repos ADD COLUMN mirror_interval_secs INTEGER",
+            )?;
+            apply_migration(
+                conn,
+                4,
+                "ALTER TABLE repos ADD COLUMN last_mirror_sync INTEGER",
+            )?;
             Ok(())
         })
     }
+}
+
+// ───────────────────────────────────────────────
+// Migration helper
+// ───────────────────────────────────────────────
+
+/// Apply a versioned migration exactly once, tracked in the `migrations` table.
+fn apply_migration(conn: &Connection, version: i64, sql: &str) -> Result<()> {
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+            params![version],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !already_applied {
+        // Ignore "duplicate column" errors from ALTER TABLE on pre-existing columns.
+        if let Err(e) = conn.execute_batch(sql) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(anyhow::anyhow!("migration {version} failed: {e}"));
+            }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        conn.execute(
+            "INSERT INTO migrations (version, applied_at) VALUES (?1, ?2)",
+            params![version, now as i64],
+        )?;
+    }
+    Ok(())
 }
 
 // ───────────────────────────────────────────────
@@ -87,7 +138,11 @@ CREATE TABLE IF NOT EXISTS repos (
     name TEXT NOT NULL,
     path TEXT NOT NULL,
     default_branch TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    is_mirror INTEGER NOT NULL DEFAULT 0,
+    mirror_url TEXT,
+    mirror_interval_secs INTEGER,
+    last_mirror_sync INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -457,8 +512,8 @@ impl RepoRepository for SqliteDb {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
                 conn.execute(
-                    "INSERT OR REPLACE INTO repos (id, project_id, name, path, default_branch, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![r.id.as_str(), r.project_id.as_str(), r.name, r.path, r.default_branch, r.created_at as i64],
+                    "INSERT OR REPLACE INTO repos (id, project_id, name, path, default_branch, created_at, is_mirror, mirror_url, mirror_interval_secs, last_mirror_sync) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    params![r.id.as_str(), r.project_id.as_str(), r.name, r.path, r.default_branch, r.created_at as i64, r.is_mirror as i64, r.mirror_url, r.mirror_interval_secs.map(|v| v as i64), r.last_mirror_sync.map(|v| v as i64)],
                 )?;
                 Ok(())
             })
@@ -470,7 +525,7 @@ impl RepoRepository for SqliteDb {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project_id, name, path, default_branch, created_at FROM repos WHERE id = ?1",
+                    "SELECT id, project_id, name, path, default_branch, created_at, is_mirror, mirror_url, mirror_interval_secs, last_mirror_sync FROM repos WHERE id = ?1",
                 )?;
                 let mut rows = stmt.query(params![id.as_str()])?;
                 if let Some(row) = rows.next()? {
@@ -480,7 +535,11 @@ impl RepoRepository for SqliteDb {
                         name: row.get(2)?,
                         path: row.get(3)?,
                         default_branch: row.get(4)?,
-                        created_at: row.get::<_, i64>(5)? as u64, is_mirror: false, mirror_url: None, mirror_interval_secs: None, last_mirror_sync: None,
+                        created_at: row.get::<_, i64>(5)? as u64,
+                        is_mirror: row.get::<_, i64>(6)? != 0,
+                        mirror_url: row.get(7)?,
+                        mirror_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                        last_mirror_sync: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
                     }))
                 } else {
                     Ok(None)
@@ -493,7 +552,7 @@ impl RepoRepository for SqliteDb {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project_id, name, path, default_branch, created_at FROM repos",
+                    "SELECT id, project_id, name, path, default_branch, created_at, is_mirror, mirror_url, mirror_interval_secs, last_mirror_sync FROM repos",
                 )?;
                 let rows = stmt.query_map([], |row| {
                     Ok(Repository {
@@ -503,10 +562,10 @@ impl RepoRepository for SqliteDb {
                         path: row.get(3)?,
                         default_branch: row.get(4)?,
                         created_at: row.get::<_, i64>(5)? as u64,
-                        is_mirror: false,
-                        mirror_url: None,
-                        mirror_interval_secs: None,
-                        last_mirror_sync: None,
+                        is_mirror: row.get::<_, i64>(6)? != 0,
+                        mirror_url: row.get(7)?,
+                        mirror_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                        last_mirror_sync: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
                     })
                 })?;
                 rows.map(|r| r.map_err(anyhow::Error::from)).collect()
@@ -519,7 +578,7 @@ impl RepoRepository for SqliteDb {
         blocking!(self, |db: &SqliteDb| {
             db.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project_id, name, path, default_branch, created_at FROM repos WHERE project_id = ?1",
+                    "SELECT id, project_id, name, path, default_branch, created_at, is_mirror, mirror_url, mirror_interval_secs, last_mirror_sync FROM repos WHERE project_id = ?1",
                 )?;
                 let rows = stmt.query_map(params![pid.as_str()], |row| {
                     Ok(Repository {
@@ -528,7 +587,11 @@ impl RepoRepository for SqliteDb {
                         name: row.get(2)?,
                         path: row.get(3)?,
                         default_branch: row.get(4)?,
-                        created_at: row.get::<_, i64>(5)? as u64, is_mirror: false, mirror_url: None, mirror_interval_secs: None, last_mirror_sync: None,
+                        created_at: row.get::<_, i64>(5)? as u64,
+                        is_mirror: row.get::<_, i64>(6)? != 0,
+                        mirror_url: row.get(7)?,
+                        mirror_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                        last_mirror_sync: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
                     })
                 })?;
                 rows.map(|r| r.map_err(anyhow::Error::from)).collect()

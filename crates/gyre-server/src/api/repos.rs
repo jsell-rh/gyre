@@ -22,6 +22,14 @@ pub struct CreateRepoRequest {
 }
 
 #[derive(Deserialize)]
+pub struct CreateMirrorRequest {
+    pub project_id: String,
+    pub name: String,
+    pub url: String,
+    pub interval_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
 pub struct ListReposQuery {
     pub project_id: Option<String>,
 }
@@ -34,6 +42,10 @@ pub struct RepoResponse {
     pub path: String,
     pub default_branch: String,
     pub created_at: u64,
+    pub is_mirror: bool,
+    pub mirror_url: Option<String>,
+    pub mirror_interval_secs: Option<u64>,
+    pub last_mirror_sync: Option<u64>,
 }
 
 impl From<Repository> for RepoResponse {
@@ -45,6 +57,10 @@ impl From<Repository> for RepoResponse {
             path: r.path,
             default_branch: r.default_branch,
             created_at: r.created_at,
+            is_mirror: r.is_mirror,
+            mirror_url: r.mirror_url,
+            mirror_interval_secs: r.mirror_interval_secs,
+            last_mirror_sync: r.last_mirror_sync,
         }
     }
 }
@@ -159,6 +175,57 @@ pub async fn diff(
         .diff(&repo.path, &params.from, &params.to)
         .await?;
     Ok(Json(result))
+}
+
+pub async fn create_mirror_repo(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateMirrorRequest>,
+) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
+    let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
+    let repo_path = format!("{}/{}/{}.git", repos_root, req.project_id, req.name);
+
+    let now = now_secs();
+    let repo = Repository {
+        id: new_id(),
+        project_id: Id::new(req.project_id),
+        name: req.name,
+        path: repo_path.clone(),
+        default_branch: "main".to_string(),
+        created_at: now,
+        is_mirror: true,
+        mirror_url: Some(req.url.clone()),
+        mirror_interval_secs: req.interval_secs,
+        last_mirror_sync: None,
+    };
+    state.repos.create(&repo).await?;
+
+    // Clone the remote as a bare mirror; log on failure but don't block the response.
+    if let Err(e) = state.git_ops.clone_mirror(&req.url, &repo_path).await {
+        tracing::warn!("clone_mirror failed for {repo_path}: {e}");
+    }
+
+    Ok((StatusCode::CREATED, Json(RepoResponse::from(repo))))
+}
+
+pub async fn sync_mirror(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RepoResponse>, ApiError> {
+    let mut repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    if !repo.is_mirror {
+        return Err(ApiError::InvalidInput("repo is not a mirror".to_string()));
+    }
+
+    state.git_ops.fetch_mirror(&repo.path).await?;
+    repo.last_mirror_sync = Some(now_secs());
+    state.repos.update(&repo).await?;
+
+    Ok(Json(RepoResponse::from(repo)))
 }
 
 #[cfg(test)]
