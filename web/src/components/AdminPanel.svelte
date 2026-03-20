@@ -4,7 +4,7 @@
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
-  import { toastSuccess, toastError, toastInfo } from '../lib/toast.js';
+  import { toastSuccess, toastError, toastInfo } from '../lib/toast.svelte.js';
 
   let health = $state(null);
   let jobs = $state([]);

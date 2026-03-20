@@ -1,5 +1,3 @@
-import { SvelteMap } from 'svelte/reactivity';
-
 let toasts = $state([]);
 let nextId = 1;
 
