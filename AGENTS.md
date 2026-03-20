@@ -434,6 +434,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Merge Request Detail** (M8.3): two-column layout — diff panel left, metadata + status timeline right. Status timeline shows each MR lifecycle step with timestamps and reviewer info.
 - **Merge Queue View** (M8.3): visual flow lanes per queue position with progress bars, estimated wait indicators, and per-entry action buttons (cancel).
 - **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card.
+- **Auth Token UI** (M9.3): auth status dot in topbar (green = authenticated, red = error). Click opens Token modal to view/change the API token stored in `localStorage`; saving reconnects the WebSocket. All REST and MCP calls inject `Authorization: Bearer {token}`. Defaults to `gyre-dev-token` when no token is stored.
 
 ---
 
@@ -579,6 +580,10 @@ Key specs to read before making changes:
 | M6 milestone deliverables | [specs/milestones/m6-infrastructure.md](specs/milestones/m6-infrastructure.md) |
 | M7 milestone deliverables | [specs/milestones/m7-production-hardening.md](specs/milestones/m7-production-hardening.md) |
 | M8 milestone deliverables | [specs/milestones/m8-frontend-excellence.md](specs/milestones/m8-frontend-excellence.md) |
+| M9 milestone deliverables | [specs/milestones/m9-functional-ui.md](specs/milestones/m9-functional-ui.md) |
+| M10 milestone deliverables | [specs/milestones/m10-persistent-storage.md](specs/milestones/m10-persistent-storage.md) |
+| M11 milestone deliverables | [specs/milestones/m11-agent-execution.md](specs/milestones/m11-agent-execution.md) |
+| M12 milestone deliverables | [specs/milestones/m12-quality-gates.md](specs/milestones/m12-quality-gates.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
