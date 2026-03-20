@@ -276,6 +276,7 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 {"type":"DomainEvent","event":"ActivityRecorded","id":"<uuid>","event_type":"RUN_STARTED"}
 {"type":"DomainEvent","event":"QueueUpdated"}
 {"type":"DomainEvent","event":"DataSeeded"}
+{"type":"DomainEvent","event":"PushRejected","repo_id":"<uuid>","branch":"<ref>","reason":"<gate-name>"}
 ```
 
 The in-memory `ActivityStore` holds up to 1000 events (oldest dropped when full).
