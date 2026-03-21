@@ -157,6 +157,8 @@ mod tests {
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
             attestation_store: base.attestation_store.clone(),
+            trusted_issuers: base.trusted_issuers.clone(),
+            remote_jwks_cache: base.remote_jwks_cache.clone(),
         });
         crate::build_router(state)
     }
