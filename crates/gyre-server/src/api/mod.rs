@@ -125,6 +125,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/spec-policy",
             get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
         )
+        // ABAC policies (G6)
+        .route(
+            "/api/v1/repos/:id/abac-policy",
+            get(crate::abac::get_abac_policy).put(crate::abac::set_abac_policy),
+        )
         // Cross-agent code awareness (M13.4)
         .route("/api/v1/repos/:id/blame", get(code_awareness::get_blame))
         .route(

@@ -161,6 +161,7 @@ mod tests {
             remote_jwks_cache: base.remote_jwks_cache.clone(),
             commit_signatures: base.commit_signatures.clone(),
             sigstore_mode: base.sigstore_mode.clone(),
+            abac_policies: base.abac_policies.clone(),
         });
         crate::build_router(state)
     }
