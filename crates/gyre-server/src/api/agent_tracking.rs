@@ -8,6 +8,7 @@ use gyre_domain::{AgentCommit, AgentWorktree};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -145,6 +146,7 @@ pub async fn list_commits(
 pub async fn create_worktree(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    auth: AuthenticatedAgent,
     Json(req): Json<CreateWorktreeRequest>,
 ) -> Result<(StatusCode, Json<AgentWorktreeResponse>), ApiError> {
     // Verify the repo exists.
@@ -153,6 +155,11 @@ pub async fn create_worktree(
         .find_by_id(&Id::new(&repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
+    crate::abac::check_repo_abac(&state, &repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
 
     // Create the worktree via git ops.
     if let Err(e) = state
