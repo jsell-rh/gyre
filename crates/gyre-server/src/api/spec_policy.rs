@@ -28,6 +28,14 @@ pub struct SpecPolicy {
     /// If true, MRs whose `spec_ref` has no active approval in the ledger are blocked.
     /// Implies `require_spec_ref` — both are checked when this is true.
     pub require_approved_spec: bool,
+    /// If true, emit a `StaleSpecWarning` domain event when an MR's spec_ref SHA is not
+    /// the current HEAD blob SHA for that spec file. Does not block the merge.
+    #[serde(default)]
+    pub warn_stale_spec: bool,
+    /// If true, block merging when an MR's spec_ref SHA is not the current HEAD blob SHA
+    /// for that spec file. Implies `require_spec_ref`.
+    #[serde(default)]
+    pub require_current_spec: bool,
 }
 
 #[derive(Serialize)]
@@ -35,6 +43,8 @@ pub struct SpecPolicyResponse {
     pub repo_id: String,
     pub require_spec_ref: bool,
     pub require_approved_spec: bool,
+    pub warn_stale_spec: bool,
+    pub require_current_spec: bool,
 }
 
 impl SpecPolicyResponse {
@@ -43,6 +53,8 @@ impl SpecPolicyResponse {
             repo_id,
             require_spec_ref: policy.require_spec_ref,
             require_approved_spec: policy.require_approved_spec,
+            warn_stale_spec: policy.warn_stale_spec,
+            require_current_spec: policy.require_current_spec,
         }
     }
 }
@@ -152,6 +164,106 @@ mod tests {
         let json = body_json(resp).await;
         assert!(!json["require_spec_ref"].as_bool().unwrap());
         assert!(!json["require_approved_spec"].as_bool().unwrap());
+        assert!(!json["warn_stale_spec"].as_bool().unwrap());
+        assert!(!json["require_current_spec"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_warn_stale_spec_round_trips() {
+        let (app, _state) = app_with_repo();
+        let body = serde_json::json!({
+            "require_spec_ref": false,
+            "require_approved_spec": false,
+            "warn_stale_spec": true,
+            "require_current_spec": false
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/spec-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["warn_stale_spec"].as_bool().unwrap());
+        assert!(!json["require_current_spec"].as_bool().unwrap());
+
+        // GET reflects persisted value.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/spec-policy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["warn_stale_spec"].as_bool().unwrap());
+        assert!(!json["require_current_spec"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_require_current_spec_round_trips() {
+        let (app, _state) = app_with_repo();
+        let body = serde_json::json!({
+            "require_spec_ref": false,
+            "require_approved_spec": false,
+            "warn_stale_spec": false,
+            "require_current_spec": true
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/spec-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(!json["warn_stale_spec"].as_bool().unwrap());
+        assert!(json["require_current_spec"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_fields_default_when_omitted_from_put() {
+        let (app, _state) = app_with_repo();
+        // Older client sends only the original two fields — new fields must default to false.
+        let body = serde_json::json!({
+            "require_spec_ref": true,
+            "require_approved_spec": false
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/spec-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["require_spec_ref"].as_bool().unwrap());
+        assert!(!json["warn_stale_spec"].as_bool().unwrap());
+        assert!(!json["require_current_spec"].as_bool().unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
