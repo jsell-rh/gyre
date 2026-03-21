@@ -3,6 +3,7 @@ pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
+pub mod commit_signatures;
 pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
@@ -179,6 +180,10 @@ pub struct AppState {
     pub trusted_issuers: Vec<String>,
     /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
     pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
+    /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
+    pub commit_signatures: commit_signatures::CommitSignatureStore,
+    /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
+    pub sigstore_mode: commit_signatures::SigstoreMode,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -496,6 +501,8 @@ pub fn build_state(
             })
             .unwrap_or_default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
+        sigstore_mode: commit_signatures::SigstoreMode::from_env(),
     })
 }
 

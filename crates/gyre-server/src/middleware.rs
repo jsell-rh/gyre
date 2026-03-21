@@ -159,6 +159,8 @@ mod tests {
             attestation_store: base.attestation_store.clone(),
             trusted_issuers: base.trusted_issuers.clone(),
             remote_jwks_cache: base.remote_jwks_cache.clone(),
+            commit_signatures: base.commit_signatures.clone(),
+            sigstore_mode: base.sigstore_mode.clone(),
         });
         crate::build_router(state)
     }
