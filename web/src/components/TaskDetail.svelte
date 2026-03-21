@@ -1,0 +1,330 @@
+<script>
+  import { api } from '../lib/api.js';
+  import Badge from '../lib/Badge.svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
+  import EmptyState from '../lib/EmptyState.svelte';
+  import Tabs from '../lib/Tabs.svelte';
+  import Button from '../lib/Button.svelte';
+
+  let { task, onBack = undefined } = $props();
+
+  let detail = $state(null);
+  let loading = $state(true);
+  let error = $state(null);
+  let activeTab = $state('info');
+
+  const tabs = [
+    { id: 'info',      label: 'Info' },
+    { id: 'artifacts', label: 'Artifacts' },
+  ];
+
+  // Ralph refs from task description/labels
+  let ralphRefs = $derived(() => {
+    if (!detail) return [];
+    const refs = [];
+    if (detail.labels) {
+      for (const lbl of detail.labels) {
+        if (lbl.startsWith('spec-') || lbl.startsWith('ralph-')) refs.push(lbl);
+      }
+    }
+    return refs;
+  });
+
+  async function load() {
+    loading = true;
+    error = null;
+    try {
+      detail = await api.task(task.id);
+    } catch (e) {
+      error = e.message;
+    }
+    loading = false;
+  }
+
+  $effect(() => { load(); });
+
+  function fmtDate(ts) {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleString();
+  }
+
+  const STATUS_COLORS = {
+    Backlog: 'neutral',
+    InProgress: 'info',
+    Review: 'warning',
+    Done: 'success',
+    Blocked: 'danger',
+  };
+</script>
+
+<div class="task-detail">
+  <div class="detail-header">
+    <Button variant="secondary" onclick={onBack}>← Back</Button>
+    <div class="header-meta">
+      {#if detail}
+        <Badge value={detail.status} color={STATUS_COLORS[detail.status]} />
+        <Badge value={detail.priority} />
+      {:else}
+        <Skeleton width="80px" height="1.4rem" />
+      {/if}
+    </div>
+  </div>
+
+  <div class="detail-body">
+    {#if loading}
+      <div class="loading-area">
+        <Skeleton width="60%" height="2rem" />
+        <Skeleton width="100%" height="1rem" />
+        <Skeleton width="80%" height="1rem" />
+      </div>
+    {:else if error}
+      <EmptyState title="Failed to load task" description={error} />
+    {:else if detail}
+      <h1 class="task-title">{detail.title}</h1>
+
+      <Tabs {tabs} bind:active={activeTab} />
+
+      {#if activeTab === 'info'}
+        <div class="info-grid">
+          <div class="info-row">
+            <span class="info-label">ID</span>
+            <span class="info-val mono">{detail.id}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Status</span>
+            <span class="info-val"><Badge value={detail.status} color={STATUS_COLORS[detail.status]} /></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Priority</span>
+            <span class="info-val"><Badge value={detail.priority} /></span>
+          </div>
+          {#if detail.assigned_to}
+            <div class="info-row">
+              <span class="info-label">Assigned To</span>
+              <span class="info-val mono">{detail.assigned_to}</span>
+            </div>
+          {/if}
+          {#if detail.parent_task_id}
+            <div class="info-row">
+              <span class="info-label">Parent Task</span>
+              <span class="info-val mono">{detail.parent_task_id}</span>
+            </div>
+          {/if}
+          <div class="info-row">
+            <span class="info-label">Created</span>
+            <span class="info-val">{fmtDate(detail.created_at)}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Updated</span>
+            <span class="info-val">{fmtDate(detail.updated_at)}</span>
+          </div>
+          {#if detail.labels?.length}
+            <div class="info-row">
+              <span class="info-label">Labels</span>
+              <div class="info-val label-list">
+                {#each detail.labels as lbl}
+                  <span class="label-pill">{lbl}</span>
+                {/each}
+              </div>
+            </div>
+          {/if}
+          {#if detail.description}
+            <div class="info-row description-row">
+              <span class="info-label">Description</span>
+              <p class="info-val description">{detail.description}</p>
+            </div>
+          {/if}
+        </div>
+      {:else if activeTab === 'artifacts'}
+        <div class="artifacts-section">
+          {#if detail.pr_link}
+            <div class="artifact-card">
+              <span class="artifact-icon">↗</span>
+              <div class="artifact-body">
+                <span class="artifact-label">Pull Request</span>
+                <a class="artifact-link" href={detail.pr_link} target="_blank" rel="noreferrer">{detail.pr_link}</a>
+              </div>
+            </div>
+          {/if}
+          {#if ralphRefs().length}
+            <div class="artifact-section-title">Ralph Loop Refs</div>
+            {#each ralphRefs() as ref}
+              <div class="artifact-card">
+                <span class="artifact-icon">⚡</span>
+                <div class="artifact-body">
+                  <span class="artifact-label mono">{ref}</span>
+                </div>
+              </div>
+            {/each}
+          {/if}
+          {#if !detail.pr_link && !ralphRefs().length}
+            <EmptyState title="No artifacts" description="Artifacts appear here when an agent completes this task and opens a merge request." />
+          {/if}
+        </div>
+      {/if}
+    {/if}
+  </div>
+</div>
+
+<style>
+  .task-detail {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-surface);
+  }
+
+  .header-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
+  .loading-area {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .task-title {
+    font-family: var(--font-display);
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    color: var(--color-text);
+    margin: 0;
+    line-height: 1.3;
+  }
+
+  .info-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .info-row {
+    display: flex;
+    gap: var(--space-4);
+    align-items: flex-start;
+  }
+
+  .info-label {
+    width: 110px;
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    padding-top: 3px;
+  }
+
+  .info-val {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    flex: 1;
+  }
+
+  .info-val.mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    word-break: break-all;
+  }
+
+  .description-row { align-items: flex-start; }
+  .description {
+    margin: 0;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .label-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .label-pill {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+  }
+
+  /* Artifacts */
+  .artifacts-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .artifact-section-title {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-muted);
+    margin-top: var(--space-2);
+  }
+
+  .artifact-card {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .artifact-icon {
+    font-size: var(--text-lg);
+    flex-shrink: 0;
+  }
+
+  .artifact-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .artifact-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+  }
+
+  .artifact-label.mono { font-family: var(--font-mono); }
+
+  .artifact-link {
+    font-size: var(--text-sm);
+    color: var(--color-primary);
+    text-decoration: none;
+    word-break: break-all;
+  }
+
+  .artifact-link:hover { text-decoration: underline; }
+</style>
