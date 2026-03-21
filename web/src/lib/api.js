@@ -82,6 +82,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, change_id }),
     }),
+  // ABAC policy
+  repoAbacPolicy: (id) => request(`/repos/${id}/abac-policy`),
+  setRepoAbacPolicy: (id, policies) =>
+    request(`/repos/${id}/abac-policy`, { method: 'PUT', body: JSON.stringify(policies) }),
+  // Spec policy
+  repoSpecPolicy: (id) => request(`/repos/${id}/spec-policy`),
+  setRepoSpecPolicy: (id, policy) =>
+    request(`/repos/${id}/spec-policy`, { method: 'PUT', body: JSON.stringify(policy) }),
+  // Hot files & blame
+  repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
+  repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
+  // Speculative merges
+  repoSpeculative: (id) => request(`/repos/${id}/speculative`),
+  // Agent commits
+  repoAgentCommits: (id) => request(`/repos/${id}/agent-commits`),
+  // Commit signature
+  commitSignature: (id, sha) => request(`/repos/${id}/commits/${sha}/signature`),
   // AIBOM (AI Bill of Materials) — M14.3
   repoAibom: (id, from, to) => {
     const qs = from ? `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to || '')}` : '';

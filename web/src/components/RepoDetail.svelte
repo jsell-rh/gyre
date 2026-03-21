@@ -27,12 +27,42 @@
   let aibomLoading = $state(false);
   let aibomError = $state(null);
 
+  // Speculative merge results — map of branch name -> result object
+  let speculative = $state({});
+  // Agent commits — map of sha -> agent_id
+  let agentCommitMap = $state({});
+  // Commit signature map — map of sha -> true (signed) | false (unsigned)
+  let sigMap = $state({});
+
+  // Activity tab (hot files + blame)
+  let hotFiles = $state([]);
+  let hotFilesLoading = $state(false);
+  let activityError = $state(null);
+  let blameFile = $state(null);
+  let blameLines = $state([]);
+  let blameLoading = $state(false);
+
+  // Policy tab (ABAC + spec policy)
+  let abacPolicies = $state([]);
+  let specPolicy = $state({ require_spec_ref: false, require_approved_spec: false, warn_stale_spec: false, require_current_spec: false });
+  let policyLoading = $state(false);
+  let policyError = $state(null);
+  let policySaving = $state(false);
+  let policySaveMsg = $state(null);
+  // New ABAC policy editing state
+  let newPolicyName = $state('');
+  let newPolicyClaim = $state('');
+  let newPolicyOp = $state('eq');
+  let newPolicyValue = $state('');
+
   const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
 
   const tabs = $derived([
     { id: 'branches', label: 'Branches', count: branches.length || undefined },
     { id: 'commits',  label: 'Commits' },
     { id: 'mrs',      label: 'Merge Requests', count: mrs.length || undefined },
+    { id: 'activity', label: 'Activity' },
+    { id: 'policy',   label: 'Policy' },
     { id: 'jj',       label: 'jj' },
     { id: 'aibom',    label: 'AIBOM' },
   ]);
@@ -48,6 +78,7 @@
   $effect(() => {
     loadBranches();
     loadMrs();
+    loadSpeculative();
   });
 
   $effect(() => {
@@ -61,6 +92,58 @@
   $effect(() => {
     if (activeTab === 'aibom') loadAibom();
   });
+
+  $effect(() => {
+    if (activeTab === 'activity') loadActivity();
+  });
+
+  $effect(() => {
+    if (activeTab === 'policy') loadPolicy();
+  });
+
+  async function loadSpeculative() {
+    try {
+      const results = await api.repoSpeculative(repo.id);
+      const map = {};
+      if (Array.isArray(results)) {
+        for (const r of results) {
+          if (r.branch) map[r.branch] = r;
+        }
+      }
+      speculative = map;
+    } catch { /* silently ignore */ }
+  }
+
+  async function loadAgentCommits() {
+    try {
+      const records = await api.repoAgentCommits(repo.id);
+      const map = {};
+      if (Array.isArray(records)) {
+        for (const r of records) {
+          if (r.sha) map[r.sha] = r.agent_id ?? null;
+        }
+      }
+      agentCommitMap = map;
+    } catch { /* silently ignore */ }
+  }
+
+  async function loadSignatures(shas) {
+    const entries = await Promise.all(
+      shas.map(async (sha) => {
+        try {
+          await api.commitSignature(repo.id, sha);
+          return [sha, true];
+        } catch {
+          return [sha, false];
+        }
+      })
+    );
+    const map = { ...sigMap };
+    for (const [sha, signed] of entries) {
+      map[sha] = signed;
+    }
+    sigMap = map;
+  }
 
   async function loadJjLog() {
     jjLoading = true; jjError = null;
@@ -101,6 +184,10 @@
     loading = true; error = null;
     try {
       commits = await api.repoCommits(repo.id, branch);
+      // Load agent commits + signatures in parallel after commits are fetched
+      const shas = commits.map(c => c.sha).filter(Boolean);
+      loadAgentCommits();
+      if (shas.length > 0) loadSignatures(shas);
     } catch (e) {
       error = e.message;
     } finally {
@@ -112,6 +199,88 @@
     try {
       mrs = await api.mergeRequests({ repository_id: repo.id });
     } catch { mrs = []; }
+  }
+
+  async function loadActivity() {
+    hotFilesLoading = true; activityError = null;
+    try {
+      hotFiles = await api.repoHotFiles(repo.id);
+    } catch (e) {
+      activityError = e.message;
+    } finally {
+      hotFilesLoading = false;
+    }
+  }
+
+  async function loadBlame(path) {
+    blameFile = path; blameLines = []; blameLoading = true;
+    try {
+      blameLines = await api.repoBlame(repo.id, path);
+    } catch { blameLines = []; }
+    finally { blameLoading = false; }
+  }
+
+  async function loadPolicy() {
+    policyLoading = true; policyError = null;
+    try {
+      const [abac, spec] = await Promise.all([
+        api.repoAbacPolicy(repo.id),
+        api.repoSpecPolicy(repo.id),
+      ]);
+      abacPolicies = Array.isArray(abac) ? abac : [];
+      specPolicy = spec ?? { require_spec_ref: false, require_approved_spec: false, warn_stale_spec: false, require_current_spec: false };
+    } catch (e) {
+      policyError = e.message;
+    } finally {
+      policyLoading = false;
+    }
+  }
+
+  async function saveSpecPolicy() {
+    policySaving = true; policySaveMsg = null;
+    try {
+      await api.setRepoSpecPolicy(repo.id, specPolicy);
+      policySaveMsg = 'Spec policy saved.';
+      setTimeout(() => { policySaveMsg = null; }, 3000);
+    } catch (e) {
+      policyError = e.message;
+    } finally {
+      policySaving = false;
+    }
+  }
+
+  async function addAbacPolicy() {
+    if (!newPolicyName.trim() || !newPolicyClaim.trim() || !newPolicyValue.trim()) return;
+    const newPolicy = {
+      name: newPolicyName.trim(),
+      rules: [{ claim: newPolicyClaim.trim(), operator: newPolicyOp, value: newPolicyValue.trim() }],
+    };
+    const updated = [...abacPolicies, newPolicy];
+    policySaving = true; policySaveMsg = null;
+    try {
+      await api.setRepoAbacPolicy(repo.id, updated);
+      abacPolicies = updated;
+      newPolicyName = ''; newPolicyClaim = ''; newPolicyValue = '';
+      policySaveMsg = 'ABAC policy added.';
+      setTimeout(() => { policySaveMsg = null; }, 3000);
+    } catch (e) {
+      policyError = e.message;
+    } finally {
+      policySaving = false;
+    }
+  }
+
+  async function removeAbacPolicy(idx) {
+    const updated = abacPolicies.filter((_, i) => i !== idx);
+    policySaving = true;
+    try {
+      await api.setRepoAbacPolicy(repo.id, updated);
+      abacPolicies = updated;
+    } catch (e) {
+      policyError = e.message;
+    } finally {
+      policySaving = false;
+    }
   }
 
   function relativeTime(ts) {
@@ -128,6 +297,19 @@
 
   function shortSha(sha) {
     return sha ? sha.slice(0, 8) : '—';
+  }
+
+  function speculativeVariant(branch) {
+    const r = speculative[branch];
+    if (!r) return null;
+    if (r.has_conflict) return 'danger';
+    return 'success';
+  }
+
+  function speculativeLabel(branch) {
+    const r = speculative[branch];
+    if (!r) return null;
+    return r.has_conflict ? 'conflict' : 'clean';
   }
 
   async function loadAibom() {
@@ -182,6 +364,7 @@
             { key: 'name', label: 'Branch', sortable: true },
             { key: 'sha', label: 'Head SHA' },
             { key: 'default', label: '' },
+            { key: 'speculative', label: 'Merge Status' },
           ]}
         >
           {#snippet children()}
@@ -192,6 +375,13 @@
                 <td>
                   {#if b.name === repo.default_branch}
                     <Badge value="default" variant="info" />
+                  {/if}
+                </td>
+                <td>
+                  {#if speculativeLabel(b.name)}
+                    <Badge value={speculativeLabel(b.name)} variant={speculativeVariant(b.name)} />
+                  {:else}
+                    <span class="secondary-cell">—</span>
                   {/if}
                 </td>
               </tr>
@@ -221,6 +411,8 @@
             { key: 'sha', label: 'SHA' },
             { key: 'message', label: 'Message' },
             { key: 'author', label: 'Author' },
+            { key: 'agent', label: 'Agent' },
+            { key: 'sig', label: 'Sig' },
             { key: 'time', label: 'Time' },
           ]}
         >
@@ -230,6 +422,22 @@
                 <td><code class="sha">{shortSha(c.sha)}</code></td>
                 <td class="commit-msg-cell">{c.message}</td>
                 <td class="secondary-cell">{c.author}</td>
+                <td class="secondary-cell mono">
+                  {#if agentCommitMap[c.sha]}
+                    <span class="agent-ref">{agentCommitMap[c.sha].slice(0, 8)}</span>
+                  {:else}
+                    <span class="secondary-cell">—</span>
+                  {/if}
+                </td>
+                <td>
+                  {#if sigMap[c.sha] === true}
+                    <Badge value="signed" variant="success" />
+                  {:else if sigMap[c.sha] === false}
+                    <Badge value="unsigned" variant="default" />
+                  {:else}
+                    <span class="secondary-cell">…</span>
+                  {/if}
+                </td>
                 <td class="secondary-cell">{relativeTime(c.timestamp)}</td>
               </tr>
             {/each}
@@ -260,6 +468,146 @@
           {/snippet}
         </Table>
       {/if}
+
+    {:else if activeTab === 'activity'}
+      {#if activityError}
+        <div class="error-msg">Error: {activityError}</div>
+      {:else if hotFilesLoading}
+        <Skeleton lines={6} height="2.5rem" />
+      {:else}
+        <div class="activity-layout">
+          <div class="hot-files-panel">
+            <h3 class="section-title">Hot Files</h3>
+            {#if hotFiles.length === 0}
+              <EmptyState title="No hot files" description="No files with concurrent agent activity in the last 24h." />
+            {:else}
+              <div class="hot-files-list">
+                {#each hotFiles as f (f.path)}
+                  <button
+                    class="hot-file-row"
+                    class:selected={blameFile === f.path}
+                    onclick={() => loadBlame(f.path)}
+                  >
+                    <span class="hot-file-path">{f.path}</span>
+                    <Badge value={`${f.agent_count} agent${f.agent_count === 1 ? '' : 's'}`} variant="info" />
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          {#if blameFile}
+            <div class="blame-panel">
+              <h3 class="section-title">Blame: <code class="inline-code">{blameFile}</code></h3>
+              {#if blameLoading}
+                <Skeleton lines={10} height="1.8rem" />
+              {:else if blameLines.length === 0}
+                <EmptyState title="No blame data" description="No per-line attribution available for this file." />
+              {:else}
+                <div class="blame-table">
+                  {#each blameLines as line, i (i)}
+                    <div class="blame-row">
+                      <span class="blame-lineno">{i + 1}</span>
+                      <span class="blame-agent secondary-cell">{line.agent_id ? line.agent_id.slice(0, 8) : '—'}</span>
+                      <code class="blame-content">{line.content ?? ''}</code>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <div class="blame-panel blame-empty">
+              <EmptyState title="Select a file" description="Click a hot file on the left to view per-line agent attribution." />
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'policy'}
+      {#if policyLoading}
+        <Skeleton lines={8} height="2.5rem" />
+      {:else if policyError}
+        <div class="error-msg">Error: {policyError}</div>
+      {:else}
+        <div class="policy-section">
+          <h3 class="section-title">Spec Policy</h3>
+          <p class="section-desc">Control how spec references are enforced on merge requests for this repository.</p>
+          <div class="policy-toggles">
+            <label class="toggle-row">
+              <input type="checkbox" bind:checked={specPolicy.require_spec_ref} />
+              <span class="toggle-label">Require spec_ref on all MRs</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" bind:checked={specPolicy.require_approved_spec} />
+              <span class="toggle-label">Require fully approved spec before merge</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" bind:checked={specPolicy.warn_stale_spec} />
+              <span class="toggle-label">Warn on stale spec (emits StaleSpecWarning event)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" bind:checked={specPolicy.require_current_spec} />
+              <span class="toggle-label">Require current spec (blocks queue when stale)</span>
+            </label>
+          </div>
+          <div class="policy-actions">
+            <button class="policy-btn primary" onclick={saveSpecPolicy} disabled={policySaving}>
+              {policySaving ? 'Saving…' : 'Save Spec Policy'}
+            </button>
+            {#if policySaveMsg}
+              <span class="save-msg">{policySaveMsg}</span>
+            {/if}
+          </div>
+        </div>
+
+        <div class="policy-section">
+          <h3 class="section-title">ABAC Policies</h3>
+          <p class="section-desc">Attribute-based access control policies evaluated on JWT claims for push and spawn. Policies are OR'd; rules within a policy are AND'd.</p>
+
+          {#if abacPolicies.length === 0}
+            <EmptyState title="No ABAC policies" description="All JWT bearers have access. Add a policy to restrict by JWT claims." />
+          {:else}
+            <div class="abac-list">
+              {#each abacPolicies as policy, idx (idx)}
+                <div class="abac-card">
+                  <div class="abac-card-hdr">
+                    <span class="abac-name">{policy.name || `Policy ${idx + 1}`}</span>
+                    <button class="abac-remove-btn" onclick={() => removeAbacPolicy(idx)} disabled={policySaving}>Remove</button>
+                  </div>
+                  <div class="abac-rules">
+                    {#each (policy.rules ?? []) as rule, ri (ri)}
+                      <div class="abac-rule">
+                        <code class="rule-claim">{rule.claim}</code>
+                        <span class="rule-op">{rule.operator}</span>
+                        <code class="rule-value">"{rule.value}"</code>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          <div class="abac-add-form">
+            <h4 class="form-title">Add Policy</h4>
+            <div class="abac-form-row">
+              <input class="policy-input" type="text" placeholder="Policy name" bind:value={newPolicyName} />
+            </div>
+            <div class="abac-form-row">
+              <input class="policy-input" type="text" placeholder="JWT claim (e.g. sub, role)" bind:value={newPolicyClaim} />
+              <select class="policy-select" bind:value={newPolicyOp}>
+                <option value="eq">eq</option>
+                <option value="neq">neq</option>
+                <option value="contains">contains</option>
+                <option value="starts_with">starts_with</option>
+              </select>
+              <input class="policy-input" type="text" placeholder="Value" bind:value={newPolicyValue} />
+              <button class="policy-btn primary" onclick={addAbacPolicy} disabled={policySaving}>Add</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
     {:else if activeTab === 'aibom'}
       {#if aibomError}
         <div class="error-msg">Error: {aibomError}</div>
@@ -550,6 +898,273 @@
 
   .clickable { cursor: pointer; }
 
+  .agent-ref {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-elevated);
+    padding: 0.1rem 0.3rem;
+    border-radius: var(--radius-sm);
+  }
+
+  /* Activity tab */
+  .activity-layout {
+    display: flex;
+    gap: var(--space-6);
+    flex: 1;
+    min-height: 0;
+  }
+
+  .hot-files-panel {
+    width: 260px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .hot-files-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .hot-file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    transition: all var(--transition-fast);
+  }
+
+  .hot-file-row:hover { background: var(--color-surface-elevated); }
+  .hot-file-row.selected { border-color: var(--color-primary); background: var(--color-surface-elevated); }
+
+  .hot-file-path {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  .blame-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .blame-empty { justify-content: center; }
+
+  .blame-table {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    overflow-y: auto;
+    flex: 1;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .blame-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    padding: 0.15rem var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .blame-row:last-child { border-bottom: none; }
+  .blame-row:hover { background: var(--color-surface-elevated); }
+
+  .blame-lineno {
+    width: 2.5rem;
+    text-align: right;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .blame-agent {
+    width: 5rem;
+    flex-shrink: 0;
+    color: var(--color-primary);
+  }
+
+  .blame-content {
+    color: var(--color-text);
+    white-space: pre;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Policy tab */
+  .section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 var(--space-2);
+  }
+
+  .section-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-4);
+  }
+
+  .policy-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .policy-toggles { display: flex; flex-direction: column; gap: var(--space-2); }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .toggle-label { flex: 1; }
+
+  .policy-actions { display: flex; align-items: center; gap: var(--space-3); }
+
+  .policy-btn {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-4);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .policy-btn:hover { background: var(--color-surface-elevated); }
+  .policy-btn.primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+  .policy-btn.primary:hover { background: var(--color-primary-hover); }
+  .policy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .save-msg { font-size: var(--text-sm); color: var(--color-success); }
+
+  .abac-list { display: flex; flex-direction: column; gap: var(--space-2); }
+
+  .abac-card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .abac-card-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-2);
+  }
+
+  .abac-name { font-weight: 600; font-size: var(--text-sm); color: var(--color-text); }
+
+  .abac-remove-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-danger);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: 0.1rem var(--space-2);
+    cursor: pointer;
+  }
+
+  .abac-rules { display: flex; flex-direction: column; gap: var(--space-1); }
+
+  .abac-rule {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .rule-claim, .rule-value {
+    font-family: var(--font-mono);
+    background: var(--color-surface-elevated);
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .rule-op { color: var(--color-text-muted); font-size: var(--text-xs); }
+
+  .abac-add-form {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .form-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  .abac-form-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+
+  .policy-input {
+    flex: 1;
+    min-width: 120px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .policy-input:focus { outline: none; border-color: var(--color-primary); }
+
+  .policy-select {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .inline-code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  /* jj */
   .jj-toolbar {
     display: flex;
     align-items: center;
