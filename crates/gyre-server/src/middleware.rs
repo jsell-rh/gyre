@@ -163,6 +163,7 @@ mod tests {
             sigstore_mode: base.sigstore_mode.clone(),
             abac_policies: base.abac_policies.clone(),
             workload_attestations: base.workload_attestations.clone(),
+            tunnel_store: base.tunnel_store.clone(),
         });
         crate::build_router(state)
     }

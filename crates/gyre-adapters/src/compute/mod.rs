@@ -6,4 +6,4 @@ pub mod ssh;
 pub use container::ContainerTarget;
 pub use docker::DockerTarget;
 pub use local::LocalTarget;
-pub use ssh::SshTarget;
+pub use ssh::{SshTarget, SshTunnel, TunnelKind};
