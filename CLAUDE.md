@@ -215,9 +215,10 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/repos/{id}/jj/init` | Initialize jj (Jujutsu) in colocated mode on a repo |
 | `GET` | `/api/v1/repos/{id}/jj/log` | List recent jj changes (`?limit=N`) |
 | `POST` | `/api/v1/repos/{id}/jj/new` | Create a new anonymous jj change (WIP commit) |
-| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change |
+| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change; returns `200 JSON` `CommitSignature` `{sha, signature (base64 Ed25519), key_id, algorithm, mode, timestamp}` — use `GET /commits/{sha}/signature` to verify later (M13.8) |
 | `POST` | `/api/v1/repos/{id}/jj/undo` | Undo the last jj operation |
 | `POST` | `/api/v1/repos/{id}/jj/bookmark` | Create a jj bookmark (branch) pointing to a change |
+| `GET` | `/api/v1/repos/{id}/commits/{sha}/signature` | Look up and verify the `CommitSignature` for a given commit SHA; 404 if SHA not in store (M13.8) |
 | `GET` | `/healthz` | Liveness probe — `{status, checks}` JSON |
 | `GET` | `/readyz` | Readiness probe — `{status, checks}` JSON |
 | `POST` | `/api/v1/analytics/events` | Record an analytics event |
@@ -296,7 +297,8 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_MAX_BODY_SIZE` | `10485760` (10 MB) | Maximum HTTP request body size in bytes (M7.3) |
 | `GYRE_CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated allowed CORS origins. Default: localhost:2222, localhost:3000, localhost:5173 **plus `http://localhost:{GYRE_PORT}` appended automatically when not already present**. Set to `*` to allow all (not recommended for production). (M7.3, M-5) |
 | `GYRE_AGENT_JWT_TTL` | `3600` | Lifetime in seconds for EdDSA JWT agent tokens issued by `POST /api/v1/agents/spawn`. After expiry, token is rejected even if not explicitly revoked. (M18) |
-| `GYRE_TRUSTED_ISSUERS` | _(disabled)_ | Comma-separated base URLs of trusted remote Gyre instances (e.g. `https://gyre-2.example.com`). Enables G11 federation: JWTs minted by these instances are verified via remote OIDC discovery + JWKS (cached 5 min). Federated agents receive `Agent` role; `agent_id = "<remote-host>/<sub>"`. **Security:** `jwks_uri` from remote discovery must be same-origin (scheme+host+port) as the trusted issuer — cross-origin values are rejected to prevent SSRF (G11-A). (G11) |
+| `GYRE_SIGSTORE_MODE` | `local` | Commit signing backend for `jj squash`: `local` signs with the forge's Ed25519 key; `fulcio` is reserved for future external Fulcio CA integration (logs a warning, does not block). (M13.8) |
+| `GYRE_TRUSTED_ISSUERS` | _(disabled)_ | Comma-separated base URLs of trusted remote Gyre instances (e.g. `https://gyre-2.example.com`). Enables G11 federation: JWTs minted by these instances are verified via remote OIDC discovery + JWKS (cached 5 min). Federated agents receive `Agent` role; `agent_id = "<remote-host>/<sub>"`. (G11) |
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
