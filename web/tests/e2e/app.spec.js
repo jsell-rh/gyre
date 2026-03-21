@@ -30,7 +30,8 @@ test.describe('Auth flow', () => {
     const tokenInput = page.locator('#token-input');
     await tokenInput.waitFor({ state: 'visible' });
     await tokenInput.fill(TOKEN);
-    await page.getByRole('button', { name: 'Save' }).click();
+    // Use CSS locator: aria-hidden on modal-backdrop hides buttons from getByRole
+    await page.locator('[role="dialog"] button:has-text("Save")').click();
 
     // Modal should close
     await expect(tokenInput).not.toBeVisible();
@@ -117,8 +118,8 @@ test.describe('Projects', () => {
     const projectName = `e2e-project-${Date.now()}`;
     await nameInput.fill(projectName);
 
-    // Submit
-    await page.getByRole('button', { name: /create project/i }).click();
+    // Submit — use CSS locator: aria-hidden on modal-backdrop hides buttons from getByRole
+    await page.locator('[role="dialog"] button:has-text("Create Project")').click();
 
     // Toast should appear confirming success
     await expect(page.getByText('Project created')).toBeVisible({ timeout: 5000 });
@@ -158,8 +159,8 @@ test.describe('Task board', () => {
     const taskTitle = `e2e-task-${Date.now()}`;
     await titleInput.fill(taskTitle);
 
-    // Submit
-    await page.getByRole('button', { name: /create task/i }).click();
+    // Submit — use CSS locator: aria-hidden on modal-backdrop hides buttons from getByRole
+    await page.locator('[role="dialog"] button:has-text("Create Task"), [role="dialog"] button:has-text("Creating")').first().click();
 
     // Toast and task should appear
     await expect(page.getByText(/task created/i)).toBeVisible({ timeout: 5000 });
