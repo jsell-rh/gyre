@@ -17,20 +17,33 @@
   import ComposeView from './components/ComposeView.svelte';
   import AnalyticsView from './components/AnalyticsView.svelte';
   import CostView from './components/CostView.svelte';
+  import TaskDetail from './components/TaskDetail.svelte';
+  import SpecApprovalsView from './components/SpecApprovalsView.svelte';
+  import AuditView from './components/AuditView.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
   import Modal from './lib/Modal.svelte';
-  import { setAuthToken } from './lib/api.js';
+  import { setAuthToken, api } from './lib/api.js';
 
   let currentView = $state('dashboard');
   let selectedRepo = $state(null);
   let selectedMr = $state(null);
+  let selectedTask = $state(null);
   let wsStatus = $state('disconnected');
   let wsStore = $state(null);
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
+  let tokenInfo = $state(null);
+  let searchOpen = $state(false);
+
+  async function openTokenModal() {
+    tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token';
+    tokenModalOpen = true;
+    tokenInfo = null;
+    try { tokenInfo = await api.tokenInfo(); } catch { /* ignore */ }
+  }
 
   function saveToken() {
     const t = tokenInput.trim() || 'gyre-dev-token';
@@ -38,6 +51,7 @@
     tokenInput = t;
     hasToken = true;
     tokenModalOpen = false;
+    tokenInfo = null;
     // Reconnect WS with new token — capture local ref so we own the lifecycle
     if (wsStore) {
       const old = wsStore;
@@ -64,23 +78,27 @@
     currentView = view;
     if (ctx.repo !== undefined) selectedRepo = ctx.repo;
     if (ctx.mr !== undefined) selectedMr = ctx.mr;
+    if (ctx.task !== undefined) selectedTask = ctx.task;
   }
 
   const viewTitles = {
-    dashboard:    'Dashboard',
-    activity:     'Activity Feed',
-    agents:       'Agents',
-    tasks:        'Task Board',
-    projects:     'Projects',
-    'repo-detail': 'Repository',
-    'mr-detail':  'Merge Request',
-    'merge-queue': 'Merge Queue',
-    'mcp-catalog': 'MCP Tool Catalog',
-    compose:      'Agent Compose',
-    analytics:    'Analytics',
-    costs:        'Cost Tracking',
-    admin:        'Admin Panel',
-    settings:     'Settings',
+    dashboard:       'Dashboard',
+    activity:        'Activity Feed',
+    agents:          'Agents',
+    tasks:           'Task Board',
+    'task-detail':   'Task Detail',
+    projects:        'Projects',
+    'repo-detail':   'Repository',
+    'mr-detail':     'Merge Request',
+    'merge-queue':   'Merge Queue',
+    'mcp-catalog':   'MCP Tool Catalog',
+    compose:         'Agent Compose',
+    analytics:       'Analytics',
+    costs:           'Cost Tracking',
+    audit:           'Audit Events',
+    'spec-approvals': 'Spec Approvals',
+    admin:           'Admin Panel',
+    settings:        'Settings',
   };
 
   let breadcrumbs = $derived(() => {
@@ -116,7 +134,7 @@
         {/if}
       </div>
       <div class="topbar-right">
-        <button class="search-trigger" onclick={() => {}} aria-label="Open search (Ctrl+K)">
+        <button class="search-trigger" onclick={() => (searchOpen = true)} aria-label="Open search (Ctrl+K)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
           </svg>
@@ -138,7 +156,7 @@
         <button
           class="auth-btn"
           class:auth-active={hasToken}
-          onclick={() => { tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token'; tokenModalOpen = true; }}
+          onclick={openTokenModal}
           aria-label={hasToken ? 'Authenticated — configure API token' : 'No token — configure API token'}
         >
           <span class="auth-dot" aria-hidden="true"></span>
@@ -157,7 +175,12 @@
       {:else if currentView === 'agents'}
         <AgentList />
       {:else if currentView === 'tasks'}
-        <TaskBoard />
+        <TaskBoard onSelectTask={(task) => navigate('task-detail', { task })} />
+      {:else if currentView === 'task-detail' && selectedTask}
+        <TaskDetail
+          task={selectedTask}
+          onBack={() => navigate('tasks')}
+        />
       {:else if currentView === 'projects'}
         <ProjectList onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
       {:else if currentView === 'repo-detail' && selectedRepo}
@@ -182,6 +205,10 @@
         <AnalyticsView />
       {:else if currentView === 'costs'}
         <CostView />
+      {:else if currentView === 'audit'}
+        <AuditView />
+      {:else if currentView === 'spec-approvals'}
+        <SpecApprovalsView />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}
@@ -192,12 +219,44 @@
 </div>
 {/if}
 
-<SearchBar onnavigate={(v) => navigate(v)} />
+<SearchBar bind:open={searchOpen} onnavigate={(v) => navigate(v)} />
 <Toast />
 
 <Modal bind:open={tokenModalOpen} title="API Token" size="sm">
   <div class="token-modal">
     <p class="token-desc">Set the Bearer token used for all API and WebSocket requests. Leave blank to use the default <code>test-token</code>.</p>
+    {#if tokenInfo}
+      <div class="token-info-box">
+        <div class="token-info-row">
+          <span class="token-info-label">Kind</span>
+          <span class="token-info-val">{tokenInfo.kind ?? '—'}</span>
+        </div>
+        {#if tokenInfo.agent_id}
+          <div class="token-info-row">
+            <span class="token-info-label">Agent ID</span>
+            <span class="token-info-val mono">{tokenInfo.agent_id}</span>
+          </div>
+        {/if}
+        {#if tokenInfo.task_id}
+          <div class="token-info-row">
+            <span class="token-info-label">Task ID</span>
+            <span class="token-info-val mono">{tokenInfo.task_id}</span>
+          </div>
+        {/if}
+        {#if tokenInfo.scope}
+          <div class="token-info-row">
+            <span class="token-info-label">Scope</span>
+            <span class="token-info-val">{tokenInfo.scope}</span>
+          </div>
+        {/if}
+        {#if tokenInfo.exp}
+          <div class="token-info-row">
+            <span class="token-info-label">Expires</span>
+            <span class="token-info-val">{new Date(tokenInfo.exp * 1000).toLocaleString()}</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
     <label class="token-label" for="token-input">Token</label>
     <input
       id="token-input"
@@ -444,6 +503,43 @@
   }
 
   .btn-secondary:hover { border-color: var(--color-text-muted); }
+
+  /* Token info box */
+  .token-info-box {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .token-info-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .token-info-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    width: 70px;
+    flex-shrink: 0;
+  }
+
+  .token-info-val {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .token-info-val.mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    word-break: break-all;
+  }
 
   /* Content area */
   .content {

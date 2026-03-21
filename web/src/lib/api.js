@@ -235,4 +235,22 @@ export const api = {
   networkDerpMap: () => request('/network/derp-map'),
   // Agent spawn log
   agentSpawnLog: (id) => request(`/admin/agents/${id}/spawn-log`),
+  // Token introspection (M18)
+  tokenInfo: () => request('/auth/token-info'),
+  // Spec approvals ledger (M12.3)
+  specsApprovals: (path) => {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+    return request(`/specs/approvals${qs}`);
+  },
+  specsApprove: (data) =>
+    request('/specs/approve', { method: 'POST', body: JSON.stringify(data) }),
+  specsRevoke: (data) =>
+    request('/specs/revoke', { method: 'POST', body: JSON.stringify(data) }),
+  // Audit events (M7.1)
+  auditEvents: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/audit/events${qs ? '?' + qs : ''}`);
+  },
+  auditStats: () => request('/audit/stats'),
+  auditStreamUrl: () => `${API_BASE}/audit/stream`,
 };
