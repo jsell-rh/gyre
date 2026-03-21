@@ -284,11 +284,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 /// Build a CORS layer from `GYRE_CORS_ORIGINS` env var.
+///
+/// When `GYRE_CORS_ORIGINS` is not set, the default list includes the server's
+/// own port (from `GYRE_PORT`) so that the dashboard works on non-default ports
+/// without requiring explicit CORS configuration.
 fn build_cors_layer() -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
     let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| {
-        "http://localhost:2222,http://localhost:3000,http://localhost:5173".to_string()
+        // Always include the server's own port so preflight requests succeed
+        // when running on a non-default port (e.g. GYRE_PORT=2223).
+        let server_port: u16 = std::env::var("GYRE_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        let server_origin = format!("http://localhost:{server_port}");
+        let mut defaults = vec![
+            "http://localhost:2222".to_string(),
+            "http://localhost:3000".to_string(),
+            "http://localhost:5173".to_string(),
+        ];
+        if !defaults.contains(&server_origin) {
+            defaults.push(server_origin);
+        }
+        defaults.join(",")
     });
 
     if origins_str == "*" {

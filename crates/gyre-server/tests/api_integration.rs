@@ -1627,3 +1627,58 @@ async fn api_key_creation() {
     assert_ne!(resp.status(), 404_u16, "endpoint should exist");
     assert_ne!(resp.status(), 401_u16, "should be authenticated");
 }
+
+// ── CORS tests ────────────────────────────────────────────────────────────────
+
+/// Verify that the CORS preflight response includes the server's own port in
+/// Access-Control-Allow-Origin when GYRE_PORT matches the listening port.
+///
+/// Regression test for: boss 401 bug on port 2223 — CORS default only listed
+/// 2222/3000/5173, so preflight for GET+Authorization from port 2223 failed.
+#[tokio::test]
+async fn cors_includes_server_port() {
+    // Spin up a server on a random port, set GYRE_PORT so the CORS layer picks it up.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // SAFETY: tests are single-threaded per tokio runtime; we set the env var
+    // before building state so the CORS layer reads the correct port.
+    // This env var is only consumed at startup, so parallel tests are not affected.
+    unsafe { std::env::set_var("GYRE_PORT", port.to_string()) };
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let state = build_state(TOKEN, &base_url, None);
+    let app = build_router(Arc::clone(&state));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Clean up env var immediately after server startup so parallel tests are not affected.
+    unsafe { std::env::remove_var("GYRE_PORT") };
+
+    let client = reqwest::Client::new();
+    let origin = format!("http://localhost:{port}");
+
+    // Send a CORS preflight OPTIONS request simulating a browser requesting
+    // a credentialed GET (Authorization header triggers preflight).
+    let resp = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{base_url}/api/v1/version"),
+        )
+        .header("Origin", &origin)
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Headers", "authorization")
+        .send()
+        .await
+        .unwrap();
+
+    let allow_origin = resp
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    assert_eq!(
+        allow_origin, origin,
+        "CORS allow-origin should include the server's own port (http://localhost:{port})"
+    );
+}
