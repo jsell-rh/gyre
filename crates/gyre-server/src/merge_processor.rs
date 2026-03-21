@@ -2,7 +2,10 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use gyre_common::Id;
-use gyre_domain::{AnalyticsEvent, MergeQueueEntryStatus, MergeResult, MrStatus};
+use gyre_domain::{
+    AnalyticsEvent, GateStatus, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MergeResult,
+    MrStatus, TaskPriority,
+};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -67,6 +70,89 @@ async fn atomic_group_ready(state: &AppState, group: &str, mr_id: &Id) -> anyhow
     Ok(true)
 }
 
+/// Check dependencies for health issues and handle them (P5):
+///
+/// - Closed deps: creates a remediation task and fails the queue entry.
+/// - Deps with 3+ gate failures: logs an escalation warning.
+///
+/// Returns `true` if a blocking issue was found (caller should skip further processing).
+async fn handle_dep_health_issues(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: &MergeRequest,
+) -> anyhow::Result<bool> {
+    for dep_id in &mr.depends_on {
+        let dep = match state.merge_requests.find_by_id(dep_id).await? {
+            Some(d) => d,
+            None => continue,
+        };
+
+        // Case 1: Dependency MR was closed before merging.
+        if dep.status == MrStatus::Closed {
+            warn!(
+                mr_id = %mr.id,
+                dep_id = %dep_id,
+                "dependency MR was closed; failing queue entry and creating reassessment task"
+            );
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let task_id = Id::new(Uuid::new_v4().to_string());
+            let mut task = gyre_domain::Task::new(
+                task_id,
+                format!("Dependency MR-{dep_id} was closed, reassess MR-{}", mr.id),
+                now,
+            );
+            task.priority = TaskPriority::High;
+            task.labels = vec!["dep-failure".to_string(), "auto-created".to_string()];
+            task.description = Some(format!(
+                "Dependency merge request {dep_id} was closed before merging. \
+                 Review whether MR {} can still proceed or needs to be updated.",
+                mr.id
+            ));
+            if let Err(e) = state.tasks.create(&task).await {
+                warn!(mr_id = %mr.id, "failed to create dep-failure task: {e}");
+            }
+
+            state
+                .merge_queue
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Failed,
+                    Some(format!("dependency MR-{dep_id} was closed")),
+                )
+                .await?;
+
+            return Ok(true);
+        }
+
+        // Case 2: Dependency has 3+ gate failures — log escalation.
+        let gate_fail_count = {
+            let results = state.gate_results.lock().await;
+            results
+                .values()
+                .filter(|r| {
+                    r.mr_id.as_str() == dep_id.as_str() && matches!(r.status, GateStatus::Failed)
+                })
+                .count()
+        };
+
+        if gate_fail_count >= 3 {
+            warn!(
+                mr_id = %mr.id,
+                dep_id = %dep_id,
+                gate_fail_count,
+                "dependency MR has {} gate failures; escalating — manual intervention may be needed",
+                gate_fail_count,
+            );
+        }
+    }
+
+    Ok(false)
+}
+
 async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // Get all queued entries and find the first one whose dependencies are all merged.
     let all_queued = state.merge_queue.list_queue().await?;
@@ -115,6 +201,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // P5: Check dependency health (closed deps, gate failure escalation).
+    if handle_dep_health_issues(state, &entry, &mr).await? {
+        return Ok(());
+    }
 
     // Look up the repository
     let repo = match state.repos.find_by_id(&mr.repository_id).await? {
