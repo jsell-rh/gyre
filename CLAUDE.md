@@ -190,7 +190,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/merge-queue/graph` | Return full merge queue DAG: `{nodes: [{mr_id, title, status, priority},...], edges: [{from, to},...]}` (TASK-100) |
 | `POST` | `/api/v1/repos/{id}/commits/record` | Record agent-commit mapping |
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
-| `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees |
+| `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees; POST: JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
 | `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task; writes `refs/agents/{id}/head` and `refs/ralph/{task-id}/implement` (M13.6); JWT bearers are evaluated against the target repo's ABAC policy before spawning — returns 403 if no policy matches (G6) |
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
@@ -216,10 +216,10 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/compose/teardown` | Stop all compose agents and remove session |
 | `POST` | `/api/v1/repos/{id}/jj/init` | Initialize jj (Jujutsu) in colocated mode on a repo |
 | `GET` | `/api/v1/repos/{id}/jj/log` | List recent jj changes (`?limit=N`) |
-| `POST` | `/api/v1/repos/{id}/jj/new` | Create a new anonymous jj change (WIP commit) |
-| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change; returns `200 JSON` `CommitSignature` `{sha, signature (base64 Ed25519), key_id, algorithm, mode, timestamp}` — use `GET /commits/{sha}/signature` to verify later (M13.8) |
-| `POST` | `/api/v1/repos/{id}/jj/undo` | Undo the last jj operation |
-| `POST` | `/api/v1/repos/{id}/jj/bookmark` | Create a jj bookmark (branch) pointing to a change |
+| `POST` | `/api/v1/repos/{id}/jj/new` | Create a new anonymous jj change (WIP commit); JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
+| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change; returns `200 JSON` `CommitSignature` `{sha, signature (base64 Ed25519), key_id, algorithm, mode, timestamp}` — use `GET /commits/{sha}/signature` to verify later (M13.8); JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
+| `POST` | `/api/v1/repos/{id}/jj/undo` | Undo the last jj operation; JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
+| `POST` | `/api/v1/repos/{id}/jj/bookmark` | Create a jj bookmark (branch) pointing to a change; JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
 | `GET` | `/api/v1/repos/{id}/commits/{sha}/signature` | Look up and verify the `CommitSignature` for a given commit SHA; 404 if SHA not in store (M13.8) |
 | `GET` | `/healthz` | Liveness probe — `{status, checks}` JSON |
 | `GET` | `/readyz` | Readiness probe — `{status, checks}` JSON |
