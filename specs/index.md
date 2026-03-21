@@ -86,7 +86,9 @@ How Gyre gets built - process and standards for the agent team.
 | M13: Forge Native | [`milestones/m13-forge-native.md`](milestones/m13-forge-native.md) | Pre-accept validation, commit provenance, speculative merging, cross-agent awareness |
 | M14: Supply Chain Security | [`milestones/m14-supply-chain.md`](milestones/m14-supply-chain.md) | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | [`milestones/m15-diesel-migrations.md`](milestones/m15-diesel-migrations.md) | Diesel ORM + migrations, full SQLite persistence, multi-tenancy |
-| M16: Security Hardening | _(spec pending)_ | 7 CISO Medium findings: constant-time compare, API key hashing, path redaction, CORS, audit guard, SSH host keys |
+| M16: Security Hardening | [`milestones/m16-security-hardening.md`](milestones/m16-security-hardening.md) | Release automation endpoint, git argument injection prevention (M16-A), CISO finding resolutions |
+| M17: Integration Testing | [`milestones/m17-integration-testing.md`](milestones/m17-integration-testing.md) | 67 API tests, 21 auth/RBAC tests, 12 git tests, 20 Playwright E2E tests |
+| M18: Agent Identity | [`milestones/m18-agent-identity.md`](milestones/m18-agent-identity.md) | EdDSA JWT agent tokens, OIDC provider, token introspection, JWT revocation, stale-spec detection |
 
 ## Open Questions
 
