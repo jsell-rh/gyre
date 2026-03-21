@@ -27,6 +27,7 @@ pub mod release;
 pub mod repos;
 pub mod spawn;
 pub mod spec_policy;
+pub mod specs;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
@@ -268,6 +269,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/approve", post(gates::approve_spec))
         .route("/api/v1/specs/approvals", get(gates::list_spec_approvals))
         .route("/api/v1/specs/revoke", post(gates::revoke_spec_approval))
+        // Spec registry (M21.1) — manifest-driven ledger
+        .route("/api/v1/specs", get(specs::list_specs))
+        .route("/api/v1/specs/pending", get(specs::list_pending_specs))
+        .route("/api/v1/specs/drifted", get(specs::list_drifted_specs))
+        .route("/api/v1/specs/index", get(specs::spec_index))
+        .route("/api/v1/specs/:path", get(specs::get_spec))
+        .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
+        .route(
+            "/api/v1/specs/:path/revoke",
+            post(specs::revoke_spec_approval),
+        )
+        .route(
+            "/api/v1/specs/:path/history",
+            get(specs::spec_approval_history),
+        )
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
         .route(
