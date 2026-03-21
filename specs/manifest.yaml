@@ -1,0 +1,199 @@
+version: 1
+
+# Default policies applied to all specs unless overridden
+defaults:
+  requires_approval: true
+  auto_create_tasks: true
+  auto_invalidate_on_change: true
+
+specs:
+  # ---- System specs (what Gyre does) ----
+
+  - path: system/design-principles.md
+    title: Design Principles
+    owner: user:jsell
+    approval:
+      mode: human_only
+      human_approvers:
+        - user:jsell
+    gates:
+      - persona: accountability
+
+  - path: system/identity-security.md
+    title: Identity & Security
+    owner: user:jsell
+    approval:
+      mode: human_and_agent
+      human_approvers:
+        - user:jsell
+      agent_approvers:
+        - persona: security
+          min_attestation_level: 3
+        - persona: accountability
+    gates:
+      - persona: security
+        min_attestation_level: 3
+      - persona: accountability
+
+  - path: system/source-control.md
+    title: Source Control
+    owner: user:jsell
+
+  - path: system/agent-runtime.md
+    title: Agent Runtime & Compute
+    owner: user:jsell
+
+  - path: system/supply-chain.md
+    title: Supply Chain Security
+    owner: user:jsell
+    approval:
+      mode: human_and_agent
+      human_approvers:
+        - user:jsell
+      agent_approvers:
+        - persona: security
+          min_attestation_level: 3
+    gates:
+      - persona: security
+        min_attestation_level: 3
+
+  - path: system/agent-gates.md
+    title: Agent Gates & Spec Binding
+    owner: user:jsell
+    gates:
+      - persona: security
+      - persona: accountability
+
+  - path: system/spec-lifecycle.md
+    title: Spec Lifecycle Automation
+    owner: user:jsell
+    gates:
+      - persona: accountability
+
+  - path: system/spec-registry.md
+    title: Spec Registry
+    owner: user:jsell
+    gates:
+      - persona: accountability
+
+  - path: system/forge-advantages.md
+    title: Forge-Native Advantages
+    owner: user:jsell
+    auto_create_tasks: false
+
+  - path: system/trusted-foundry-integration.md
+    title: Trusted Foundry (Future)
+    owner: user:jsell
+    auto_create_tasks: false
+
+  - path: system/activity-dashboard.md
+    title: Activity Dashboard
+    owner: user:jsell
+
+  - path: system/admin-panel.md
+    title: Admin Panel
+    owner: user:jsell
+
+  - path: system/analytics.md
+    title: Analytics
+    owner: user:jsell
+
+  - path: system/business-continuity.md
+    title: Business Continuity
+    owner: user:jsell
+
+  - path: system/merge-dependencies.md
+    title: Merge Dependencies
+    owner: user:jsell
+
+  - path: system/observability.md
+    title: Observability
+    owner: user:jsell
+
+  - path: system/sdlc.md
+    title: SDLC Philosophy
+    owner: user:jsell
+    auto_create_tasks: false
+
+  # ---- Development specs (agent-only approval sufficient for mechanical/structural specs) ----
+
+  - path: development/architecture.md
+    title: Architecture & Standards
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+
+  - path: development/ralph-loops.md
+    title: Ralph Loops
+    owner: user:jsell
+
+  - path: development/database-migrations.md
+    title: Database & Migrations
+    owner: user:jsell
+
+  - path: development/agent-experience.md
+    title: Agent Experience & Legibility
+    owner: user:jsell
+
+  - path: development/agent-workflow.md
+    title: Agent Workflow
+    owner: user:jsell
+
+  - path: development/ci-docs-release.md
+    title: CI, Docs & Release
+    owner: user:jsell
+
+  - path: development/dogfooding.md
+    title: Dogfooding
+    owner: user:jsell
+    auto_create_tasks: false
+
+  - path: development/frontend-testing.md
+    title: Frontend Testing
+    owner: user:jsell
+
+  - path: development/manager-agent.md
+    title: Manager Agent
+    owner: user:jsell
+    auto_create_tasks: false
+
+  - path: development/philosophy.md
+    title: Philosophy
+    owner: user:jsell
+    auto_create_tasks: false
+
+  - path: development/speed-backpressure.md
+    title: Speed & Backpressure
+    owner: user:jsell
+    auto_create_tasks: false
+
+  # ---- Personas (not implementation contracts) ----
+
+  - path: personas/ceo.md
+    title: CEO Agent Persona
+    owner: user:jsell
+    approval:
+      mode: human_only
+      human_approvers:
+        - user:jsell
+    auto_create_tasks: false
+
+  - path: personas/accountability.md
+    title: Accountability Agent Persona
+    owner: user:jsell
+    approval:
+      mode: human_only
+      human_approvers:
+        - user:jsell
+    auto_create_tasks: false
+
+  - path: personas/security.md
+    title: Security Agent Persona
+    owner: user:jsell
+    approval:
+      mode: human_only
+      human_approvers:
+        - user:jsell
+    auto_create_tasks: false

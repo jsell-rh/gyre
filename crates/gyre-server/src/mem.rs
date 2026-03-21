@@ -1138,5 +1138,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         abac_policies: Arc::new(Mutex::new(HashMap::new())),
         workload_attestations: Arc::new(Mutex::new(HashMap::new())),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
+        spec_ledger: Arc::new(Mutex::new(HashMap::new())),
+        spec_approval_history: Arc::new(Mutex::new(Vec::new())),
     })
 }
