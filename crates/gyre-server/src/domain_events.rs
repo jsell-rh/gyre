@@ -80,4 +80,13 @@ pub enum DomainEvent {
         spec_ref: Option<String>,
         gate_agent_id: String,
     },
+    /// Emitted when an MR references a spec_ref SHA that is not the current HEAD blob
+    /// for that spec file (warn_stale_spec policy). The merge is not blocked.
+    StaleSpecWarning {
+        mr_id: String,
+        repo_id: String,
+        spec_path: String,
+        spec_sha: String,
+        current_sha: String,
+    },
 }

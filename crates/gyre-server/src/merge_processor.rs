@@ -279,6 +279,58 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 }
             }
         }
+
+        // Check if the spec_ref SHA is current (warn_stale_spec / require_current_spec).
+        if policy.warn_stale_spec || policy.require_current_spec {
+            if let Some(spec_ref) = mr.spec_ref.as_deref() {
+                // Parse "path@sha" — same format used by verify_spec_ref.
+                if let Some((path, sha)) = spec_ref.rsplit_once('@') {
+                    let current = crate::git_refs::resolve_blob_sha(&repo.path, path).await;
+                    let is_stale = match &current {
+                        // If the file can't be resolved (new/empty repo), treat as non-stale.
+                        Some(cur) => cur != sha,
+                        None => false,
+                    };
+                    if is_stale {
+                        let current_sha = current.unwrap_or_default();
+                        if policy.require_current_spec {
+                            let reason = format!(
+                                "spec policy requires current spec: '{path}' HEAD is {current_sha} but MR references {sha}"
+                            );
+                            warn!(entry_id = %entry.id, %reason, "stale spec blocked merge");
+                            state
+                                .merge_queue
+                                .update_status(
+                                    &entry.id,
+                                    MergeQueueEntryStatus::Failed,
+                                    Some(reason),
+                                )
+                                .await?;
+                            return Ok(());
+                        } else {
+                            // warn_stale_spec only — emit domain event, don't block.
+                            warn!(
+                                entry_id = %entry.id,
+                                mr_id = %mr.id,
+                                spec_path = %path,
+                                spec_sha = %sha,
+                                %current_sha,
+                                "stale spec_ref detected (warn only)"
+                            );
+                            let _ = state.event_tx.send(
+                                crate::domain_events::DomainEvent::StaleSpecWarning {
+                                    mr_id: mr.id.to_string(),
+                                    repo_id: repo.id.to_string(),
+                                    spec_path: path.to_string(),
+                                    spec_sha: sha.to_string(),
+                                    current_sha,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Check quality gates before merging.
