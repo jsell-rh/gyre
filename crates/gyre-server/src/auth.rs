@@ -194,6 +194,10 @@ pub struct AuthenticatedAgent {
     /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
     /// - All other auth methods: always "default".
     pub tenant_id: String,
+    /// Raw JWT claims for ABAC evaluation (G6).
+    /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
+    /// - Global token or API key: `None` — ABAC checks are bypassed for these.
+    pub jwt_claims: Option<serde_json::Value>,
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -356,6 +360,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 user_id: None,
                 roles: vec![UserRole::Admin],
                 tenant_id: "default".to_string(),
+                jwt_claims: None, // Admin bypass — no ABAC evaluation.
             });
         }
 
@@ -368,18 +373,27 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .map(|(id, _)| id.clone())
             {
                 // JWT tokens: additionally validate signature and expiry.
-                if token.starts_with("ey") {
-                    if let Err(e) = state.agent_signing_key.validate(token, &state.base_url) {
-                        tracing::debug!("Agent JWT validation failed: {e}");
-                        return Err((StatusCode::UNAUTHORIZED, "Invalid or expired agent token")
-                            .into_response());
+                let jwt_claims = if token.starts_with("ey") {
+                    match state.agent_signing_key.validate(token, &state.base_url) {
+                        Ok(agent_claims) => serde_json::to_value(&agent_claims).ok(),
+                        Err(e) => {
+                            tracing::debug!("Agent JWT validation failed: {e}");
+                            return Err((
+                                StatusCode::UNAUTHORIZED,
+                                "Invalid or expired agent token",
+                            )
+                                .into_response());
+                        }
                     }
-                }
+                } else {
+                    None // Legacy UUID token — no JWT claims for ABAC.
+                };
                 return Ok(AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
                     tenant_id: "default".to_string(),
+                    jwt_claims,
                 });
             }
         }
@@ -411,6 +425,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     user_id: Some(user.id),
                     roles: user.roles,
                     tenant_id: "default".to_string(),
+                    jwt_claims: None, // API key — no ABAC evaluation.
                 });
             }
         }
@@ -491,6 +506,11 @@ async fn validate_jwt(
     let token_data = jsonwebtoken::decode::<JwtClaims>(token, &decoding_key, &validation)
         .map_err(|e| format!("decode: {e}"))?;
 
+    // Also capture the raw claims as JSON for ABAC evaluation (G6).
+    let raw_claims = jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation)
+        .map(|td| td.claims)
+        .ok();
+
     let claims = token_data.claims;
     let roles = roles_from_claims(&claims);
     let username = claims
@@ -518,6 +538,7 @@ async fn validate_jwt(
         user_id: Some(user.id),
         roles: user.roles,
         tenant_id,
+        jwt_claims: raw_claims,
     })
 }
 
@@ -720,11 +741,13 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
     let remote_host = normalized_iss
         .trim_start_matches("https://")
         .trim_start_matches("http://");
+    let fed_claims_json = serde_json::to_value(&claims).ok();
     Some(AuthenticatedAgent {
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
         tenant_id: "default".to_string(),
+        jwt_claims: fed_claims_json,
     })
 }
 

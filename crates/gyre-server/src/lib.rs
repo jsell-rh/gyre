@@ -1,3 +1,4 @@
+pub(crate) mod abac;
 pub(crate) mod activity;
 pub mod api;
 pub mod attestation;
@@ -184,6 +185,8 @@ pub struct AppState {
     pub commit_signatures: commit_signatures::CommitSignatureStore,
     /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
     pub sigstore_mode: commit_signatures::SigstoreMode,
+    /// Per-repo ABAC policies: repo_id -> list of AbacPolicy (G6).
+    pub abac_policies: Arc<Mutex<HashMap<String, Vec<abac::AbacPolicy>>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -503,6 +506,7 @@ pub fn build_state(
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
+        abac_policies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
