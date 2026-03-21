@@ -60,6 +60,34 @@ pub async fn write_ref(repo_path: &str, refname: &str, sha: &str) {
     }
 }
 
+/// Resolve the blob SHA for `file_path` at the current HEAD of `repo_path`.
+///
+/// Returns `None` if the file doesn't exist in HEAD, the repo is empty, or `file_path`
+/// contains unsafe characters that could cause argument injection.
+pub async fn resolve_blob_sha(repo_path: &str, file_path: &str) -> Option<String> {
+    // Reject paths that could inject git flags or traverse outside the tree.
+    if file_path.starts_with('-') || file_path.contains("..") {
+        tracing::warn!(file_path, "resolve_blob_sha: unsafe path rejected");
+        return None;
+    }
+    // Use "HEAD:<file_path>" as a single argument — git interprets this as a tree ref,
+    // not a flag, so no argument injection is possible.
+    let treeish = format!("HEAD:{file_path}");
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", &treeish])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .ok()?;
+    if out.status.success() {
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(sha);
+        }
+    }
+    None
+}
+
 /// Count refs that exist under `prefix` (e.g. `refs/agents/{id}/snapshots/`).
 pub async fn count_refs_under(repo_path: &str, prefix: &str) -> usize {
     if !refname_safe(prefix) {
