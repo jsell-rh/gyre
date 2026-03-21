@@ -1,5 +1,6 @@
 pub(crate) mod activity;
 pub mod api;
+pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
 pub mod domain_events;
@@ -171,6 +172,8 @@ pub struct AppState {
     pub spec_approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
     /// Per-repo spec enforcement policies: repo_id -> SpecPolicy (M12.3).
     pub spec_policies: Arc<Mutex<HashMap<String, api::spec_policy::SpecPolicy>>>,
+    /// Merge attestation bundles: mr_id -> AttestationBundle (G5).
+    pub attestation_store: Arc<Mutex<HashMap<String, attestation::AttestationBundle>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -468,6 +471,7 @@ pub fn build_state(
         db_storage,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
+        attestation_store: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
