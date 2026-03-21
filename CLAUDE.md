@@ -145,6 +145,14 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, signature?}` — `sha` must be 40-char hex; **approver identity derived server-side from auth token** (client must not supply `approver_id`) (CISO M12.3-A, M12.3) |
 | `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
 | `POST` | `/api/v1/specs/revoke` | Revoke a spec approval: `{approval_id, reason}` — caller must be original approver or Admin (returns 403 otherwise); revoker identity derived server-side (client must not supply `revoked_by`) (CISO M12.3-A, M12.3) |
+| `GET` | `/api/v1/specs` | List all specs with ledger state — reads `specs/manifest.yaml` + ledger; each entry includes `path`, `title`, `owner`, `sha`, `approval_status`, `drift_status` (M21.1) |
+| `GET` | `/api/v1/specs/pending` | Specs awaiting approval — ledger entries with `approval_status: Pending` (M21.1) |
+| `GET` | `/api/v1/specs/drifted` | Specs with open drift-review tasks — `drift_status: Drifted` (M21.1) |
+| `GET` | `/api/v1/specs/index` | Auto-generated markdown index of all specs in manifest (M21.1) |
+| `GET` | `/api/v1/specs/{path}` | Get single spec ledger entry by URL-encoded path (M21.1) |
+| `POST` | `/api/v1/specs/{path}/approve` | Approve a specific spec version: `{sha}` — path-scoped; transitions ledger Pending → Approved; `sha` must be 40-char hex (M21.1) |
+| `POST` | `/api/v1/specs/{path}/revoke` | Revoke approval for a specific spec: `{reason}` — path-scoped; caller must be original approver or Admin (M21.1) |
+| `GET` | `/api/v1/specs/{path}/history` | Approval event history for a specific spec — list of approval/revocation events with approver, SHA, timestamps, reason (M21.1) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
 | `GET/PUT` | `/api/v1/repos/{id}/spec-policy` | Get / set per-repo spec enforcement policy: `{require_spec_ref: bool, require_approved_spec: bool, warn_stale_spec: bool, require_current_spec: bool}`. `warn_stale_spec` emits `StaleSpecWarning` domain event when MR spec_ref SHA differs from HEAD; `require_current_spec` blocks merge queue when stale. **PUT requires Admin role**. All fields default to `false` (backwards compatible). (M18) |
 | `GET` | `/api/v1/repos/{id}/blame?path={file}` | Per-line agent attribution — which agent last touched each line (M13.4) |
@@ -595,6 +603,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Admin Panel — M6 additions** (M6.2): snapshot create/restore/delete controls, job history table with Run Now button, retention policy editor, full data export download.
 - **Audit View** (M7.1 + M20, sidebar: "Audit"): two-tab view — **Live Stream** tab streams real-time audit events via SSE (`GET /api/v1/audit/stream`) with connected/disconnected indicator; **History** tab shows filtered audit event query with event type and agent ID filters (`GET /api/v1/audit/events`). Aggregate stats card shows event counts by type.
 - **Spec Approvals View** (M20, sidebar: "Spec Approvals"): full CRUD for spec approval records — approval table with path, SHA, approver, timestamp; **Approve modal** (path, SHA input); **Revoke modal** (reason input). Uses `GET /api/v1/specs/approvals`, `POST /api/v1/specs/approve`, `POST /api/v1/specs/revoke`.
+- **Spec Dashboard** (M21.2, sidebar: "Specs" under Source Control): full spec registry view. Stats cards row (Total / Approved / Pending / Drifted counts live from ledger); filter pills (All / Pending / Approved / Drifted); spec table with path (mono), title, owner, status `Badge` (semantic color), 7-char SHA, relative timestamp; clicking a row opens a slide-in detail panel (380px) with three tabs — **Info** (full ledger metadata: path, title, owner, SHA, approval_mode, drift_status, timestamps), **History** (approval event timeline with approver, SHA, timestamps, revocation reason), **Links** (linked MRs and tasks). **Approve button** opens SHA-confirmation modal → `POST /api/v1/specs/{path}/approve`; **Revoke button** opens reason-input modal → `POST /api/v1/specs/{path}/revoke`. (M21.1/M21.2)
 - **SIEM Panel** (M7.1, Admin only): configure SIEM forwarding targets (webhook URL, format, filter), enable/disable per target.
 - **Compute Targets** (M7.2, Admin only): register and manage remote compute targets (local, Docker, SSH). Shows target type, host, and status.
 - **Network Panel** (M7.3, Admin only): WireGuard peer registry, DERP relay map viewer, per-agent peer status.
@@ -749,6 +758,7 @@ Key specs to read before making changes:
 | Design principles (invariants) | [specs/system/design-principles.md](specs/system/design-principles.md) |
 | Agent Gates & Spec Binding | [specs/system/agent-gates.md](specs/system/agent-gates.md) |
 | Spec Lifecycle Automation | [specs/system/spec-lifecycle.md](specs/system/spec-lifecycle.md) |
+| Spec Registry (manifest + ledger) | [specs/system/spec-registry.md](specs/system/spec-registry.md) |
 | M0 milestone deliverables | [specs/milestones/m0-walking-skeleton.md](specs/milestones/m0-walking-skeleton.md) |
 | M1 milestone deliverables | [specs/milestones/m1-domain-foundation.md](specs/milestones/m1-domain-foundation.md) |
 | M2 milestone deliverables | [specs/milestones/m2-source-control.md](specs/milestones/m2-source-control.md) |
