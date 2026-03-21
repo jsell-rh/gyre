@@ -71,6 +71,11 @@ pub async fn spawn_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", req.repo_id)))?;
 
+    // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
+    crate::abac::check_repo_abac(&state, &req.repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
+
     // Verify task exists
     let mut task = state
         .tasks
