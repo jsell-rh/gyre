@@ -605,6 +605,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/admin/compute-targets")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -633,6 +634,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/admin/compute-targets/{id}/tunnel"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -658,6 +660,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/admin/compute-targets/{target_id}/tunnel"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -679,6 +682,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/admin/compute-targets/no-such-target/tunnel")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -696,6 +700,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/admin/compute-targets/{target_id}/tunnel"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -712,6 +717,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/admin/compute-targets/no-such/tunnel")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -732,6 +738,7 @@ mod tests {
                     .uri(format!(
                         "/api/v1/admin/compute-targets/{target_id}/tunnel/no-such-tunnel"
                     ))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
