@@ -1121,3 +1121,190 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
         "MR-C should list MR-B as dependency in graph"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 13: Spec approval auto-invalidated when spec file is modified
+// ---------------------------------------------------------------------------
+//
+// Scenario:
+//   1. Create a repo and push an initial spec file to main.
+//   2. Record a spec approval for that path.
+//   3. Push a commit that modifies the spec file.
+//   4. The post-receive hook should auto-revoke the approval.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spec_approval_auto_invalidated_on_spec_change() {
+    let token = "git-test-spec-invalidate-token";
+    let (_port, base_url) = start_server(token).await;
+    let api = format!("{base_url}/api/v1");
+    let auth_hdr = format!("Bearer {token}");
+    let client = reqwest::Client::new();
+
+    let proj = uniq("proj-spec-inv");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "spec-inv-repo").await;
+    assert!(!repo_id.is_empty());
+
+    let task_id = create_task(&client, &api, &auth_hdr, "spec-inv: setup task").await;
+
+    // Spawn an agent to get a scoped token.
+    let spawn_resp: serde_json::Value = client
+        .post(format!("{api}/agents/spawn"))
+        .header("Authorization", &auth_hdr)
+        .json(&serde_json::json!({
+            "name": "spec-inv-agent",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/spec-inv",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let agent_token = spawn_resp["token"].as_str().unwrap().to_string();
+    let agent_hdr = format!("Bearer {agent_token}");
+
+    // Build clone URL before proj is moved into the closure.
+    let clone_url = format!("{base_url}/git/{proj}/spec-inv-repo.git");
+
+    // Step 1: push initial commit with a spec file to main.
+    let clone_url_c = clone_url.clone();
+    let agent_token_c = agent_token.clone();
+    tokio::task::spawn_blocking(move || {
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+        let clone_url = clone_url_c;
+
+        let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &agent_token_c);
+        let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
+        let ok = clone_out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "spec-inv@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Spec Inv Agent"], &dir);
+
+        // Create specs directory and initial spec file.
+        std::fs::create_dir_all(dir.join("specs/system")).unwrap();
+        std::fs::write(
+            dir.join("specs/system/test-spec.md"),
+            "# Test Spec\n\nInitial content.\n",
+        )
+        .unwrap();
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "docs: add test spec file"], &dir);
+
+        // Push initial commit to main.
+        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        assert!(
+            push.status.success(),
+            "initial push failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+    })
+    .await
+    .unwrap();
+
+    // Step 2: record a spec approval for the spec path (any 40-char hex SHA).
+    let fake_sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    let approval_resp: serde_json::Value = client
+        .post(format!("{api}/specs/approve"))
+        .header("Authorization", &agent_hdr)
+        .json(&serde_json::json!({
+            "path": "specs/system/test-spec.md",
+            "sha": fake_sha,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let approval_id = approval_resp["id"].as_str().unwrap().to_string();
+    assert!(!approval_id.is_empty(), "approval should have an ID");
+    assert!(
+        approval_resp["revoked_at"].is_null(),
+        "approval should be active initially"
+    );
+
+    // Step 3: push a modification to the spec file.
+    let clone_url_c = clone_url.clone();
+    let agent_token_c = agent_token.clone();
+    tokio::task::spawn_blocking(move || {
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+
+        let clone_out = git_with_token(
+            &["clone", &clone_url_c, "repo"],
+            work.path(),
+            &agent_token_c,
+        );
+        let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
+        let ok = clone_out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "second clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "spec-inv@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Spec Inv Agent"], &dir);
+
+        // Modify the spec file.
+        std::fs::write(
+            dir.join("specs/system/test-spec.md"),
+            "# Test Spec\n\nUpdated content - spec has changed.\n",
+        )
+        .unwrap();
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "docs: update test spec file"], &dir);
+
+        // Push modification to main.
+        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        assert!(
+            push.status.success(),
+            "spec modification push failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+    })
+    .await
+    .unwrap();
+
+    // Step 4: wait briefly for the async post-receive hook to complete.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Step 5: verify the approval is now revoked.
+    let approvals: serde_json::Value = client
+        .get(format!(
+            "{api}/specs/approvals?path=specs/system/test-spec.md"
+        ))
+        .header("Authorization", &auth_hdr)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let approvals_list = approvals.as_array().unwrap();
+    let our_approval = approvals_list
+        .iter()
+        .find(|a| a["id"].as_str() == Some(&approval_id));
+
+    assert!(
+        our_approval.is_some(),
+        "approval {approval_id} should still appear in the ledger"
+    );
+    let our_approval = our_approval.unwrap();
+    assert!(
+        !our_approval["revoked_at"].is_null(),
+        "approval should be revoked after spec file was modified in a push: {our_approval}"
+    );
+    assert_eq!(
+        our_approval["revoked_by"].as_str(),
+        Some("system:spec-lifecycle"),
+        "revoked_by should be system:spec-lifecycle"
+    );
+}
