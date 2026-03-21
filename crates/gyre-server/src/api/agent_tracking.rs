@@ -374,6 +374,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/worktrees"))
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -428,6 +429,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/worktrees"))
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
