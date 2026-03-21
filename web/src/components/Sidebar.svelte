@@ -1,47 +1,49 @@
 <script>
+  import { t } from 'svelte-i18n';
+
   let { current = $bindable('dashboard') } = $props();
 
   let collapsed = $state(false);
 
-  const sections = [
+  let sections = $derived([
     {
-      label: 'Overview',
+      label: $t('nav.sections.overview'),
       items: [
-        { id: 'dashboard', label: 'Dashboard', icon: dashboardIcon() },
-        { id: 'activity',  label: 'Activity',  icon: activityIcon() },
+        { id: 'dashboard', label: $t('nav.items.dashboard'), icon: dashboardIcon() },
+        { id: 'activity',  label: $t('nav.items.activity'),  icon: activityIcon() },
       ],
     },
     {
-      label: 'Source Control',
+      label: $t('nav.sections.source_control'),
       items: [
-        { id: 'projects',    label: 'Projects',    icon: projectsIcon() },
-        { id: 'merge-queue', label: 'Merge Queue', icon: queueIcon() },
+        { id: 'projects',    label: $t('nav.items.projects'),    icon: projectsIcon() },
+        { id: 'merge-queue', label: $t('nav.items.merge_queue'), icon: queueIcon() },
       ],
     },
     {
-      label: 'Agents',
+      label: $t('nav.sections.agents'),
       items: [
-        { id: 'agents',  label: 'Agents',  icon: agentsIcon() },
-        { id: 'tasks',   label: 'Tasks',   icon: tasksIcon() },
-        { id: 'compose', label: 'Compose', icon: composeIcon() },
+        { id: 'agents',  label: $t('nav.items.agents'),  icon: agentsIcon() },
+        { id: 'tasks',   label: $t('nav.items.tasks'),   icon: tasksIcon() },
+        { id: 'compose', label: $t('nav.items.compose'), icon: composeIcon() },
       ],
     },
     {
-      label: 'Operations',
+      label: $t('nav.sections.operations'),
       items: [
-        { id: 'analytics',   label: 'Analytics',   icon: analyticsIcon() },
-        { id: 'costs',       label: 'Costs',        icon: costsIcon() },
-        { id: 'mcp-catalog', label: 'MCP Tools',    icon: mcpIcon() },
+        { id: 'analytics',   label: $t('nav.items.analytics'),  icon: analyticsIcon() },
+        { id: 'costs',       label: $t('nav.items.costs'),       icon: costsIcon() },
+        { id: 'mcp-catalog', label: $t('nav.items.mcp_tools'),  icon: mcpIcon() },
       ],
     },
     {
-      label: 'Admin',
+      label: $t('nav.sections.admin'),
       items: [
-        { id: 'admin',    label: 'Admin Panel', icon: adminIcon() },
-        { id: 'settings', label: 'Settings',    icon: settingsIcon() },
+        { id: 'admin',    label: $t('nav.items.admin_panel'), icon: adminIcon() },
+        { id: 'settings', label: $t('nav.items.settings'),    icon: settingsIcon() },
       ],
     },
-  ];
+  ]);
 
   function isActive(id) {
     if (id === 'projects') {
@@ -80,8 +82,8 @@
     <button
       class="collapse-btn"
       onclick={() => (collapsed = !collapsed)}
-      title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      title={collapsed ? $t('nav.sidebar.expand') : $t('nav.sidebar.collapse')}
+      aria-label={collapsed ? $t('nav.sidebar.expand') : $t('nav.sidebar.collapse')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
         {#if collapsed}
@@ -127,7 +129,7 @@
     <div class="server-status" title="Server status">
       <span class="status-dot"></span>
       {#if !collapsed}
-        <span class="status-text">Connected</span>
+        <span class="status-text">{$t('nav.sidebar.connected')}</span>
       {/if}
     </div>
   </div>
