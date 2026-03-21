@@ -12,8 +12,12 @@
   let reviews = $state([]);
   let comments = $state([]);
   let gates = $state([]);
+  let deps = $state(null);
   let loading = $state(true);
   let enqueueing = $state(false);
+  let addDepInput = $state('');
+  let addingDep = $state(false);
+  let removingDepId = $state(null);
 
   // Diff / Files tab state
   let activeTab = $state('overview'); // 'overview' | 'files'
@@ -33,6 +37,7 @@
         api.mrComments(mr.id),
         api.mrGates(mr.id),
       ]);
+      try { deps = await api.mrDependencies(mr.id); } catch { deps = null; }
     } catch { /* ignore */ }
     loading = false;
   }
@@ -89,6 +94,35 @@
       toastError(e.message);
     } finally {
       enqueueing = false;
+    }
+  }
+
+  async function addDep() {
+    const depId = addDepInput.trim();
+    if (!depId) return;
+    addingDep = true;
+    try {
+      const current = deps?.depends_on ?? [];
+      deps = await api.setMrDependencies(mr.id, { depends_on: [...current, depId] });
+      addDepInput = '';
+      toastSuccess('Dependency added.');
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      addingDep = false;
+    }
+  }
+
+  async function removeDep(depId) {
+    removingDepId = depId;
+    try {
+      await api.removeMrDependency(mr.id, depId);
+      deps = { ...deps, depends_on: deps.depends_on.filter(id => id !== depId) };
+      toastSuccess('Dependency removed.');
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      removingDepId = null;
     }
   }
 
@@ -182,6 +216,26 @@
             </div>
           {/if}
 
+          {#if mr.spec_ref}
+            <div class="meta-divider"></div>
+            <h4 class="sidebar-section-title">Spec Binding</h4>
+            {#each [mr.spec_ref.split('@')] as [specPath, specSha]}
+              <div class="spec-ref-row">
+                <span class="spec-ref-path" title={mr.spec_ref}>{specPath}</span>
+                {#if specSha}
+                  <code class="spec-ref-sha">{specSha.slice(0, 8)}</code>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+
+          {#if mr.atomic_group}
+            <div class="meta-row">
+              <span class="meta-label">Atomic Group</span>
+              <code class="meta-mono">{mr.atomic_group}</code>
+            </div>
+          {/if}
+
           {#if mr.diff_stats}
             <div class="meta-divider"></div>
             <h4 class="sidebar-section-title">Changes</h4>
@@ -206,6 +260,52 @@
                 </div>
               {/each}
             </div>
+          </div>
+        {/if}
+
+        <!-- Dependencies -->
+        {#if deps !== null}
+          <div class="sidebar-card">
+            <h4 class="sidebar-section-title">Dependencies</h4>
+            {#if deps.depends_on && deps.depends_on.length > 0}
+              <div class="dep-list">
+                {#each deps.depends_on as depId (depId)}
+                  <div class="dep-row">
+                    <code class="dep-id" title={depId}>{depId.slice(0, 12)}…</code>
+                    <button
+                      class="dep-remove-btn"
+                      onclick={() => removeDep(depId)}
+                      disabled={removingDepId === depId}
+                      title="Remove dependency"
+                    >
+                      {removingDepId === depId ? '…' : '×'}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="dep-empty">No dependencies</p>
+            {/if}
+            <div class="dep-add-row">
+              <input
+                class="dep-input"
+                placeholder="MR UUID"
+                bind:value={addDepInput}
+                onkeydown={(e) => e.key === 'Enter' && addDep()}
+              />
+              <button class="dep-add-btn" onclick={addDep} disabled={addingDep || !addDepInput.trim()}>
+                {addingDep ? '…' : 'Add'}
+              </button>
+            </div>
+            {#if deps.dependents && deps.dependents.length > 0}
+              <div class="meta-divider"></div>
+              <h4 class="sidebar-section-title">Required by</h4>
+              <div class="dep-list">
+                {#each deps.dependents as depId (depId)}
+                  <code class="dep-id dep-id-ro" title={depId}>{depId.slice(0, 12)}…</code>
+                {/each}
+              </div>
+            {/if}
           </div>
         {/if}
 
@@ -1082,6 +1182,113 @@
     font-size: var(--text-sm);
     text-align: center;
   }
+
+  /* Spec ref */
+  .spec-ref-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    flex-wrap: wrap;
+  }
+  .spec-ref-path {
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .spec-ref-sha {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--color-link);
+    background: rgba(0,102,204,0.1);
+    padding: 0.1rem 0.3rem;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+  .meta-mono {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-text-secondary);
+  }
+
+  /* Dependencies */
+  .dep-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .dep-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .dep-id {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--color-text-secondary);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dep-id-ro {
+    display: block;
+    margin-bottom: var(--space-1);
+  }
+  .dep-empty {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+    font-style: italic;
+  }
+  .dep-remove-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-danger);
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 0 var(--space-1);
+    line-height: 1.4;
+    flex-shrink: 0;
+    transition: background var(--transition-fast);
+  }
+  .dep-remove-btn:hover:not(:disabled) { background: rgba(240,86,29,0.1); }
+  .dep-remove-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .dep-add-row {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+  }
+  .dep-input {
+    flex: 1;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    min-width: 0;
+  }
+  .dep-input:focus { outline: none; border-color: var(--color-primary); }
+  .dep-add-btn {
+    background: rgba(0,102,204,0.1);
+    border: 1px solid rgba(0,102,204,0.3);
+    border-radius: var(--radius);
+    color: var(--color-link);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    font-family: var(--font-body);
+    white-space: nowrap;
+    transition: background var(--transition-fast);
+  }
+  .dep-add-btn:hover:not(:disabled) { background: rgba(0,102,204,0.18); }
+  .dep-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* Syntax highlighting token colors */
   :global(.hl-kw)  { color: #cc99ff; }

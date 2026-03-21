@@ -178,6 +178,31 @@ export const api = {
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
   appendAgentLog: (id, message) =>
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
+  // MR dependencies
+  mrDependencies: (id) => request(`/merge-requests/${id}/dependencies`),
+  setMrDependencies: (id, data) =>
+    request(`/merge-requests/${id}/dependencies`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  removeMrDependency: (id, depId) =>
+    request(`/merge-requests/${id}/dependencies/${depId}`, { method: 'DELETE' }),
+  setMrAtomicGroup: (id, group) =>
+    request(`/merge-requests/${id}/atomic-group`, {
+      method: 'PUT',
+      body: JSON.stringify({ group }),
+    }),
+  // Repo gates
+  repoGates: (id) => request(`/repos/${id}/gates`),
+  createRepoGate: (id, data) =>
+    request(`/repos/${id}/gates`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteRepoGate: (id, gateId) =>
+    request(`/repos/${id}/gates/${gateId}`, { method: 'DELETE' }),
+  repoPushGates: (id) => request(`/repos/${id}/push-gates`),
+  setRepoPushGates: (id, data) =>
+    request(`/repos/${id}/push-gates`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Merge queue graph
+  mergeQueueGraph: () => request('/merge-queue/graph'),
   // Data export
   adminExport: () => request('/admin/export'),
   // Retention
