@@ -113,6 +113,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M18: Agent Identity | Done | EdDSA JWT agent tokens, built-in OIDC provider, token introspection, JWT revocation on complete, stale-spec detection |
 | M19: Container Runtime | Done | Docker/Podman ContainerTarget with security defaults, procfs agent monitor, workload attestation, SSH compute targets + reverse tunnels |
 | M20: UI Accountability | Done | 19 frontend findings resolved: admin panels (SIEM/Compute/Network/Spawn Log), Repo Detail Policy/Activity/Gates tabs, MR dependency panel, merge queue DAG view, task detail view, token introspection, spec approvals view |
+| M21: Spec Registry | In Progress | Spec manifest (`specs/manifest.yaml`), ledger state machine (Approved/Pending/Deprecated), 8 new `/api/v1/specs/` endpoints, Spec Dashboard UI |
 
 741 Rust + 95 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
