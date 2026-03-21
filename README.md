@@ -75,6 +75,9 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 - **Agent identity** — built-in OIDC provider issues EdDSA JWT tokens per agent; tokens are revoked on agent completion; cross-instance JWT federation (G11)
 - **Supply chain security** — per-push stack attestation, AIBOM generation, signed merge attestation bundles stored as git notes (G5)
 - **Attribute-based access control** — ABAC policies evaluate JWT claims against repo-level rules; enforced on git push, agent spawn, and jj write endpoints (G6)
+- **Container isolation** — agent workloads run in Docker/Podman containers with security defaults: `--network=none`, 2 GB memory cap, 512 PID limit, non-root user (G8); procfs liveness monitor detects crashed agent processes in real time (G7)
+- **Workload attestation** — each agent records PID, hostname, and stack fingerprint at spawn; heartbeat re-checks process liveness; attestation embedded in JWT claims (G10)
+- **SSH compute targets** — run agents on remote hosts via SSH; reverse tunnels (`-R`) let air-gapped agents phone home through NAT without inbound firewall rules (G12)
 - **Full audit trail** — every agent action logged; eBPF syscall capture; SIEM forwarding
 
 ## Tech Stack
@@ -108,6 +111,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
 | M17: Integration Testing | Done | 67 REST API contract tests, 21 auth/RBAC tests, 12 git smart HTTP tests, 20 Playwright E2E tests |
 | M18: Agent Identity | Done | EdDSA JWT agent tokens, built-in OIDC provider, token introspection, JWT revocation on complete, stale-spec detection |
+| M19: Container Runtime | Done | Docker/Podman ContainerTarget with security defaults, procfs agent monitor, workload attestation, SSH compute targets + reverse tunnels |
 
 741 Rust + 95 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
