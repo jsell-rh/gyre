@@ -34,6 +34,7 @@ pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod tty;
 pub mod version_compute;
+pub mod workload_attestation;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -188,6 +189,9 @@ pub struct AppState {
     pub sigstore_mode: commit_signatures::SigstoreMode,
     /// Per-repo ABAC policies: repo_id -> list of AbacPolicy (G6).
     pub abac_policies: Arc<Mutex<HashMap<String, Vec<abac::AbacPolicy>>>>,
+    /// Workload attestation records: agent_id -> WorkloadAttestation (G10).
+    pub workload_attestations:
+        Arc<Mutex<HashMap<String, workload_attestation::WorkloadAttestation>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -508,6 +512,7 @@ pub fn build_state(
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         abac_policies: Arc::new(Mutex::new(HashMap::new())),
+        workload_attestations: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

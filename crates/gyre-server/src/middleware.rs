@@ -162,6 +162,7 @@ mod tests {
             commit_signatures: base.commit_signatures.clone(),
             sigstore_mode: base.sigstore_mode.clone(),
             abac_policies: base.abac_policies.clone(),
+            workload_attestations: base.workload_attestations.clone(),
         });
         crate::build_router(state)
     }
