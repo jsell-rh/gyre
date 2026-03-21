@@ -5,6 +5,7 @@
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { repo, onBack, onSelectMr } = $props();
 
@@ -55,6 +56,20 @@
   let newPolicyOp = $state('eq');
   let newPolicyValue = $state('');
 
+  // Gates tab
+  let gates = $state([]);
+  let pushGates = $state(null);
+  let gatesLoading = $state(false);
+  let gatesError = $state(null);
+  let showGateForm = $state(false);
+  let newGateName = $state('');
+  let newGateType = $state('TestCommand');
+  let newGateCmd = $state('');
+  let creatingGate = $state(false);
+  let deletingGateId = $state(null);
+  const GATE_TYPES = ['TestCommand', 'LintCommand', 'AgentReview', 'AgentValidation', 'RequiredApprovals'];
+  const BUILTIN_PUSH_GATES = ['ConventionalCommit', 'TaskRef', 'NoEmDash'];
+
   const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
 
   const tabs = $derived([
@@ -63,6 +78,7 @@
     { id: 'mrs',      label: 'Merge Requests', count: mrs.length || undefined },
     { id: 'activity', label: 'Activity' },
     { id: 'policy',   label: 'Policy' },
+    { id: 'gates',    label: 'Gates', count: gates.length || undefined },
     { id: 'jj',       label: 'jj' },
     { id: 'aibom',    label: 'AIBOM' },
   ]);
@@ -99,6 +115,10 @@
 
   $effect(() => {
     if (activeTab === 'policy') loadPolicy();
+  });
+
+  $effect(() => {
+    if (activeTab === 'gates') loadGates();
   });
 
   async function loadSpeculative() {
@@ -280,6 +300,66 @@
       policyError = e.message;
     } finally {
       policySaving = false;
+    }
+  }
+
+  async function loadGates() {
+    gatesLoading = true; gatesError = null;
+    try {
+      [gates, pushGates] = await Promise.all([
+        api.repoGates(repo.id),
+        api.repoPushGates(repo.id).catch(() => null),
+      ]);
+    } catch (e) {
+      gatesError = e.message;
+    } finally {
+      gatesLoading = false;
+    }
+  }
+
+  async function createGate() {
+    creatingGate = true;
+    try {
+      const body = { name: newGateName, gate_type: newGateType };
+      if (newGateCmd) body.command = newGateCmd;
+      const gate = await api.createRepoGate(repo.id, body);
+      gates = [...gates, gate];
+      newGateName = '';
+      newGateType = 'TestCommand';
+      newGateCmd = '';
+      showGateForm = false;
+      toastSuccess('Gate created.');
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      creatingGate = false;
+    }
+  }
+
+  async function deleteGate(gateId) {
+    deletingGateId = gateId;
+    try {
+      await api.deleteRepoGate(repo.id, gateId);
+      gates = gates.filter(g => g.id !== gateId);
+      toastSuccess('Gate deleted.');
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      deletingGateId = null;
+    }
+  }
+
+  async function togglePushGate(gateName) {
+    if (!pushGates) return;
+    const active = pushGates.active_gates ?? [];
+    const next = active.includes(gateName)
+      ? active.filter(g => g !== gateName)
+      : [...active, gateName];
+    try {
+      pushGates = await api.setRepoPushGates(repo.id, { active_gates: next });
+      toastSuccess('Push gates updated.');
+    } catch (e) {
+      toastError(e.message);
     }
   }
 
@@ -606,6 +686,87 @@
             </div>
           </div>
         </div>
+      {/if}
+
+    {:else if activeTab === 'gates'}
+      {#if gatesError}
+        <div class="error-msg">Error: {gatesError}</div>
+      {:else if gatesLoading}
+        <Skeleton lines={6} height="2.5rem" />
+      {:else}
+        <!-- Quality gates -->
+        <div class="gates-section-hdr">
+          <h3 class="gates-section-title">Quality Gates</h3>
+          <button class="jj-btn primary" onclick={() => showGateForm = !showGateForm}>
+            {showGateForm ? 'Cancel' : '+ New Gate'}
+          </button>
+        </div>
+        {#if showGateForm}
+          <div class="gate-form">
+            <input class="branch-select" placeholder="Gate name" bind:value={newGateName} />
+            <select class="branch-select" bind:value={newGateType}>
+              {#each GATE_TYPES as t (t)}
+                <option value={t}>{t}</option>
+              {/each}
+            </select>
+            <input class="branch-select" placeholder="Command (optional)" bind:value={newGateCmd} />
+            <button class="jj-btn primary" onclick={createGate} disabled={creatingGate || !newGateName.trim()}>
+              {creatingGate ? 'Creating…' : 'Create'}
+            </button>
+          </div>
+        {/if}
+        {#if gates.length === 0}
+          <EmptyState title="No quality gates" description="Add a quality gate to enforce checks before merge." />
+        {:else}
+          <Table
+            columns={[
+              { key: 'name', label: 'Name' },
+              { key: 'type', label: 'Type' },
+              { key: 'command', label: 'Command' },
+              { key: 'actions', label: '' },
+            ]}
+          >
+            {#snippet children()}
+              {#each gates as gate (gate.id)}
+                <tr>
+                  <td class="branch-name-cell">{gate.name}</td>
+                  <td><Badge value={gate.gate_type ?? gate.kind ?? '—'} /></td>
+                  <td class="secondary-cell mono">{gate.command ?? gate.config?.command ?? '—'}</td>
+                  <td>
+                    <button
+                      class="gate-del-btn"
+                      onclick={() => deleteGate(gate.id)}
+                      disabled={deletingGateId === gate.id}
+                    >
+                      {deletingGateId === gate.id ? '…' : 'Delete'}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            {/snippet}
+          </Table>
+        {/if}
+
+        <!-- Push gates -->
+        {#if pushGates !== null}
+          <div class="gates-section-hdr" style="margin-top: var(--space-6);">
+            <h3 class="gates-section-title">Pre-accept Push Gates</h3>
+          </div>
+          <div class="push-gates-list">
+            {#each BUILTIN_PUSH_GATES as gateName (gateName)}
+              {@const active = (pushGates.active_gates ?? []).includes(gateName)}
+              <label class="push-gate-toggle">
+                <input
+                  type="checkbox"
+                  checked={active}
+                  onchange={() => togglePushGate(gateName)}
+                />
+                <span class="push-gate-name">{gateName}</span>
+                <Badge value={active ? 'active' : 'inactive'} variant={active ? 'success' : 'default'} />
+              </label>
+            {/each}
+          </div>
+        {/if}
       {/if}
 
     {:else if activeTab === 'aibom'}
@@ -1162,6 +1323,63 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
+  }
+
+  /* Gates tab */
+  .gates-section-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .gates-section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+  .gate-form {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4);
+  }
+  .gate-del-btn {
+    background: rgba(240, 86, 29, 0.1);
+    border: 1px solid rgba(240, 86, 29, 0.3);
+    border-radius: var(--radius-sm);
+    color: var(--color-danger);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    font-family: var(--font-body);
+  }
+  .gate-del-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .push-gates-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4);
+  }
+  .push-gate-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    cursor: pointer;
+    font-size: var(--text-sm);
+  }
+  .push-gate-name {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--color-text);
   }
 
   /* jj */

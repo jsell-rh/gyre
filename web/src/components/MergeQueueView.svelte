@@ -9,6 +9,9 @@
   let loading = $state(true);
   let error = $state(null);
   let cancellingId = $state(null);
+  let graph = $state(null);
+  let graphLoading = $state(false);
+  let viewMode = $state('lanes'); // 'lanes' | 'dag'
 
   $effect(() => {
     load();
@@ -24,6 +27,34 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function loadGraph() {
+    graphLoading = true;
+    try {
+      graph = await api.mergeQueueGraph();
+    } catch { graph = null; } finally {
+      graphLoading = false;
+    }
+  }
+
+  function switchView(mode) {
+    viewMode = mode;
+    if (mode === 'dag' && !graph) loadGraph();
+  }
+
+  // Build adjacency: for each node, which nodes does it depend on (edges: from→to means from depends on to)
+  function nodeBlockedBy(nodeId) {
+    if (!graph) return [];
+    return graph.edges.filter(e => e.from === nodeId).map(e => e.to);
+  }
+
+  function nodeBlockedByNames(nodeId) {
+    const deps = nodeBlockedBy(nodeId);
+    return deps.map(depId => {
+      const n = graph.nodes.find(n => n.mr_id === depId);
+      return n ? n.title || depId.slice(0, 10) + '…' : depId.slice(0, 10) + '…';
+    });
   }
 
   async function cancel(id) {
@@ -59,12 +90,18 @@
       <h2>Merge Queue</h2>
       <span class="queue-count">{entries.length} entries</span>
     </div>
-    <button class="refresh-btn" onclick={load} disabled={loading}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-        <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
-      </svg>
-      {loading ? 'Loading…' : 'Refresh'}
-    </button>
+    <div class="header-right">
+      <div class="view-toggle">
+        <button class="toggle-btn" class:active={viewMode === 'lanes'} onclick={() => switchView('lanes')}>Lanes</button>
+        <button class="toggle-btn" class:active={viewMode === 'dag'} onclick={() => switchView('dag')}>DAG</button>
+      </div>
+      <button class="refresh-btn" onclick={load} disabled={loading}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+        </svg>
+        {loading ? 'Loading…' : 'Refresh'}
+      </button>
+    </div>
   </div>
 
   <div class="scroll">
@@ -84,6 +121,55 @@
         title="Queue is empty"
         description="Approved merge requests will appear here when added to the merge queue."
       />
+    {:else if viewMode === 'dag'}
+      <!-- DAG dependency view -->
+      {#if graphLoading}
+        <div class="skeleton-panel">
+          <Skeleton height="120px" />
+          <Skeleton height="80px" />
+        </div>
+      {:else if !graph || graph.nodes.length === 0}
+        <EmptyState title="No graph data" description="Dependency graph is empty or unavailable." />
+      {:else}
+        <div class="dag-list">
+          {#each graph.nodes as node (node.mr_id)}
+            {@const blockedBy = nodeBlockedByNames(node.mr_id)}
+            {@const isBlocked = blockedBy.length > 0}
+            <div class="dag-node" class:dag-blocked={isBlocked}>
+              <div class="dag-node-top">
+                <div class="dag-node-info">
+                  <code class="mr-id">{node.mr_id.slice(0, 12)}…</code>
+                  {#if node.title}
+                    <span class="dag-node-title">{node.title}</span>
+                  {/if}
+                </div>
+                <div class="dag-node-meta">
+                  <Badge value={node.status} />
+                  {#if node.priority != null}
+                    <span class="dag-priority">P{node.priority}</span>
+                  {/if}
+                </div>
+              </div>
+              {#if isBlocked}
+                <div class="dag-deps">
+                  <span class="dag-deps-label">Blocked by:</span>
+                  {#each blockedBy as dep (dep)}
+                    <span class="dag-dep-chip">{dep}</span>
+                  {/each}
+                </div>
+              {:else}
+                <span class="dag-free">No dependencies — ready to process</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+        {#if graph.edges.length > 0}
+          <div class="dag-legend">
+            <span class="dag-legend-item dag-legend-blocked">Blocked</span>
+            <span class="dag-legend-item dag-legend-free">Ready</span>
+          </div>
+        {/if}
+      {/if}
     {:else}
       <!-- Visual flow lanes -->
       <div class="flow-lanes">
@@ -551,4 +637,135 @@
     font-family: var(--font-body);
   }
   .cancel-btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* View toggle */
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .view-toggle {
+    display: flex;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .toggle-btn {
+    background: none;
+    border: none;
+    border-right: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+  .toggle-btn:last-child { border-right: none; }
+  .toggle-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
+  .toggle-btn.active { background: var(--color-surface-elevated); color: var(--color-text); font-weight: 600; }
+
+  /* DAG view */
+  .dag-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .dag-node {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    transition: border-color var(--transition-fast);
+  }
+  .dag-node.dag-blocked {
+    border-left: 3px solid var(--color-warning);
+  }
+  .dag-node-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+  .dag-node-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .dag-node-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dag-node-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+  .dag-priority {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+  .dag-deps {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .dag-deps-label {
+    font-size: var(--text-xs);
+    color: var(--color-warning);
+    font-weight: 600;
+  }
+  .dag-dep-chip {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 0.1rem 0.4rem;
+  }
+  .dag-free {
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    font-style: italic;
+  }
+  .dag-legend {
+    display: flex;
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+    font-size: var(--text-xs);
+  }
+  .dag-legend-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--color-text-muted);
+  }
+  .dag-legend-blocked::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--color-warning);
+  }
+  .dag-legend-free::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--color-success);
+  }
 </style>
