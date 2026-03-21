@@ -28,6 +28,7 @@ pub mod retention;
 pub mod siem;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub mod stale_agents;
@@ -194,6 +195,10 @@ pub struct AppState {
         Arc<Mutex<HashMap<String, workload_attestation::WorkloadAttestation>>>,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
+    /// Spec registry ledger: spec path -> SpecLedgerEntry (M21.1).
+    pub spec_ledger: spec_registry::SpecLedger,
+    /// Spec approval history: ordered list of SpecApprovalEvent (M21.1).
+    pub spec_approval_history: spec_registry::SpecApprovalHistory,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -516,6 +521,8 @@ pub fn build_state(
         abac_policies: Arc::new(Mutex::new(HashMap::new())),
         workload_attestations: Arc::new(Mutex::new(HashMap::new())),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
+        spec_ledger: Arc::new(Mutex::new(HashMap::new())),
+        spec_approval_history: Arc::new(Mutex::new(Vec::new())),
     })
 }
 

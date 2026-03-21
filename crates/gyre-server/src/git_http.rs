@@ -367,6 +367,18 @@ pub async fn git_receive_pack(
             &ref_updates,
         )
         .await;
+        // Spec registry: sync ledger from manifest on pushes to the default branch (M21.1).
+        let default_ref = format!("refs/heads/{default_branch_clone}");
+        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+            let now = crate::api::now_secs();
+            crate::spec_registry::sync_spec_ledger(
+                &state_clone.spec_ledger,
+                &repo_path_clone,
+                &update.new_sha,
+                now,
+            )
+            .await;
+        }
     });
 
     Response::builder()
