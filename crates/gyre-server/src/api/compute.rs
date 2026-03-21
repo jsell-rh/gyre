@@ -1,3 +1,4 @@
+use crate::auth::AdminOnly;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -160,6 +161,7 @@ pub async fn delete_compute_target(
 /// object with at least `user` and `host` fields.
 pub async fn open_tunnel(
     State(state): State<Arc<AppState>>,
+    _admin: AdminOnly,
     Path(target_id): Path<String>,
     Json(req): Json<OpenTunnelRequest>,
 ) -> Result<(StatusCode, Json<TunnelRecord>), ApiError> {
@@ -264,6 +266,7 @@ pub async fn open_tunnel(
 /// List all tunnels for this compute target.
 pub async fn list_tunnels(
     State(state): State<Arc<AppState>>,
+    _admin: AdminOnly,
     Path(target_id): Path<String>,
 ) -> Result<Json<Vec<TunnelRecord>>, ApiError> {
     // Verify target exists
@@ -291,6 +294,7 @@ pub async fn list_tunnels(
 /// Close an active SSH tunnel.  Sends SIGTERM to the `ssh -N` process.
 pub async fn close_tunnel(
     State(state): State<Arc<AppState>>,
+    _admin: AdminOnly,
     Path((target_id, tunnel_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let mut tunnel_store = state.tunnel_store.lock().await;
@@ -601,6 +605,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/admin/compute-targets")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -629,6 +634,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/admin/compute-targets/{id}/tunnel"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -654,6 +660,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/admin/compute-targets/{target_id}/tunnel"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -675,6 +682,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/admin/compute-targets/no-such-target/tunnel")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -692,6 +700,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/admin/compute-targets/{target_id}/tunnel"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -708,6 +717,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/admin/compute-targets/no-such/tunnel")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -728,6 +738,7 @@ mod tests {
                     .uri(format!(
                         "/api/v1/admin/compute-targets/{target_id}/tunnel/no-such-tunnel"
                     ))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
