@@ -177,6 +177,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
+| `GET` | `/api/v1/merge-requests/{id}/attestation` | Get signed merge attestation bundle for a merged MR — fields: `attestation_version`, `mr_id`, `merge_commit_sha`, `merged_at`, `gate_results`, `spec_ref`, `spec_fully_approved`, `author_agent_id`; returns 404 if not yet merged or attestation pending (G5) |
 | `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100). **Branch lineage auto-detection:** on MR creation, the server uses `git merge-base` to check if the source branch descends from another open MR's source branch and auto-populates `depends_on` (branch refs validated to prevent arg injection). |
 | `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
 | `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
@@ -510,6 +511,7 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 | `spawn` | `refs/agents/{agent-id}/head` | Points to the HEAD commit at spawn; survives branch force-pushes |
 | `spawn` | `refs/ralph/{task-id}/implement` | Marks the implement step of the Ralph loop for this task |
 | `complete` | `refs/agents/{agent-id}/snapshots/{n}` | Immutable snapshot of the branch tip at completion (n increments per call) |
+| `merge` | `refs/notes/attestations` | Signed `MergeAttestation` JSON attached as git note to the merge commit SHA; inspect via `git notes --ref=refs/notes/attestations show <sha>` (G5) |
 
 These refs survive agent restarts. Query them via standard git: `git ls-remote <clone-url> 'refs/agents/*'`.
 
