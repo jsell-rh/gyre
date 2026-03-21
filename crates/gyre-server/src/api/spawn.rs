@@ -37,6 +37,8 @@ pub struct SpawnAgentResponse {
     pub clone_url: String,
     pub branch: String,
     pub compute_target_id: Option<String>,
+    /// jj change ID created for this agent's worktree, if jj was successfully initialized.
+    pub jj_change_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +120,36 @@ pub async fn spawn_agent(
     {
         tracing::warn!("create_worktree failed: {e}");
     }
+
+    // Initialize jj in the worktree and create an initial change (best-effort).
+    // Only attempted if the worktree directory exists on disk.
+    let jj_change_id = if std::path::Path::new(&worktree_path).exists() {
+        match state.jj_ops.jj_init(&worktree_path).await {
+            Ok(()) => {
+                let description = format!("Agent {}: task {}", agent.name, req.task_id);
+                match state.jj_ops.jj_new(&worktree_path, &description).await {
+                    Ok(change_id) => {
+                        tracing::debug!(
+                            agent_id = %agent.id,
+                            change_id = %change_id,
+                            "jj initialized in worktree"
+                        );
+                        Some(change_id)
+                    }
+                    Err(e) => {
+                        tracing::debug!(agent_id = %agent.id, "jj new skipped: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(agent_id = %agent.id, "jj init skipped: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Write custom ref namespaces (best-effort)
     if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
@@ -232,6 +264,7 @@ pub async fn spawn_agent(
             clone_url,
             branch: req.branch,
             compute_target_id: req.compute_target_id,
+            jj_change_id,
         }),
     ))
 }
@@ -309,6 +342,26 @@ pub async fn complete_agent(
 
     // Revoke the agent's token — completed agents must not continue to authenticate (N-1).
     state.agent_tokens.lock().await.remove(&id);
+
+    // Create a jj bookmark for the agent's branch in their worktree (best-effort).
+    // This persists the branch tip in jj's bookmark namespace for traceability.
+    if let Some(wt) = worktrees.first() {
+        if std::path::Path::new(&wt.path).exists() {
+            if let Err(e) = state
+                .jj_ops
+                .jj_bookmark_create(&wt.path, &mr.source_branch, "@")
+                .await
+            {
+                tracing::debug!(agent_id = %agent.id, "jj bookmark skipped: {e}");
+            } else {
+                tracing::debug!(
+                    agent_id = %agent.id,
+                    branch = %mr.source_branch,
+                    "jj bookmark created on complete"
+                );
+            }
+        }
+    }
 
     // Write snapshot ref for this agent (best-effort)
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
@@ -443,6 +496,24 @@ mod tests {
         assert!(!json["agent"]["id"].as_str().unwrap().is_empty());
         assert!(!json["token"].as_str().unwrap().is_empty());
         assert_eq!(json["branch"], "feat/build");
+        // jj_change_id is present in the response (null when worktree doesn't exist on disk)
+        assert!(json.get("jj_change_id").is_some());
+    }
+
+    #[tokio::test]
+    async fn spawn_response_includes_jj_change_id_field() {
+        // Verifies the jj_change_id field is present in the spawn response JSON.
+        // It will be null if the worktree path doesn't exist on disk (test env),
+        // but the field must always be serialized.
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "jj field task").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/jj-test").await;
+
+        assert!(
+            json.get("jj_change_id").is_some(),
+            "spawn response must include jj_change_id field: {json}"
+        );
     }
 
     #[tokio::test]
