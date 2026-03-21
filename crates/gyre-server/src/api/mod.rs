@@ -151,6 +151,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/jj/squash", post(jj::jj_squash))
         .route("/api/v1/repos/:id/jj/undo", post(jj::jj_undo))
         .route("/api/v1/repos/:id/jj/bookmark", post(jj::jj_bookmark))
+        .route(
+            "/api/v1/repos/:id/commits/:sha/signature",
+            get(jj::get_commit_signature),
+        )
         // Agents
         .route(
             "/api/v1/agents",

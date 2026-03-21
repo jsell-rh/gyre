@@ -134,8 +134,8 @@ impl JjOpsPort for NoopJjOps {
         Ok(vec![])
     }
 
-    async fn jj_squash(&self, _repo_path: &str) -> Result<()> {
-        Ok(())
+    async fn jj_squash(&self, _repo_path: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
     }
 
     async fn jj_bookmark_create(
@@ -1133,5 +1133,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         attestation_store: Arc::new(Mutex::new(HashMap::new())),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
+        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
     })
 }

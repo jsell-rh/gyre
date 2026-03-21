@@ -8,6 +8,7 @@ use gyre_ports::JjChange;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::commit_signatures::{self, CommitSignature};
 use crate::AppState;
 
 use super::error::ApiError;
@@ -106,17 +107,60 @@ pub async fn jj_new(
 }
 
 /// POST /api/v1/repos/:id/jj/squash
+///
+/// Squashes the working copy into its parent change and signs the resulting
+/// commit SHA with the forge's Ed25519 key (M13.8 Sigstore local signing).
 pub async fn jj_squash(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<CommitSignature>, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
-    state
+    let commit_sha = state
         .jj_ops
         .jj_squash(&path)
         .await
         .map_err(ApiError::Internal)?;
-    Ok(StatusCode::NO_CONTENT)
+
+    // Sign the resulting commit SHA with the forge's Ed25519 key.
+    let record = commit_signatures::sign_commit(
+        &commit_sha,
+        "forge",
+        &state.agent_signing_key,
+        state.sigstore_mode.clone(),
+    );
+
+    state
+        .commit_signatures
+        .lock()
+        .await
+        .insert(commit_sha.clone(), record.clone());
+
+    tracing::info!(
+        commit_sha = %commit_sha,
+        signing_key_id = %record.signing_key_id,
+        mode = ?record.sigstore_mode,
+        "jj squash: commit signed (M13.8)"
+    );
+
+    Ok(Json(record))
+}
+
+/// GET /api/v1/repos/:id/commits/:sha/signature
+///
+/// Return the Sigstore commit signature for a specific commit SHA, if one exists.
+pub async fn get_commit_signature(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, sha)): Path<(String, String)>,
+) -> Result<Json<CommitSignature>, ApiError> {
+    // Verify the repo exists.
+    let _ = repo_path(&state, &repo_id).await?;
+
+    let store = state.commit_signatures.lock().await;
+    store
+        .get(&sha)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("no signature found for commit {sha}")))
 }
 
 /// POST /api/v1/repos/:id/jj/undo
@@ -269,9 +313,9 @@ mod tests {
         assert!(json["change_id"].as_str().is_some());
     }
 
-    /// jj squash returns 204.
+    /// jj squash returns 200 with a commit signature (M13.8 Sigstore).
     #[tokio::test]
-    async fn jj_squash_returns_no_content() {
+    async fn jj_squash_returns_commit_signature() {
         let app = app();
         let (app, repo_id) = create_project_and_repo(app).await;
 
@@ -286,7 +330,79 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["commit_sha"].as_str().is_some(), "missing commit_sha");
+        assert!(json["signature"].as_str().is_some(), "missing signature");
+        assert!(
+            json["signing_key_id"].as_str().is_some(),
+            "missing signing_key_id"
+        );
+        assert_eq!(json["algorithm"].as_str().unwrap(), "EdDSA");
+        assert_eq!(json["sigstore_mode"].as_str().unwrap(), "local");
+    }
+
+    /// jj squash signature can be retrieved via GET /commits/:sha/signature (M13.8).
+    #[tokio::test]
+    async fn commit_signature_retrievable_after_squash() {
+        use tower::ServiceExt as _;
+        let state = crate::mem::test_state();
+        let app = crate::build_router(state);
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        // First squash to produce a signature.
+        let squash_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(squash_resp.status(), StatusCode::OK);
+        let squash_json = body_json(squash_resp).await;
+        let sha = squash_json["commit_sha"].as_str().unwrap().to_string();
+
+        // Then retrieve the signature by SHA.
+        let sig_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/commits/{sha}/signature"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sig_resp.status(), StatusCode::OK);
+        let sig_json = body_json(sig_resp).await;
+        assert_eq!(sig_json["commit_sha"].as_str().unwrap(), sha);
+        assert!(sig_json["signature"].as_str().is_some());
+    }
+
+    /// GET /commits/:sha/signature returns 404 for an unknown SHA (M13.8).
+    #[tokio::test]
+    async fn commit_signature_unknown_sha_returns_404() {
+        let app = app();
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/commits/deadbeef/signature"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// jj undo returns 204.

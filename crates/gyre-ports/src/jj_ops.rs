@@ -33,7 +33,9 @@ pub trait JjOpsPort: Send + Sync {
     async fn jj_log(&self, repo_path: &str, limit: usize) -> Result<Vec<JjChange>>;
 
     /// Squash the working copy into its parent change.
-    async fn jj_squash(&self, repo_path: &str) -> Result<()>;
+    ///
+    /// Returns the commit SHA of the resulting (parent) commit after squash.
+    async fn jj_squash(&self, repo_path: &str) -> Result<String>;
 
     /// Create a bookmark (branch) pointing to a specific change.
     async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()>;
