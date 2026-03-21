@@ -370,6 +370,24 @@ test.describe('Analytics and Cost', () => {
 // Accessibility baseline
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// i18n / console error guard
+// ---------------------------------------------------------------------------
+
+test.describe('i18n locale init', () => {
+  test('no_console_errors_on_dashboard_load', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+    await page.goto('/');
+    await page.waitForTimeout(2000);
+    expect(errors).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accessibility baseline
+// ---------------------------------------------------------------------------
+
 test.describe('Accessibility', () => {
   test('no_axe_violations_on_dashboard', async ({ page }) => {
     await page.goto('/');
