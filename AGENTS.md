@@ -137,12 +137,13 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
-| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: TestCommand, LintCommand, RequiredApprovals, AgentReview, AgentValidation) (M12.1, M12.3) |
+| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: TestCommand, LintCommand, RequiredApprovals, AgentReview, AgentValidation) (M12.1, M12.3). See **Gate Agent Protocol** below for `AgentReview`/`AgentValidation` env vars. |
 | `DELETE` | `/api/v1/repos/{id}/gates/{gate_id}` | Delete a quality gate (M12.1) |
 | `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, signature?}` — `sha` must be 40-char hex; **approver identity derived server-side from auth token** (client must not supply `approver_id`) (CISO M12.3-A, M12.3) |
 | `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
 | `POST` | `/api/v1/specs/revoke` | Revoke a spec approval: `{approval_id, reason}` — caller must be original approver or Admin (returns 403 otherwise); revoker identity derived server-side (client must not supply `revoked_by`) (CISO M12.3-A, M12.3) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
+| `GET/PUT` | `/api/v1/repos/{id}/spec-policy` | Get / set per-repo spec enforcement policy: `{require_spec_ref: bool, require_approved_spec: bool}`. When enabled, merge queue rejects MRs missing a `spec_ref` or whose spec has no active approval. **PUT requires Admin role**. Defaults to both `false` (backwards compatible). |
 | `GET` | `/api/v1/repos/{id}/blame?path={file}` | Per-line agent attribution — which agent last touched each line (M13.4) |
 | `GET` | `/api/v1/repos/{id}/hot-files?limit=20` | Files with the most concurrent active agents in the last 24h (M13.4) |
 | `GET` | `/api/v1/repos/{id}/review-routing?path={file}` | Ordered list of agents to request review from, ranked by recency and commit count (M13.4) |
@@ -173,7 +174,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
-| `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100) |
+| `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100). **Branch lineage auto-detection:** on MR creation, the server uses `git merge-base` to check if the source branch descends from another open MR's source branch and auto-populates `depends_on` (branch refs validated to prevent arg injection). |
 | `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
 | `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
 | `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued; **Developer+ required** (CISO P147-A, TASK-100) |
@@ -463,7 +464,8 @@ Agents are created in dependency order (parents before children). Parent links a
   "token": "<per-agent-bearer-token>",
   "worktree_path": "/path/to/worktree",
   "clone_url": "http://localhost:3000/git/project/repo.git",
-  "branch": "feat/my-feature"
+  "branch": "feat/my-feature",
+  "jj_change_id": "<jj-change-id-or-null>"   // present when jj is initialized in worktree (best-effort)
 }
 ```
 
@@ -504,6 +506,29 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 
 These refs survive agent restarts. Query them via standard git: `git ls-remote <clone-url> 'refs/agents/*'`.
 
+### Gate Agent Protocol (M12.1)
+
+When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spawns the configured command as a subprocess with these environment variables:
+
+| Variable | Value |
+|---|---|
+| `GYRE_SERVER_URL` | Server base URL |
+| `GYRE_REVIEW_TOKEN` / `GYRE_VALIDATION_TOKEN` | Scoped per-run Bearer token — revoked on process exit |
+| `GYRE_MR_ID` | UUID of the MR being reviewed |
+| `GYRE_GATE_ID` | UUID of the gate triggering this run |
+| `GYRE_GATE_AGENT_ID` | Identity to use when submitting reviews via API |
+| `GYRE_DIFF_URL` | URL to fetch the MR diff |
+| `GYRE_SPEC_REF` | Spec reference bound to the MR (if any) |
+| `GYRE_PERSONA` | Persona file path for the gate |
+
+**`AgentReview` protocol:** exit with any code; server checks for an Approved/ChangesRequested review submitted by `GYRE_GATE_AGENT_ID` after the process exits.
+
+**`AgentValidation` protocol:** exit 0 = pass, non-zero = fail.
+
+**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace — no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents.
+
+**Merge processor dep failure handling (P5):** before processing each queued entry, the merge processor checks dependency health: if a dependency MR is `Closed`, the queue entry is marked `Failed` and a High-priority task `"Dependency MR-{id} was closed, reassess MR-{dependent}"` is auto-created; if a dependency has 3+ gate failures, an escalation warning is logged.
+
 ### Spec Lifecycle Automation (M13.8)
 
 When an agent pushes to the **default branch** of any repo, the post-receive hook scans for changes to watched spec paths. If spec files are added, modified, deleted, or renamed, the server automatically creates a task and broadcasts a `SpecChanged` domain event.
@@ -524,6 +549,8 @@ When an agent pushes to the **default branch** of any repo, the post-receive hoo
 The task description records the spec path and repo ID. The `SpecChanged` domain event is broadcast over WebSocket immediately after the task is created, so dashboards and listeners can react in real time.
 
 **No action required** from agents pushing spec changes — task creation is automatic and idempotent within a single push. Multiple spec files changed in one push create one task per file.
+
+**Auto-revocation of spec approvals:** When a watched spec file is **modified**, **deleted**, or **renamed** in a push to the default branch, all active approvals for that path are automatically revoked. `revoked_by` is set to `"system:spec-lifecycle"` and `revocation_reason` records the push branch. For renames, approvals on the old path are revoked; the new path starts with no approvals.
 
 > `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
 > time. Agents and CI do not need Node installed to build or run `gyre-server`.
@@ -558,7 +585,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Repo Detail** (M8.2): uses `lib/Tabs` + `lib/Table` components, `Badge` for MR status, relative timestamps, `EmptyState` per empty tab.
 - **Merge Request Detail** (M8.3 + M12.3): two-column layout — diff panel left, metadata + status timeline right. Diff panel upgraded to side-by-side view with syntax highlighting (M12.3). Status timeline shows each MR lifecycle step with timestamps and reviewer info.
 - **Merge Queue View** (M8.3): visual flow lanes per queue position with progress bars, estimated wait indicators, and per-entry action buttons (cancel).
-- **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card.
+- **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card, language selector (current locale; add locales by dropping JSON files in `web/src/locales/`).
 - **Auth Token UI** (M9.3): auth status dot in topbar (green = authenticated, red = error). Click opens Token modal to view/change the API token stored in `localStorage`; saving reconnects the WebSocket. All REST and MCP calls inject `Authorization: Bearer {token}`. Defaults to `gyre-dev-token` when no token is stored.
 
 ---

@@ -122,6 +122,8 @@ mod tests {
             broadcast_tx: base.broadcast_tx.clone(),
             agent_messages: base.agent_messages.clone(),
             agent_tokens: base.agent_tokens.clone(),
+            agent_signing_key: base.agent_signing_key.clone(),
+            agent_jwt_ttl_secs: base.agent_jwt_ttl_secs,
             users: base.users.clone(),
             api_keys: base.api_keys.clone(),
             jwt_config: base.jwt_config.clone(),
@@ -154,6 +156,12 @@ mod tests {
             db_storage: base.db_storage.clone(),
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
+            attestation_store: base.attestation_store.clone(),
+            trusted_issuers: base.trusted_issuers.clone(),
+            remote_jwks_cache: base.remote_jwks_cache.clone(),
+            commit_signatures: base.commit_signatures.clone(),
+            sigstore_mode: base.sigstore_mode.clone(),
+            abac_policies: base.abac_policies.clone(),
         });
         crate::build_router(state)
     }

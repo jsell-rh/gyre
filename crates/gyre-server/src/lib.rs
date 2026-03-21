@@ -1,7 +1,10 @@
+pub(crate) mod abac;
 pub(crate) mod activity;
 pub mod api;
+pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
+pub mod commit_signatures;
 pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
@@ -16,6 +19,7 @@ pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
+pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
@@ -100,6 +104,11 @@ pub struct AppState {
     pub agent_messages: Arc<Mutex<HashMap<String, VecDeque<AgentMessage>>>>,
     /// Auth tokens issued on agent registration: agent_id -> token.
     pub agent_tokens: Arc<Mutex<HashMap<String, String>>>,
+    /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
+    /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
+    pub agent_signing_key: Arc<auth::AgentSigningKey>,
+    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 3600).
+    pub agent_jwt_ttl_secs: u64,
     /// User repository for JWT/SSO user management.
     pub users: Arc<dyn UserRepository>,
     /// API key repository: key -> user_id.
@@ -165,6 +174,19 @@ pub struct AppState {
     pub spec_approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
     /// Per-repo spec enforcement policies: repo_id -> SpecPolicy (M12.3).
     pub spec_policies: Arc<Mutex<HashMap<String, api::spec_policy::SpecPolicy>>>,
+    /// Merge attestation bundles: mr_id -> AttestationBundle (G5).
+    pub attestation_store: Arc<Mutex<HashMap<String, attestation::AttestationBundle>>>,
+    /// Trusted remote Gyre base URLs for cross-instance JWT federation (G11).
+    /// Populated from `GYRE_TRUSTED_ISSUERS` (comma-separated list of base URLs).
+    pub trusted_issuers: Vec<String>,
+    /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
+    pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
+    /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
+    pub commit_signatures: commit_signatures::CommitSignatureStore,
+    /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
+    pub sigstore_mode: commit_signatures::SigstoreMode,
+    /// Per-repo ABAC policies: repo_id -> list of AbacPolicy (G6).
+    pub abac_policies: Arc<Mutex<HashMap<String, Vec<abac::AbacPolicy>>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -216,6 +238,15 @@ async fn require_auth_middleware(
                     return next.run(req).await;
                 }
             }
+            // Check federation JWT from trusted remote Gyre instances (G11).
+            if t.starts_with("ey")
+                && !state.trusted_issuers.is_empty()
+                && auth::validate_federated_jwt_middleware(t, &state)
+                    .await
+                    .is_ok()
+            {
+                return next.run(req).await;
+            }
             (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
         None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
@@ -248,6 +279,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(health::healthz_handler))
         .route("/readyz", get(health::readyz_handler))
         .route("/metrics", get(metrics::metrics_handler))
+        // OIDC discovery endpoints (M18) — no auth required.
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc::openid_configuration),
+        )
+        .route("/.well-known/jwks.json", get(oidc::jwks))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
@@ -284,11 +321,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 /// Build a CORS layer from `GYRE_CORS_ORIGINS` env var.
+///
+/// When `GYRE_CORS_ORIGINS` is not set, the default list includes the server's
+/// own port (from `GYRE_PORT`) so that the dashboard works on non-default ports
+/// without requiring explicit CORS configuration.
 fn build_cors_layer() -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
     let origins_str = std::env::var("GYRE_CORS_ORIGINS").unwrap_or_else(|_| {
-        "http://localhost:2222,http://localhost:3000,http://localhost:5173".to_string()
+        // Always include the server's own port so preflight requests succeed
+        // when running on a non-default port (e.g. GYRE_PORT=2223).
+        let server_port: u16 = std::env::var("GYRE_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        let server_origin = format!("http://localhost:{server_port}");
+        let mut defaults = vec![
+            "http://localhost:2222".to_string(),
+            "http://localhost:3000".to_string(),
+            "http://localhost:5173".to_string(),
+        ];
+        if !defaults.contains(&server_origin) {
+            defaults.push(server_origin);
+        }
+        defaults.join(",")
     });
 
     if origins_str == "*" {
@@ -391,6 +447,11 @@ pub fn build_state(
         event_tx,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
+        agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600),
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
@@ -432,6 +493,20 @@ pub fn build_state(
         db_storage,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
+        attestation_store: Arc::new(Mutex::new(HashMap::new())),
+        trusted_issuers: std::env::var("GYRE_TRUSTED_ISSUERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().trim_end_matches('/').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
+        sigstore_mode: commit_signatures::SigstoreMode::from_env(),
+        abac_policies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

@@ -13,6 +13,7 @@ pub mod compose;
 pub mod compute;
 pub mod discover;
 pub mod error;
+pub mod federation;
 pub mod gates;
 pub mod jj;
 pub mod merge_deps;
@@ -124,6 +125,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/spec-policy",
             get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
         )
+        // ABAC policies (G6)
+        .route(
+            "/api/v1/repos/:id/abac-policy",
+            get(crate::abac::get_abac_policy).put(crate::abac::set_abac_policy),
+        )
         // Cross-agent code awareness (M13.4)
         .route("/api/v1/repos/:id/blame", get(code_awareness::get_blame))
         .route(
@@ -150,6 +156,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/jj/squash", post(jj::jj_squash))
         .route("/api/v1/repos/:id/jj/undo", post(jj::jj_undo))
         .route("/api/v1/repos/:id/jj/bookmark", post(jj::jj_bookmark))
+        .route(
+            "/api/v1/repos/:id/commits/:sha/signature",
+            get(jj::get_commit_signature),
+        )
         // Agents
         .route(
             "/api/v1/agents",
@@ -228,6 +238,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(merge_requests::get_diff),
         )
         .route(
+            "/api/v1/merge-requests/:id/attestation",
+            get(merge_requests::get_attestation),
+        )
+        .route(
             "/api/v1/merge-requests/:id/gates",
             get(gates::list_mr_gate_results),
         )
@@ -258,8 +272,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/merge-queue", get(merge_queue::list_queue))
         .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
-        // Auth / API keys
+        // Auth / API keys / token introspection (M18)
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
+        .route("/api/v1/auth/token-info", get(auth::token_info))
         // Analytics
         .route(
             "/api/v1/analytics/events",
@@ -339,6 +354,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/network/peers/:id", delete(network::delete_peer))
         .route("/api/v1/network/derp-map", get(network::derp_map))
+        // Federation (G11)
+        .route(
+            "/api/v1/federation/trusted-issuers",
+            get(federation::list_trusted_issuers),
+        )
 }
 
 pub(crate) fn now_secs() -> u64 {

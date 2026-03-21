@@ -1252,6 +1252,17 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         git_local(&["config", "user.email", "spec-inv@gyre.local"], &dir);
         git_local(&["config", "user.name", "Spec Inv Agent"], &dir);
 
+        // CI runners default init.defaultBranch=master; remote HEAD may still
+        // point to master (unborn) even though main was pushed in step 1.
+        // Checkout main explicitly so we build on the existing commit history
+        // and avoid a non-fast-forward push rejection.
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&dir)
+            .status();
+
+        // Ensure directory exists (in case checkout missed it somehow).
+        std::fs::create_dir_all(dir.join("specs/system")).unwrap();
         // Modify the spec file.
         std::fs::write(
             dir.join("specs/system/test-spec.md"),

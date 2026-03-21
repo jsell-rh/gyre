@@ -66,9 +66,14 @@
 
 {#if open}
   <div class="search-backdrop" onclick={() => (open = false)} aria-hidden="true"></div>
-  <div class="search-dialog" role="dialog" aria-label="Quick navigation">
+  <div
+    class="search-dialog"
+    role="dialog"
+    aria-label="Quick navigation"
+    aria-modal="true"
+  >
     <div class="search-input-wrap">
-      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
         <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
       </svg>
       <!-- svelte-ignore a11y_autofocus -->
@@ -81,32 +86,41 @@
         class="search-input"
         autocomplete="off"
         spellcheck="false"
+        aria-label="Search or navigate"
+        aria-autocomplete="list"
+        aria-controls="search-listbox"
+        aria-activedescendant={results.length > 0 ? `search-option-${selected}` : undefined}
+        role="combobox"
+        aria-expanded={results.length > 0}
+        aria-haspopup="listbox"
       />
-      <kbd class="search-esc">Esc</kbd>
+      <kbd class="search-esc" aria-hidden="true">Esc</kbd>
     </div>
 
     {#if results.length > 0}
-      <ul class="search-results" role="listbox">
+      <ul class="search-results" role="listbox" id="search-listbox" aria-label="Navigation options">
         {#each results as item, i}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
           <li
             role="option"
+            id="search-option-{i}"
             aria-selected={selected === i}
             class="search-result"
             class:active={selected === i}
             onclick={() => navigate(item)}
+            onkeydown={(e) => e.key === 'Enter' && navigate(item)}
             onmouseenter={() => (selected = i)}
+            tabindex="-1"
           >
-            <span class="result-icon">{item.icon}</span>
+            <span class="result-icon" aria-hidden="true">{item.icon}</span>
             <span class="result-label">{item.label}</span>
           </li>
         {/each}
       </ul>
     {:else}
-      <div class="search-empty">No results for "{query}"</div>
+      <div class="search-empty" role="status">No results for "{query}"</div>
     {/if}
 
-    <div class="search-footer">
+    <div class="search-footer" aria-hidden="true">
       <span><kbd>↑↓</kbd> navigate</span>
       <span><kbd>↵</kbd> select</span>
       <span><kbd>Esc</kbd> close</span>

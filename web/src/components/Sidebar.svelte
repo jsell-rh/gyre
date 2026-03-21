@@ -1,49 +1,47 @@
 <script>
-  import { t } from 'svelte-i18n';
-
   let { current = $bindable('dashboard') } = $props();
 
   let collapsed = $state(false);
 
-  let sections = $derived([
+  const sections = [
     {
-      label: $t('nav.sections.overview'),
+      label: 'Overview',
       items: [
-        { id: 'dashboard', label: $t('nav.items.dashboard'), icon: dashboardIcon() },
-        { id: 'activity',  label: $t('nav.items.activity'),  icon: activityIcon() },
+        { id: 'dashboard', label: 'Dashboard', icon: dashboardIcon() },
+        { id: 'activity',  label: 'Activity',  icon: activityIcon() },
       ],
     },
     {
-      label: $t('nav.sections.source_control'),
+      label: 'Source Control',
       items: [
-        { id: 'projects',    label: $t('nav.items.projects'),    icon: projectsIcon() },
-        { id: 'merge-queue', label: $t('nav.items.merge_queue'), icon: queueIcon() },
+        { id: 'projects',    label: 'Projects',    icon: projectsIcon() },
+        { id: 'merge-queue', label: 'Merge Queue', icon: queueIcon() },
       ],
     },
     {
-      label: $t('nav.sections.agents'),
+      label: 'Agents',
       items: [
-        { id: 'agents',  label: $t('nav.items.agents'),  icon: agentsIcon() },
-        { id: 'tasks',   label: $t('nav.items.tasks'),   icon: tasksIcon() },
-        { id: 'compose', label: $t('nav.items.compose'), icon: composeIcon() },
+        { id: 'agents',  label: 'Agents',  icon: agentsIcon() },
+        { id: 'tasks',   label: 'Tasks',   icon: tasksIcon() },
+        { id: 'compose', label: 'Compose', icon: composeIcon() },
       ],
     },
     {
-      label: $t('nav.sections.operations'),
+      label: 'Operations',
       items: [
-        { id: 'analytics',   label: $t('nav.items.analytics'),  icon: analyticsIcon() },
-        { id: 'costs',       label: $t('nav.items.costs'),       icon: costsIcon() },
-        { id: 'mcp-catalog', label: $t('nav.items.mcp_tools'),  icon: mcpIcon() },
+        { id: 'analytics',   label: 'Analytics',   icon: analyticsIcon() },
+        { id: 'costs',       label: 'Costs',        icon: costsIcon() },
+        { id: 'mcp-catalog', label: 'MCP Tools',    icon: mcpIcon() },
       ],
     },
     {
-      label: $t('nav.sections.admin'),
+      label: 'Admin',
       items: [
-        { id: 'admin',    label: $t('nav.items.admin_panel'), icon: adminIcon() },
-        { id: 'settings', label: $t('nav.items.settings'),    icon: settingsIcon() },
+        { id: 'admin',    label: 'Admin Panel', icon: adminIcon() },
+        { id: 'settings', label: 'Settings',    icon: settingsIcon() },
       ],
     },
-  ]);
+  ];
 
   function isActive(id) {
     if (id === 'projects') {
@@ -67,25 +65,27 @@
   function settingsIcon()   { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>'; }
 </script>
 
-<nav class="sidebar" class:collapsed>
+<nav class="sidebar" class:collapsed aria-label="Main navigation">
   <!-- Logo -->
   <div class="logo">
-    <div class="logo-mark">
-      <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+    <div class="logo-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" width="22" height="22" aria-hidden="true">
         <circle cx="12" cy="12" r="10" stroke="var(--color-primary)" stroke-width="2"/>
         <path d="M8 12l3 3 5-5" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </div>
     {#if !collapsed}
       <span class="logo-text">Gyre</span>
+    {:else}
+      <span class="sr-only">Gyre</span>
     {/if}
     <button
       class="collapse-btn"
       onclick={() => (collapsed = !collapsed)}
-      title={collapsed ? $t('nav.sidebar.expand') : $t('nav.sidebar.collapse')}
-      aria-label={collapsed ? $t('nav.sidebar.expand') : $t('nav.sidebar.collapse')}
+      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      aria-expanded={!collapsed}
     >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         {#if collapsed}
           <path d="M9 18l6-6-6-6"/>
         {:else}
@@ -100,21 +100,21 @@
     {#each sections as section}
       <div class="nav-section">
         {#if !collapsed}
-          <div class="section-label">{section.label}</div>
+          <div class="section-label" aria-hidden="true">{section.label}</div>
         {/if}
-        <ul>
+        <ul role="list" aria-label={collapsed ? section.label : undefined}>
           {#each section.items as item}
             <li>
               <button
                 class="nav-item"
                 class:active={isActive(item.id)}
                 onclick={() => (current = item.id)}
-                title={collapsed ? item.label : ''}
+                aria-label={item.label}
                 aria-current={isActive(item.id) ? 'page' : undefined}
               >
-                <span class="nav-icon">{@html item.icon}</span>
+                <span class="nav-icon" aria-hidden="true">{@html item.icon}</span>
                 {#if !collapsed}
-                  <span class="nav-label">{item.label}</span>
+                  <span class="nav-label" aria-hidden="true">{item.label}</span>
                 {/if}
               </button>
             </li>
@@ -126,10 +126,10 @@
 
   <!-- Bottom status -->
   <div class="sidebar-footer">
-    <div class="server-status" title="Server status">
-      <span class="status-dot"></span>
+    <div class="server-status" role="status" aria-label="Server connected">
+      <span class="status-dot" aria-hidden="true"></span>
       {#if !collapsed}
-        <span class="status-text">{$t('nav.sidebar.connected')}</span>
+        <span class="status-text" aria-hidden="true">Connected</span>
       {/if}
     </div>
   </div>

@@ -71,6 +71,11 @@ pub async fn spawn_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", req.repo_id)))?;
 
+    // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
+    crate::abac::check_repo_abac(&state, &req.repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
+
     // Verify task exists
     let mut task = state
         .tasks
@@ -100,8 +105,21 @@ pub async fn spawn_agent(
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
 
-    // Generate auth token
-    let token = uuid::Uuid::new_v4().to_string();
+    // Mint a signed EdDSA JWT as the agent's auth token (M18).
+    // Falls back to a UUID if JWT minting fails (defensive).
+    let token = state
+        .agent_signing_key
+        .mint(
+            &agent.id.to_string(),
+            &task.id.to_string(),
+            &auth.agent_id,
+            &state.base_url,
+            state.agent_jwt_ttl_secs,
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!("JWT minting failed, falling back to UUID token: {e}");
+            uuid::Uuid::new_v4().to_string()
+        });
     state
         .agent_tokens
         .lock()

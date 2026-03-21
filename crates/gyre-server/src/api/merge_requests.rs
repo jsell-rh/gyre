@@ -664,6 +664,31 @@ pub async fn get_diff(
     }))
 }
 
+// ── Attestation ───────────────────────────────────────────────────────────────
+
+/// `GET /api/v1/merge-requests/{id}/attestation`
+///
+/// Returns the signed attestation bundle created at merge time (G5).
+/// Returns 404 if the MR does not exist or has not yet been merged.
+pub async fn get_attestation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::attestation::AttestationBundle>, ApiError> {
+    // Verify the MR exists.
+    state
+        .merge_requests
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
+
+    let store = state.attestation_store.lock().await;
+    store
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("no attestation found for merge request {id}")))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1012,5 +1037,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Attestation tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn attestation_missing_mr_returns_404() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/no-such-mr/attestation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn attestation_unmerged_mr_returns_404() {
+        let app = app();
+        let (app, id) = create_test_mr(app, "Not yet merged").await;
+
+        // MR exists but has no attestation yet (not merged)
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/merge-requests/{id}/attestation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn attestation_bundle_round_trip() {
+        use crate::attestation::{sign_attestation, verify_bundle, MergeAttestation};
+        use crate::mem::test_state;
+
+        let state = test_state();
+
+        // Build and sign an attestation.
+        let attestation = MergeAttestation {
+            attestation_version: 1,
+            mr_id: "mr-abc".to_string(),
+            merge_commit_sha: "deadbeef".repeat(5),
+            merged_at: 1_700_000_000,
+            gate_results: vec![],
+            spec_ref: None,
+            spec_fully_approved: true,
+            author_agent_id: Some("agent-1".to_string()),
+        };
+
+        let bundle = sign_attestation(attestation, &state.agent_signing_key);
+
+        // Signature must verify with the public key.
+        assert!(verify_bundle(
+            &bundle,
+            &state.agent_signing_key.public_key_bytes
+        ));
+
+        // Tampered payload must fail verification.
+        let mut tampered = bundle.clone();
+        tampered.attestation.merge_commit_sha = "000000".to_string();
+        assert!(!verify_bundle(
+            &tampered,
+            &state.agent_signing_key.public_key_bytes
+        ));
+    }
+
+    #[tokio::test]
+    async fn attestation_stored_and_retrievable() {
+        use crate::attestation::{sign_attestation, MergeAttestation};
+        use crate::mem::test_state;
+
+        let state = test_state();
+
+        // Create an MR so the GET endpoint can find it.
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Merge me").await;
+
+        // Directly insert an attestation bundle into the store.
+        let attestation = MergeAttestation {
+            attestation_version: 1,
+            mr_id: mr_id.clone(),
+            merge_commit_sha: "abc123".to_string(),
+            merged_at: 1_700_000_000,
+            gate_results: vec![],
+            spec_ref: None,
+            spec_fully_approved: true,
+            author_agent_id: None,
+        };
+        let bundle = sign_attestation(attestation, &state.agent_signing_key);
+        {
+            let mut store = state.attestation_store.lock().await;
+            store.insert(mr_id.clone(), bundle.clone());
+        }
+
+        // GET the attestation via the API.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/attestation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["attestation"]["mr_id"], mr_id);
+        assert_eq!(json["attestation"]["merge_commit_sha"], "abc123");
+        assert_eq!(json["attestation"]["attestation_version"], 1);
+        assert!(json["signature"].as_str().is_some());
+        assert!(json["signing_key_id"].as_str().is_some());
     }
 }

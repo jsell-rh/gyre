@@ -15,19 +15,21 @@
   /* Text */
   --color-text:             #ffffff;
   --color-text-secondary:   #a3a3a3;
-  --color-text-muted:       #707070;
+  /* text-muted updated from #707070 (3.33:1 — WCAG fail) to #8a8a8a (~4.6:1 — WCAG AA pass) */
+  --color-text-muted:       #8a8a8a;
 
   /* Accent / Actions */
   --color-primary:          #ee0000;
   --color-primary-hover:    #a60000;
-  --color-link:             #0066cc;
-  --color-link-hover:       #4394e5;
+  /* Link blue updated from #0066cc (2.96:1 — WCAG fail) to #4db0ff (7.5:1 on dark surface — WCAG AA pass) */
+  --color-link:             #4db0ff;
+  --color-link-hover:       #79c8ff;
 
   /* Status */
   --color-success:          #63993d;
   --color-warning:          #f5921b;
   --color-danger:           #f0561d;
-  --color-info:             #0066cc;
+  --color-info:             #4db0ff;
   --color-blocked:          #5e40be;
 
   /* Semantic: Agent */
@@ -107,7 +109,7 @@
   --text-muted:    var(--color-text-secondary);
   --text-dim:      var(--color-text-muted);
   --accent:        var(--color-link);
-  --accent-muted:  rgba(0, 102, 204, 0.1);
+  --accent-muted:  rgba(77, 176, 255, 0.1);
 }
 
 /* ============================================================
@@ -202,4 +204,44 @@ a:hover {
   overflow: hidden;
   clip: rect(0,0,0,0);
   border: 0;
+}
+
+/* Skip-to-content link for keyboard users */
+.skip-to-content {
+  position: absolute;
+  top: -100%;
+  left: var(--space-4);
+  z-index: 9999;
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 2px solid var(--color-primary);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  transition: top var(--transition-fast);
+}
+.skip-to-content:focus {
+  top: var(--space-2);
+}
+
+/* Global focus-visible indicator — WCAG 2.4.7 */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Suppress focus ring for mouse/touch users */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

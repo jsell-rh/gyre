@@ -72,6 +72,9 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 - **Git forge** — bare repos on disk, Smart HTTP clone/push, branches, diffs, merge requests with reviews and a merge queue
 - **Agent orchestration** — spawn agents with a dedicated worktree and auth token; agents push, open MRs, and self-complete
 - **Quality gates** — per-repo gate definitions (test command, lint, required approvals, agent review and validation) enforced before merge
+- **Agent identity** — built-in OIDC provider issues EdDSA JWT tokens per agent; tokens are revoked on agent completion; cross-instance JWT federation (G11)
+- **Supply chain security** — per-push stack attestation, AIBOM generation, signed merge attestation bundles stored as git notes (G5)
+- **Attribute-based access control** — ABAC policies evaluate JWT claims against repo-level rules; enforced on git push, agent spawn, and jj write endpoints (G6)
 - **Full audit trail** — every agent action logged; eBPF syscall capture; SIEM forwarding
 
 ## Tech Stack
@@ -100,12 +103,13 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M11: Agent Execution | Done | Real agent processes, TTY attach, agent logs, execution lifecycle |
 | M12: Quality Gates | Done | Merge queue gates, repo mirroring, diff viewer with syntax highlighting |
 | M13: Forge Native | Done | Pre-accept validation, commit provenance, zero-latency feedback, cross-agent code awareness, agent gates + spec binding |
-| M14: Supply Chain Security | In Progress | Agent stack fingerprinting, push attestation, AIBOM generation |
+| M14: Supply Chain Security | Done | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | Done | Diesel ORM + migrations, SQLite + PostgreSQL adapters, full persistence, multi-tenancy (tenant_id scoping) |
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
-| M17: Integration Testing | In Progress | REST API contract tests, git smart HTTP tests, merge queue system tests, auth matrix, Playwright E2E |
+| M17: Integration Testing | Done | 67 REST API contract tests, 21 auth/RBAC tests, 12 git smart HTTP tests, 20 Playwright E2E tests |
+| M18: Agent Identity | Done | EdDSA JWT agent tokens, built-in OIDC provider, token introspection, JWT revocation on complete, stale-spec detection |
 
-722 Rust + 92 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+741 Rust + 95 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 

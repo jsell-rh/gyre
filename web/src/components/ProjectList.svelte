@@ -1,5 +1,4 @@
 <script>
-  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -114,56 +113,56 @@
   }
 </script>
 
-<Modal bind:open={showNewProject} title={$t('projects.new_project.title')}>
+<Modal bind:open={showNewProject} title="New Project">
   <div class="form">
-    <label class="form-label">{$t('projects.new_project.name_label')}
-      <input class="form-input" bind:value={projName} placeholder={$t('projects.new_project.name_placeholder')} />
+    <label class="form-label">Name
+      <input class="form-input" bind:value={projName} placeholder="my-project" />
     </label>
-    <label class="form-label">{$t('projects.new_project.desc_label')}
-      <input class="form-input" bind:value={projDesc} placeholder={$t('projects.new_project.desc_placeholder')} />
+    <label class="form-label">Description
+      <input class="form-input" bind:value={projDesc} placeholder="Optional description" />
     </label>
   </div>
   {#snippet footer()}
-    <Button variant="secondary" onclick={() => (showNewProject = false)}>{$t('common.cancel')}</Button>
+    <Button variant="secondary" onclick={() => (showNewProject = false)}>Cancel</Button>
     <Button variant="primary" onclick={createProject} disabled={projCreating || !projName.trim()}>
-      {projCreating ? $t('common.creating') : $t('common.create') + ' Project'}
+      {projCreating ? 'Creating…' : 'Create Project'}
     </Button>
   {/snippet}
 </Modal>
 
-<Modal bind:open={showAddRepo} title={$t('projects.add_repo.title')}>
+<Modal bind:open={showAddRepo} title="Add Repository">
   <div class="form">
-    <label class="form-label">{$t('projects.add_repo.name_label')}
-      <input class="form-input" bind:value={repoName} placeholder={$t('projects.add_repo.name_placeholder')} />
+    <label class="form-label">Repository Name
+      <input class="form-input" bind:value={repoName} placeholder="my-repo" />
     </label>
-    <label class="form-label">{$t('projects.add_repo.branch_label')}
-      <input class="form-input" bind:value={repoBranch} placeholder={$t('projects.add_repo.branch_placeholder')} />
+    <label class="form-label">Default Branch
+      <input class="form-input" bind:value={repoBranch} placeholder="main" />
     </label>
   </div>
   {#snippet footer()}
-    <Button variant="secondary" onclick={() => (showAddRepo = false)}>{$t('common.cancel')}</Button>
+    <Button variant="secondary" onclick={() => (showAddRepo = false)}>Cancel</Button>
     <Button variant="primary" onclick={addRepo} disabled={repoCreating || !repoName.trim()}>
-      {repoCreating ? $t('common.creating') : $t('projects.add_repo.button')}
+      {repoCreating ? 'Creating…' : 'Add Repository'}
     </Button>
   {/snippet}
 </Modal>
 
-<Modal bind:open={showMirrorRepo} title={$t('projects.mirror_repo.title')}>
+<Modal bind:open={showMirrorRepo} title="Mirror Repository">
   <div class="form">
-    <label class="form-label">{$t('projects.mirror_repo.name_label')}
-      <input class="form-input" bind:value={mirrorName} placeholder={$t('projects.mirror_repo.name_placeholder')} />
+    <label class="form-label">Repository Name
+      <input class="form-input" bind:value={mirrorName} placeholder="my-mirror" />
     </label>
-    <label class="form-label">{$t('projects.mirror_repo.url_label')}
-      <input class="form-input" bind:value={mirrorUrl} placeholder={$t('projects.mirror_repo.url_placeholder')} />
+    <label class="form-label">Remote URL
+      <input class="form-input" bind:value={mirrorUrl} placeholder="https://github.com/org/repo.git" />
     </label>
-    <label class="form-label">{$t('projects.mirror_repo.interval_label')}
-      <input class="form-input" type="number" bind:value={mirrorInterval} min="60" placeholder={$t('projects.mirror_repo.interval_placeholder')} />
+    <label class="form-label">Sync Interval (seconds)
+      <input class="form-input" type="number" bind:value={mirrorInterval} min="60" placeholder="300" />
     </label>
   </div>
   {#snippet footer()}
-    <Button variant="secondary" onclick={() => (showMirrorRepo = false)}>{$t('common.cancel')}</Button>
+    <Button variant="secondary" onclick={() => (showMirrorRepo = false)}>Cancel</Button>
     <Button variant="primary" onclick={addMirrorRepo} disabled={mirrorCreating || !mirrorName.trim() || !mirrorUrl.trim()}>
-      {mirrorCreating ? $t('common.creating') : $t('common.create') + ' Mirror'}
+      {mirrorCreating ? 'Mirroring…' : 'Create Mirror'}
     </Button>
   {/snippet}
 </Modal>
@@ -171,12 +170,12 @@
 <div class="page">
   <div class="page-hdr">
     <div>
-      <h1 class="page-title">{$t('projects.title')}</h1>
+      <h1 class="page-title">Projects</h1>
       {#if !loading}
         <p class="page-desc">{projects.length} project{projects.length !== 1 ? 's' : ''}</p>
       {/if}
     </div>
-    <Button variant="primary" onclick={() => (showNewProject = true)}>+ {$t('projects.new_project.button')}</Button>
+    <Button variant="primary" onclick={() => (showNewProject = true)}>+ New Project</Button>
   </div>
 
   {#if loading}
@@ -195,17 +194,22 @@
     <div class="error-msg">Error: {error}</div>
   {:else if projects.length === 0}
     <EmptyState
-      title={$t('projects.empty.title')}
-      description={$t('projects.empty.description')}
+      title="No projects yet"
+      description="Create your first project to get started with Gyre."
     />
   {:else}
     <div class="scroll">
       <div class="project-grid">
         {#each projects as p (p.id)}
-          <button
+          <div
             class="project-card"
             class:selected={selected?.id === p.id}
             onclick={() => selectProject(p)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectProject(p); } }}
+            role="button"
+            tabindex="0"
+            aria-label="Select project {p.name}"
+            aria-pressed={selected?.id === p.id}
           >
             <div class="card-hdr">
               <h2 class="project-name">{p.name}</h2>
@@ -214,35 +218,35 @@
             {#if p.description}
               <p class="project-desc">{p.description}</p>
             {:else}
-              <p class="project-desc muted">{$t('projects.empty.no_description')}</p>
+              <p class="project-desc muted">No description</p>
             {/if}
 
             {#if selected?.id === p.id}
               <div class="repos-section">
                 <div class="repos-hdr">
-                  <h4 class="repos-title">{$t('projects.repos.title')}</h4>
+                  <h4 class="repos-title">Repositories</h4>
                   <div class="repo-actions">
-                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <span class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showAddRepo = true; }}>+ {$t('projects.add_repo.button')}</span>
-                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <span class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showMirrorRepo = true; }}>⟳ Mirror</span>
+                    <!-- converted to button for a11y -->
+                    <button class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showAddRepo = true; }}>+ Add Repo</button>
+                    <!-- converted to button for a11y -->
+                    <button class="add-repo-btn" onclick={(e) => { e.stopPropagation(); showMirrorRepo = true; }}>⟳ Mirror</button>
                   </div>
                 </div>
                 {#if reposLoading}
                   <Skeleton lines={3} height="1.5rem" />
                 {:else if repos.length === 0}
-                  <p class="no-repos">{$t('projects.repos.empty')}</p>
+                  <p class="no-repos">No repositories in this project.</p>
                 {:else}
                   <ul class="repo-list">
                     {#each repos as r (r.id)}
                       <li class="repo-item">
-                        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                        <span
+                        <!-- converted to button for a11y -->
+                        <button
                           class="repo-link"
                           onclick={(e) => { e.stopPropagation(); onSelectRepo && onSelectRepo(r); }}
                         >
                           {r.name}
-                        </span>
+                        </button>
                         {#if r.is_mirror}
                           <span class="mirror-badge" title={r.mirror_url}>mirror</span>
                         {/if}
@@ -264,7 +268,7 @@
                 {/if}
               </div>
             {/if}
-          </button>
+          </div>
         {/each}
       </div>
     </div>
@@ -390,10 +394,14 @@
   }
 
   .add-repo-btn {
+    background: none;
+    border: none;
+    padding: 0;
     font-size: var(--text-xs);
     color: var(--color-link);
     cursor: pointer;
     transition: color var(--transition-fast);
+    font-family: var(--font-body);
   }
 
   .add-repo-btn:hover { color: var(--color-link-hover); }
@@ -439,10 +447,16 @@
   }
 
   .repo-link {
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
     color: var(--color-link);
     font-weight: 500;
     cursor: pointer;
     transition: color var(--transition-fast);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
   }
 
   .repo-link:hover { color: var(--color-link-hover); text-decoration: underline; }

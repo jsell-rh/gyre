@@ -231,6 +231,11 @@ pub async fn git_receive_pack(
     let repo_path = resolved.path;
     let default_branch = resolved.default_branch;
 
+    // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        return (StatusCode::FORBIDDEN, reason).into_response();
+    }
+
     // M13.2: Extract model context header before consuming the request body.
     let model_context = req
         .headers()

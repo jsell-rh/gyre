@@ -535,30 +535,48 @@ async fn run_command(cmd: &str) -> (GateStatus, String) {
     }
 }
 
-/// Returns whether all gate results for the given MR have passed.
-/// Returns `Ok(true)` if no gates exist or all passed.
-/// Returns `Ok(false)` if any are still pending/running.
-/// Returns `Err(msg)` if any gate has failed.
+/// Returns whether all required gate results for the given MR have passed.
+/// Returns `Ok(true)` if no gates exist or all required gates passed.
+/// Returns `Ok(false)` if any required gates are still pending/running.
+/// Returns `Err(msg)` if any required gate has failed.
+/// Non-required (advisory) gates that fail are recorded but do not block merging.
 pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, String> {
-    let lock = state.gate_results.lock().await;
-    let results: Vec<_> = lock
-        .values()
-        .filter(|r| r.mr_id.as_str() == mr_id.as_str())
-        .collect();
+    let results = {
+        let lock = state.gate_results.lock().await;
+        lock.values()
+            .filter(|r| r.mr_id.as_str() == mr_id.as_str())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    // Build a lookup of gate required-ness.
+    let gates = state.quality_gates.lock().await;
 
     for r in &results {
+        // Look up whether this gate is required (default: true for unknown gates).
+        let is_required = gates
+            .get(r.gate_id.as_str())
+            .map(|g| g.required)
+            .unwrap_or(true);
+
         match r.status {
             GateStatus::Failed => {
-                return Err(format!("gate {} failed", r.gate_id));
+                if is_required {
+                    return Err(format!("gate {} failed", r.gate_id));
+                }
+                // Advisory gate failure — log but don't block.
             }
             GateStatus::Pending | GateStatus::Running => {
-                return Ok(false); // not ready yet
+                if is_required {
+                    return Ok(false); // not ready yet
+                }
+                // Advisory gate still running — don't wait for it.
             }
             GateStatus::Passed => {}
         }
     }
 
-    Ok(true) // all passed (or no gates)
+    Ok(true) // all required gates passed (or no gates)
 }
 
 fn now_secs() -> u64 {
@@ -586,6 +604,7 @@ mod tests {
             command,
             required_approvals: None,
             persona: Some("personas/test.md".to_string()),
+            required: true,
             created_at: now_secs(),
         }
     }
@@ -814,5 +833,58 @@ mod tests {
         let result = check_gates_for_mr(&state, &mr_id).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(gate_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn check_gates_non_required_failed_does_not_block() {
+        // A gate with required=false that fails should NOT block the MR.
+        let state = test_state();
+        let mr_id = make_mr_id();
+        let gate_id = Id::new(Uuid::new_v4().to_string());
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        // Register the gate as advisory (required=false).
+        {
+            let mut gates = state.quality_gates.lock().await;
+            gates.insert(
+                gate_id.to_string(),
+                gyre_domain::QualityGate {
+                    id: gate_id.clone(),
+                    repo_id: Id::new(Uuid::new_v4().to_string()),
+                    name: "advisory-lint".to_string(),
+                    gate_type: GateType::LintCommand,
+                    command: Some("false".to_string()),
+                    required_approvals: None,
+                    persona: None,
+                    required: false,
+                    created_at: now_secs(),
+                },
+            );
+        }
+
+        // Record a Failed result for this advisory gate.
+        {
+            let mut lock = state.gate_results.lock().await;
+            lock.insert(
+                result_id.to_string(),
+                GateResult {
+                    id: result_id.clone(),
+                    gate_id: gate_id.clone(),
+                    mr_id: mr_id.clone(),
+                    status: GateStatus::Failed,
+                    output: Some("lint warnings".to_string()),
+                    started_at: None,
+                    finished_at: None,
+                },
+            );
+        }
+
+        // Non-required gate failure should return Ok(true) — MR can proceed.
+        let result = check_gates_for_mr(&state, &mr_id).await;
+        assert_eq!(
+            result,
+            Ok(true),
+            "advisory gate failure should not block MR"
+        );
     }
 }

@@ -134,8 +134,8 @@ impl JjOpsPort for NoopJjOps {
         Ok(vec![])
     }
 
-    async fn jj_squash(&self, _repo_path: &str) -> Result<()> {
-        Ok(())
+    async fn jj_squash(&self, _repo_path: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
     }
 
     async fn jj_bookmark_create(
@@ -1093,6 +1093,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         event_tx: broadcast::channel(16).0,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
+        agent_jwt_ttl_secs: 3600,
         users: Arc::new(MemUserRepository::default()),
         api_keys: Arc::new(MemApiKeyRepository::default()),
         jwt_config: None,
@@ -1128,5 +1130,11 @@ pub fn test_state() -> Arc<crate::AppState> {
         db_storage: None,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
+        attestation_store: Arc::new(Mutex::new(HashMap::new())),
+        trusted_issuers: vec![],
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
+        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
+        abac_policies: Arc::new(Mutex::new(HashMap::new())),
     })
 }

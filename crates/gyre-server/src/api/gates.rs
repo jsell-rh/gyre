@@ -30,6 +30,8 @@ pub struct CreateGateRequest {
     pub required_approvals: Option<u32>,
     /// Persona path (used by AgentReview / AgentValidation).
     pub persona: Option<String>,
+    /// When false, gate is advisory only — failures do not block merging. Defaults to true.
+    pub required: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -41,6 +43,8 @@ pub struct GateResponse {
     pub command: Option<String>,
     pub required_approvals: Option<u32>,
     pub persona: Option<String>,
+    /// Whether this gate is blocking (true) or advisory-only (false).
+    pub required: bool,
     pub created_at: u64,
 }
 
@@ -54,6 +58,7 @@ impl From<QualityGate> for GateResponse {
             command: g.command,
             required_approvals: g.required_approvals,
             persona: g.persona,
+            required: g.required,
             created_at: g.created_at,
         }
     }
@@ -208,6 +213,7 @@ pub async fn create_gate(
         command: req.command,
         required_approvals: req.required_approvals,
         persona: req.persona,
+        required: req.required.unwrap_or(true),
         created_at: now_secs(),
     };
 

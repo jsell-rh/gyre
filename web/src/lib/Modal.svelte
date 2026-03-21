@@ -8,25 +8,76 @@
     footer = undefined,
   } = $props();
 
+  let modalEl = $state(null);
+  let previousFocus = $state(null);
+  let titleId = $derived(`modal-title-${Math.random().toString(36).slice(2, 8)}`);
+
   function close() {
     open = false;
     onclose?.();
   }
 
   function onkeydown(e) {
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') {
+      close();
+      return;
+    }
+    // Focus trap: keep Tab within modal
+    if (e.key === 'Tab' && modalEl) {
+      const focusable = modalEl.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        }
+      }
+    }
   }
+
+  $effect(() => {
+    if (open) {
+      previousFocus = document.activeElement;
+      // Focus the modal close button (first focusable element) after render
+      setTimeout(() => {
+        const focusable = modalEl?.querySelector(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        focusable?.focus();
+      }, 20);
+    } else {
+      previousFocus?.focus();
+      previousFocus = null;
+    }
+  });
 </script>
 
 {#if open}
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label={title} onkeydown={onkeydown}>
+  <div class="modal-backdrop">
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modal-overlay" onclick={close} aria-hidden="true"></div>
-    <div class="modal modal-{size}">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="modal modal-{size}"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      aria-labelledby={titleId}
+      onkeydown={onkeydown}
+      bind:this={modalEl}
+    >
       <div class="modal-header">
-        <h3 class="modal-title">{title}</h3>
-        <button class="modal-close" onclick={close} aria-label="Close">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+        <h3 class="modal-title" id={titleId}>{title}</h3>
+        <button class="modal-close" onclick={close} aria-label="Close {title}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
             <path d="M18 6L6 18M6 6l12 12"/>
           </svg>
         </button>

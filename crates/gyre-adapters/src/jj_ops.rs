@@ -113,9 +113,25 @@ impl JjOpsPort for JjOpsAdapter {
         Ok(changes)
     }
 
-    async fn jj_squash(&self, repo_path: &str) -> Result<()> {
+    async fn jj_squash(&self, repo_path: &str) -> Result<String> {
         self.run_jj(repo_path, &["squash"]).await?;
-        Ok(())
+        // After squash the parent becomes the working copy — get its commit SHA.
+        let sha = self
+            .run_jj(
+                repo_path,
+                &[
+                    "log",
+                    "--no-graph",
+                    "--color",
+                    "never",
+                    "--limit",
+                    "1",
+                    "-T",
+                    "commit_id",
+                ],
+            )
+            .await?;
+        Ok(sha.trim().to_string())
     }
 
     async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
