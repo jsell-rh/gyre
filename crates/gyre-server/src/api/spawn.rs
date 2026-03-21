@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{auth::AuthenticatedAgent, git_refs, AppState};
+use crate::{auth::AuthenticatedAgent, git_refs, workload_attestation, AppState};
 
 use super::agents::AgentResponse;
 use super::error::ApiError;
@@ -105,26 +105,11 @@ pub async fn spawn_agent(
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
 
-    // Mint a signed EdDSA JWT as the agent's auth token (M18).
-    // Falls back to a UUID if JWT minting fails (defensive).
-    let token = state
-        .agent_signing_key
-        .mint(
-            &agent.id.to_string(),
-            &task.id.to_string(),
-            &auth.agent_id,
-            &state.base_url,
-            state.agent_jwt_ttl_secs,
-        )
-        .unwrap_or_else(|e| {
-            tracing::error!("JWT minting failed, falling back to UUID token: {e}");
-            uuid::Uuid::new_v4().to_string()
-        });
-    state
-        .agent_tokens
-        .lock()
-        .await
-        .insert(agent.id.to_string(), token.clone());
+    // JWT minting is deferred until after process spawn so workload claims
+    // (PID, hostname, compute target) can be embedded.  We declare `token`
+    // here and populate it below after the spawn block.
+    // Using a temporary placeholder that will be replaced before the function returns.
+    let token_placeholder = String::new();
 
     // Compute worktree path: {repo_path}/worktrees/{branch_slug}
     let branch_slug = req.branch.replace('/', "-");
@@ -201,6 +186,9 @@ pub async fn spawn_agent(
     let clone_url = format!("{}/git/{}/{}", state.base_url, repo.project_id, repo.name);
 
     // Launch a real process via LocalTarget and monitor its lifecycle.
+    // Capture the PID so we can embed it in the JWT and workload attestation.
+    let spawned_pid: Option<u32>;
+    let compute_target_label = req.compute_target_id.as_deref().unwrap_or("local");
     {
         // Command is server-controlled only — never from user input (C-1 RCE fix).
         let command = "echo".to_string();
@@ -220,6 +208,7 @@ pub async fn spawn_agent(
         let local = gyre_adapters::compute::LocalTarget;
         match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
             Ok(handle) => {
+                spawned_pid = handle.pid;
                 let agent_id_str = agent.id.to_string();
                 state
                     .process_registry
@@ -258,10 +247,69 @@ pub async fn spawn_agent(
                 });
             }
             Err(e) => {
+                spawned_pid = None;
                 tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
             }
         }
     }
+
+    // G10: Create workload attestation now that we know the PID.
+    let att = {
+        // Retrieve the stack hash recorded by the agent (M14.1), if any.
+        let stack_hash = {
+            let stacks = state.agent_stacks.lock().await;
+            stacks
+                .get(&agent.id.to_string())
+                .map(|s| s.fingerprint())
+                .unwrap_or_default()
+        };
+        workload_attestation::attest_agent(
+            &agent.id.to_string(),
+            spawned_pid,
+            compute_target_label,
+            &stack_hash,
+        )
+    };
+    let wl_hostname = Some(att.hostname.clone());
+    let wl_compute_target = Some(att.compute_target.clone());
+    let wl_stack_hash = if att.stack_fingerprint.is_empty() {
+        None
+    } else {
+        Some(att.stack_fingerprint.clone())
+    };
+    state
+        .workload_attestations
+        .lock()
+        .await
+        .insert(agent.id.to_string(), att);
+
+    // Mint a signed EdDSA JWT as the agent's auth token (M18 + G10).
+    // Embeds workload attestation claims so external verifiers can reconstruct
+    // workload identity from the JWT alone without calling the server.
+    // Falls back to a UUID if JWT minting fails (defensive).
+    let _ = token_placeholder; // consumed
+    let token = state
+        .agent_signing_key
+        .mint_with_workload(
+            &agent.id.to_string(),
+            &task.id.to_string(),
+            &auth.agent_id,
+            &state.base_url,
+            state.agent_jwt_ttl_secs,
+            spawned_pid,
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!("JWT minting failed, falling back to UUID token: {e}");
+            uuid::Uuid::new_v4().to_string()
+        });
+    state
+        .agent_tokens
+        .lock()
+        .await
+        .insert(agent.id.to_string(), token.clone());
 
     // Auto-track agent spawn
     let ev = AnalyticsEvent::new(
