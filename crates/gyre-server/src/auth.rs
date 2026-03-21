@@ -3,24 +3,142 @@
 //! Auth chain (first match wins):
 //! 1. Global `auth_token` -- for system/dev use, resolves as "system".
 //! 2. Per-agent tokens -- issued at registration, resolves as the agent id.
+//!    - UUID tokens: looked up in agent_tokens HashMap.
+//!    - JWT tokens (start with "ey"): looked up in HashMap + cryptographically validated.
 //! 3. API keys -- resolves as the owning user's name.
 //! 4. JWT (OIDC/Keycloak) -- validates RS256 token; auto-creates user on first login.
 //!
 //! If `jwt_config` is None the server runs without Keycloak (agent tokens only).
+//! Gyre always mints its own agent JWTs via `AgentSigningKey` (EdDSA/Ed25519).
 
 use axum::{
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use gyre_common::Id;
 use gyre_domain::{User, UserRole};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{collections::HashMap, sync::Arc};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
+
+// -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
+
+/// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentJwtClaims {
+    /// Subject — the agent's UUID.
+    pub sub: String,
+    /// Issuer — the server's base URL.
+    pub iss: String,
+    /// Issued-at (Unix epoch seconds).
+    pub iat: u64,
+    /// Expiry (Unix epoch seconds).
+    pub exp: u64,
+    /// Always "agent" for agent tokens.
+    pub scope: String,
+    /// Task assigned to this agent at spawn time.
+    pub task_id: String,
+    /// Identity that called POST /api/v1/agents/spawn.
+    pub spawned_by: String,
+}
+
+/// Ed25519 key pair used to mint and verify agent JWTs.
+///
+/// Generated fresh on every server start. The public key is exposed via
+/// `GET /.well-known/jwks.json` so external verifiers can validate tokens.
+pub struct AgentSigningKey {
+    pub encoding_key: jsonwebtoken::EncodingKey,
+    pub decoding_key: jsonwebtoken::DecodingKey,
+    /// Pre-serialised JWKS JSON response body.
+    pub jwks_json: String,
+    /// Key ID embedded in JWT headers.
+    pub kid: String,
+}
+
+impl AgentSigningKey {
+    /// Generate a fresh Ed25519 key pair.
+    pub fn generate() -> Self {
+        use ring::rand::SystemRandom;
+        use ring::signature::Ed25519KeyPair;
+
+        let rng = SystemRandom::new();
+        let pkcs8 =
+            Ed25519KeyPair::generate_pkcs8(&rng).expect("Ed25519 key generation must succeed");
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .expect("Ed25519 key pair construction must succeed");
+        use ring::signature::KeyPair as _;
+        let pub_key_bytes = key_pair.public_key().as_ref();
+
+        let kid = uuid::Uuid::new_v4().to_string();
+        let x = URL_SAFE_NO_PAD.encode(pub_key_bytes);
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "use": "sig",
+                "alg": "EdDSA",
+                "kid": kid,
+                "x": x
+            }]
+        })
+        .to_string();
+
+        let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(pub_key_bytes);
+
+        Self {
+            encoding_key,
+            decoding_key,
+            jwks_json,
+            kid,
+        }
+    }
+
+    /// Mint a signed EdDSA JWT for an agent.
+    pub fn mint(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: "agent".to_string(),
+            task_id: task_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Validate a self-issued agent JWT, returning its claims on success.
+    pub fn validate(&self, token: &str, expected_issuer: &str) -> Result<AgentJwtClaims, String> {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&[expected_issuer]);
+        validation.validate_aud = false;
+        jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
+            .map(|td| td.claims)
+            .map_err(|e| format!("agent JWT validation: {e}"))
+    }
+}
 
 // -- Security helpers ---------------------------------------------------------
 
@@ -211,7 +329,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
             });
         }
 
-        // 2. Per-agent tokens issued at registration.
+        // 2. Per-agent tokens issued at spawn (UUID legacy or JWT).
         {
             let agent_tokens = state.agent_tokens.lock().await;
             if let Some(agent_id) = agent_tokens
@@ -219,12 +337,39 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .find(|(_, t)| t.as_str() == token)
                 .map(|(id, _)| id.clone())
             {
+                // JWT tokens: additionally validate signature and expiry.
+                if token.starts_with("ey") {
+                    if let Err(e) = state.agent_signing_key.validate(token, &state.base_url) {
+                        tracing::debug!("Agent JWT validation failed: {e}");
+                        return Err((StatusCode::UNAUTHORIZED, "Invalid or expired agent token")
+                            .into_response());
+                    }
+                }
                 return Ok(AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
                     tenant_id: "default".to_string(),
                 });
+            }
+        }
+
+        // 2.5. JWT token not found in agent_tokens — treat as revoked or unknown.
+        //      Do not fall through to API-key or Keycloak for "ey" tokens,
+        //      as that would allow a compromised agent JWT to escalate.
+        if token.starts_with("ey") {
+            // Attempt cryptographic validation to give a better error message.
+            match state.agent_signing_key.validate(token, &state.base_url) {
+                Ok(_) => {
+                    // Valid signature but not in HashMap — token was revoked.
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Agent token has been revoked").into_response()
+                    );
+                }
+                Err(_) => {
+                    // Invalid signature — fall through to Keycloak JWT path.
+                    // (Could be a legitimate Keycloak JWT that starts with "ey".)
+                }
             }
         }
 

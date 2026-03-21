@@ -1,13 +1,17 @@
-//! API key management endpoints.
+//! API key management and token introspection endpoints.
 //!
-//! `POST /api/v1/auth/api-keys` — create an API key (admin only).
+//! `POST /api/v1/auth/api-keys`  — create an API key (admin only).
+//! `GET  /api/v1/auth/token-info` — introspect the caller's current token (M18).
 
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{auth::AdminOnly, AppState};
+use crate::{
+    auth::{AdminOnly, AuthenticatedAgent},
+    AppState,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
@@ -49,6 +53,57 @@ pub async fn create_api_key(
             name: req.name,
         }),
     ))
+}
+
+// -- Token introspection ------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct TokenInfoResponse {
+    /// Resolved agent/user identity.
+    pub subject: String,
+    /// Roles granted to this token.
+    pub roles: Vec<String>,
+    /// Token kind: "global", "agent_jwt", "agent_uuid", "api_key", "keycloak_jwt".
+    pub token_kind: String,
+    /// JWT-specific claims, present when token_kind is "agent_jwt".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwt_claims: Option<crate::auth::AgentJwtClaims>,
+}
+
+/// GET /api/v1/auth/token-info
+///
+/// Introspects the caller's current auth token, returning the resolved identity
+/// and — for agent JWTs — the full decoded claims.
+pub async fn token_info(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<TokenInfoResponse>, (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    let (token_kind, jwt_claims) = if token == state.auth_token {
+        ("global".to_string(), None)
+    } else if token.starts_with("ey") {
+        match state.agent_signing_key.validate(token, &state.base_url) {
+            Ok(claims) => ("agent_jwt".to_string(), Some(claims)),
+            Err(_) => ("keycloak_jwt".to_string(), None),
+        }
+    } else if token.starts_with("gyre_") {
+        ("api_key".to_string(), None)
+    } else {
+        ("agent_uuid".to_string(), None)
+    };
+
+    Ok(Json(TokenInfoResponse {
+        subject: auth.agent_id,
+        roles: auth.roles.iter().map(|r| r.as_str().to_string()).collect(),
+        token_kind,
+        jwt_claims,
+    }))
 }
 
 #[cfg(test)]
