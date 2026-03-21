@@ -192,6 +192,8 @@ pub struct AppState {
     /// Workload attestation records: agent_id -> WorkloadAttestation (G10).
     pub workload_attestations:
         Arc<Mutex<HashMap<String, workload_attestation::WorkloadAttestation>>>,
+    /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
+    pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -513,6 +515,7 @@ pub fn build_state(
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         abac_policies: Arc::new(Mutex::new(HashMap::new())),
         workload_attestations: Arc::new(Mutex::new(HashMap::new())),
+        tunnel_store: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
