@@ -1252,6 +1252,8 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         git_local(&["config", "user.email", "spec-inv@gyre.local"], &dir);
         git_local(&["config", "user.name", "Spec Inv Agent"], &dir);
 
+        // Ensure directory exists (clone of empty repo may not have it).
+        std::fs::create_dir_all(dir.join("specs/system")).unwrap();
         // Modify the spec file.
         std::fs::write(
             dir.join("specs/system/test-spec.md"),
