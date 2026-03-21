@@ -1,7 +1,5 @@
 <script>
-  let { onnavigate = undefined } = $props();
-
-  let open = $state(false);
+  let { open = $bindable(false), onnavigate = undefined } = $props();
   let query = $state('');
   let inputEl = $state(null);
 

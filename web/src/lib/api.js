@@ -82,6 +82,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, change_id }),
     }),
+  // ABAC policy
+  repoAbacPolicy: (id) => request(`/repos/${id}/abac-policy`),
+  setRepoAbacPolicy: (id, policies) =>
+    request(`/repos/${id}/abac-policy`, { method: 'PUT', body: JSON.stringify(policies) }),
+  // Spec policy
+  repoSpecPolicy: (id) => request(`/repos/${id}/spec-policy`),
+  setRepoSpecPolicy: (id, policy) =>
+    request(`/repos/${id}/spec-policy`, { method: 'PUT', body: JSON.stringify(policy) }),
+  // Hot files & blame
+  repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
+  repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
+  // Speculative merges
+  repoSpeculative: (id) => request(`/repos/${id}/speculative`),
+  // Agent commits
+  repoAgentCommits: (id) => request(`/repos/${id}/agent-commits`),
+  // Commit signature
+  commitSignature: (id, sha) => request(`/repos/${id}/commits/${sha}/signature`),
   // AIBOM (AI Bill of Materials) — M14.3
   repoAibom: (id, from, to) => {
     const qs = from ? `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to || '')}` : '';
@@ -161,6 +178,31 @@ export const api = {
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
   appendAgentLog: (id, message) =>
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
+  // MR dependencies
+  mrDependencies: (id) => request(`/merge-requests/${id}/dependencies`),
+  setMrDependencies: (id, data) =>
+    request(`/merge-requests/${id}/dependencies`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  removeMrDependency: (id, depId) =>
+    request(`/merge-requests/${id}/dependencies/${depId}`, { method: 'DELETE' }),
+  setMrAtomicGroup: (id, group) =>
+    request(`/merge-requests/${id}/atomic-group`, {
+      method: 'PUT',
+      body: JSON.stringify({ group }),
+    }),
+  // Repo gates
+  repoGates: (id) => request(`/repos/${id}/gates`),
+  createRepoGate: (id, data) =>
+    request(`/repos/${id}/gates`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteRepoGate: (id, gateId) =>
+    request(`/repos/${id}/gates/${gateId}`, { method: 'DELETE' }),
+  repoPushGates: (id) => request(`/repos/${id}/push-gates`),
+  setRepoPushGates: (id, data) =>
+    request(`/repos/${id}/push-gates`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Merge queue graph
+  mergeQueueGraph: () => request('/merge-queue/graph'),
   // Data export
   adminExport: () => request('/admin/export'),
   // Retention
@@ -170,4 +212,45 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(policies),
     }),
+  // SIEM forwarding targets
+  siemList: () => request('/admin/siem'),
+  siemCreate: (data) =>
+    request('/admin/siem', { method: 'POST', body: JSON.stringify(data) }),
+  siemUpdate: (id, data) =>
+    request(`/admin/siem/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  siemDelete: (id) =>
+    request(`/admin/siem/${id}`, { method: 'DELETE' }),
+  // Compute targets
+  computeList: () => request('/admin/compute-targets'),
+  computeCreate: (data) =>
+    request('/admin/compute-targets', { method: 'POST', body: JSON.stringify(data) }),
+  computeDelete: (id) =>
+    request(`/admin/compute-targets/${id}`, { method: 'DELETE' }),
+  // Network / WireGuard peers
+  networkPeers: () => request('/network/peers'),
+  networkPeerCreate: (data) =>
+    request('/network/peers', { method: 'POST', body: JSON.stringify(data) }),
+  networkPeerDelete: (id) =>
+    request(`/network/peers/${id}`, { method: 'DELETE' }),
+  networkDerpMap: () => request('/network/derp-map'),
+  // Agent spawn log
+  agentSpawnLog: (id) => request(`/admin/agents/${id}/spawn-log`),
+  // Token introspection (M18)
+  tokenInfo: () => request('/auth/token-info'),
+  // Spec approvals ledger (M12.3)
+  specsApprovals: (path) => {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+    return request(`/specs/approvals${qs}`);
+  },
+  specsApprove: (data) =>
+    request('/specs/approve', { method: 'POST', body: JSON.stringify(data) }),
+  specsRevoke: (data) =>
+    request('/specs/revoke', { method: 'POST', body: JSON.stringify(data) }),
+  // Audit events (M7.1)
+  auditEvents: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/audit/events${qs ? '?' + qs : ''}`);
+  },
+  auditStats: () => request('/audit/stats'),
+  auditStreamUrl: () => `${API_BASE}/audit/stream`,
 };
