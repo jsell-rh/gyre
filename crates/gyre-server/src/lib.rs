@@ -174,6 +174,11 @@ pub struct AppState {
     pub spec_policies: Arc<Mutex<HashMap<String, api::spec_policy::SpecPolicy>>>,
     /// Merge attestation bundles: mr_id -> AttestationBundle (G5).
     pub attestation_store: Arc<Mutex<HashMap<String, attestation::AttestationBundle>>>,
+    /// Trusted remote Gyre base URLs for cross-instance JWT federation (G11).
+    /// Populated from `GYRE_TRUSTED_ISSUERS` (comma-separated list of base URLs).
+    pub trusted_issuers: Vec<String>,
+    /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
+    pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -224,6 +229,15 @@ async fn require_auth_middleware(
                 {
                     return next.run(req).await;
                 }
+            }
+            // Check federation JWT from trusted remote Gyre instances (G11).
+            if t.starts_with("ey")
+                && !state.trusted_issuers.is_empty()
+                && auth::validate_federated_jwt_middleware(t, &state)
+                    .await
+                    .is_ok()
+            {
+                return next.run(req).await;
             }
             (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
@@ -472,6 +486,16 @@ pub fn build_state(
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
         attestation_store: Arc::new(Mutex::new(HashMap::new())),
+        trusted_issuers: std::env::var("GYRE_TRUSTED_ISSUERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().trim_end_matches('/').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     })
 }
 

@@ -13,6 +13,7 @@ pub mod compose;
 pub mod compute;
 pub mod discover;
 pub mod error;
+pub mod federation;
 pub mod gates;
 pub mod jj;
 pub mod merge_deps;
@@ -344,6 +345,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/network/peers/:id", delete(network::delete_peer))
         .route("/api/v1/network/derp-map", get(network::derp_map))
+        // Federation (G11)
+        .route(
+            "/api/v1/federation/trusted-issuers",
+            get(federation::list_trusted_issuers),
+        )
 }
 
 pub(crate) fn now_secs() -> u64 {

@@ -1131,5 +1131,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
         attestation_store: Arc::new(Mutex::new(HashMap::new())),
+        trusted_issuers: vec![],
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     })
 }
