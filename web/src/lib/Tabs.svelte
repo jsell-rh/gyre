@@ -3,6 +3,7 @@
     tabs = [],
     active = $bindable(''),
     onchange = undefined,
+    panelId = undefined,
   } = $props();
 
   $effect(() => {
@@ -13,24 +14,48 @@
     active = id;
     onchange?.(id);
   }
+
+  function onkeydown(e, id, index) {
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      const next = tabs[(index + 1) % tabs.length];
+      if (!next.disabled) select(next.id);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const prev = tabs[(index - 1 + tabs.length) % tabs.length];
+      if (!prev.disabled) select(prev.id);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      const first = tabs.find(t => !t.disabled);
+      if (first) select(first.id);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      const last = [...tabs].reverse().find(t => !t.disabled);
+      if (last) select(last.id);
+    }
+  }
 </script>
 
 <div class="tabs-bar" role="tablist">
-  {#each tabs as tab}
+  {#each tabs as tab, i}
     <button
       role="tab"
+      id="tab-{tab.id}"
       aria-selected={active === tab.id}
+      aria-controls={panelId ?? `tabpanel-${tab.id}`}
+      tabindex={active === tab.id ? 0 : -1}
       class="tab-btn"
       class:active={active === tab.id}
       onclick={() => select(tab.id)}
+      onkeydown={(e) => onkeydown(e, tab.id, i)}
       disabled={tab.disabled}
     >
       {#if tab.icon}
-        <span class="tab-icon">{@html tab.icon}</span>
+        <span class="tab-icon" aria-hidden="true">{@html tab.icon}</span>
       {/if}
       {tab.label}
       {#if tab.count !== undefined}
-        <span class="tab-count">{tab.count}</span>
+        <span class="tab-count" aria-label="{tab.count} items">{tab.count}</span>
       {/if}
     </button>
   {/each}

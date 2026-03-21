@@ -1,7 +1,5 @@
 <script>
   import './lib/design-system.css';
-  import './lib/i18n.js';
-  import { t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import Sidebar from './components/Sidebar.svelte';
   import DashboardHome from './components/DashboardHome.svelte';
@@ -68,20 +66,20 @@
   }
 
   const viewTitles = {
-    dashboard:    () => $t('nav.items.dashboard'),
-    activity:     () => $t('nav.items.activity'),
-    agents:       () => $t('nav.items.agents'),
-    tasks:        () => $t('nav.items.tasks'),
-    projects:     () => $t('nav.items.projects'),
-    'repo-detail': () => 'Repository',
-    'mr-detail':  () => 'Merge Request',
-    'merge-queue': () => $t('nav.items.merge_queue'),
-    'mcp-catalog': () => $t('nav.items.mcp_tools'),
-    compose:      () => $t('nav.items.compose'),
-    analytics:    () => $t('nav.items.analytics'),
-    costs:        () => $t('nav.items.costs'),
-    admin:        () => $t('nav.items.admin_panel'),
-    settings:     () => $t('nav.items.settings'),
+    dashboard:    'Dashboard',
+    activity:     'Activity Feed',
+    agents:       'Agents',
+    tasks:        'Task Board',
+    projects:     'Projects',
+    'repo-detail': 'Repository',
+    'mr-detail':  'Merge Request',
+    'merge-queue': 'Merge Queue',
+    'mcp-catalog': 'MCP Tool Catalog',
+    compose:      'Agent Compose',
+    analytics:    'Analytics',
+    costs:        'Cost Tracking',
+    admin:        'Admin Panel',
+    settings:     'Settings',
   };
 
   let breadcrumbs = $derived(() => {
@@ -102,41 +100,54 @@
   });
 </script>
 
+<a href="#main-content" class="skip-to-content">Skip to main content</a>
+
 <div class="app">
   <Sidebar bind:current={currentView} />
 
   <div class="main">
     <header class="topbar">
       <div class="topbar-left">
-        <span class="topbar-title">{(viewTitles[currentView] ?? (() => 'Gyre'))()}</span>
+        <span class="topbar-title" aria-live="polite" aria-atomic="true">{viewTitles[currentView] ?? 'Gyre'}</span>
         {#if breadcrumbs().length > 0}
           <Breadcrumb items={breadcrumbs()} onnavigate={navigate} />
         {/if}
       </div>
       <div class="topbar-right">
         <button class="search-trigger" onclick={() => {}} aria-label="Open search (Ctrl+K)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
           </svg>
           <span>Search</span>
-          <kbd>⌘K</kbd>
+          <kbd aria-hidden="true">⌘K</kbd>
         </button>
 
-        <div class="ws-indicator" class:connected={wsStatus === 'connected'} class:error={wsStatus === 'error' || wsStatus === 'auth-failed'} title="WebSocket: {wsStatus}">
-          <span class="ws-dot"></span>
+        <div
+          class="ws-indicator"
+          class:connected={wsStatus === 'connected'}
+          class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
+          role="status"
+          aria-label="WebSocket status: {wsStatus}"
+        >
+          <span class="ws-dot" aria-hidden="true"></span>
           <span class="ws-label">{wsStatus}</span>
         </div>
 
-        <button class="auth-btn" class:auth-active={hasToken} onclick={() => { tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token'; tokenModalOpen = true; }} title="Configure API token">
-          <span class="auth-dot"></span>
-          <span>{hasToken ? 'Authenticated' : $t('settings.token.title')}</span>
+        <button
+          class="auth-btn"
+          class:auth-active={hasToken}
+          onclick={() => { tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token'; tokenModalOpen = true; }}
+          aria-label={hasToken ? 'Authenticated — configure API token' : 'No token — configure API token'}
+        >
+          <span class="auth-dot" aria-hidden="true"></span>
+          <span aria-hidden="true">{hasToken ? 'Authenticated' : 'No Token'}</span>
         </button>
 
-        <span class="version">v0.1.0</span>
+        <span class="version" aria-label="Version 0.1.0">v0.1.0</span>
       </div>
     </header>
 
-    <div class="content">
+    <main class="content" id="main-content" tabindex="-1">
       {#if currentView === 'dashboard'}
         <DashboardHome {wsStore} onnavigate={(v) => navigate(v)} />
       {:else if currentView === 'activity'}
@@ -174,7 +185,7 @@
       {:else}
         <Settings {wsStatus} />
       {/if}
-    </div>
+    </main>
   </div>
 </div>
 
@@ -437,5 +448,10 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  /* Remove default outline on main — focus is only programmatic (skip link) */
+  main:focus {
+    outline: none;
   }
 </style>

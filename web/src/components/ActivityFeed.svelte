@@ -78,11 +78,12 @@
   </div>
 
   {#if eventTypes.length > 0}
-    <div class="filter-bar">
+    <div class="filter-bar" role="group" aria-label="Filter events by type">
       <button
         class="pill"
         class:active={activeFilters.size === 0}
         onclick={() => (activeFilters = new Set())}
+        aria-pressed={activeFilters.size === 0}
       >
         All
       </button>
@@ -91,6 +92,7 @@
           class="pill"
           class:active={activeFilters.has(type)}
           onclick={() => toggleFilter(type)}
+          aria-pressed={activeFilters.has(type)}
         >
           {type}
         </button>
@@ -126,10 +128,10 @@
         : 'No activity events yet. Events will appear here as agents perform actions.'}
     />
   {:else}
-    <div class="timeline">
+    <div class="timeline" aria-live="polite" aria-label="Activity events">
       {#each filtered as e (e.event_id)}
-        <div class="timeline-item">
-          <div class="timeline-node">
+        <article class="timeline-item">
+          <div class="timeline-node" aria-hidden="true">
             <div class="node-dot node-{eventVariant(e.event_type)}">{eventIcon(e.event_type)}</div>
             <div class="timeline-line"></div>
           </div>
@@ -137,11 +139,11 @@
             <div class="event-header">
               <Badge value={e.event_type} variant={eventVariant(e.event_type)} />
               <span class="agent-name">{e.agent_id}</span>
-              <span class="timestamp">{relativeTime(e.timestamp)}</span>
+              <time class="timestamp" datetime={e.timestamp}>{relativeTime(e.timestamp)}</time>
             </div>
             <p class="event-desc">{e.description}</p>
           </div>
-        </div>
+        </article>
       {/each}
     </div>
   {/if}
