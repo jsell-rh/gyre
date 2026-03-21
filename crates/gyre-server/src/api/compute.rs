@@ -16,7 +16,7 @@ use crate::AppState;
 pub struct ComputeTargetConfig {
     pub id: String,
     pub name: String,
-    /// "local" | "docker" | "ssh"
+    /// "local" | "docker" | "ssh" | "container"
     pub target_type: String,
     /// Target-specific configuration (image, host, user, etc.)
     pub config: serde_json::Value,
@@ -38,9 +38,12 @@ pub async fn create_compute_target(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateComputeTargetRequest>,
 ) -> Result<(StatusCode, Json<ComputeTargetConfig>), ApiError> {
-    if !matches!(req.target_type.as_str(), "local" | "docker" | "ssh") {
+    if !matches!(
+        req.target_type.as_str(),
+        "local" | "docker" | "ssh" | "container"
+    ) {
         return Err(ApiError::InvalidInput(format!(
-            "invalid target_type '{}'; must be local, docker, or ssh",
+            "invalid target_type '{}'; must be local, docker, ssh, or container",
             req.target_type
         )));
     }
@@ -195,6 +198,36 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["target_type"], "ssh");
         assert_eq!(json["config"]["host"], "10.0.0.5");
+    }
+
+    #[tokio::test]
+    async fn create_container_compute_target_with_config() {
+        let body = serde_json::json!({
+            "name": "container-runner",
+            "target_type": "container",
+            "config": {
+                "image": "ghcr.io/my-org/gyre-agent:latest",
+                "runtime": "auto",
+                "volumes": ["/data:/data"],
+                "env_vars": { "GYRE_SERVER_URL": "http://gyre:3000" }
+            }
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/compute-targets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["target_type"], "container");
+        assert_eq!(json["config"]["image"], "ghcr.io/my-org/gyre-agent:latest");
+        assert_eq!(json["config"]["runtime"], "auto");
     }
 
     #[tokio::test]
