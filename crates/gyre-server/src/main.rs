@@ -1,7 +1,7 @@
 use anyhow::Result;
 use gyre_server::{
-    audit_simulator, build_router, build_state, merge_processor, siem, spawn_stale_agent_detector,
-    telemetry, JwtConfig,
+    audit_simulator, build_router, build_state, merge_processor, procfs_monitor, siem,
+    spawn_stale_agent_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -41,6 +41,9 @@ async fn main() -> Result<()> {
     spawn_stale_agent_detector(state.clone());
     merge_processor::spawn_merge_processor(state.clone());
     siem::spawn_siem_forwarder(state.clone());
+    // Real procfs-based agent monitoring (replaces the synthetic simulator).
+    // Simulator still available for testing via GYRE_AUDIT_SIMULATE=true.
+    procfs_monitor::spawn_procfs_monitor(state.clone());
     audit_simulator::spawn_audit_simulator(state.clone());
 
     let app = build_router(state);
