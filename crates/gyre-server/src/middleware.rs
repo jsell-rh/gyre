@@ -156,6 +156,7 @@ mod tests {
             db_storage: base.db_storage.clone(),
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
+            attestation_store: base.attestation_store.clone(),
         });
         crate::build_router(state)
     }
