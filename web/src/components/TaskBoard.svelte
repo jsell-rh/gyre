@@ -327,17 +327,17 @@
   .cards {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-3);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--space-3);
   }
 
   .task-card {
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
