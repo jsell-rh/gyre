@@ -122,6 +122,8 @@ mod tests {
             broadcast_tx: base.broadcast_tx.clone(),
             agent_messages: base.agent_messages.clone(),
             agent_tokens: base.agent_tokens.clone(),
+            agent_signing_key: base.agent_signing_key.clone(),
+            agent_jwt_ttl_secs: base.agent_jwt_ttl_secs,
             users: base.users.clone(),
             api_keys: base.api_keys.clone(),
             jwt_config: base.jwt_config.clone(),

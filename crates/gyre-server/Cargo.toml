@@ -42,6 +42,8 @@ reqwest = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"
 subtle = { workspace = true }
+ring = { workspace = true }
+base64 = "0.22"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
@@ -49,9 +51,6 @@ http = "1"
 tower = { workspace = true, features = ["util"] }
 tempfile = "3"
 reqwest = { workspace = true, features = ["json"] }
-# ring for RSA JWT signing in tests (no simple_asn1 → time MSRV issue)
-ring = "0.17"
-base64 = "0.22"
 # For auth integration tests: seed users/api-keys and hash api keys.
 gyre-common = { workspace = true }
 gyre-ports = { workspace = true }

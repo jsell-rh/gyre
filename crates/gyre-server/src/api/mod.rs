@@ -258,8 +258,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/merge-queue", get(merge_queue::list_queue))
         .route("/api/v1/merge-queue/:id", delete(merge_queue::cancel_entry))
-        // Auth / API keys
+        // Auth / API keys / token introspection (M18)
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
+        .route("/api/v1/auth/token-info", get(auth::token_info))
         // Analytics
         .route(
             "/api/v1/analytics/events",
