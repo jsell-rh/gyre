@@ -89,6 +89,19 @@ pub fn sign_commit(
     }
 }
 
+/// Verify a `CommitSignature` using the provided raw 32-byte Ed25519 public key.
+///
+/// Returns `true` if the signature is valid.
+pub fn verify_commit_signature(record: &CommitSignature, public_key_bytes: &[u8]) -> bool {
+    use ring::signature::{self, UnparsedPublicKey};
+    let sig_bytes = match BASE64.decode(&record.signature) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let pk = UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+    pk.verify(record.commit_sha.as_bytes(), &sig_bytes).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,17 +134,4 @@ mod tests {
         std::env::remove_var("GYRE_SIGSTORE_MODE");
         assert_eq!(SigstoreMode::from_env(), SigstoreMode::Local);
     }
-}
-
-/// Verify a `CommitSignature` using the provided raw 32-byte Ed25519 public key.
-///
-/// Returns `true` if the signature is valid.
-pub fn verify_commit_signature(record: &CommitSignature, public_key_bytes: &[u8]) -> bool {
-    use ring::signature::{self, UnparsedPublicKey};
-    let sig_bytes = match BASE64.decode(&record.signature) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let pk = UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
-    pk.verify(record.commit_sha.as_bytes(), &sig_bytes).is_ok()
 }
