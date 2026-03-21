@@ -8,6 +8,8 @@
   import Button from '../lib/Button.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
+  let { onSelectTask = undefined } = $props();
+
   let tasks = $state([]);
   let loading = $state(true);
   let error = $state(null);
@@ -160,7 +162,15 @@
           </div>
           <div class="cards">
             {#each colTasks as task (task.id)}
-              <div class="task-card">
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <div
+                class="task-card"
+                class:clickable={!!onSelectTask}
+                onclick={() => onSelectTask?.(task)}
+                onkeydown={(e) => e.key === 'Enter' && onSelectTask?.(task)}
+                role={onSelectTask ? 'button' : undefined}
+                tabindex={onSelectTask ? 0 : undefined}
+              >
                 <p class="card-title">{task.title}</p>
                 <div class="card-meta">
                   <Badge value={task.priority} />
@@ -346,6 +356,8 @@
   }
 
   .task-card:hover { border-color: var(--color-border-strong); }
+  .task-card.clickable { cursor: pointer; }
+  .task-card.clickable:hover { border-color: var(--color-primary); }
 
   .card-title {
     font-size: var(--text-sm);
