@@ -16,6 +16,7 @@ pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
+pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
@@ -100,6 +101,11 @@ pub struct AppState {
     pub agent_messages: Arc<Mutex<HashMap<String, VecDeque<AgentMessage>>>>,
     /// Auth tokens issued on agent registration: agent_id -> token.
     pub agent_tokens: Arc<Mutex<HashMap<String, String>>>,
+    /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
+    /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
+    pub agent_signing_key: Arc<auth::AgentSigningKey>,
+    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 3600).
+    pub agent_jwt_ttl_secs: u64,
     /// User repository for JWT/SSO user management.
     pub users: Arc<dyn UserRepository>,
     /// API key repository: key -> user_id.
@@ -248,6 +254,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(health::healthz_handler))
         .route("/readyz", get(health::readyz_handler))
         .route("/metrics", get(metrics::metrics_handler))
+        // OIDC discovery endpoints (M18) — no auth required.
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc::openid_configuration),
+        )
+        .route("/.well-known/jwks.json", get(oidc::jwks))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
@@ -410,6 +422,11 @@ pub fn build_state(
         event_tx,
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
+        agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600),
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
