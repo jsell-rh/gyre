@@ -1136,5 +1136,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         abac_policies: Arc::new(Mutex::new(HashMap::new())),
+        workload_attestations: Arc::new(Mutex::new(HashMap::new())),
+        tunnel_store: Arc::new(Mutex::new(HashMap::new())),
     })
 }
