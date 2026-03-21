@@ -163,6 +163,8 @@ pub struct AppState {
     pub db_storage: Option<Arc<gyre_adapters::SqliteStorage>>,
     /// Spec approval ledger: approval_id -> SpecApproval (agent-gates).
     pub spec_approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
+    /// Per-repo spec enforcement policies: repo_id -> SpecPolicy (M12.3).
+    pub spec_policies: Arc<Mutex<HashMap<String, api::spec_policy::SpecPolicy>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -429,6 +431,7 @@ pub fn build_state(
         repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
         db_storage,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
+        spec_policies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

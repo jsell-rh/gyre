@@ -25,6 +25,7 @@ pub mod push_gates;
 pub mod release;
 pub mod repos;
 pub mod spawn;
+pub mod spec_policy;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
@@ -117,6 +118,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/stack-policy",
             get(stack_attest::get_stack_policy).put(stack_attest::set_stack_policy),
+        )
+        // Spec enforcement policy (M12.3)
+        .route(
+            "/api/v1/repos/:id/spec-policy",
+            get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
         )
         // Cross-agent code awareness (M13.4)
         .route("/api/v1/repos/:id/blame", get(code_awareness::get_blame))
