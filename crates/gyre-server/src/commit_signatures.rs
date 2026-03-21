@@ -38,7 +38,7 @@ impl SigstoreMode {
                     "GYRE_SIGSTORE_MODE=fulcio: external Fulcio CA is not yet configured; \
                      falling back to local signing"
                 );
-                Self::Fulcio
+                Self::Local
             }
             _ => Self::Local,
         }
@@ -86,6 +86,40 @@ pub fn sign_commit(
             .unwrap_or_default()
             .as_secs(),
         sigstore_mode: mode,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fulcio_env_falls_back_to_local() {
+        // When GYRE_SIGSTORE_MODE=fulcio the Fulcio CA is not configured, so
+        // from_env() must return Local — not Fulcio — to accurately report the
+        // actual signing method used.
+        std::env::set_var("GYRE_SIGSTORE_MODE", "fulcio");
+        let mode = SigstoreMode::from_env();
+        std::env::remove_var("GYRE_SIGSTORE_MODE");
+        assert_eq!(
+            mode,
+            SigstoreMode::Local,
+            "GYRE_SIGSTORE_MODE=fulcio should fall back to Local, not Fulcio"
+        );
+    }
+
+    #[test]
+    fn local_env_returns_local() {
+        std::env::set_var("GYRE_SIGSTORE_MODE", "local");
+        let mode = SigstoreMode::from_env();
+        std::env::remove_var("GYRE_SIGSTORE_MODE");
+        assert_eq!(mode, SigstoreMode::Local);
+    }
+
+    #[test]
+    fn default_env_returns_local() {
+        std::env::remove_var("GYRE_SIGSTORE_MODE");
+        assert_eq!(SigstoreMode::from_env(), SigstoreMode::Local);
     }
 }
 
