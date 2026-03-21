@@ -18,7 +18,15 @@ pub struct QualityGate {
     pub required_approvals: Option<u32>,
     /// Persona file path for AgentReview / AgentValidation gates.
     pub persona: Option<String>,
+    /// When false, a failing gate is advisory only — it does not block the MR from merging.
+    /// Defaults to true (blocking).
+    #[serde(default = "default_required")]
+    pub required: bool,
     pub created_at: u64,
+}
+
+fn default_required() -> bool {
+    true
 }
 
 /// Discriminant for a quality gate check type.
