@@ -31,6 +31,7 @@ pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
 pub mod version;
+pub mod workload;
 
 use audit::{
     audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
@@ -198,6 +199,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/agents/:id/stack",
             post(stack_attest::register_stack).get(stack_attest::get_stack),
         )
+        // Workload attestation (G10)
+        .route("/api/v1/agents/:id/workload", get(workload::get_workload))
         // Compose
         .route("/api/v1/compose/apply", post(compose_apply))
         .route("/api/v1/compose/status", get(compose_status))

@@ -60,6 +60,20 @@ pub struct AgentJwtClaims {
     pub task_id: String,
     /// Identity that called POST /api/v1/agents/spawn.
     pub spawned_by: String,
+
+    // -- G10: Workload attestation claims -------------------------------------
+    /// OS PID of the agent process (workload identity, G10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wl_pid: Option<u32>,
+    /// Hostname where the agent process is running (workload identity, G10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wl_hostname: Option<String>,
+    /// Compute target identifier: "local", docker container ID, SSH host (G10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wl_compute_target: Option<String>,
+    /// Stack fingerprint hash at spawn time (G10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wl_stack_hash: Option<String>,
 }
 
 /// Ed25519 key pair used to mint and verify agent JWTs.
@@ -132,6 +146,10 @@ impl AgentSigningKey {
     }
 
     /// Mint a signed EdDSA JWT for an agent.
+    ///
+    /// `workload` carries optional G10 workload attestation claims embedded
+    /// directly in the JWT so external verifiers can reconstruct workload
+    /// identity from the token alone.
     pub fn mint(
         &self,
         agent_id: &str,
@@ -139,6 +157,25 @@ impl AgentSigningKey {
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+    ) -> Result<String, String> {
+        self.mint_with_workload(
+            agent_id, task_id, spawned_by, issuer, ttl_secs, None, None, None, None,
+        )
+    }
+
+    /// Mint a signed EdDSA JWT with embedded G10 workload attestation claims.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_with_workload(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        wl_pid: Option<u32>,
+        wl_hostname: Option<String>,
+        wl_compute_target: Option<String>,
+        wl_stack_hash: Option<String>,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -152,6 +189,10 @@ impl AgentSigningKey {
             scope: "agent".to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
+            wl_pid,
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
@@ -1517,6 +1558,10 @@ mod tests {
             scope: "agent".to_string(),
             task_id: "task-1".to_string(),
             spawned_by: "system".to_string(),
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(remote_key.kid.clone());

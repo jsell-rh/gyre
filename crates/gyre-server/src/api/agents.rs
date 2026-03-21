@@ -160,6 +160,28 @@ pub async fn agent_heartbeat(
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
     agent.heartbeat(now_secs());
     state.agents.update(&agent).await?;
+
+    // G10: Verify workload attestation liveness on each heartbeat.
+    // Checks PID is still alive; stack hash is left empty (stack re-check
+    // is only done when agent self-reports via POST /api/v1/agents/{id}/stack).
+    {
+        let mut attestations = state.workload_attestations.lock().await;
+        if let Some(att) = attestations.get_mut(&id) {
+            let pid_alive = att
+                .pid
+                .map(crate::workload_attestation::pid_is_alive)
+                .unwrap_or(true); // no PID recorded → assume alive
+            let still_ok = crate::workload_attestation::verify_attestation(att, pid_alive, "");
+            if !still_ok {
+                tracing::warn!(
+                    agent_id = %id,
+                    pid = ?att.pid,
+                    "Workload attestation liveness check failed on heartbeat"
+                );
+            }
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
