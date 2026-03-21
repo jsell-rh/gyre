@@ -1,3 +1,4 @@
+use crate::auth::AdminOnly;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -160,6 +161,7 @@ pub async fn delete_compute_target(
 /// object with at least `user` and `host` fields.
 pub async fn open_tunnel(
     State(state): State<Arc<AppState>>,
+    _admin: AdminOnly,
     Path(target_id): Path<String>,
     Json(req): Json<OpenTunnelRequest>,
 ) -> Result<(StatusCode, Json<TunnelRecord>), ApiError> {
@@ -264,6 +266,7 @@ pub async fn open_tunnel(
 /// List all tunnels for this compute target.
 pub async fn list_tunnels(
     State(state): State<Arc<AppState>>,
+    _admin: AdminOnly,
     Path(target_id): Path<String>,
 ) -> Result<Json<Vec<TunnelRecord>>, ApiError> {
     // Verify target exists
@@ -291,6 +294,7 @@ pub async fn list_tunnels(
 /// Close an active SSH tunnel.  Sends SIGTERM to the `ssh -N` process.
 pub async fn close_tunnel(
     State(state): State<Arc<AppState>>,
+    _admin: AdminOnly,
     Path((target_id, tunnel_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let mut tunnel_store = state.tunnel_store.lock().await;
