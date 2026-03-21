@@ -1,0 +1,244 @@
+{
+  "nav": {
+    "sections": {
+      "overview": "Overview",
+      "source_control": "Source Control",
+      "agents": "Agents",
+      "operations": "Operations",
+      "admin": "Admin"
+    },
+    "items": {
+      "dashboard": "Dashboard",
+      "activity": "Activity",
+      "projects": "Projects",
+      "merge_queue": "Merge Queue",
+      "agents": "Agents",
+      "tasks": "Tasks",
+      "compose": "Compose",
+      "analytics": "Analytics",
+      "costs": "Costs",
+      "mcp_tools": "MCP Tools",
+      "admin_panel": "Admin Panel",
+      "settings": "Settings"
+    },
+    "sidebar": {
+      "expand": "Expand sidebar",
+      "collapse": "Collapse sidebar",
+      "connected": "Connected"
+    }
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "metrics": {
+      "active_agents": "Active Agents",
+      "open_tasks": "Open Tasks",
+      "pending_mrs": "Pending MRs",
+      "queue_depth": "Queue Depth",
+      "total": "{count} total",
+      "open_for_review": "open for review",
+      "total_entries": "{count} total entries"
+    },
+    "sections": {
+      "agent_health": "Agent Health",
+      "recent_activity": "Recent Activity",
+      "merge_queue": "Merge Queue"
+    },
+    "quick_actions": {
+      "new_project": "+ New Project",
+      "new_task": "+ New Task",
+      "seed_demo": "Seed Demo Data",
+      "seeding": "Seeding..."
+    },
+    "view_all": "View all",
+    "empty": {
+      "no_agents": "No agents",
+      "no_agents_desc": "No agents found.",
+      "no_activity": "No activity yet",
+      "no_activity_desc": "Events will appear here."
+    }
+  },
+  "agents": {
+    "title": "Agents",
+    "views": {
+      "grid": "Grid view",
+      "table": "Table view"
+    },
+    "filter": {
+      "all": "All"
+    },
+    "spawn": {
+      "button": "Spawn Agent",
+      "title": "Spawn Agent",
+      "name_label": "Name",
+      "name_placeholder": "worker-1",
+      "branch_label": "Branch",
+      "branch_placeholder": "feat/my-feature",
+      "result": {
+        "agent_id": "Agent ID",
+        "token": "Token",
+        "clone_url": "Clone URL",
+        "worktree": "Worktree",
+        "branch": "Branch"
+      }
+    },
+    "detail": {
+      "tabs": {
+        "info": "Info",
+        "logs": "Logs",
+        "terminal": "Terminal"
+      },
+      "fields": {
+        "id": "ID",
+        "status": "Status",
+        "parent": "Parent",
+        "current_task": "Current Task",
+        "spawned": "Spawned",
+        "last_heartbeat": "Last Heartbeat",
+        "task": "Task",
+        "uptime": "Uptime",
+        "heartbeat": "Heartbeat"
+      }
+    },
+    "empty": {
+      "title": "No agents found",
+      "description": "No agents match your filters."
+    }
+  },
+  "tasks": {
+    "title": "Task Board",
+    "filters": {
+      "all_priorities": "All priorities",
+      "all_agents": "All agents"
+    },
+    "priority": {
+      "critical": "Critical",
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low"
+    },
+    "status": {
+      "backlog": "Backlog",
+      "in_progress": "In Progress",
+      "review": "Review",
+      "done": "Done",
+      "blocked": "Blocked"
+    },
+    "new_task": {
+      "button": "New Task",
+      "title": "New Task",
+      "title_label": "Title",
+      "title_placeholder": "Task title",
+      "desc_label": "Description",
+      "desc_placeholder": "Optional description",
+      "priority_label": "Priority",
+      "status_label": "Status"
+    }
+  },
+  "projects": {
+    "title": "Projects",
+    "new_project": {
+      "button": "New Project",
+      "title": "New Project",
+      "name_label": "Name",
+      "name_placeholder": "my-project",
+      "desc_label": "Description",
+      "desc_placeholder": "Optional description"
+    },
+    "add_repo": {
+      "button": "Add Repo",
+      "title": "Add Repository",
+      "name_label": "Repository Name",
+      "name_placeholder": "my-repo",
+      "branch_label": "Default Branch",
+      "branch_placeholder": "main"
+    },
+    "mirror_repo": {
+      "button": "Mirror Repo",
+      "title": "Mirror Repository",
+      "name_label": "Name",
+      "name_placeholder": "my-mirror",
+      "url_label": "Mirror URL",
+      "url_placeholder": "https://github.com/org/repo.git",
+      "interval_label": "Sync Interval (seconds)",
+      "interval_placeholder": "300"
+    },
+    "repos": {
+      "title": "Repositories",
+      "empty": "No repositories in this project.",
+      "clone_url": "Clone URL"
+    },
+    "empty": {
+      "title": "No projects yet",
+      "description": "Create your first project to get started.",
+      "no_description": "No description"
+    }
+  },
+  "settings": {
+    "title": "Settings",
+    "server_info": {
+      "title": "Server Information",
+      "name": "Name",
+      "version": "Version",
+      "milestone": "Milestone",
+      "reachable": "Server reachable",
+      "unreachable": "Could not connect to server"
+    },
+    "websocket": {
+      "title": "WebSocket Connection",
+      "sublabel": "Real-time event stream",
+      "status": {
+        "connected": "Connected",
+        "disconnected": "Disconnected",
+        "connecting": "Connecting",
+        "error": "Error",
+        "auth_failed": "Auth Failed"
+      }
+    },
+    "config": {
+      "title": "Configuration",
+      "setting": "Setting",
+      "value": "Value",
+      "api_base_url": "API Base URL",
+      "ws_url": "WebSocket URL",
+      "dashboard_build": "Dashboard Build"
+    },
+    "about": {
+      "tagline": "Autonomous Development Platform"
+    },
+    "language": {
+      "title": "Language",
+      "label": "Interface Language",
+      "en": "English"
+    },
+    "token": {
+      "title": "API Token",
+      "label": "Bearer Token",
+      "placeholder": "gyre-dev-token",
+      "save": "Save Token",
+      "saved": "Token saved"
+    }
+  },
+  "common": {
+    "cancel": "Cancel",
+    "close": "Close",
+    "save": "Save",
+    "create": "Create",
+    "creating": "Creating...",
+    "loading": "Loading...",
+    "error": "Error: {message}",
+    "view_all": "View all",
+    "actions": "Actions",
+    "status": {
+      "active": "Active",
+      "idle": "Idle",
+      "blocked": "Blocked",
+      "dead": "Dead",
+      "error": "Error"
+    },
+    "mr": {
+      "open": "Open",
+      "merged": "Merged",
+      "closed": "Closed"
+    }
+  }
+}

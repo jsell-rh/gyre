@@ -1,4 +1,5 @@
 <script>
+  import { t } from 'svelte-i18n';
   import Card from '../lib/Card.svelte';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -120,41 +121,41 @@
   }
 </script>
 
-<Modal bind:open={showNewProject} title="New Project">
+<Modal bind:open={showNewProject} title={$t('projects.new_project.title')}>
   <div class="qa-form">
-    <label class="qa-label">Name
-      <input class="qa-input" bind:value={qaName} placeholder="my-project" />
+    <label class="qa-label">{$t('projects.new_project.name_label')}
+      <input class="qa-input" bind:value={qaName} placeholder={$t('projects.new_project.name_placeholder')} />
     </label>
-    <label class="qa-label">Description
-      <input class="qa-input" bind:value={qaDesc} placeholder="Optional description" />
+    <label class="qa-label">{$t('projects.new_project.desc_label')}
+      <input class="qa-input" bind:value={qaDesc} placeholder={$t('projects.new_project.desc_placeholder')} />
     </label>
   </div>
   {#snippet footer()}
-    <Button variant="secondary" onclick={() => (showNewProject = false)}>Cancel</Button>
+    <Button variant="secondary" onclick={() => (showNewProject = false)}>{$t('common.cancel')}</Button>
     <Button variant="primary" onclick={quickCreateProject} disabled={qaCreating || !qaName.trim()}>
-      {qaCreating ? 'Creating…' : 'Create Project'}
+      {qaCreating ? $t('common.creating') : $t('common.create') + ' Project'}
     </Button>
   {/snippet}
 </Modal>
 
-<Modal bind:open={showNewTask} title="New Task">
+<Modal bind:open={showNewTask} title={$t('tasks.new_task.title')}>
   <div class="qa-form">
-    <label class="qa-label">Title
-      <input class="qa-input" bind:value={qaTaskTitle} placeholder="Task title" />
+    <label class="qa-label">{$t('tasks.new_task.title_label')}
+      <input class="qa-input" bind:value={qaTaskTitle} placeholder={$t('tasks.new_task.title_placeholder')} />
     </label>
-    <label class="qa-label">Priority
+    <label class="qa-label">{$t('tasks.new_task.priority_label')}
       <select class="qa-input" bind:value={qaTaskPriority}>
-        <option value="Critical">Critical</option>
-        <option value="High">High</option>
-        <option value="Medium">Medium</option>
-        <option value="Low">Low</option>
+        <option value="Critical">{$t('tasks.priority.critical')}</option>
+        <option value="High">{$t('tasks.priority.high')}</option>
+        <option value="Medium">{$t('tasks.priority.medium')}</option>
+        <option value="Low">{$t('tasks.priority.low')}</option>
       </select>
     </label>
   </div>
   {#snippet footer()}
-    <Button variant="secondary" onclick={() => (showNewTask = false)}>Cancel</Button>
+    <Button variant="secondary" onclick={() => (showNewTask = false)}>{$t('common.cancel')}</Button>
     <Button variant="primary" onclick={quickCreateTask} disabled={qaTaskCreating || !qaTaskTitle.trim()}>
-      {qaTaskCreating ? 'Creating…' : 'Create Task'}
+      {qaTaskCreating ? $t('common.creating') : $t('common.create') + ' Task'}
     </Button>
   {/snippet}
 </Modal>
@@ -169,52 +170,52 @@
   <!-- Metric cards -->
   <section class="metrics">
     <button class="metric-card" onclick={() => onnavigate?.('agents')}>
-      <div class="metric-label">Active Agents</div>
+      <div class="metric-label">{$t('dashboard.metrics.active_agents')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
       {:else}
         <div class="metric-value">{activeAgents.length}</div>
-        <div class="metric-sub">{agents.length} total</div>
+        <div class="metric-sub">{$t('dashboard.metrics.total', { values: { count: agents.length } })}</div>
       {/if}
     </button>
 
     <button class="metric-card" onclick={() => onnavigate?.('tasks')}>
-      <div class="metric-label">Open Tasks</div>
+      <div class="metric-label">{$t('dashboard.metrics.open_tasks')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
       {:else}
         <div class="metric-value">{openTasks.length}</div>
-        <div class="metric-sub">{tasks.length} total</div>
+        <div class="metric-sub">{$t('dashboard.metrics.total', { values: { count: tasks.length } })}</div>
       {/if}
     </button>
 
     <button class="metric-card" onclick={() => onnavigate?.('projects')}>
-      <div class="metric-label">Pending MRs</div>
+      <div class="metric-label">{$t('dashboard.metrics.pending_mrs')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
       {:else}
         <div class="metric-value">{pendingMrs.length}</div>
-        <div class="metric-sub">open for review</div>
+        <div class="metric-sub">{$t('dashboard.metrics.open_for_review')}</div>
       {/if}
     </button>
 
     <button class="metric-card" onclick={() => onnavigate?.('merge-queue')}>
-      <div class="metric-label">Queue Depth</div>
+      <div class="metric-label">{$t('dashboard.metrics.queue_depth')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
       {:else}
         <div class="metric-value">{queueDepth}</div>
-        <div class="metric-sub">{queue.length} total entries</div>
+        <div class="metric-sub">{$t('dashboard.metrics.total_entries', { values: { count: queue.length } })}</div>
       {/if}
     </button>
   </section>
 
   <!-- Quick actions -->
   <section class="quick-actions">
-    <Button variant="secondary" onclick={() => (showNewProject = true)}>+ New Project</Button>
-    <Button variant="secondary" onclick={() => (showNewTask = true)}>+ New Task</Button>
+    <Button variant="secondary" onclick={() => (showNewProject = true)}>{$t('dashboard.quick_actions.new_project')}</Button>
+    <Button variant="secondary" onclick={() => (showNewTask = true)}>{$t('dashboard.quick_actions.new_task')}</Button>
     <Button variant="secondary" onclick={seedDemoData} disabled={seedLoading}>
-      {seedLoading ? 'Seeding…' : '⚡ Seed Demo Data'}
+      {seedLoading ? $t('dashboard.quick_actions.seeding') : $t('dashboard.quick_actions.seed_demo')}
     </Button>
   </section>
 
@@ -222,8 +223,8 @@
     <!-- Agent health grid -->
     <Card>
       {#snippet header()}
-        <span>Agent Health</span>
-        <button class="view-all" onclick={() => onnavigate?.('agents')}>View all</button>
+        <span>{$t('dashboard.sections.agent_health')}</span>
+        <button class="view-all" onclick={() => onnavigate?.('agents')}>{$t('dashboard.view_all')}</button>
       {/snippet}
       {#if loading}
         <div class="agent-grid">
@@ -232,7 +233,7 @@
           {/each}
         </div>
       {:else if agents.length === 0}
-        <EmptyState title="No agents" description="No agents found." />
+        <EmptyState title={$t('dashboard.empty.no_agents')} description={$t('dashboard.empty.no_agents_desc')} />
       {:else}
         <div class="agent-grid">
           {#each agents as agent}
@@ -251,8 +252,8 @@
     <!-- Recent activity -->
     <Card>
       {#snippet header()}
-        <span>Recent Activity</span>
-        <button class="view-all" onclick={() => onnavigate?.('activity')}>View all</button>
+        <span>{$t('dashboard.sections.recent_activity')}</span>
+        <button class="view-all" onclick={() => onnavigate?.('activity')}>{$t('dashboard.view_all')}</button>
       {/snippet}
       {#if loading}
         <div class="activity-list">
@@ -264,7 +265,7 @@
           {/each}
         </div>
       {:else if activity.length === 0}
-        <EmptyState title="No activity yet" description="Events will appear here." />
+        <EmptyState title={$t('dashboard.empty.no_activity')} description={$t('dashboard.empty.no_activity_desc')} />
       {:else}
         <ul class="activity-list">
           {#each activity.slice(0, 10) as event}
@@ -281,8 +282,8 @@
     {#if queue.length > 0}
       <Card>
         {#snippet header()}
-          <span>Merge Queue</span>
-          <button class="view-all" onclick={() => onnavigate?.('merge-queue')}>View all</button>
+          <span>{$t('dashboard.sections.merge_queue')}</span>
+          <button class="view-all" onclick={() => onnavigate?.('merge-queue')}>{$t('dashboard.view_all')}</button>
         {/snippet}
         <div class="queue-bar">
           {#each queue.slice(0, 8) as item}
