@@ -61,7 +61,7 @@
 </script>
 
 {#if open}
-  <div class="modal-backdrop" aria-hidden="true">
+  <div class="modal-backdrop">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modal-overlay" onclick={close} aria-hidden="true"></div>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
