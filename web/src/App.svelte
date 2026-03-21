@@ -1,5 +1,6 @@
 <script>
   import './lib/design-system.css';
+  import { isLoading } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import Sidebar from './components/Sidebar.svelte';
   import DashboardHome from './components/DashboardHome.svelte';
@@ -102,6 +103,7 @@
 
 <a href="#main-content" class="skip-to-content">Skip to main content</a>
 
+{#if !$isLoading}
 <div class="app">
   <Sidebar bind:current={currentView} />
 
@@ -188,6 +190,7 @@
     </main>
   </div>
 </div>
+{/if}
 
 <SearchBar onnavigate={(v) => navigate(v)} />
 <Toast />
