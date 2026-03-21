@@ -767,6 +767,7 @@ Key specs to read before making changes:
 | M16 milestone deliverables | [specs/milestones/m16-security-hardening.md](specs/milestones/m16-security-hardening.md) |
 | M17 milestone deliverables | [specs/milestones/m17-integration-testing.md](specs/milestones/m17-integration-testing.md) |
 | M18 milestone deliverables | [specs/milestones/m18-agent-identity.md](specs/milestones/m18-agent-identity.md) |
+| M19 milestone deliverables | [specs/milestones/m19-container-runtime.md](specs/milestones/m19-container-runtime.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
 | Trusted Foundry integration (future pattern) | [specs/system/trusted-foundry-integration.md](specs/system/trusted-foundry-integration.md) |
