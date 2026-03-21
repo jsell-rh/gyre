@@ -43,7 +43,8 @@ use axum::{
 };
 use compose::{compose_apply, compose_status, compose_teardown};
 use compute::{
-    create_compute_target, delete_compute_target, get_compute_target, list_compute_targets,
+    close_tunnel, create_compute_target, delete_compute_target, get_compute_target,
+    list_compute_targets, list_tunnels, open_tunnel,
 };
 use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
@@ -345,6 +346,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/admin/compute-targets/:id",
             get(get_compute_target).delete(delete_compute_target),
+        )
+        // SSH Tunnels (G12) — reverse tunnels so air-gapped agents phone home
+        .route(
+            "/api/v1/admin/compute-targets/:id/tunnel",
+            post(open_tunnel).get(list_tunnels),
+        )
+        .route(
+            "/api/v1/admin/compute-targets/:id/tunnel/:tunnel_id",
+            delete(close_tunnel),
         )
         // Network peers (WireGuard mesh)
         .route(
