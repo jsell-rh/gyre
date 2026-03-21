@@ -5,6 +5,10 @@
     disabled = false,
     type = 'button',
     onclick = undefined,
+    'aria-label': ariaLabel = undefined,
+    'aria-describedby': ariaDescribedby = undefined,
+    'aria-pressed': ariaPressed = undefined,
+    'aria-expanded': ariaExpanded = undefined,
     children,
   } = $props();
 </script>
@@ -14,6 +18,10 @@
   {disabled}
   class="btn btn-{variant} btn-{size}"
   {onclick}
+  aria-label={ariaLabel}
+  aria-describedby={ariaDescribedby}
+  aria-pressed={ariaPressed}
+  aria-expanded={ariaExpanded}
 >
   {@render children?.()}
 </button>

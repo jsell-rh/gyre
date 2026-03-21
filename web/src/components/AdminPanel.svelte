@@ -546,8 +546,15 @@
 
 <!-- Modal -->
 {#if actionModal}
-  <div class="modal-backdrop" onclick={closeModal}>
-    <div class="modal" onclick={(e) => e.stopPropagation()}>
+  <div class="modal-backdrop" aria-hidden="true" onclick={closeModal}></div>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    aria-label="Agent Action"
+    onkeydown={(e) => { if (e.key === 'Escape') closeModal(); }}
+  >
       {#if actionModal.type === 'kill'}
         <h3 class="modal-title">Force Kill Agent</h3>
         <p class="modal-desc">
@@ -585,7 +592,6 @@
         </div>
       {/if}
     </div>
-  </div>
 {/if}
 
 <style>

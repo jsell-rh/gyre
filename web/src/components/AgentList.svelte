@@ -1,5 +1,4 @@
 <script>
-  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -150,12 +149,12 @@
 <div class="page">
   <div class="page-hdr">
     <div>
-      <h1 class="page-title">{$t('agents.title')}</h1>
+      <h1 class="page-title">Agents</h1>
       <p class="page-desc">{agents.length} agent{agents.length !== 1 ? 's' : ''} registered</p>
     </div>
     <div class="page-actions">
       <div class="view-toggle">
-        <button class="toggle-btn" class:active={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title={$t('agents.views.grid')}>
+        <button class="toggle-btn" class:active={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Grid view">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <rect x="1" y="1" width="6" height="6" rx="1"/>
             <rect x="9" y="1" width="6" height="6" rx="1"/>
@@ -163,7 +162,7 @@
             <rect x="9" y="9" width="6" height="6" rx="1"/>
           </svg>
         </button>
-        <button class="toggle-btn" class:active={viewMode === 'table'} onclick={() => (viewMode = 'table')} title={$t('agents.views.table')}>
+        <button class="toggle-btn" class:active={viewMode === 'table'} onclick={() => (viewMode = 'table')} title="Table view">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <rect x="1" y="2" width="14" height="2" rx="1"/>
             <rect x="1" y="7" width="14" height="2" rx="1"/>
@@ -171,12 +170,12 @@
           </svg>
         </button>
       </div>
-      <button class="spawn-btn" onclick={openSpawnModal}>+ {$t('agents.spawn.button')}</button>
+      <button class="spawn-btn" onclick={openSpawnModal}>+ Spawn Agent</button>
     </div>
   </div>
 
   <div class="filter-bar">
-    <button class="pill" class:active={statusFilter === ''} onclick={() => (statusFilter = '')}>{$t('agents.filter.all')}</button>
+    <button class="pill" class:active={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
     {#each statuses as s}
       <button
         class="pill"
@@ -189,26 +188,31 @@
   </div>
 
   {#if showSpawnModal}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal-backdrop" onclick={closeSpawnModal}>
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="modal" onclick={(e) => e.stopPropagation()}>
-        <h3>{$t('agents.spawn.title')}</h3>
+    <div class="modal-backdrop" aria-hidden="true" onclick={closeSpawnModal}></div>
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      aria-label="Spawn Agent"
+      onkeydown={(e) => { if (e.key === 'Escape') closeSpawnModal(); }}
+    >
+        <h3>Spawn Agent</h3>
         {#if spawnResult}
           <div class="spawn-success">
             <p class="success-msg">Agent spawned successfully.</p>
             <dl>
-              <dt>{$t('agents.spawn.result.agent_id')}</dt><dd>{spawnResult.agent.id}</dd>
-              <dt>{$t('agents.spawn.result.token')}</dt><dd class="mono">{spawnResult.token}</dd>
-              <dt>{$t('agents.spawn.result.clone_url')}</dt><dd class="mono">{spawnResult.clone_url}</dd>
-              <dt>{$t('agents.spawn.result.worktree')}</dt><dd>{spawnResult.worktree_path}</dd>
-              <dt>{$t('agents.spawn.result.branch')}</dt><dd>{spawnResult.branch}</dd>
+              <dt>Agent ID</dt><dd>{spawnResult.agent.id}</dd>
+              <dt>Token</dt><dd class="mono">{spawnResult.token}</dd>
+              <dt>Clone URL</dt><dd class="mono">{spawnResult.clone_url}</dd>
+              <dt>Worktree</dt><dd>{spawnResult.worktree_path}</dd>
+              <dt>Branch</dt><dd>{spawnResult.branch}</dd>
             </dl>
-            <button class="modal-btn" onclick={closeSpawnModal}>{$t('common.close')}</button>
+            <button class="modal-btn" onclick={closeSpawnModal}>Close</button>
           </div>
         {:else}
           <div class="form">
-            <label>{$t('agents.spawn.name_label')}<input bind:value={spawnName} placeholder={$t('agents.spawn.name_placeholder')} /></label>
+            <label>Name<input bind:value={spawnName} placeholder="worker-1" /></label>
             <label>Repository
               <select bind:value={spawnRepoId}>
                 <option value="">Select repo...</option>
@@ -221,10 +225,10 @@
                 {#each tasks as t}<option value={t.id}>{t.title}</option>{/each}
               </select>
             </label>
-            <label>{$t('agents.spawn.branch_label')}<input bind:value={spawnBranch} placeholder={$t('agents.spawn.branch_placeholder')} /></label>
+            <label>Branch<input bind:value={spawnBranch} placeholder="feat/my-feature" /></label>
             {#if spawnError}<p class="form-error">{spawnError}</p>{/if}
             <div class="form-actions">
-              <button class="modal-btn secondary" onclick={closeSpawnModal}>{$t('common.cancel')}</button>
+              <button class="modal-btn secondary" onclick={closeSpawnModal}>Cancel</button>
               <button class="modal-btn primary" onclick={doSpawn} disabled={spawnLoading}>
                 {spawnLoading ? 'Spawning...' : 'Spawn'}
               </button>
@@ -232,7 +236,6 @@
           </div>
         {/if}
       </div>
-    </div>
   {/if}
 
   <div class="content">
@@ -256,7 +259,7 @@
       <div class="error-msg">Error: {error}</div>
     {:else if filtered.length === 0}
       <EmptyState
-        title={$t('agents.empty.title')}
+        title="No agents found"
         description={statusFilter
           ? `No agents with status "${statusFilter}". Try a different filter.`
           : 'No agents have been spawned yet.'}
@@ -309,20 +312,20 @@
           <button class="close-btn" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
         </div>
         <div class="detail-tabs">
-          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')}>{$t('agents.detail.tabs.info')}</button>
-          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')}>{$t('agents.detail.tabs.logs')}</button>
-          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')}>{$t('agents.detail.tabs.terminal')}</button>
+          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')}>Info</button>
+          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')}>Logs</button>
+          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')}>Terminal</button>
         </div>
         {#if detailTab === 'info'}
           <div class="detail-body">
             <dl class="detail-dl">
-              <dt>{$t('agents.detail.fields.id')}</dt><dd class="mono">{selected.id}</dd>
-              <dt>{$t('agents.detail.fields.status')}</dt><dd><Badge value={selected.status} /></dd>
-              <dt>{$t('agents.detail.fields.parent')}</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
-              <dt>{$t('agents.detail.fields.current_task')}</dt><dd class="mono">{selected.current_task_id ?? '—'}</dd>
+              <dt>ID</dt><dd class="mono">{selected.id}</dd>
+              <dt>Status</dt><dd><Badge value={selected.status} /></dd>
+              <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
+              <dt>Current Task</dt><dd class="mono">{selected.current_task_id ?? '—'}</dd>
               <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
-              <dt>{$t('agents.detail.fields.spawned')}</dt><dd>{formatTime(selected.spawned_at)}</dd>
-              <dt>{$t('agents.detail.fields.last_heartbeat')}</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
+              <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
+              <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
             </dl>
             <AgentCardPanel agentId={selected.id} />
           </div>
