@@ -22,9 +22,16 @@ Three layers, each proving something different. All use existing protocols - no 
     "task_id": "TASK-007",
     "spawned_by": "user:jsell",
     "scope": ["repo:gyre:write", "mr:create"],
+    "stack_hash": "sha256:abc123def456...",
+    "persona": "security",
+    "attestation_level": 3,
     "exp": 1711036800
   }
   ```
+- **Stack hash as an OIDC claim.** The agent's stack fingerprint (from `supply-chain.md`) is embedded in the JWT. Any system verifying the token can check not just who the agent is, but what configuration it was running. This is used by:
+  - **Spec registry** (`spec-registry.md`): verify agent approvals came from the required stack
+  - **Agent gates** (`agent-gates.md`): verify gate agents match the policy's stack requirements
+  - **Merge attestation** (`agent-gates.md`): record which stack produced each gate result
 - Tokens are **short-lived and scoped to a task** - no long-lived API keys, no static secrets.
 - External systems verify agent identity by trusting Gyre's OIDC issuer (`/.well-known/openid-configuration`).
 - This is the same pattern GitHub Actions uses for workload identity federation.
