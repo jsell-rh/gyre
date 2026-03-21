@@ -39,6 +39,7 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
+url = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"
 subtle = { workspace = true }

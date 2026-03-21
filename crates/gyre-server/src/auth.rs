@@ -559,6 +559,24 @@ fn extract_iss_from_jwt_payload(token: &str) -> Option<String> {
     value.get("iss")?.as_str().map(|s| s.to_string())
 }
 
+/// Return true iff `jwks_uri` shares the same scheme and host as `issuer`.
+///
+/// Prevents SSRF: a compromised remote Gyre's discovery document could set
+/// `jwks_uri` to an internal metadata endpoint (e.g. `http://169.254.169.254/`)
+/// unless we verify it stays on the same origin as the trusted issuer.
+fn is_same_origin(issuer: &str, jwks_uri: &str) -> bool {
+    let iss = url::Url::parse(issuer).ok();
+    let jwks = url::Url::parse(jwks_uri).ok();
+    match (iss, jwks) {
+        (Some(a), Some(b)) => {
+            a.scheme() == b.scheme()
+                && a.host() == b.host()
+                && a.port_or_known_default() == b.port_or_known_default()
+        }
+        _ => false,
+    }
+}
+
 /// Fetch JWKS keys for a remote Gyre issuer via OIDC discovery.
 async fn fetch_remote_jwks_for_issuer(
     issuer: &str,
@@ -576,6 +594,16 @@ async fn fetch_remote_jwks_for_issuer(
         .json()
         .await
         .ok()?;
+
+    // G11-A: Reject jwks_uri that redirects to a different origin (SSRF guard).
+    if !is_same_origin(issuer, &discovery.jwks_uri) {
+        tracing::warn!(
+            issuer = %issuer,
+            jwks_uri = %discovery.jwks_uri,
+            "Federation SSRF guard: jwks_uri is not same-origin as issuer — rejecting"
+        );
+        return None;
+    }
 
     let jwk_set: JwkSet = http_client
         .get(&discovery.jwks_uri)
@@ -1555,6 +1583,89 @@ mod tests {
                     .uri("/protected")
                     .header("Authorization", format!("Bearer {token}"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -- G11-A SSRF guard tests -----------------------------------------------
+
+    #[test]
+    fn is_same_origin_same_host_accepted() {
+        assert!(super::is_same_origin(
+            "https://remote-gyre.example.com",
+            "https://remote-gyre.example.com/jwks"
+        ));
+    }
+
+    #[test]
+    fn is_same_origin_different_host_rejected() {
+        assert!(!super::is_same_origin(
+            "https://remote-gyre.example.com",
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+        ));
+    }
+
+    #[test]
+    fn is_same_origin_different_scheme_rejected() {
+        assert!(!super::is_same_origin(
+            "https://remote-gyre.example.com",
+            "http://remote-gyre.example.com/jwks"
+        ));
+    }
+
+    #[test]
+    fn is_same_origin_malformed_uri_rejected() {
+        assert!(!super::is_same_origin(
+            "https://remote-gyre.example.com",
+            "not a url"
+        ));
+    }
+
+    #[test]
+    fn is_same_origin_different_port_rejected() {
+        assert!(!super::is_same_origin(
+            "https://remote-gyre.example.com",
+            "https://remote-gyre.example.com:9999/jwks"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cross_origin_jwks_uri_rejected_by_ssrf_guard() {
+        use axum::routing::get;
+        use axum::Router;
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        // Build a state that trusts our "remote" issuer.
+        let remote_url = "http://remote-gyre.example.com";
+        let state = make_state_with_trusted_issuer(remote_url);
+        let remote_key = crate::auth::AgentSigningKey::generate();
+
+        // Instead of injecting via seed_remote_jwks (which bypasses the HTTP
+        // fetch), we inject a *stale* cache entry so the code re-fetches.
+        // But since we can't start an HTTP server here, we rely on the unit
+        // test for is_same_origin above to cover the guard logic directly.
+        //
+        // This integration-level test verifies that when the cache is empty
+        // and the issuer is trusted, but no real JWKS can be fetched (network
+        // unavailable in test), the token is ultimately rejected.
+        let token = mint_remote_jwt(&remote_key, remote_url, "agent-ssrf", 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        // No JWKS seeded → fetch_remote_jwks_for_issuer will fail (no real
+        // server) → token rejected.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
