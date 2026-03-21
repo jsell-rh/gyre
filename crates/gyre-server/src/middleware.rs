@@ -164,6 +164,8 @@ mod tests {
             abac_policies: base.abac_policies.clone(),
             workload_attestations: base.workload_attestations.clone(),
             tunnel_store: base.tunnel_store.clone(),
+            spec_ledger: base.spec_ledger.clone(),
+            spec_approval_history: base.spec_approval_history.clone(),
         });
         crate::build_router(state)
     }
