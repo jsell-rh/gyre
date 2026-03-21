@@ -59,6 +59,10 @@ pub struct AgentSigningKey {
     pub jwks_json: String,
     /// Key ID embedded in JWT headers.
     pub kid: String,
+    /// Raw PKCS#8 bytes retained for signing arbitrary data (attestation bundles).
+    pkcs8_bytes: Vec<u8>,
+    /// Raw 32-byte public key for external verification.
+    pub public_key_bytes: Vec<u8>,
 }
 
 impl AgentSigningKey {
@@ -98,7 +102,19 @@ impl AgentSigningKey {
             decoding_key,
             jwks_json,
             kid,
+            pkcs8_bytes: pkcs8.as_ref().to_vec(),
+            public_key_bytes: pub_key_bytes.to_vec(),
         }
+    }
+
+    /// Sign arbitrary bytes with the Ed25519 private key.
+    ///
+    /// Used by the attestation module to sign merge attestation bundles.
+    pub fn sign_bytes(&self, data: &[u8]) -> Vec<u8> {
+        use ring::signature::Ed25519KeyPair;
+        let key_pair = Ed25519KeyPair::from_pkcs8(&self.pkcs8_bytes)
+            .expect("stored pkcs8 bytes must remain valid");
+        key_pair.sign(data).as_ref().to_vec()
     }
 
     /// Mint a signed EdDSA JWT for an agent.
@@ -535,7 +551,7 @@ impl FromRequestParts<Arc<AppState>> for AdminOnly {
 pub mod test_helpers {
     use super::*;
     use crate::JwtConfig;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use jsonwebtoken::DecodingKey;
     use std::time::{SystemTime, UNIX_EPOCH};
 

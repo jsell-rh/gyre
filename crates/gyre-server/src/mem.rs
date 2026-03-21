@@ -1130,5 +1130,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         db_storage: None,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
+        attestation_store: Arc::new(Mutex::new(HashMap::new())),
     })
 }

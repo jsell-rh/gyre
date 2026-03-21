@@ -403,6 +403,101 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 now,
             );
             let _ = state.analytics.record(&ev).await;
+
+            // Build and store a signed merge attestation bundle (G5).
+            let gate_results_snapshot = {
+                let lock = state.gate_results.lock().await;
+                lock.values()
+                    .filter(|r| r.mr_id.as_str() == updated_mr.id.as_str())
+                    .map(|r| crate::attestation::AttestationGateResult {
+                        gate_id: r.gate_id.to_string(),
+                        gate_type: String::new(), // gate type looked up below
+                        status: format!("{:?}", r.status),
+                        output: r.output.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            // Enrich gate_type from quality_gates map.
+            let gate_results_enriched = {
+                let gates_lock = state.quality_gates.lock().await;
+                gate_results_snapshot
+                    .into_iter()
+                    .map(|mut gr| {
+                        if let Some(gate) = gates_lock.get(&gr.gate_id) {
+                            gr.gate_type = format!("{:?}", gate.gate_type);
+                        }
+                        gr
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            // Check spec approval status.
+            let spec_fully_approved = if let Some(spec_ref) = updated_mr.spec_ref.as_deref() {
+                crate::api::gates::verify_spec_ref(state, spec_ref)
+                    .await
+                    .is_ok()
+            } else {
+                true // no spec bound — treat as approved
+            };
+
+            let attestation = crate::attestation::MergeAttestation {
+                attestation_version: 1,
+                mr_id: updated_mr.id.to_string(),
+                merge_commit_sha: merge_commit_sha.clone(),
+                merged_at: now,
+                gate_results: gate_results_enriched,
+                spec_ref: updated_mr.spec_ref.clone(),
+                spec_fully_approved,
+                author_agent_id: updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
+            };
+
+            let bundle =
+                crate::attestation::sign_attestation(attestation, &state.agent_signing_key);
+
+            // Attach as a git note under refs/notes/attestations.
+            let bundle_json = serde_json::to_string(&bundle).unwrap_or_default();
+            let repo_path = repo.path.clone();
+            let sha_for_note = merge_commit_sha.clone();
+            let bundle_json_for_note = bundle_json.clone();
+            tokio::spawn(async move {
+                let out = tokio::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &repo_path,
+                        "notes",
+                        "--ref=refs/notes/attestations",
+                        "add",
+                        "-f",
+                        "-m",
+                        &bundle_json_for_note,
+                        &sha_for_note,
+                    ])
+                    .output()
+                    .await;
+                match out {
+                    Ok(o) if o.status.success() => {
+                        tracing::info!(sha = %sha_for_note, "attestation note attached");
+                    }
+                    Ok(o) => {
+                        tracing::warn!(
+                            sha = %sha_for_note,
+                            stderr = %String::from_utf8_lossy(&o.stderr),
+                            "git notes failed — attestation stored in memory only"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(sha = %sha_for_note, error = %e, "git not found — attestation stored in memory only");
+                    }
+                }
+            });
+
+            // Store in memory for API retrieval.
+            {
+                let mut store = state.attestation_store.lock().await;
+                store.insert(updated_mr.id.to_string(), bundle);
+            }
+            info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
         }
         Ok(MergeResult::Conflict { message }) => {
             warn!(entry_id = %entry.id, reason = %message, "merge conflict");
