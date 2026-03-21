@@ -248,6 +248,18 @@ pub async fn approve_spec(
     let spec_path = encoded_path;
     let now = now_secs();
 
+    // ReadOnly users cannot approve specs (M21.1-C).
+    if auth.roles.contains(&gyre_domain::UserRole::ReadOnly)
+        && !auth.roles.contains(&gyre_domain::UserRole::Admin)
+        && !auth.roles.contains(&gyre_domain::UserRole::Developer)
+        && !auth.roles.contains(&gyre_domain::UserRole::Agent)
+        && auth.agent_id != "system"
+    {
+        return Err(ApiError::Forbidden(
+            "ReadOnly users cannot approve specs".to_string(),
+        ));
+    }
+
     // Validate SHA format (must be 40-char hex).
     if req.sha.len() != 40 || !req.sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(ApiError::InvalidInput(
@@ -265,14 +277,11 @@ pub async fn approve_spec(
         }
     }
 
-    // Determine approver type and identity from auth.
-    // The global token → "system"; agent JWT → agent_id; others → agent_id.
-    let (approver_type, approver_id) = if auth.agent_id == "system" || auth.agent_id.is_empty() {
-        ("human".to_string(), format!("user:{}", auth.agent_id))
-    } else if req.persona.is_some() {
+    // Determine approver type from auth token kind (not request body).
+    // JWT bearer tokens → agent; global token / API key → human.
+    let (approver_type, approver_id) = if auth.jwt_claims.is_some() {
         ("agent".to_string(), format!("agent:{}", auth.agent_id))
     } else {
-        // Global token usage — treat as human.
         ("human".to_string(), format!("user:{}", auth.agent_id))
     };
 
@@ -332,6 +341,24 @@ pub async fn revoke_spec_approval(
             "no active approval for spec '{spec_path}'"
         ))),
         Some(ev) => {
+            // Only the original approver or an Admin can revoke.
+            let is_admin =
+                auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
+            let caller_id = format!(
+                "{}:{}",
+                if auth.jwt_claims.is_some() {
+                    "agent"
+                } else {
+                    "user"
+                },
+                auth.agent_id
+            );
+            if ev.approver_id != caller_id && !is_admin {
+                return Err(ApiError::Forbidden(
+                    "only the original approver or an Admin can revoke".to_string(),
+                ));
+            }
+
             ev.revoked_at = Some(now);
             ev.revoked_by = Some(auth.agent_id.clone());
             ev.revocation_reason = Some(req.reason);
