@@ -151,6 +151,45 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // Check spec enforcement policy before merging.
+    {
+        let policy = state
+            .spec_policies
+            .lock()
+            .await
+            .get(&repo.id.to_string())
+            .cloned()
+            .unwrap_or_default();
+
+        if policy.require_spec_ref || policy.require_approved_spec {
+            if mr.spec_ref.is_none() {
+                let reason = "spec policy requires a spec_ref but MR has none".to_string();
+                warn!(entry_id = %entry.id, %reason, "spec policy blocked merge");
+                state
+                    .merge_queue
+                    .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                    .await?;
+                return Ok(());
+            }
+
+            if policy.require_approved_spec {
+                let spec_ref = mr.spec_ref.as_deref().unwrap();
+                if let Err(reason) = crate::api::gates::verify_spec_ref(state, spec_ref).await {
+                    warn!(entry_id = %entry.id, %reason, "spec approval check blocked merge");
+                    state
+                        .merge_queue
+                        .update_status(
+                            &entry.id,
+                            MergeQueueEntryStatus::Failed,
+                            Some(format!("spec approval required: {reason}")),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     // Check quality gates before merging.
     match crate::gate_executor::check_gates_for_mr(state, &mr.id).await {
         Ok(true) => {} // all passed or no gates
