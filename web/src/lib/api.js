@@ -212,4 +212,27 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(policies),
     }),
+  // SIEM forwarding targets
+  siemList: () => request('/admin/siem'),
+  siemCreate: (data) =>
+    request('/admin/siem', { method: 'POST', body: JSON.stringify(data) }),
+  siemUpdate: (id, data) =>
+    request(`/admin/siem/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  siemDelete: (id) =>
+    request(`/admin/siem/${id}`, { method: 'DELETE' }),
+  // Compute targets
+  computeList: () => request('/admin/compute-targets'),
+  computeCreate: (data) =>
+    request('/admin/compute-targets', { method: 'POST', body: JSON.stringify(data) }),
+  computeDelete: (id) =>
+    request(`/admin/compute-targets/${id}`, { method: 'DELETE' }),
+  // Network / WireGuard peers
+  networkPeers: () => request('/network/peers'),
+  networkPeerCreate: (data) =>
+    request('/network/peers', { method: 'POST', body: JSON.stringify(data) }),
+  networkPeerDelete: (id) =>
+    request(`/network/peers/${id}`, { method: 'DELETE' }),
+  networkDerpMap: () => request('/network/derp-map'),
+  // Agent spawn log
+  agentSpawnLog: (id) => request(`/admin/agents/${id}/spawn-log`),
 };

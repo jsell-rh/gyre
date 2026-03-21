@@ -12,6 +12,10 @@
   let agents = $state([]);
   let snapshots = $state([]);
   let retention = $state([]);
+  let siemTargets = $state([]);
+  let computeTargets = $state([]);
+  let networkPeers = $state([]);
+  let derpMap = $state(null);
   let loading = $state(true);
   let error = $state(null);
   let activeTab = $state('health');
@@ -34,6 +38,26 @@
   // Job trigger state
   let triggerLoading = $state({});
 
+  // SIEM modal state
+  let siemModal = $state(null); // null | { mode: 'create' | 'edit', target?: obj }
+  let siemForm = $state({ url: '', format: 'json', enabled: true, filter: '' });
+  let siemLoading = $state(false);
+
+  // Compute modal state
+  let computeModal = $state(false);
+  let computeForm = $state({ name: '', target_type: 'local', host: '', port: '' });
+  let computeLoading = $state(false);
+
+  // Network peer modal state
+  let peerModal = $state(false);
+  let peerForm = $state({ agent_id: '', public_key: '', endpoint: '', allowed_ips: '' });
+  let peerLoading = $state(false);
+
+  // Agent spawn log drill-down
+  let selectedAgentId = $state(null);
+  let spawnLog = $state([]);
+  let spawnLogLoading = $state(false);
+
   const TABS = [
     { id: 'health',    label: 'Health' },
     { id: 'jobs',      label: 'Jobs' },
@@ -41,6 +65,9 @@
     { id: 'agents',    label: 'Agents' },
     { id: 'snapshots', label: 'Snapshots' },
     { id: 'retention', label: 'Retention' },
+    { id: 'siem',      label: 'SIEM' },
+    { id: 'compute',   label: 'Compute' },
+    { id: 'network',   label: 'Network' },
   ];
 
   $effect(() => {
@@ -51,13 +78,17 @@
     loading = true;
     error = null;
     try {
-      const [h, j, a, ag, snaps, ret] = await Promise.all([
+      const [h, j, a, ag, snaps, ret, siem, compute, peers, derp] = await Promise.all([
         api.adminHealth(),
         api.adminJobs(),
         api.adminAudit(),
         api.agents(),
         api.adminListSnapshots().catch(() => []),
         api.adminRetention().catch(() => []),
+        api.siemList().catch(() => []),
+        api.computeList().catch(() => []),
+        api.networkPeers().catch(() => []),
+        api.networkDerpMap().catch(() => null),
       ]);
       health = h;
       jobs = j;
@@ -65,10 +96,143 @@
       agents = ag;
       snapshots = snaps;
       retention = ret;
+      siemTargets = Array.isArray(siem) ? siem : (siem?.targets ?? []);
+      computeTargets = Array.isArray(compute) ? compute : (compute?.targets ?? []);
+      networkPeers = Array.isArray(peers) ? peers : (peers?.peers ?? []);
+      derpMap = derp;
     } catch (e) {
       error = e.message;
     } finally {
       loading = false;
+    }
+  }
+
+  // SIEM actions
+  function openSiemCreate() {
+    siemForm = { url: '', format: 'json', enabled: true, filter: '' };
+    siemModal = { mode: 'create' };
+  }
+
+  function openSiemEdit(target) {
+    siemForm = { url: target.url ?? '', format: target.format ?? 'json', enabled: target.enabled ?? true, filter: target.filter ?? '' };
+    siemModal = { mode: 'edit', target };
+  }
+
+  function closeSiemModal() { siemModal = null; }
+
+  async function saveSiem() {
+    siemLoading = true;
+    try {
+      if (siemModal.mode === 'create') {
+        await api.siemCreate(siemForm);
+        toastSuccess('SIEM target created.');
+      } else {
+        await api.siemUpdate(siemModal.target.id, siemForm);
+        toastSuccess('SIEM target updated.');
+      }
+      siemTargets = await api.siemList().then(r => Array.isArray(r) ? r : (r?.targets ?? []));
+      closeSiemModal();
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      siemLoading = false;
+    }
+  }
+
+  async function deleteSiem(id) {
+    if (!confirm('Delete this SIEM target?')) return;
+    try {
+      await api.siemDelete(id);
+      siemTargets = siemTargets.filter(t => t.id !== id);
+      toastSuccess('SIEM target deleted.');
+    } catch (e) {
+      toastError(e.message);
+    }
+  }
+
+  // Compute actions
+  function openComputeCreate() {
+    computeForm = { name: '', target_type: 'local', host: '', port: '' };
+    computeModal = true;
+  }
+
+  function closeComputeModal() { computeModal = false; }
+
+  async function saveCompute() {
+    computeLoading = true;
+    try {
+      await api.computeCreate(computeForm);
+      computeTargets = await api.computeList().then(r => Array.isArray(r) ? r : (r?.targets ?? []));
+      toastSuccess('Compute target created.');
+      closeComputeModal();
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      computeLoading = false;
+    }
+  }
+
+  async function deleteCompute(id) {
+    if (!confirm('Delete this compute target?')) return;
+    try {
+      await api.computeDelete(id);
+      computeTargets = computeTargets.filter(t => t.id !== id);
+      toastSuccess('Compute target deleted.');
+    } catch (e) {
+      toastError(e.message);
+    }
+  }
+
+  // Network peer actions
+  function openPeerCreate() {
+    peerForm = { agent_id: '', public_key: '', endpoint: '', allowed_ips: '' };
+    peerModal = true;
+  }
+
+  function closePeerModal() { peerModal = false; }
+
+  async function savePeer() {
+    peerLoading = true;
+    try {
+      await api.networkPeerCreate(peerForm);
+      networkPeers = await api.networkPeers().then(r => Array.isArray(r) ? r : (r?.peers ?? []));
+      toastSuccess('Peer registered.');
+      closePeerModal();
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      peerLoading = false;
+    }
+  }
+
+  async function deletePeer(id) {
+    if (!confirm('Remove this peer?')) return;
+    try {
+      await api.networkPeerDelete(id);
+      networkPeers = networkPeers.filter(p => p.id !== id);
+      toastSuccess('Peer removed.');
+    } catch (e) {
+      toastError(e.message);
+    }
+  }
+
+  // Spawn log drill-down
+  async function showSpawnLog(agentId) {
+    if (selectedAgentId === agentId) {
+      selectedAgentId = null;
+      spawnLog = [];
+      return;
+    }
+    selectedAgentId = agentId;
+    spawnLogLoading = true;
+    spawnLog = [];
+    try {
+      const result = await api.agentSpawnLog(agentId);
+      spawnLog = Array.isArray(result) ? result : (result?.steps ?? result?.log ?? []);
+    } catch (e) {
+      spawnLog = [];
+    } finally {
+      spawnLogLoading = false;
     }
   }
 
@@ -448,9 +612,44 @@
                       <button class="kill-btn" onclick={() => openKill(agent)}>Kill</button>
                     {/if}
                     <button class="secondary-btn" onclick={() => openReassign(agent)}>Reassign</button>
+                    <button class="secondary-btn" onclick={() => showSpawnLog(agent.id)}>
+                      {selectedAgentId === agent.id ? 'Hide Log' : 'Spawn Log'}
+                    </button>
                   </div>
                 </td>
               </tr>
+              {#if selectedAgentId === agent.id}
+                <tr class="spawn-log-row">
+                  <td colspan="4">
+                    <div class="spawn-log-panel">
+                      <div class="spawn-log-header">Spawn Log — {agent.name}</div>
+                      {#if spawnLogLoading}
+                        <Skeleton height="60px" />
+                      {:else if spawnLog.length === 0}
+                        <p class="spawn-log-empty">No spawn log steps recorded.</p>
+                      {:else}
+                        <ol class="spawn-log-timeline">
+                          {#each spawnLog as step, i}
+                            <li class="spawn-log-step {step.status ?? ''}">
+                              <span class="step-num">{i + 1}</span>
+                              <span class="step-name">{step.step ?? step.name ?? step}</span>
+                              {#if step.status}
+                                <Badge value={step.status} />
+                              {/if}
+                              {#if step.timestamp || step.ts}
+                                <span class="step-time dim">{formatTime(step.timestamp ?? step.ts)}</span>
+                              {/if}
+                              {#if step.message || step.detail}
+                                <span class="step-detail dim">{step.message ?? step.detail}</span>
+                              {/if}
+                            </li>
+                          {/each}
+                        </ol>
+                      {/if}
+                    </div>
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>
@@ -540,6 +739,133 @@
           </tbody>
         </table>
       {/if}
+
+    <!-- SIEM TAB -->
+    {:else if activeTab === 'siem'}
+      <div class="section-actions">
+        <p class="section-desc">Configure SIEM forwarding targets for security event streaming.</p>
+        <button class="primary-btn" onclick={openSiemCreate}>+ Add Target</button>
+      </div>
+      {#if loading}
+        <Skeleton height="150px" />
+      {:else if siemTargets.length === 0}
+        <EmptyState title="No SIEM targets" description="Add a SIEM target to forward security events." />
+      {:else}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>URL</th>
+              <th>Format</th>
+              <th>Filter</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each siemTargets as target}
+              <tr>
+                <td class="mono dim">{target.url}</td>
+                <td class="dim">{target.format ?? 'json'}</td>
+                <td class="dim">{target.filter || '—'}</td>
+                <td>
+                  <Badge value={target.enabled ? 'active' : 'idle'} />
+                </td>
+                <td>
+                  <div class="action-row">
+                    <button class="secondary-btn" onclick={() => openSiemEdit(target)}>Edit</button>
+                    <button class="kill-btn" onclick={() => deleteSiem(target.id)}>Delete</button>
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    <!-- COMPUTE TAB -->
+    {:else if activeTab === 'compute'}
+      <div class="section-actions">
+        <p class="section-desc">Register remote compute targets for agent workload dispatch.</p>
+        <button class="primary-btn" onclick={openComputeCreate}>+ Add Target</button>
+      </div>
+      {#if loading}
+        <Skeleton height="150px" />
+      {:else if computeTargets.length === 0}
+        <EmptyState title="No compute targets" description="Register local, Docker, or SSH compute targets." />
+      {:else}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Host</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each computeTargets as ct}
+              <tr>
+                <td class="agent-name">{ct.name ?? ct.id}</td>
+                <td><Badge value={ct.target_type ?? ct.type ?? 'local'} /></td>
+                <td class="mono dim">{ct.host || '—'}</td>
+                <td><Badge value={ct.status ?? 'active'} /></td>
+                <td>
+                  <button class="kill-btn" onclick={() => deleteCompute(ct.id)}>Delete</button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    <!-- NETWORK TAB -->
+    {:else if activeTab === 'network'}
+      <div class="section-actions">
+        <p class="section-desc">WireGuard mesh peer registry and DERP relay map.</p>
+        <button class="primary-btn" onclick={openPeerCreate}>+ Register Peer</button>
+      </div>
+      {#if loading}
+        <Skeleton height="150px" />
+      {:else}
+        {#if networkPeers.length === 0}
+          <EmptyState title="No peers" description="No WireGuard peers registered yet." />
+        {:else}
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Agent ID</th>
+                <th>Public Key</th>
+                <th>Endpoint</th>
+                <th>Allowed IPs</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each networkPeers as peer}
+                <tr>
+                  <td class="mono dim">{peer.agent_id ?? peer.id}</td>
+                  <td class="mono dim" title={peer.public_key}>{(peer.public_key ?? '').slice(0, 16)}{peer.public_key?.length > 16 ? '…' : ''}</td>
+                  <td class="mono dim">{peer.endpoint || '—'}</td>
+                  <td class="mono dim">{peer.allowed_ips || '—'}</td>
+                  <td>
+                    <button class="kill-btn" onclick={() => deletePeer(peer.id)}>Remove</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+
+        {#if derpMap}
+          <div class="derp-section">
+            <h4 class="derp-title">DERP Relay Map</h4>
+            <div class="derp-card">
+              <pre class="derp-json">{JSON.stringify(derpMap, null, 2)}</pre>
+            </div>
+          </div>
+        {/if}
+      {/if}
     {/if}
   </div>
 </div>
@@ -592,6 +918,123 @@
         </div>
       {/if}
     </div>
+{/if}
+
+<!-- SIEM Modal -->
+{#if siemModal}
+  <div class="modal-backdrop" aria-hidden="true" onclick={closeSiemModal}></div>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    aria-label="SIEM Target"
+    onkeydown={(e) => { if (e.key === 'Escape') closeSiemModal(); }}
+  >
+    <h3 class="modal-title">{siemModal.mode === 'create' ? 'Add SIEM Target' : 'Edit SIEM Target'}</h3>
+    <div class="form-field">
+      <label class="form-label" for="siem-url">Webhook URL</label>
+      <input id="siem-url" class="filter-input full-width" bind:value={siemForm.url} placeholder="https://siem.example.com/ingest" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="siem-format">Format</label>
+      <select id="siem-format" class="target-select" bind:value={siemForm.format}>
+        <option value="json">JSON</option>
+        <option value="cef">CEF</option>
+        <option value="leef">LEEF</option>
+      </select>
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="siem-filter">Event Filter (optional)</label>
+      <input id="siem-filter" class="filter-input full-width" bind:value={siemForm.filter} placeholder="e.g. agent.spawned,mr.merged" />
+    </div>
+    <div class="form-field inline-check">
+      <input type="checkbox" id="siem-enabled" bind:checked={siemForm.enabled} />
+      <label for="siem-enabled" class="form-label">Enabled</label>
+    </div>
+    <div class="modal-actions">
+      <button class="secondary-btn" onclick={closeSiemModal}>Cancel</button>
+      <button class="primary-btn" onclick={saveSiem} disabled={siemLoading || !siemForm.url}>
+        {siemLoading ? 'Saving…' : 'Save'}
+      </button>
+    </div>
+  </div>
+{/if}
+
+<!-- Compute Modal -->
+{#if computeModal}
+  <div class="modal-backdrop" aria-hidden="true" onclick={closeComputeModal}></div>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    aria-label="Compute Target"
+    onkeydown={(e) => { if (e.key === 'Escape') closeComputeModal(); }}
+  >
+    <h3 class="modal-title">Add Compute Target</h3>
+    <div class="form-field">
+      <label class="form-label" for="ct-name">Name</label>
+      <input id="ct-name" class="filter-input full-width" bind:value={computeForm.name} placeholder="e.g. docker-host-1" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="ct-type">Type</label>
+      <select id="ct-type" class="target-select" bind:value={computeForm.target_type}>
+        <option value="local">Local</option>
+        <option value="docker">Docker</option>
+        <option value="ssh">SSH</option>
+      </select>
+    </div>
+    {#if computeForm.target_type !== 'local'}
+      <div class="form-field">
+        <label class="form-label" for="ct-host">Host</label>
+        <input id="ct-host" class="filter-input full-width" bind:value={computeForm.host} placeholder="host:port or hostname" />
+      </div>
+    {/if}
+    <div class="modal-actions">
+      <button class="secondary-btn" onclick={closeComputeModal}>Cancel</button>
+      <button class="primary-btn" onclick={saveCompute} disabled={computeLoading || !computeForm.name}>
+        {computeLoading ? 'Creating…' : 'Create'}
+      </button>
+    </div>
+  </div>
+{/if}
+
+<!-- Network Peer Modal -->
+{#if peerModal}
+  <div class="modal-backdrop" aria-hidden="true" onclick={closePeerModal}></div>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    aria-label="Register Peer"
+    onkeydown={(e) => { if (e.key === 'Escape') closePeerModal(); }}
+  >
+    <h3 class="modal-title">Register WireGuard Peer</h3>
+    <div class="form-field">
+      <label class="form-label" for="peer-agent-id">Agent ID</label>
+      <input id="peer-agent-id" class="filter-input full-width" bind:value={peerForm.agent_id} placeholder="UUID of agent" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="peer-pubkey">WireGuard Public Key</label>
+      <input id="peer-pubkey" class="filter-input full-width" bind:value={peerForm.public_key} placeholder="Base64 public key" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="peer-endpoint">Endpoint</label>
+      <input id="peer-endpoint" class="filter-input full-width" bind:value={peerForm.endpoint} placeholder="1.2.3.4:51820" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="peer-ips">Allowed IPs</label>
+      <input id="peer-ips" class="filter-input full-width" bind:value={peerForm.allowed_ips} placeholder="10.0.0.2/32" />
+    </div>
+    <div class="modal-actions">
+      <button class="secondary-btn" onclick={closePeerModal}>Cancel</button>
+      <button class="primary-btn" onclick={savePeer} disabled={peerLoading || !peerForm.public_key}>
+        {peerLoading ? 'Registering…' : 'Register'}
+      </button>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -965,5 +1408,94 @@
     padding: var(--space-2) var(--space-3);
     font-size: var(--text-sm);
     font-family: var(--font-body);
+  }
+
+  /* Spawn log drill-down */
+  .spawn-log-row td { padding: 0 var(--space-4) var(--space-3); background: var(--color-bg); }
+
+  .spawn-log-panel {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    background: var(--color-surface);
+  }
+
+  .spawn-log-header {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: var(--space-3);
+  }
+
+  .spawn-log-empty {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .spawn-log-timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .spawn-log-step {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .step-name { font-weight: 500; color: var(--color-text); }
+  .step-time { margin-left: auto; }
+  .step-detail { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+  /* Form fields in modals */
+  .form-field { display: flex; flex-direction: column; gap: var(--space-1); }
+  .form-label { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 500; }
+  .full-width { width: 100%; box-sizing: border-box; }
+  .inline-check { flex-direction: row; align-items: center; gap: var(--space-2); }
+
+  /* DERP map section */
+  .derp-section { margin-top: var(--space-6); }
+  .derp-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin: 0 0 var(--space-3);
+  }
+  .derp-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    overflow-x: auto;
+  }
+  .derp-json {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 </style>
