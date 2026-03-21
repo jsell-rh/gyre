@@ -17,20 +17,22 @@
   let showNewTask = $state(false);
   let taskTitle = $state('');
   let taskDesc = $state('');
-  let taskPriority = $state('Medium');
-  let taskStatus = $state('Backlog');
+  let taskPriority = $state('medium');
+  let taskStatus = $state('backlog');
   let taskCreating = $state(false);
 
   const columns = [
-    { key: 'Backlog',    label: 'Backlog',      colorClass: 'col-backlog' },
-    { key: 'InProgress', label: 'In Progress',  colorClass: 'col-inprogress' },
-    { key: 'Review',     label: 'Review',       colorClass: 'col-review' },
-    { key: 'Done',       label: 'Done',         colorClass: 'col-done' },
-    { key: 'Blocked',    label: 'Blocked',      colorClass: 'col-blocked' },
+    { key: 'backlog',      label: 'Backlog',      colorClass: 'col-backlog' },
+    { key: 'in_progress',  label: 'In Progress',  colorClass: 'col-inprogress' },
+    { key: 'review',       label: 'Review',       colorClass: 'col-review' },
+    { key: 'done',         label: 'Done',         colorClass: 'col-done' },
+    { key: 'blocked',      label: 'Blocked',      colorClass: 'col-blocked' },
   ];
 
-  const priorities = ['Critical', 'High', 'Medium', 'Low'];
-  const statuses = ['Backlog', 'InProgress', 'Review', 'Done', 'Blocked'];
+  const priorities = ['critical', 'high', 'medium', 'low'];
+  const priorityLabels = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
+  const statuses = ['backlog', 'in_progress', 'review', 'done', 'blocked'];
+  const statusLabels = { backlog: 'Backlog', in_progress: 'In Progress', review: 'Review', done: 'Done', blocked: 'Blocked' };
 
   const agents = $derived([...new Set(tasks.map((t) => t.assigned_to).filter(Boolean))].sort());
 
@@ -69,7 +71,7 @@
       });
       toastSuccess('Task created');
       showNewTask = false;
-      taskTitle = ''; taskDesc = ''; taskPriority = 'Medium'; taskStatus = 'Backlog';
+      taskTitle = ''; taskDesc = ''; taskPriority = 'medium'; taskStatus = 'backlog';
       loading = true;
       await loadTasks();
     } catch (e) {
@@ -89,12 +91,12 @@
     </label>
     <label class="form-label">Priority
       <select class="form-input" bind:value={taskPriority}>
-        {#each priorities as p}<option value={p}>{p}</option>{/each}
+        {#each priorities as p}<option value={p}>{priorityLabels[p]}</option>{/each}
       </select>
     </label>
     <label class="form-label">Status
       <select class="form-input" bind:value={taskStatus}>
-        {#each statuses as s}<option value={s}>{s}</option>{/each}
+        {#each statuses as s}<option value={s}>{statusLabels[s]}</option>{/each}
       </select>
     </label>
   </div>
@@ -116,7 +118,7 @@
       <div class="filters">
         <select bind:value={filterPriority} class="filter-select">
           <option value="">All priorities</option>
-          {#each priorities as p}<option value={p}>{p}</option>{/each}
+          {#each priorities as p}<option value={p}>{priorityLabels[p]}</option>{/each}
         </select>
         <select bind:value={filterAgent} class="filter-select">
           <option value="">All agents</option>
@@ -327,17 +329,17 @@
   .cards {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-3);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--space-3);
   }
 
   .task-card {
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);

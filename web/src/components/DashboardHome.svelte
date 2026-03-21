@@ -160,6 +160,12 @@
 </Modal>
 
 <div class="dashboard">
+  <!-- Page header -->
+  <div class="page-header">
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-desc">Platform overview and quick actions</p>
+  </div>
+
   <!-- Metric cards -->
   <section class="metrics">
     <button class="metric-card" onclick={() => onnavigate?.('agents')}>
@@ -335,6 +341,25 @@
 
   .qa-input:focus { outline: none; border-color: var(--color-primary); }
 
+  /* Page header */
+  .page-header {
+    margin-bottom: var(--space-2);
+  }
+
+  .page-title {
+    font-family: var(--font-display);
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-1);
+  }
+
+  .page-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
   /* Metric cards */
   .metrics {
     display: grid;
@@ -388,7 +413,7 @@
   .dashboard-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: var(--space-4);
+    gap: var(--space-6);
     align-items: start;
   }
 
