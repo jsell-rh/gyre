@@ -196,6 +196,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
 | `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2) |
 | `GET` | `/api/v1/auth/token-info` | Token introspection — returns token kind (`agent_jwt`, `uuid_token`, `api_key`, `global`) and decoded JWT claims including `task_id`, `spawned_by`, `exp` (M18) |
+| `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
@@ -261,6 +262,7 @@ Four auth mechanisms are accepted (checked in priority order):
 |---|---|---|
 | `GYRE_AUTH_TOKEN` env var | Server config (default: `gyre-dev-token`) | Global admin — all endpoints |
 | JWT agent token (EdDSA) | Returned by `POST /api/v1/agents/spawn` (starts with `ey`, 3 dot-separated parts) | Agent-scoped; signed + expiry validated + revocation checked; verify via `/.well-known/jwks.json`; TTL via `GYRE_AGENT_JWT_TTL` (M18) |
+| Federated JWT (remote EdDSA) | JWT minted by a trusted remote Gyre instance in `GYRE_TRUSTED_ISSUERS` | Agent-scoped; verified via remote OIDC discovery + JWKS (no local registration); `agent_id = "<remote-host>/<sub>"`; JWKS cached 5 min per issuer (G11) |
 | Per-agent UUID token | Returned by `POST /api/v1/agents` (legacy); still accepted for backwards compatibility | Agent-scoped operations |
 | API key (`gyre_<uuid>`) | `POST /api/v1/auth/api-keys` (Admin only) | Same as the user's role |
 | JWT (Keycloak OIDC) | Keycloak token exchange | Role from `realm_access` JWT claim |
@@ -294,6 +296,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_MAX_BODY_SIZE` | `10485760` (10 MB) | Maximum HTTP request body size in bytes (M7.3) |
 | `GYRE_CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated allowed CORS origins. Default: localhost:2222, localhost:3000, localhost:5173 **plus `http://localhost:{GYRE_PORT}` appended automatically when not already present**. Set to `*` to allow all (not recommended for production). (M7.3, M-5) |
 | `GYRE_AGENT_JWT_TTL` | `3600` | Lifetime in seconds for EdDSA JWT agent tokens issued by `POST /api/v1/agents/spawn`. After expiry, token is rejected even if not explicitly revoked. (M18) |
+| `GYRE_TRUSTED_ISSUERS` | _(disabled)_ | Comma-separated base URLs of trusted remote Gyre instances (e.g. `https://gyre-2.example.com`). Enables G11 federation: JWTs minted by these instances are verified via remote OIDC discovery + JWKS (cached 5 min). Federated agents receive `Agent` role; `agent_id = "<remote-host>/<sub>"`. (G11) |
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
