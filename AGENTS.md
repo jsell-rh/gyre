@@ -47,6 +47,9 @@ cargo test --all
 # Run frontend component tests (vitest — requires Node/npm)
 cd web && npm test && cd ..
 
+# Run Playwright E2E tests (M17.5 — auto-starts gyre-server on port 2222)
+cd web && npm run test:e2e && cd ..
+
 # Format check
 cargo fmt --all -- --check
 
@@ -64,7 +67,27 @@ cargo watch -x "test --all"
 
 # Run the E2E Ralph loop integration test (requires git on PATH)
 cargo test -p gyre-server --test e2e_ralph_loop
+
+# Run M17 integration test suites individually (all require git on PATH)
+cargo test -p gyre-server --test api_integration      # 67 REST API contract tests
+cargo test -p gyre-server --test auth_integration     # 21 auth + RBAC tests
+cargo test -p gyre-server --test git_integration      # 12 git smart HTTP + merge queue tests
 ```
+
+### M17 Integration Test Suites
+
+Four integration test files in `crates/gyre-server/tests/` each start a live server on a random port:
+
+| File | Tests | Coverage |
+|---|---|---|
+| `e2e_ralph_loop.rs` | 1 | Full Ralph loop end-to-end: spawn → clone → push → MR → merge |
+| `api_integration.rs` | 67 | REST API contract tests for all endpoints (M17.2) |
+| `auth_integration.rs` | 21 | Auth matrix: valid tokens, invalid tokens, RBAC role enforcement (M17.4) |
+| `git_integration.rs` | 12 | Smart HTTP clone/push, push gates, merge queue, commit provenance (M17.3) |
+
+All tests bind to `127.0.0.1:0` (random port) and run safely in parallel. Require `git` on `PATH`.
+
+> **Note for CI / integration tests:** Always use `git push origin HEAD:main` (not `git push origin main`) when pushing to an empty repo. GitHub Actions runners default to `init.defaultBranch=master`, so the local unborn branch may be named `master` even if the remote expects `main`.
 
 ### E2E Integration Test (`e2e_ralph_loop`)
 
@@ -150,10 +173,10 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
-| `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps (TASK-100) |
+| `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100) |
 | `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
-| `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on (TASK-100) |
-| `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued (TASK-100) |
+| `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
+| `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued; **Developer+ required** (CISO P147-A, TASK-100) |
 | `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |
 | `GET` | `/api/v1/merge-queue` | List merge queue entries (priority ordered) |
 | `DELETE` | `/api/v1/merge-queue/{id}` | Cancel queued entry |
@@ -695,6 +718,7 @@ Key specs to read before making changes:
 | M17 milestone deliverables | [specs/milestones/m17-integration-testing.md](specs/milestones/m17-integration-testing.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
+| Trusted Foundry integration (future pattern) | [specs/system/trusted-foundry-integration.md](specs/system/trusted-foundry-integration.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](specs/development/ci-docs-release.md) |
 
