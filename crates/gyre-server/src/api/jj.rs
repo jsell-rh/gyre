@@ -8,6 +8,7 @@ use gyre_ports::JjChange;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::auth::AuthenticatedAgent;
 use crate::commit_signatures::{self, CommitSignature};
 use crate::AppState;
 
@@ -95,9 +96,13 @@ pub async fn jj_log(
 pub async fn jj_new(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    auth: AuthenticatedAgent,
     Json(req): Json<NewChangeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
+    crate::abac::check_repo_abac(&state, &repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
     let change_id = state
         .jj_ops
         .jj_new(&path, &req.description)
@@ -113,8 +118,12 @@ pub async fn jj_new(
 pub async fn jj_squash(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    auth: AuthenticatedAgent,
 ) -> Result<Json<CommitSignature>, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
+    crate::abac::check_repo_abac(&state, &repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
     let commit_sha = state
         .jj_ops
         .jj_squash(&path)
@@ -167,8 +176,12 @@ pub async fn get_commit_signature(
 pub async fn jj_undo(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
+    crate::abac::check_repo_abac(&state, &repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
     state
         .jj_ops
         .jj_undo(&path)
@@ -181,9 +194,13 @@ pub async fn jj_undo(
 pub async fn jj_bookmark(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    auth: AuthenticatedAgent,
     Json(req): Json<BookmarkRequest>,
 ) -> Result<StatusCode, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
+    crate::abac::check_repo_abac(&state, &repo_id, &auth)
+        .await
+        .map_err(ApiError::Forbidden)?;
     state
         .jj_ops
         .jj_bookmark_create(&path, &req.name, &req.change_id)
@@ -445,6 +462,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Agent with ABAC policy blocking repo access gets 403 on jj_new (G6-A).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_new_abac_blocked_returns_403() {
+        use crate::abac::AbacPolicy;
+        use gyre_domain::Repository;
+        use std::collections::HashMap;
+
+        let state = crate::mem::test_state();
+
+        // Create a repo with a known ID.
+        let repo = Repository::new(
+            gyre_common::Id::new("repo-jj-abac"),
+            gyre_common::Id::new("proj-1"),
+            "jj-abac-test",
+            "/tmp/jj-abac-test",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Set ABAC policy requiring scope=repo:special.
+        // Agent JWTs have scope=agent — they won't satisfy this policy.
+        {
+            let mut policies = state.abac_policies.lock().await;
+            let mut required = HashMap::new();
+            required.insert("scope".to_string(), "repo:special".to_string());
+            policies.insert(
+                "repo-jj-abac".to_string(),
+                vec![AbacPolicy {
+                    resource_type: "repo".to_string(),
+                    resource_id: None,
+                    required_claims: required,
+                }],
+            );
+        }
+
+        // Mint an agent JWT (scope=agent ≠ repo:special → ABAC will deny).
+        let jwt = state
+            .agent_signing_key
+            .mint("agent-blocked", "task-1", "system", &state.base_url, 3600)
+            .expect("mint JWT");
+
+        // Register the JWT so the auth middleware accepts it.
+        {
+            let mut tokens = state.agent_tokens.lock().await;
+            tokens.insert("agent-blocked".to_string(), jwt.clone());
+        }
+
+        let app = crate::build_router(state);
+
+        let body = serde_json::json!({ "description": "should be denied" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-jj-abac/jj/new")
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     /// jj init on unknown repo returns 404.
