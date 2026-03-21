@@ -19,6 +19,7 @@
   import CostView from './components/CostView.svelte';
   import TaskDetail from './components/TaskDetail.svelte';
   import SpecApprovalsView from './components/SpecApprovalsView.svelte';
+  import SpecDashboard from './components/SpecDashboard.svelte';
   import AuditView from './components/AuditView.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
@@ -97,6 +98,7 @@
     costs:           'Cost Tracking',
     audit:           'Audit Events',
     'spec-approvals': 'Spec Approvals',
+    specs:           'Spec Registry',
     admin:           'Admin Panel',
     settings:        'Settings',
   };
@@ -209,6 +211,8 @@
         <AuditView />
       {:else if currentView === 'spec-approvals'}
         <SpecApprovalsView />
+      {:else if currentView === 'specs'}
+        <SpecDashboard />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}

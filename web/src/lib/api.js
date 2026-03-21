@@ -253,4 +253,20 @@ export const api = {
   },
   auditStats: () => request('/audit/stats'),
   auditStreamUrl: () => `${API_BASE}/audit/stream`,
+  // Spec registry (M21.1)
+  getSpecs: () => request('/specs'),
+  getSpec: (path) => request(`/specs/${encodeURIComponent(path)}`),
+  approveSpec: (path, sha) =>
+    request(`/specs/${encodeURIComponent(path)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ sha }),
+    }),
+  revokeSpec: (path, reason) =>
+    request(`/specs/${encodeURIComponent(path)}/revoke`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  getSpecHistory: (path) => request(`/specs/${encodeURIComponent(path)}/history`),
+  getPendingSpecs: () => request('/specs/pending'),
+  getDriftedSpecs: () => request('/specs/drifted'),
 };
