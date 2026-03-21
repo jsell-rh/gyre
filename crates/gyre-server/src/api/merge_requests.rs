@@ -7,7 +7,7 @@ use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, MergeRequest, MrStatus, Review, ReviewComment, ReviewDecision};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 use crate::domain_events::DomainEvent;
 use crate::AppState;
@@ -255,7 +255,7 @@ pub async fn create_mr(
     mr.author_agent_id = req.author_agent_id.map(Id::new);
     mr.spec_ref = req.spec_ref;
 
-    // Compute diff stats and conflict detection if the repository has a path
+    // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
     if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
         if let Ok(diff) = state
             .git_ops
@@ -275,6 +275,18 @@ pub async fn create_mr(
         {
             mr.has_conflicts = Some(!can_merge);
         }
+        // Auto-detect branch lineage dependencies (P4).
+        let lineage_deps = detect_lineage_deps(
+            &state,
+            &repo_id,
+            &repo.path,
+            &req.source_branch,
+            &req.target_branch,
+        )
+        .await;
+        if !lineage_deps.is_empty() {
+            mr.depends_on = lineage_deps;
+        }
     }
 
     state.merge_requests.create(&mr).await?;
@@ -282,6 +294,103 @@ pub async fn create_mr(
         id: mr.id.to_string(),
     });
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
+}
+
+/// Auto-detect MR dependencies based on git branch lineage (P4).
+///
+/// For each open MR in the same repo targeting the same target branch, checks
+/// whether `source_branch` is a descendant of that MR's source branch by
+/// comparing the merge-base to the candidate branch tip. If merge-base == tip,
+/// the new branch was created from the candidate branch and should depend on it.
+async fn detect_lineage_deps(
+    state: &Arc<AppState>,
+    repo_id: &Id,
+    repo_path: &str,
+    source_branch: &str,
+    target_branch: &str,
+) -> Vec<Id> {
+    let all_mrs = match state.merge_requests.list_by_repo(repo_id).await {
+        Ok(mrs) => mrs,
+        Err(_) => return vec![],
+    };
+
+    let candidates: Vec<_> = all_mrs
+        .into_iter()
+        .filter(|m| {
+            m.target_branch == target_branch
+                && m.source_branch != source_branch
+                && m.status == MrStatus::Open
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return vec![];
+    }
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let mut deps = Vec::new();
+
+    // Validate a branch name is safe to pass to git (no flag injection).
+    let is_safe_branch = |b: &str| !b.starts_with('-') && !b.contains("..");
+
+    if !is_safe_branch(source_branch) {
+        return vec![];
+    }
+
+    for candidate in candidates {
+        let cand_branch = &candidate.source_branch;
+        if !is_safe_branch(cand_branch) {
+            continue;
+        }
+
+        // Get the tip SHA of the candidate branch.
+        let tip_out = tokio::process::Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("rev-parse")
+            .arg(format!("refs/heads/{cand_branch}"))
+            .output()
+            .await
+            .ok();
+
+        let cand_tip = match tip_out.as_ref().filter(|o| o.status.success()) {
+            Some(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            None => continue,
+        };
+
+        if cand_tip.is_empty() || !cand_tip.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        // Get the merge-base of the candidate branch and the new source branch.
+        let mb_out = tokio::process::Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("merge-base")
+            .arg(format!("refs/heads/{cand_branch}"))
+            .arg(format!("refs/heads/{source_branch}"))
+            .output()
+            .await
+            .ok();
+
+        let merge_base = match mb_out.as_ref().filter(|o| o.status.success()) {
+            Some(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            None => continue,
+        };
+
+        // If merge-base == cand tip, source_branch is a descendant of cand branch.
+        if !merge_base.is_empty() && merge_base == cand_tip {
+            info!(
+                source = source_branch,
+                parent_branch = %cand_branch,
+                mr_id = %candidate.id,
+                "auto-detected branch lineage dependency"
+            );
+            deps.push(candidate.id);
+        }
+    }
+
+    deps
 }
 
 pub async fn list_mrs(
