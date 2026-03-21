@@ -1,4 +1,5 @@
 <script>
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -17,22 +18,20 @@
   let showNewTask = $state(false);
   let taskTitle = $state('');
   let taskDesc = $state('');
-  let taskPriority = $state('medium');
-  let taskStatus = $state('backlog');
+  let taskPriority = $state('Medium');
+  let taskStatus = $state('Backlog');
   let taskCreating = $state(false);
 
-  const columns = [
-    { key: 'backlog',      label: 'Backlog',      colorClass: 'col-backlog' },
-    { key: 'in_progress',  label: 'In Progress',  colorClass: 'col-inprogress' },
-    { key: 'review',       label: 'Review',       colorClass: 'col-review' },
-    { key: 'done',         label: 'Done',         colorClass: 'col-done' },
-    { key: 'blocked',      label: 'Blocked',      colorClass: 'col-blocked' },
-  ];
+  let columns = $derived([
+    { key: 'Backlog',    label: $t('tasks.status.backlog'),     colorClass: 'col-backlog' },
+    { key: 'InProgress', label: $t('tasks.status.in_progress'), colorClass: 'col-inprogress' },
+    { key: 'Review',     label: $t('tasks.status.review'),      colorClass: 'col-review' },
+    { key: 'Done',       label: $t('tasks.status.done'),        colorClass: 'col-done' },
+    { key: 'Blocked',    label: $t('tasks.status.blocked'),     colorClass: 'col-blocked' },
+  ]);
 
-  const priorities = ['critical', 'high', 'medium', 'low'];
-  const priorityLabels = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
-  const statuses = ['backlog', 'in_progress', 'review', 'done', 'blocked'];
-  const statusLabels = { backlog: 'Backlog', in_progress: 'In Progress', review: 'Review', done: 'Done', blocked: 'Blocked' };
+  const priorities = ['Critical', 'High', 'Medium', 'Low'];
+  const statuses = ['Backlog', 'InProgress', 'Review', 'Done', 'Blocked'];
 
   const agents = $derived([...new Set(tasks.map((t) => t.assigned_to).filter(Boolean))].sort());
 
@@ -71,7 +70,7 @@
       });
       toastSuccess('Task created');
       showNewTask = false;
-      taskTitle = ''; taskDesc = ''; taskPriority = 'medium'; taskStatus = 'backlog';
+      taskTitle = ''; taskDesc = ''; taskPriority = 'Medium'; taskStatus = 'Backlog';
       loading = true;
       await loadTasks();
     } catch (e) {
@@ -81,29 +80,29 @@
   }
 </script>
 
-<Modal bind:open={showNewTask} title="New Task">
+<Modal bind:open={showNewTask} title={$t('tasks.new_task.title')}>
   <div class="form">
-    <label class="form-label">Title
-      <input class="form-input" bind:value={taskTitle} placeholder="Task title" />
+    <label class="form-label">{$t('tasks.new_task.title_label')}
+      <input class="form-input" bind:value={taskTitle} placeholder={$t('tasks.new_task.title_placeholder')} />
     </label>
-    <label class="form-label">Description
-      <textarea class="form-input form-textarea" bind:value={taskDesc} placeholder="Optional description" rows="3"></textarea>
+    <label class="form-label">{$t('tasks.new_task.desc_label')}
+      <textarea class="form-input form-textarea" bind:value={taskDesc} placeholder={$t('tasks.new_task.desc_placeholder')} rows="3"></textarea>
     </label>
-    <label class="form-label">Priority
+    <label class="form-label">{$t('tasks.new_task.priority_label')}
       <select class="form-input" bind:value={taskPriority}>
-        {#each priorities as p}<option value={p}>{priorityLabels[p]}</option>{/each}
+        {#each priorities as p}<option value={p}>{p}</option>{/each}
       </select>
     </label>
-    <label class="form-label">Status
+    <label class="form-label">{$t('tasks.new_task.status_label')}
       <select class="form-input" bind:value={taskStatus}>
-        {#each statuses as s}<option value={s}>{statusLabels[s]}</option>{/each}
+        {#each statuses as s}<option value={s}>{s}</option>{/each}
       </select>
     </label>
   </div>
   {#snippet footer()}
-    <Button variant="secondary" onclick={() => (showNewTask = false)}>Cancel</Button>
+    <Button variant="secondary" onclick={() => (showNewTask = false)}>{$t('common.cancel')}</Button>
     <Button variant="primary" onclick={createTask} disabled={taskCreating || !taskTitle.trim()}>
-      {taskCreating ? 'Creating…' : 'Create Task'}
+      {taskCreating ? $t('common.creating') : $t('common.create') + ' Task'}
     </Button>
   {/snippet}
 </Modal>
@@ -111,21 +110,21 @@
 <div class="page">
   <div class="page-hdr">
     <div>
-      <h1 class="page-title">Task Board</h1>
+      <h1 class="page-title">{$t('tasks.title')}</h1>
       <p class="page-desc">{tasks.length} task{tasks.length !== 1 ? 's' : ''} total</p>
     </div>
     <div class="page-actions">
       <div class="filters">
         <select bind:value={filterPriority} class="filter-select">
-          <option value="">All priorities</option>
-          {#each priorities as p}<option value={p}>{priorityLabels[p]}</option>{/each}
+          <option value="">{$t('tasks.filters.all_priorities')}</option>
+          {#each priorities as p}<option value={p}>{p}</option>{/each}
         </select>
         <select bind:value={filterAgent} class="filter-select">
-          <option value="">All agents</option>
+          <option value="">{$t('tasks.filters.all_agents')}</option>
           {#each agents as a}<option value={a}>{a}</option>{/each}
         </select>
       </div>
-      <Button variant="primary" onclick={() => (showNewTask = true)}>+ New Task</Button>
+      <Button variant="primary" onclick={() => (showNewTask = true)}>+ {$t('tasks.new_task.button')}</Button>
     </div>
   </div>
 
@@ -329,17 +328,17 @@
   .cards {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-4);
+    padding: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
   }
 
   .task-card {
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: var(--space-4);
+    padding: var(--space-3) var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);

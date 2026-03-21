@@ -1,4 +1,5 @@
 <script>
+  import { t, locale } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
 
@@ -20,19 +21,24 @@
     return () => clearInterval(id);
   });
 
-  const wsStatusInfo = {
-    connected:    { label: 'Connected',    color: 'var(--color-success)' },
-    disconnected: { label: 'Disconnected', color: 'var(--color-text-muted)' },
-    error:        { label: 'Error',        color: 'var(--color-danger)' },
-    'auth-failed':{ label: 'Auth Failed',  color: 'var(--color-danger)' },
-  };
+  const supportedLocales = [
+    { code: 'en', label: 'English' },
+  ];
 
-  let wsInfo = $derived(wsStatusInfo[wsStatus] ?? { label: wsStatus, color: 'var(--color-text-muted)' });
+  let wsInfo = $derived((() => {
+    const map = {
+      connected:    { label: $t('settings.websocket.status.connected'),    color: 'var(--color-success)' },
+      disconnected: { label: $t('settings.websocket.status.disconnected'), color: 'var(--color-text-muted)' },
+      error:        { label: $t('settings.websocket.status.error'),        color: 'var(--color-danger)' },
+      'auth-failed':{ label: $t('settings.websocket.status.auth_failed'),  color: 'var(--color-danger)' },
+    };
+    return map[wsStatus] ?? { label: wsStatus, color: 'var(--color-text-muted)' };
+  })());
 </script>
 
 <div class="panel">
   <div class="panel-header">
-    <h2>Settings</h2>
+    <h2>{$t('settings.title')}</h2>
   </div>
 
   <div class="content">
@@ -43,7 +49,7 @@
           <rect x="2" y="3" width="20" height="14" rx="2"/>
           <path d="M8 21h8M12 17v4"/>
         </svg>
-        <h3>Server Information</h3>
+        <h3>{$t('settings.server_info.title')}</h3>
       </div>
 
       {#if loading}
@@ -55,29 +61,29 @@
       {:else if version}
         <dl class="info-list">
           <div class="info-row">
-            <dt class="info-label">Name</dt>
+            <dt class="info-label">{$t('settings.server_info.name')}</dt>
             <dd class="info-value">{version.name}</dd>
           </div>
           <div class="info-row">
-            <dt class="info-label">Version</dt>
+            <dt class="info-label">{$t('settings.server_info.version')}</dt>
             <dd class="info-value mono">{version.version}</dd>
           </div>
           <div class="info-row">
-            <dt class="info-label">Milestone</dt>
+            <dt class="info-label">{$t('settings.server_info.milestone')}</dt>
             <dd class="info-value">{version.milestone}</dd>
           </div>
         </dl>
 
         <div class="status-indicator connected">
           <div class="status-dot"></div>
-          <span>Server reachable</span>
+          <span>{$t('settings.server_info.reachable')}</span>
         </div>
       {:else}
         <div class="error-row">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
             <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
           </svg>
-          <span>Could not connect to server</span>
+          <span>{$t('settings.server_info.unreachable')}</span>
         </div>
       {/if}
     </div>
@@ -88,7 +94,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
           <path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/>
         </svg>
-        <h3>WebSocket Connection</h3>
+        <h3>{$t('settings.websocket.title')}</h3>
       </div>
 
       <div class="ws-status-row">
@@ -96,7 +102,7 @@
           class:pulse={wsStatus === 'connected'}></div>
         <div class="ws-status-text">
           <span class="ws-label" style:color={wsInfo.color}>{wsInfo.label}</span>
-          <span class="ws-sublabel">Real-time event stream</span>
+          <span class="ws-sublabel">{$t('settings.websocket.sublabel')}</span>
         </div>
       </div>
     </div>
@@ -107,38 +113,56 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
           <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
         </svg>
-        <h3>Configuration</h3>
+        <h3>{$t('settings.config.title')}</h3>
       </div>
 
       <table class="config-table">
         <thead>
           <tr>
-            <th>Setting</th>
-            <th>Value</th>
+            <th>{$t('settings.config.setting')}</th>
+            <th>{$t('settings.config.value')}</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td class="config-key">API Base URL</td>
+            <td class="config-key">{$t('settings.config.api_base_url')}</td>
             <td class="config-val mono">{window.location.origin}/api</td>
           </tr>
           <tr>
-            <td class="config-key">WebSocket URL</td>
+            <td class="config-key">{$t('settings.config.ws_url')}</td>
             <td class="config-val mono">{window.location.origin.replace('http', 'ws')}/ws</td>
           </tr>
           <tr>
-            <td class="config-key">Dashboard Build</td>
+            <td class="config-key">{$t('settings.config.dashboard_build')}</td>
             <td class="config-val mono">Svelte 5</td>
           </tr>
         </tbody>
       </table>
     </div>
 
+    <!-- Language -->
+    <div class="info-card">
+      <div class="card-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
+        </svg>
+        <h3>{$t('settings.language.title')}</h3>
+      </div>
+      <div class="lang-row">
+        <label class="lang-label" for="lang-select">{$t('settings.language.label')}</label>
+        <select id="lang-select" class="lang-select" bind:value={$locale}>
+          {#each supportedLocales as loc}
+            <option value={loc.code}>{loc.label}</option>
+          {/each}
+        </select>
+      </div>
+    </div>
+
     <!-- About -->
     <div class="info-card about-card">
       <div class="gyre-logo">
         <span class="logo-text">Gyre</span>
-        <span class="logo-sub">Autonomous Development Platform</span>
+        <span class="logo-sub">{$t('settings.about.tagline')}</span>
       </div>
       <p class="about-desc">
         Gyre is an autonomous software development platform. Agents collaborate to write, review, and deploy code — all coordinated through the Gyre server.
@@ -411,5 +435,33 @@
   .mono {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+  }
+
+  .lang-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .lang-label {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    min-width: 10rem;
+  }
+
+  .lang-select {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+
+  .lang-select:focus {
+    outline: none;
+    border-color: var(--color-primary);
   }
 </style>

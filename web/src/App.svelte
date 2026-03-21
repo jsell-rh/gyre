@@ -1,5 +1,7 @@
 <script>
   import './lib/design-system.css';
+  import './lib/i18n.js';
+  import { t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import Sidebar from './components/Sidebar.svelte';
   import DashboardHome from './components/DashboardHome.svelte';
@@ -66,20 +68,20 @@
   }
 
   const viewTitles = {
-    dashboard:    'Dashboard',
-    activity:     'Activity Feed',
-    agents:       'Agents',
-    tasks:        'Task Board',
-    projects:     'Projects',
-    'repo-detail': 'Repository',
-    'mr-detail':  'Merge Request',
-    'merge-queue': 'Merge Queue',
-    'mcp-catalog': 'MCP Tool Catalog',
-    compose:      'Agent Compose',
-    analytics:    'Analytics',
-    costs:        'Cost Tracking',
-    admin:        'Admin Panel',
-    settings:     'Settings',
+    dashboard:    () => $t('nav.items.dashboard'),
+    activity:     () => $t('nav.items.activity'),
+    agents:       () => $t('nav.items.agents'),
+    tasks:        () => $t('nav.items.tasks'),
+    projects:     () => $t('nav.items.projects'),
+    'repo-detail': () => 'Repository',
+    'mr-detail':  () => 'Merge Request',
+    'merge-queue': () => $t('nav.items.merge_queue'),
+    'mcp-catalog': () => $t('nav.items.mcp_tools'),
+    compose:      () => $t('nav.items.compose'),
+    analytics:    () => $t('nav.items.analytics'),
+    costs:        () => $t('nav.items.costs'),
+    admin:        () => $t('nav.items.admin_panel'),
+    settings:     () => $t('nav.items.settings'),
   };
 
   let breadcrumbs = $derived(() => {
@@ -106,7 +108,7 @@
   <div class="main">
     <header class="topbar">
       <div class="topbar-left">
-        <span class="topbar-title">{viewTitles[currentView] ?? 'Gyre'}</span>
+        <span class="topbar-title">{(viewTitles[currentView] ?? (() => 'Gyre'))()}</span>
         {#if breadcrumbs().length > 0}
           <Breadcrumb items={breadcrumbs()} onnavigate={navigate} />
         {/if}
@@ -127,7 +129,7 @@
 
         <button class="auth-btn" class:auth-active={hasToken} onclick={() => { tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token'; tokenModalOpen = true; }} title="Configure API token">
           <span class="auth-dot"></span>
-          <span>{hasToken ? 'Authenticated' : 'No Token'}</span>
+          <span>{hasToken ? 'Authenticated' : $t('settings.token.title')}</span>
         </button>
 
         <span class="version">v0.1.0</span>
