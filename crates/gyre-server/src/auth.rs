@@ -7,6 +7,9 @@
 //!    - JWT tokens (start with "ey"): looked up in HashMap + cryptographically validated.
 //! 3. API keys -- resolves as the owning user's name.
 //! 4. JWT (OIDC/Keycloak) -- validates RS256 token; auto-creates user on first login.
+//! 5. Federation JWT (G11) -- EdDSA JWT from a trusted remote Gyre instance.
+//!    `iss` claim must match one of `GYRE_TRUSTED_ISSUERS`. JWKS fetched via OIDC
+//!    discovery from the remote instance and cached for 5 minutes.
 //!
 //! If `jwt_config` is None the server runs without Keycloak (agent tokens only).
 //! Gyre always mints its own agent JWTs via `AgentSigningKey` (EdDSA/Ed25519).
@@ -26,6 +29,17 @@ use std::{collections::HashMap, sync::Arc};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
+
+// -- Federation JWKS cache (G11) ----------------------------------------------
+
+/// Cached JWKS entry for a trusted remote Gyre instance.
+pub struct RemoteJwksEntry {
+    pub keys: HashMap<String, jsonwebtoken::DecodingKey>,
+    pub fetched_at: std::time::Instant,
+}
+
+/// TTL for cached remote JWKS (5 minutes).
+const REMOTE_JWKS_TTL_SECS: u64 = 300;
 
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
@@ -403,10 +417,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
 
         // 4. JWT validation.
         if let Some(jwt_cfg) = &state.jwt_config {
-            return validate_jwt(token, jwt_cfg, state).await.map_err(|e| {
-                tracing::debug!("JWT validation failed: {e}");
-                (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()
-            });
+            if let Ok(auth) = validate_jwt(token, jwt_cfg, state).await {
+                return Ok(auth);
+            }
+        }
+
+        // 5. Federation JWT from a trusted remote Gyre instance (G11).
+        if token.starts_with("ey") {
+            if let Some(auth) = validate_federated_jwt(token, state).await {
+                return Ok(auth);
+            }
         }
 
         Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response())
@@ -420,6 +440,17 @@ pub async fn validate_jwt_middleware(
     state: &Arc<crate::AppState>,
 ) -> Result<(), String> {
     validate_jwt(token, jwt_cfg, state).await.map(|_| ())
+}
+
+/// Public wrapper for federation JWT validation used by the global auth middleware.
+pub async fn validate_federated_jwt_middleware(
+    token: &str,
+    state: &Arc<crate::AppState>,
+) -> Result<(), String> {
+    validate_federated_jwt(token, state)
+        .await
+        .map(|_| ())
+        .ok_or_else(|| "federated JWT validation failed".to_string())
 }
 
 async fn validate_jwt(
@@ -515,6 +546,158 @@ async fn find_or_create_user(
 
     state.users.create(&user).await?;
     Ok(user)
+}
+
+// -- Federation JWT validation (G11) ------------------------------------------
+
+/// Extract the `iss` claim from a JWT payload without verifying the signature.
+/// Used to route federation tokens to the correct remote JWKS endpoint.
+fn extract_iss_from_jwt_payload(token: &str) -> Option<String> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    value.get("iss")?.as_str().map(|s| s.to_string())
+}
+
+/// Fetch JWKS keys for a remote Gyre issuer via OIDC discovery.
+async fn fetch_remote_jwks_for_issuer(
+    issuer: &str,
+    http_client: &reqwest::Client,
+) -> Option<HashMap<String, jsonwebtoken::DecodingKey>> {
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let discovery: OidcDiscovery = http_client
+        .get(&discovery_url)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let jwk_set: JwkSet = http_client
+        .get(&discovery.jwks_uri)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let mut keys = HashMap::new();
+    for jwk in &jwk_set.keys {
+        let kid = match jwk.get("kid").and_then(|v| v.as_str()) {
+            Some(k) => k.to_string(),
+            None => continue,
+        };
+        let jwk_typed: jsonwebtoken::jwk::Jwk = match serde_json::from_value(jwk.clone()) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("Federation: failed to parse JWK {kid} from {issuer}: {e}");
+                continue;
+            }
+        };
+        match jsonwebtoken::DecodingKey::from_jwk(&jwk_typed) {
+            Ok(dk) => {
+                keys.insert(kid, dk);
+            }
+            Err(e) => tracing::warn!(
+                "Federation: failed to build DecodingKey for {kid} from {issuer}: {e}"
+            ),
+        }
+    }
+
+    if keys.is_empty() {
+        tracing::warn!("Federation: no valid keys found in JWKS for {issuer}");
+        None
+    } else {
+        Some(keys)
+    }
+}
+
+/// Validate a JWT from a trusted remote Gyre instance (EdDSA/Ed25519).
+///
+/// Returns `Some(AuthenticatedAgent)` if the token is valid and its `iss`
+/// matches a configured trusted issuer. Returns `None` if not applicable
+/// (unknown issuer, invalid signature, or expired).
+async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<AuthenticatedAgent> {
+    if state.trusted_issuers.is_empty() {
+        return None;
+    }
+
+    // Extract issuer without verifying signature.
+    let iss = extract_iss_from_jwt_payload(token)?;
+
+    // Check if the issuer is trusted.
+    let normalized_iss = iss.trim_end_matches('/').to_string();
+    if !state
+        .trusted_issuers
+        .iter()
+        .any(|t| t.trim_end_matches('/') == normalized_iss)
+    {
+        return None;
+    }
+
+    let header = jsonwebtoken::decode_header(token).ok()?;
+    let kid = header.kid.unwrap_or_else(|| "default".to_string());
+
+    // Check cache for a fresh entry.
+    let decoding_key = {
+        let cache = state.remote_jwks_cache.read().await;
+        cache.get(&normalized_iss).and_then(|entry| {
+            if entry.fetched_at.elapsed().as_secs() < REMOTE_JWKS_TTL_SECS {
+                entry.keys.get(&kid).cloned()
+            } else {
+                None
+            }
+        })
+    };
+
+    let decoding_key = if let Some(dk) = decoding_key {
+        dk
+    } else {
+        // Fetch fresh JWKS.
+        let keys = fetch_remote_jwks_for_issuer(&normalized_iss, &state.http_client).await?;
+        let dk = keys.get(&kid).cloned()?;
+        let mut cache = state.remote_jwks_cache.write().await;
+        cache.insert(
+            normalized_iss.clone(),
+            RemoteJwksEntry {
+                keys,
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+        dk
+    };
+
+    // Validate signature and standard claims (exp, iss).
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+    validation.set_issuer(&[&normalized_iss]);
+    validation.validate_aud = false;
+
+    let token_data =
+        jsonwebtoken::decode::<AgentJwtClaims>(token, &decoding_key, &validation).ok()?;
+    let claims = token_data.claims;
+
+    tracing::debug!(
+        issuer = %normalized_iss,
+        sub = %claims.sub,
+        "Federated JWT accepted"
+    );
+
+    // Federated agents receive Agent role; agent_id is prefixed with the
+    // remote host to avoid collisions with local agent IDs.
+    let remote_host = normalized_iss
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    Some(AuthenticatedAgent {
+        agent_id: format!("{remote_host}/{}", claims.sub),
+        user_id: None,
+        roles: vec![UserRole::Agent],
+        tenant_id: "default".to_string(),
+    })
 }
 
 // -- AdminOnly extractor ------------------------------------------------------
@@ -658,6 +841,7 @@ mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, routing::get, Router};
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     use super::{test_helpers::*, AuthenticatedAgent};
@@ -1147,6 +1331,213 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.as_ref(), b"system");
+    }
+
+    // -- Federation JWT tests (G11) -------------------------------------------
+
+    /// Build a minimal AppState that trusts a given issuer URL.
+    fn make_state_with_trusted_issuer(issuer_url: &str) -> Arc<crate::AppState> {
+        let base = crate::mem::test_state();
+        let mut state = (*base).clone();
+        state.trusted_issuers = vec![issuer_url.to_string()];
+        Arc::new(state)
+    }
+
+    /// Mint an EdDSA JWT using a fresh AgentSigningKey, simulating a remote Gyre.
+    fn mint_remote_jwt(
+        signing_key: &crate::auth::AgentSigningKey,
+        issuer: &str,
+        sub: &str,
+        ttl_secs: u64,
+    ) -> String {
+        signing_key
+            .mint(sub, "task-1", "system", issuer, ttl_secs)
+            .expect("mint must succeed")
+    }
+
+    /// Inject a remote JWKS entry into the state's cache so we don't need an
+    /// actual HTTP server for most tests.
+    async fn seed_remote_jwks(
+        state: &Arc<crate::AppState>,
+        issuer: &str,
+        remote_key: &crate::auth::AgentSigningKey,
+    ) {
+        use jsonwebtoken::DecodingKey;
+        let jwks: serde_json::Value =
+            serde_json::from_str(&remote_key.jwks_json).expect("valid JWKS");
+        let keys_arr = jwks["keys"].as_array().expect("keys array");
+        let mut map = std::collections::HashMap::new();
+        for jwk in keys_arr {
+            let jwk_typed: jsonwebtoken::jwk::Jwk =
+                serde_json::from_value(jwk.clone()).expect("valid JWK");
+            let dk = DecodingKey::from_jwk(&jwk_typed).expect("valid DecodingKey");
+            let kid = jwk["kid"].as_str().unwrap_or("default").to_string();
+            map.insert(kid, dk);
+        }
+        state.remote_jwks_cache.write().await.insert(
+            issuer.trim_end_matches('/').to_string(),
+            crate::auth::RemoteJwksEntry {
+                keys: map,
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn federated_jwt_from_trusted_issuer_accepted() {
+        let remote_url = "http://remote-gyre.example.com";
+        let state = make_state_with_trusted_issuer(remote_url);
+        let remote_key = crate::auth::AgentSigningKey::generate();
+        seed_remote_jwks(&state, remote_url, &remote_key).await;
+
+        let token = mint_remote_jwt(&remote_key, remote_url, "agent-abc", 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        // agent_id should be prefixed with the remote host
+        assert!(
+            body.contains("agent-abc"),
+            "expected agent-abc in agent_id, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn federated_jwt_from_untrusted_issuer_rejected() {
+        // Trust "http://trusted.example.com" but present a token from "http://evil.example.com"
+        let state = make_state_with_trusted_issuer("http://trusted.example.com");
+        let evil_key = crate::auth::AgentSigningKey::generate();
+        // Do NOT seed the trusted cache — JWKS fetch would fail for the evil issuer anyway,
+        // but the issuer check should reject before attempting JWKS fetch.
+
+        let token = mint_remote_jwt(&evil_key, "http://evil.example.com", "evil-agent", 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn federated_jwt_expired_rejected() {
+        let remote_url = "http://remote-gyre.example.com";
+        let state = make_state_with_trusted_issuer(remote_url);
+        let remote_key = crate::auth::AgentSigningKey::generate();
+        seed_remote_jwks(&state, remote_url, &remote_key).await;
+
+        // Negative TTL — token is already expired.
+        // We use jsonwebtoken directly to mint an expired token.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = crate::auth::AgentJwtClaims {
+            sub: "agent-xyz".to_string(),
+            iss: remote_url.to_string(),
+            iat: now - 7200,
+            exp: now - 3600,
+            scope: "agent".to_string(),
+            task_id: "task-1".to_string(),
+            spawned_by: "system".to_string(),
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(remote_key.kid.clone());
+        let token = jsonwebtoken::encode(&header, &claims, &remote_key.encoding_key).expect("mint");
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn federated_jwt_wrong_signature_rejected() {
+        let remote_url = "http://remote-gyre.example.com";
+        let state = make_state_with_trusted_issuer(remote_url);
+        let trusted_key = crate::auth::AgentSigningKey::generate();
+        seed_remote_jwks(&state, remote_url, &trusted_key).await;
+
+        // Sign with a DIFFERENT key — same issuer but wrong signature.
+        let attacker_key = crate::auth::AgentSigningKey::generate();
+        let token = mint_remote_jwt(&attacker_key, remote_url, "agent-evil", 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn federated_jwt_no_trusted_issuers_rejected() {
+        // State with no trusted issuers — federation step skipped entirely.
+        let state = test_state(); // default test_state has trusted_issuers: vec![]
+        let remote_key = crate::auth::AgentSigningKey::generate();
+        let token = mint_remote_jwt(&remote_key, "http://some-gyre.example.com", "agent-1", 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
