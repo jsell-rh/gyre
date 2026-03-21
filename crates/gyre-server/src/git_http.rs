@@ -999,6 +999,52 @@ async fn process_spec_lifecycle(
         let now = crate::api::now_secs();
 
         for (status_char, path, old_path) in changes {
+            // Auto-invalidate active spec approvals when the spec file is modified,
+            // deleted, or renamed. An approval is stale once the spec content changes.
+            {
+                // For renames, the old path is stale; for M/D, the current path is stale.
+                let stale_paths: Vec<&str> = match status_char {
+                    'M' | 'D' => vec![path.as_str()],
+                    'R' => old_path
+                        .as_deref()
+                        .map(|p| vec![p])
+                        .unwrap_or_else(|| vec![path.as_str()]),
+                    _ => vec![],
+                };
+
+                if !stale_paths.is_empty() {
+                    let mut approvals = state.spec_approvals.lock().await;
+                    let mut invalidated = 0usize;
+                    for approval in approvals.values_mut() {
+                        if approval.is_active()
+                            && stale_paths.iter().any(|&p| approval.spec_path == p)
+                        {
+                            approval.revoked_at = Some(now);
+                            approval.revoked_by = Some("system:spec-lifecycle".to_string());
+                            approval.revocation_reason = Some(format!(
+                                "spec file {} in push to {}",
+                                match status_char {
+                                    'M' => "modified",
+                                    'D' => "deleted",
+                                    'R' => "renamed",
+                                    _ => "changed",
+                                },
+                                default_branch
+                            ));
+                            invalidated += 1;
+                        }
+                    }
+                    drop(approvals);
+                    if invalidated > 0 {
+                        info!(
+                            spec_path = %path,
+                            invalidated,
+                            "spec-lifecycle: auto-invalidated stale spec approvals"
+                        );
+                    }
+                }
+            }
+
             let Some((title, labels, priority)) =
                 classify_spec_change(status_char, &path, old_path.as_deref())
             else {
