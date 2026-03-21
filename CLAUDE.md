@@ -150,7 +150,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/specs/drifted` | Specs with open drift-review tasks — `drift_status: Drifted` (M21.1) |
 | `GET` | `/api/v1/specs/index` | Auto-generated markdown index of all specs in manifest (M21.1) |
 | `GET` | `/api/v1/specs/{path}` | Get single spec ledger entry by URL-encoded path (M21.1) |
-| `POST` | `/api/v1/specs/{path}/approve` | Approve a specific spec version: `{sha}` — path-scoped; transitions ledger Pending → Approved; `sha` must be 40-char hex (M21.1) |
+| `POST` | `/api/v1/specs/{path}/approve` | Approve a specific spec version: `{sha}` — path-scoped; transitions ledger Pending → Approved; `sha` must be 40-char hex; **approver type (`agent`/`human`) derived server-side from token kind** (JWT bearer = agent, global token/API key = human; client must not supply); **Developer+ required** — ReadOnly callers receive 403 (M21.1, M21.1-B, M21.1-C) |
 | `POST` | `/api/v1/specs/{path}/revoke` | Revoke approval for a specific spec: `{reason}` — path-scoped; caller must be original approver or Admin (M21.1) |
 | `GET` | `/api/v1/specs/{path}/history` | Approval event history for a specific spec — list of approval/revocation events with approver, SHA, timestamps, reason (M21.1) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
