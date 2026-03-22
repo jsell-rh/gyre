@@ -817,6 +817,9 @@ Key specs to read before making changes:
 | M17 milestone deliverables | [specs/milestones/m17-integration-testing.md](specs/milestones/m17-integration-testing.md) |
 | M18 milestone deliverables | [specs/milestones/m18-agent-identity.md](specs/milestones/m18-agent-identity.md) |
 | M19 milestone deliverables | [specs/milestones/m19-container-runtime.md](specs/milestones/m19-container-runtime.md) |
+| M20 milestone deliverables | [specs/milestones/m20-ui-coverage.md](specs/milestones/m20-ui-coverage.md) |
+| M21 milestone deliverables | [specs/milestones/m21-spec-registry.md](specs/milestones/m21-spec-registry.md) |
+| M22 milestone deliverables | [specs/milestones/m22-platform-entities.md](specs/milestones/m22-platform-entities.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | User management & notification system | [specs/system/user-management.md](specs/system/user-management.md) |
 | Full-text search (all entities, FTS5/tsvector, MCP tool) | [specs/system/search.md](specs/system/search.md) |
