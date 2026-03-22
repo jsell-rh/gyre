@@ -116,7 +116,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M21: Spec Registry | Done | Spec manifest (`specs/manifest.yaml`), ledger state machine (Approved/Pending/Deprecated), 8 new `/api/v1/specs/` endpoints, Spec Dashboard UI |
 | M22: Platform Entities | Done | **M22.1** Workspace+Persona entities (PersonaScope, 5 endpoints). **M22.2** BudgetConfig/BudgetUsage, 3 budget endpoints, spawn 429 gate. **M22.3** SpecLink/SpecLinkType, 6 link types, forge enforcement. **M22.4** DependencyEdge, 6 dep endpoints, Cargo.toml auto-detect. **M22.5** 7 Svelte views (Workspaces, Personas, Budget, Dep Graph, Spec Graph, User Profile) + 20+ api.js methods. **M22.6** Declarative ABAC Policy engine (8 operators, first-match-wins), 5 endpoints. **M22.7** SearchPort/MemSearchAdapter, 2 endpoints, `gyre_search` MCP tool. **M22.8** Enhanced User, WorkspaceMembership (WorkspaceRole), Team, Notification (16 types), 12 endpoints |
 
-741 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+757 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
