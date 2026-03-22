@@ -63,6 +63,13 @@ specs:
     gates:
       - persona: security
       - persona: accountability
+    links:
+      - type: depends_on
+        target: system/source-control.md
+        reason: "Gate enforcement requires Smart HTTP push infrastructure"
+      - type: references
+        target: system/spec-lifecycle.md
+        reason: "Spec binding on MR create is part of the spec lifecycle"
 
   - path: system/spec-lifecycle.md
     title: Spec Lifecycle Automation
@@ -75,6 +82,10 @@ specs:
     owner: user:jsell
     gates:
       - persona: accountability
+    links:
+      - type: extends
+        target: system/spec-lifecycle.md
+        reason: "Registry is the storage layer for the spec lifecycle"
 
   - path: system/forge-advantages.md
     title: Forge-Native Advantages
@@ -158,6 +169,10 @@ specs:
     title: Manager Agent
     owner: user:jsell
     auto_create_tasks: false
+    links:
+      - type: references
+        target: development/ralph-loops.md
+        reason: "Manager agent orchestrates via Ralph loops"
 
   - path: development/philosophy.md
     title: Philosophy
