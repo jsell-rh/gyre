@@ -78,6 +78,7 @@ pub struct WorkspaceRepoEntry {
 }
 
 pub async fn create_workspace(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceResponse>), ApiError> {
@@ -121,6 +122,7 @@ pub async fn get_workspace(
 }
 
 pub async fn update_workspace(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateWorkspaceRequest>,
@@ -150,6 +152,7 @@ pub async fn update_workspace(
 }
 
 pub async fn delete_workspace(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -163,6 +166,7 @@ pub async fn delete_workspace(
 }
 
 pub async fn add_repo_to_workspace(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(ws_id): Path<String>,
     Json(req): Json<AddRepoRequest>,
@@ -236,6 +240,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -286,6 +291,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -302,6 +308,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/workspaces/{id}"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
@@ -323,6 +330,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -337,6 +345,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

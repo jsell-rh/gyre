@@ -156,6 +156,7 @@ pub async fn list_dependents(
 /// POST /api/v1/repos/{id}/dependencies
 /// Manually declare a dependency from this repo to another.
 pub async fn add_dependency(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<AddDependencyRequest>,
@@ -209,6 +210,7 @@ pub async fn add_dependency(
 /// DELETE /api/v1/repos/{id}/dependencies/{dep_id}
 /// Remove a dependency edge. Only manually-declared edges can be deleted via API.
 pub async fn delete_dependency(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path((repo_id, dep_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
