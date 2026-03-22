@@ -70,16 +70,144 @@ pub enum WorkspaceRole {
 }
 ```
 
-### Invitation Flow
+### Tenant-Level User Onboarding
 
-1. Workspace Owner/Admin invites user by email or username
-2. Invitation created with `accepted_at: None`
-3. Invitee receives notification (email + in-app)
+Before a user can join workspaces, they must exist in the tenant. Two modes:
+
+**SSO mode (Keycloak/OIDC):**
+- Users are auto-provisioned on first SSO login (existing behavior in `auth.rs`)
+- SCIM handles bulk provisioning from the IdP
+- Tenant admin can also manually invite by email
+
+**Local mode (no external IdP):**
+- Gyre manages users directly (no Keycloak dependency)
+- Tenant admin invites users by email
+- Invitee receives a magic link or sets a password
+- Local user accounts are first-class, not second-class
+
+This is critical for running Gyre locally, in air-gapped environments, or for teams that don't have Keycloak. The platform must work without any external identity system.
+
+```rust
+pub struct TenantInvitation {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub email: String,
+    pub invited_by: Id,
+    pub role: GlobalRole,         // TenantAdmin or Member
+    pub workspace_ids: Vec<Id>,   // Optionally pre-assign workspaces
+    pub workspace_roles: Vec<WorkspaceRole>, // Role per pre-assigned workspace
+    pub status: InvitationStatus,
+    pub token_hash: String,       // SHA-256 of invitation token (for magic link)
+    pub expires_at: u64,
+    pub created_at: u64,
+    pub accepted_at: Option<u64>,
+}
+
+pub enum InvitationStatus {
+    Pending,
+    Accepted,
+    Declined,
+    Expired,
+    Revoked,
+}
+```
+
+**Tenant invitation flow:**
+
+```
+1. Tenant admin invites user@example.com
+   - Optionally: pre-assign to workspaces with roles
+   - Invitation token generated (cryptographically random)
+   - Invitation expires after configurable period (default: 7 days)
+
+2. Invitee receives email with magic link:
+   https://gyre.example.com/invite/{token}
+
+3. Invitee clicks link:
+   - SSO mode: redirected to Keycloak login, then account linked
+   - Local mode: prompted to set display name + password
+
+4. Account created, workspace memberships activated
+
+5. Invitee lands on their dashboard with pre-assigned workspaces
+```
+
+**Bulk invitation:**
+
+Tenant admins can invite multiple users at once:
+
+```json
+POST /api/v1/tenant/invite/bulk
+{
+  "invitations": [
+    {
+      "email": "alice@example.com",
+      "workspace_ids": ["ws-platform"],
+      "workspace_roles": ["Developer"]
+    },
+    {
+      "email": "bob@example.com",
+      "workspace_ids": ["ws-platform", "ws-apps"],
+      "workspace_roles": ["Admin", "Developer"]
+    }
+  ],
+  "expires_in_days": 7
+}
+```
+
+For SCIM-managed tenants, bulk invite is rarely needed (users auto-provision). For local-mode tenants, this is the primary onboarding mechanism.
+
+### Workspace Invitation Flow
+
+Once a user exists in the tenant, workspace access is granted through invitation:
+
+1. Workspace Owner/Admin invites user by username (tenant-internal) or email
+2. Invitation created with configurable expiry (default: 7 days)
+3. Invitee receives notification (in-app always, email if configured)
 4. Invitee accepts or declines
 5. On accept: membership is active, user gains access to workspace repos
-6. Pending invitations visible in admin panel
+6. Pending invitations visible in workspace settings and admin panel
+7. Expired invitations are automatically cleaned up by a background job
 
 Users don't self-join workspaces. Access is always granted by an existing member with Owner/Admin role.
+
+**Cross-tenant sharing:** Not supported. Tenants are hard isolation boundaries. A user in Tenant A cannot be invited to a workspace in Tenant B. If cross-org collaboration is needed, users must have accounts in both tenants.
+
+### Invitation Expiry
+
+All invitations (tenant and workspace) expire:
+
+```rust
+pub struct InvitationPolicy {
+    pub tenant_invite_expiry_days: u32,     // Default: 7
+    pub workspace_invite_expiry_days: u32,  // Default: 7
+    pub max_pending_invitations: u32,       // Per workspace, default: 50
+    pub allow_re_invite: bool,              // Re-invite after expiry, default: true
+}
+```
+
+- Expired invitations are marked `Expired` by a background job (not deleted, for audit)
+- Admins can revoke pending invitations at any time
+- Re-inviting after expiry creates a new invitation with a new token
+
+### Ownership Transfer & Reclamation
+
+When a workspace Owner leaves (account deactivated, removed from tenant):
+
+1. Tenant Admin receives a notification: "Workspace X has no active Owner"
+2. Tenant Admin can reassign ownership via ABAC-permitted action:
+   ```
+   PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role
+   { "role": "Owner" }
+   ```
+3. This is an ABAC-enforced action: `subject.global_role == TenantAdmin` AND `action == transfer_ownership`
+4. The action is audit-logged with the previous owner and reason
+5. If no Tenant Admin acts within a configurable period (default: 30 days), the workspace is flagged in the admin dashboard as "orphaned"
+
+Workspace Owners can also voluntarily transfer ownership:
+- Must designate a new Owner before downgrading their own role
+- Cannot remove themselves as Owner if they're the last Owner
+- Transfer is audit-logged
 
 ### Repo Access
 
@@ -347,6 +475,16 @@ Public within the tenant:
 
 ## API
 
+### Tenant Invitations
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `POST /api/v1/tenant/invite` | POST | Invite user to tenant (TenantAdmin only) |
+| `POST /api/v1/tenant/invite/bulk` | POST | Bulk invite (TenantAdmin only) |
+| `GET /api/v1/tenant/invitations` | GET | List pending/expired/accepted invitations |
+| `DELETE /api/v1/tenant/invitations/{id}` | DELETE | Revoke pending invitation |
+| `POST /api/v1/invite/{token}/accept` | POST | Accept invitation via magic link token |
+
 ### User Management
 
 | Endpoint | Method | Purpose |
@@ -355,6 +493,7 @@ Public within the tenant:
 | `PUT /api/v1/users/me` | PUT | Update display name, timezone, locale, preferences |
 | `GET /api/v1/users/{username}` | GET | User profile (tenant-public) |
 | `GET /api/v1/users` | GET | List users (tenant admin only) |
+| `PUT /api/v1/users/{id}/deactivate` | PUT | Deactivate user (TenantAdmin only) |
 | `GET /api/v1/users/me/sessions` | GET | My active sessions |
 | `DELETE /api/v1/users/me/sessions/{id}` | DELETE | Revoke a session |
 | `POST /api/v1/users/me/sessions/revoke-all` | POST | Revoke all sessions |
@@ -365,8 +504,10 @@ Public within the tenant:
 |---|---|---|
 | `GET /api/v1/workspaces/{id}/members` | GET | List workspace members |
 | `POST /api/v1/workspaces/{id}/invite` | POST | Invite user (Owner/Admin only) |
+| `GET /api/v1/workspaces/{id}/invitations` | GET | List pending invitations |
 | `POST /api/v1/workspaces/{id}/invite/accept` | POST | Accept invitation |
-| `PUT /api/v1/workspaces/{id}/members/{user_id}/role` | PUT | Change member role |
+| `DELETE /api/v1/workspaces/{id}/invitations/{id}` | DELETE | Revoke invitation |
+| `PUT /api/v1/workspaces/{id}/members/{user_id}/role` | PUT | Change member role (including ownership transfer) |
 | `DELETE /api/v1/workspaces/{id}/members/{user_id}` | DELETE | Remove member |
 
 ### Teams
@@ -394,20 +535,37 @@ Public within the tenant:
 ## CLI
 
 ```bash
+# Identity
 gyre whoami                                  # Current user profile
 gyre profile set --display-name "Jordan Sell" --timezone "America/New_York"
 gyre sessions list                           # Active sessions
 gyre sessions revoke <session-id>
 gyre sessions revoke-all
 
-gyre workspace members list
-gyre workspace invite user@example.com --role Developer
-gyre workspace members set-role @asmith Admin
+# Tenant invitations (TenantAdmin only)
+gyre tenant invite alice@example.com                              # Invite to tenant
+gyre tenant invite alice@example.com --workspace platform --role Developer  # With workspace pre-assignment
+gyre tenant invite --bulk users.csv                               # Bulk invite from CSV
+gyre tenant invitations list                                      # Pending invitations
+gyre tenant invitations revoke <invitation-id>
 
+# Workspace membership
+gyre workspace members list
+gyre workspace invite @alice --role Developer                     # By username (already in tenant)
+gyre workspace invite alice@example.com --role Developer          # By email (sends tenant invite if needed)
+gyre workspace members set-role @asmith Admin
+gyre workspace members set-role @asmith Owner --transfer          # Transfer ownership
+gyre workspace members remove @asmith
+gyre workspace invitations list
+gyre workspace invitations revoke <invitation-id>
+
+# Teams
 gyre team create "Platform Team" --lead @jsell
 gyre team add @asmith --team "Platform Team"
 gyre team list
+gyre team remove @asmith --team "Platform Team"
 
+# Notifications
 gyre notifications list                      # Recent notifications
 gyre notifications list --unread --priority high
 gyre notifications preferences set --email-digest hourly --email-min-priority high
@@ -418,11 +576,15 @@ gyre notifications preferences set --slack-url https://hooks.slack.com/...
 
 | Page | Purpose |
 |---|---|
-| My Dashboard | Landing page with my tasks, MRs, agents, approvals, notifications |
+| My Dashboard | Landing page with my tasks, MRs, agents, approvals, notifications, pending invitations |
 | User Profile (`/@username`) | Public profile with activity feed |
 | User Settings | Edit display name, timezone, preferences, notification channels |
 | Session Management | Active sessions with revoke |
-| Workspace Members | Member list, invite, role management |
+| Tenant User Management | User list, invite, deactivate, role management (TenantAdmin only) |
+| Tenant Invitation Management | Pending/expired/accepted invitations, bulk invite, revoke (TenantAdmin only) |
+| Workspace Members | Member list, invite modal, role management, ownership transfer |
+| Workspace Invitations | Pending invitations with expiry countdown, revoke |
+| Pending Invitation Accept Page | `/invite/{token}` - accept/decline with workspace preview |
 | Team Management | Create/edit teams, manage membership |
 | Notification Drawer | Slide-out panel from bell icon |
 | Notification Preferences | Channel configuration, priority filters |
@@ -430,25 +592,6 @@ gyre notifications preferences set --slack-url https://hooks.slack.com/...
 ---
 
 ## Remaining Gaps for Enterprise Readiness
-
-Beyond this spec, the following gaps still need dedicated specs:
-
-### Search (Not Yet Specced)
-
-At scale, users need to find things across the tenant:
-- Full-text search of specs, tasks, MR titles/descriptions, commit messages
-- Faceted filtering (by workspace, repo, status, author, date range)
-- Search results scoped by user's access (can't find things in workspaces you're not a member of)
-- Agent-queryable (agents should be able to search too, via MCP)
-
-### ABAC Policy Engine (Not Yet Specced)
-
-ABAC is referenced throughout but never fully specified:
-- What attributes are available for policy decisions?
-- How are policies defined (declarative, in the manifest? in the admin panel?)
-- How is the policy engine evaluated (middleware? per-handler?)
-- How do policies compose (tenant policies + workspace policies + repo policies)?
-- Audit logging of policy decisions
 
 ### External Integrations / Webhooks (Not Yet Specced)
 
