@@ -1,6 +1,6 @@
 # M22: Platform Entities
 
-**Status:** In Progress  
+**Status:** Done  
 **Goal:** Core platform entities for multi-tenant governance, budget control, spec governance, cross-repo dependency tracking, declarative ABAC, full-text search, and user management.
 
 ## Sub-Milestones
