@@ -36,6 +36,7 @@ pub mod specs;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
+pub mod users;
 pub mod version;
 pub mod workload;
 pub mod workspaces;
@@ -56,6 +57,11 @@ use compute::{
 use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
+use users::{
+    create_team, delete_team, get_me, get_my_agents, get_my_mrs, get_my_notifications,
+    get_my_tasks, invite_member, list_members, list_teams, mark_notification_read, remove_member,
+    update_me, update_member_role, update_team,
+};
 
 use crate::AppState;
 
@@ -465,6 +471,34 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(policies::get_policy)
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
+        )
+        // User profile (M22.8)
+        .route("/api/v1/users/me", get(get_me).put(update_me))
+        .route("/api/v1/users/me/agents", get(get_my_agents))
+        .route("/api/v1/users/me/tasks", get(get_my_tasks))
+        .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        .route("/api/v1/users/me/notifications", get(get_my_notifications))
+        .route(
+            "/api/v1/users/me/notifications/:id/read",
+            put(mark_notification_read),
+        )
+        // Workspace members (M22.8)
+        .route(
+            "/api/v1/workspaces/:id/members",
+            post(invite_member).get(list_members),
+        )
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id",
+            put(update_member_role).delete(remove_member),
+        )
+        // Teams (M22.8)
+        .route(
+            "/api/v1/workspaces/:id/teams",
+            post(create_team).get(list_teams),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id",
+            put(update_team).delete(delete_team),
         )
 }
 

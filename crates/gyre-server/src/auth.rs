@@ -462,7 +462,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
                 return Ok(AuthenticatedAgent {
-                    agent_id: user.name.clone(),
+                    agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
                     tenant_id: "default".to_string(),
@@ -575,7 +575,7 @@ async fn validate_jwt(
     .map_err(|e| format!("user resolution: {e}"))?;
 
     Ok(AuthenticatedAgent {
-        agent_id: user.name.clone(),
+        agent_id: user.display_name.clone(),
         user_id: Some(user.id),
         roles: user.roles,
         tenant_id,
@@ -1148,7 +1148,7 @@ mod tests {
             .unwrap();
         assert!(after.is_some());
         let user = after.unwrap();
-        assert_eq!(user.name, "dave");
+        assert_eq!(user.display_name, "dave");
         assert_eq!(user.email.as_deref(), Some("dave@example.com"));
     }
 

@@ -22,6 +22,7 @@ pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
 pub mod network_peer;
+pub mod notification;
 pub mod policy;
 pub mod project;
 pub mod quality_gate;
@@ -29,8 +30,10 @@ pub mod repository;
 pub mod review;
 pub mod spec_approval;
 pub mod task;
+pub mod team;
 pub mod user;
 pub mod workspace;
+pub mod workspace_membership;
 
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
@@ -46,6 +49,7 @@ pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use message_type::MessageType;
 pub use network_peer::NetworkPeer;
+pub use notification::{Notification, NotificationPriority, NotificationType};
 pub use policy::{
     builtin_policies, Condition, ConditionOp, ConditionValue, Policy, PolicyDecision, PolicyEffect,
     PolicyScope,
@@ -56,5 +60,7 @@ pub use repository::Repository;
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use spec_approval::SpecApproval;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
-pub use user::{User, UserRole};
+pub use team::Team;
+pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
 pub use workspace::{Persona, PersonaScope, Workspace};
+pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
