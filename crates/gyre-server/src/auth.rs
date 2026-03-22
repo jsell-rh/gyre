@@ -387,11 +387,18 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        // Accept token from Authorization header or ?token= query param (for SSE/EventSource).
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| {
+                parts
+                    .uri
+                    .query()
+                    .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
+            })
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
 
         // 1. Global auth token (dev / system usage). Use constant-time compare.
