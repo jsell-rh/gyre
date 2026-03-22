@@ -18,6 +18,8 @@ What Gyre does - the product.
 |---|---|---|
 | **Platform Model** | [`system/platform-model.md`](system/platform-model.md) | **Foundational spec:** tenant/workspace/repo hierarchy, persona model, orchestration, MCP coordination, budgets, rollback, secrets, bootstrap |
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
+| Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
+| ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
 | Design Principles | [`system/design-principles.md`](system/design-principles.md) | Core invariants that govern all decisions |
 | Source Control | [`system/source-control.md`](system/source-control.md) | Built-in git forge, MRs, merge queue, jj evaluation |
 | Forge Advantages | [`system/forge-advantages.md`](system/forge-advantages.md) | 8 capabilities only possible with a forge-native agent platform |
