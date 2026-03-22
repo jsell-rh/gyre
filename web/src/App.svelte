@@ -199,6 +199,18 @@
         {/if}
       </div>
       <div class="topbar-right">
+        {#if selectedWorkspace}
+          <button
+            class="scope-chip"
+            onclick={() => navigate('workspace-detail', { workspace: selectedWorkspace })}
+            aria-label="Current workspace: {selectedWorkspace.name}"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+            <span>{selectedWorkspace.name}</span>
+          </button>
+        {/if}
         <button class="search-trigger" onclick={() => (searchOpen = true)} aria-label="Open search (Ctrl+K)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
@@ -437,6 +449,38 @@
     font-size: 0.65rem;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
+  }
+
+  /* Workspace scope chip */
+  .scope-chip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    white-space: nowrap;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .scope-chip:hover {
+    background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+    border-color: var(--color-primary);
+  }
+
+  .scope-chip span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* WS indicator */
