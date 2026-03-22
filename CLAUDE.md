@@ -226,11 +226,11 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
 | `GET` | `/api/v1/users/me/notifications` | Notifications (16 `NotificationType` variants: `MrNeedsReview`, `GateFailure`, `MrMerged`, etc.; 4 priority levels); auto-created on agent complete, gate failure, and MR merge (M22.8) |
 | `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark notification read (M22.8) |
-| `POST/GET` | `/api/v1/workspaces/{id}/members` | Invite / list members; `WorkspaceRole`: Owner, Admin, Developer, Viewer; accept/pending lifecycle (M22.8) |
-| `PUT` | `/api/v1/workspaces/{id}/members/{user_id}` | Update a member's `WorkspaceRole` (M22.8) |
-| `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member (M22.8) |
-| `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create / list workspace-scoped teams (M22.8) |
-| `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; `add_member`/`remove_member` idempotent (M22.8) |
+| `POST/GET` | `/api/v1/workspaces/{id}/members` | Invite (**Admin only**, H-19) / list members; `WorkspaceRole`: Owner, Admin, Developer, Viewer; accept/pending lifecycle (M22.8) |
+| `PUT` | `/api/v1/workspaces/{id}/members/{user_id}` | Update a member's `WorkspaceRole`; **Admin only** (H-17, M22.8) |
+| `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member; **Admin only** (H-20, M22.8) |
+| `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create (**Admin only**, H-21) / list workspace-scoped teams (M22.8) |
+| `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; **Admin only** (H-18); `add_member`/`remove_member` idempotent (M22.8) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
