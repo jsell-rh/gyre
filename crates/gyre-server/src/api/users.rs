@@ -324,7 +324,7 @@ pub struct InviteMemberRequest {
 }
 
 pub async fn invite_member(
-    auth: AuthenticatedAgent,
+    _admin: crate::auth::AdminOnly,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<InviteMemberRequest>,
@@ -332,7 +332,7 @@ pub async fn invite_member(
     let role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
 
-    let caller_id = resolve_user_id(&auth);
+    let caller_id = Id::new(_admin.agent_id.clone());
     let ws_id = Id::new(workspace_id);
     let user_id = Id::new(req.user_id);
     let now = now_secs();
@@ -380,6 +380,7 @@ pub struct UpdateMemberRoleRequest {
 }
 
 pub async fn update_member_role(
+    _admin: crate::auth::AdminOnly,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMemberRoleRequest>,
@@ -401,6 +402,7 @@ pub async fn update_member_role(
 }
 
 pub async fn remove_member(
+    _admin: crate::auth::AdminOnly,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
@@ -447,6 +449,7 @@ pub struct CreateTeamRequest {
 }
 
 pub async fn create_team(
+    _admin: crate::auth::AdminOnly,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTeamRequest>,
@@ -475,11 +478,12 @@ pub struct UpdateTeamRequest {
 }
 
 pub async fn update_team(
+    _admin: crate::auth::AdminOnly,
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateTeamRequest>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let _ = workspace_id;
+    let _ws_id = Id::new(workspace_id);
     let tid = Id::new(team_id);
     let mut team = state
         .teams
@@ -497,10 +501,11 @@ pub async fn update_team(
 }
 
 pub async fn delete_team(
+    _admin: crate::auth::AdminOnly,
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let _ = workspace_id;
+    let _ws_id = Id::new(workspace_id);
     let tid = Id::new(team_id);
     state.teams.delete(&tid).await?;
     Ok(StatusCode::NO_CONTENT)
