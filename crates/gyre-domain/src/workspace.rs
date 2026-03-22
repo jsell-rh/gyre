@@ -1,7 +1,6 @@
-use gyre_common::Id;
 use crate::budget::BudgetConfig;
+use gyre_common::Id;
 use serde::{Deserialize, Serialize};
-
 
 /// Governance and coordination boundary. Groups related repos with shared budgets and policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
