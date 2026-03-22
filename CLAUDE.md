@@ -758,6 +758,7 @@ Key specs to read before making changes:
 | Design principles (invariants) | [specs/system/design-principles.md](specs/system/design-principles.md) |
 | Agent Gates & Spec Binding | [specs/system/agent-gates.md](specs/system/agent-gates.md) |
 | Spec Lifecycle Automation | [specs/system/spec-lifecycle.md](specs/system/spec-lifecycle.md) |
+| Platform model (ownership, orchestration, personas, governance) | [specs/system/platform-model.md](specs/system/platform-model.md) |
 | Spec Registry (manifest + ledger) | [specs/system/spec-registry.md](specs/system/spec-registry.md) |
 | M0 milestone deliverables | [specs/milestones/m0-walking-skeleton.md](specs/milestones/m0-walking-skeleton.md) |
 | M1 milestone deliverables | [specs/milestones/m1-domain-foundation.md](specs/milestones/m1-domain-foundation.md) |
