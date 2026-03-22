@@ -378,18 +378,36 @@ pub async fn spawn_agent(
                 let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(false);
                 let ssh_spawn_config = if container_mode {
                     // M19.5: Build a docker run command to execute on the remote SSH host.
+                    // Validate agent name to prevent shell injection (M19.5-A).
+                    let safe_name = agent
+                        .name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+                    if !safe_name || agent.name.is_empty() || agent.name.len() > 63 {
+                        return Err(ApiError::InvalidInput(
+                            "agent name must be 1-63 chars of [a-zA-Z0-9._-] for container use"
+                                .to_string(),
+                        ));
+                    }
                     let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest");
-                    let docker_cmd = format!(
-                        "docker run --detach --rm --network=none --memory=2g --pids-limit=512 --user=65534:65534 --name={} {} {} {}",
-                        agent.name,
-                        image,
-                        command,
-                        args.join(" ")
-                    );
+                    // Use direct args (no shell) to prevent injection.
+                    let mut docker_args = vec![
+                        "run".to_string(),
+                        "--detach".to_string(),
+                        "--rm".to_string(),
+                        "--network=none".to_string(),
+                        "--memory=2g".to_string(),
+                        "--pids-limit=512".to_string(),
+                        "--user=65534:65534".to_string(),
+                        format!("--name={}", agent.name),
+                        image.to_string(),
+                        command.clone(),
+                    ];
+                    docker_args.extend(args.iter().cloned());
                     gyre_ports::SpawnConfig {
                         name: agent.name.clone(),
-                        command: "sh".to_string(),
-                        args: vec!["-c".to_string(), docker_cmd],
+                        command: "docker".to_string(),
+                        args: docker_args,
                         env: std::collections::HashMap::new(),
                         work_dir: effective_work_dir,
                     }
