@@ -169,8 +169,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
 | `GET` | `/api/v1/repos/{id}/dependencies` | Outgoing dependency edges from this repo (`DependencyType`: Code/Spec/Api/Schema/Manual; `DetectionMethod`: auto/manual) (M22.4) |
 | `GET` | `/api/v1/repos/{id}/dependents` | Incoming dependency edges — repos that declare a dependency on this one (M22.4) |
-| `POST` | `/api/v1/repos/{id}/dependencies` | Add a manual dependency edge: `{target_repo_id, dep_type, notes?}` (M22.4) |
-| `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dependency edge (M22.4) |
+| `POST` | `/api/v1/repos/{id}/dependencies` | Add a manual dependency edge: `{target_repo_id, dep_type, notes?}`; **Admin only** (H-12, M22.4) |
+| `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dependency edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents — all repos that would be affected if this one changes, with depth (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes: [{repo_id, name},...], edges: [{from, to, dep_type, detection_method},...]}` (M22.4) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
