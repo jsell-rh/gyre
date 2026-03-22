@@ -235,6 +235,8 @@ export const api = {
   networkDerpMap: () => request('/network/derp-map'),
   // Agent spawn log
   agentSpawnLog: (id) => request(`/admin/agents/${id}/spawn-log`),
+  // Container audit record (M19.3) — 404 if agent was not container-spawned
+  agentContainer: (id) => request(`/agents/${id}/container`),
   // Token introspection (M18)
   tokenInfo: () => request('/auth/token-info'),
   // Spec approvals ledger (M12.3)
