@@ -97,33 +97,39 @@
     if (ctx.repo !== undefined) selectedRepo = ctx.repo;
     if (ctx.mr !== undefined) selectedMr = ctx.mr;
     if (ctx.task !== undefined) selectedTask = ctx.task;
-    // Push to browser history so back button works
-    window.history.pushState(
-      { view, selectedRepo, selectedMr, selectedTask },
-      '',
-      '#' + view,
-    );
     if (ctx.workspace !== undefined) selectedWorkspace = ctx.workspace;
+    // Push to browser history so back button works (path-based for clean URLs)
+    window.history.pushState(
+      { view, selectedRepo, selectedMr, selectedTask, selectedWorkspace },
+      '',
+      '/' + view,
+    );
   }
 
   // Sync browser history ↔ app state using onMount to avoid reactive loops
   onMount(() => {
-    const initHash = window.location.hash.slice(1);
-    if (initHash && initHash in viewTitles) {
-      currentView = initHash;
+    // Support both path-based (/agents) and legacy hash-based (#agents) URLs
+    const pathView = window.location.pathname.slice(1);
+    const hashView = window.location.hash.slice(1);
+    const initView = (pathView && pathView in viewTitles) ? pathView
+                   : (hashView && hashView in viewTitles) ? hashView
+                   : null;
+    if (initView) {
+      currentView = initView;
     }
     window.history.replaceState(
-      { view: currentView, selectedRepo, selectedMr, selectedTask },
+      { view: currentView, selectedRepo, selectedMr, selectedTask, selectedWorkspace },
       '',
-      '#' + currentView,
+      '/' + currentView,
     );
 
     function handlePopstate(e) {
       if (e.state?.view) {
-        currentView  = e.state.view;
-        selectedRepo = e.state.selectedRepo ?? null;
-        selectedMr   = e.state.selectedMr   ?? null;
-        selectedTask = e.state.selectedTask  ?? null;
+        currentView       = e.state.view;
+        selectedRepo      = e.state.selectedRepo      ?? null;
+        selectedMr        = e.state.selectedMr        ?? null;
+        selectedTask      = e.state.selectedTask       ?? null;
+        selectedWorkspace = e.state.selectedWorkspace  ?? null;
       } else {
         currentView = 'dashboard';
       }

@@ -879,7 +879,13 @@
     aria-modal="true"
     tabindex="-1"
     aria-label="Agent Action"
-    onkeydown={(e) => { if (e.key === 'Escape') closeModal(); }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { closeModal(); return; }
+      if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
+        if (actionModal?.type === 'kill') confirmKill();
+        else if (actionModal?.type === 'reassign') confirmReassign();
+      }
+    }}
   >
       {#if actionModal.type === 'kill'}
         <h3 class="modal-title">Force Kill Agent</h3>
@@ -1163,7 +1169,7 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4) var(--space-4);
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface-elevated);
   }
@@ -1176,7 +1182,7 @@
   .data-table tbody tr:hover { background: var(--color-surface-elevated); }
 
   .data-table td {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4) var(--space-4);
     vertical-align: middle;
     color: var(--color-text);
   }
