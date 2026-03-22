@@ -1318,6 +1318,206 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// WorkspaceMembership
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{WorkspaceMembership, WorkspaceRole};
+use gyre_ports::WorkspaceMembershipRepository;
+
+#[derive(Default)]
+pub struct MemWorkspaceMembershipRepository {
+    store: Arc<Mutex<HashMap<String, WorkspaceMembership>>>,
+}
+
+#[async_trait]
+impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
+    async fn create(&self, m: &WorkspaceMembership) -> Result<()> {
+        self.store.lock().await.insert(m.id.to_string(), m.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<WorkspaceMembership>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<WorkspaceMembership>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|m| m.workspace_id == *workspace_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_by_user(&self, user_id: &Id) -> Result<Vec<WorkspaceMembership>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|m| m.user_id == *user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_user_and_workspace(
+        &self,
+        user_id: &Id,
+        workspace_id: &Id,
+    ) -> Result<Option<WorkspaceMembership>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|m| m.user_id == *user_id && m.workspace_id == *workspace_id)
+            .cloned())
+    }
+
+    async fn update_role(&self, id: &Id, role: WorkspaceRole) -> Result<()> {
+        if let Some(m) = self.store.lock().await.get_mut(id.as_str()) {
+            m.role = role;
+        }
+        Ok(())
+    }
+
+    async fn accept(&self, id: &Id, now: u64) -> Result<()> {
+        if let Some(m) = self.store.lock().await.get_mut(id.as_str()) {
+            m.accept(now);
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Team
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::Team;
+use gyre_ports::TeamRepository;
+
+#[derive(Default)]
+pub struct MemTeamRepository {
+    store: Arc<Mutex<HashMap<String, Team>>>,
+}
+
+#[async_trait]
+impl TeamRepository for MemTeamRepository {
+    async fn create(&self, team: &Team) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(team.id.to_string(), team.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Team>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|t| t.workspace_id == *workspace_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn update(&self, team: &Team) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(team.id.to_string(), team.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Notification
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::Notification;
+use gyre_ports::NotificationRepository;
+
+#[derive(Default)]
+pub struct MemNotificationRepository {
+    store: Arc<Mutex<Vec<Notification>>>,
+}
+
+#[async_trait]
+impl NotificationRepository for MemNotificationRepository {
+    async fn create(&self, n: &Notification) -> Result<()> {
+        self.store.lock().await.push(n.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Notification>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|n| n.id == *id)
+            .cloned())
+    }
+
+    async fn list_by_user(&self, user_id: &Id, unread_only: bool) -> Result<Vec<Notification>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| n.user_id == *user_id && (!unread_only || !n.read))
+            .cloned()
+            .collect())
+    }
+
+    async fn count_unread(&self, user_id: &Id) -> Result<u64> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| n.user_id == *user_id && !n.read)
+            .count() as u64)
+    }
+
+    async fn mark_read(&self, id: &Id, now: u64) -> Result<()> {
+        for n in self.store.lock().await.iter_mut() {
+            if n.id == *id {
+                n.mark_read(now);
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, now: u64) -> Result<()> {
+        for n in self.store.lock().await.iter_mut() {
+            if n.user_id == *user_id && !n.read {
+                n.mark_read(now);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -1398,5 +1598,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         personas: Arc::new(MemPersonaRepository::default()),
         workspace_repos: Arc::new(Mutex::new(HashMap::new())),
         policies: Arc::new(MemPolicyRepository::default()),
+        workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        teams: Arc::new(MemTeamRepository::default()),
+        notifications: Arc::new(MemNotificationRepository::default()),
     })
 }

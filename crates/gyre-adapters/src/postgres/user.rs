@@ -34,15 +34,16 @@ struct UserRow {
 
 impl From<UserRow> for User {
     fn from(r: UserRow) -> Self {
-        User {
-            id: Id::new(r.id),
-            external_id: r.external_id,
-            name: r.name,
-            email: r.email,
-            roles: json_to_roles(&r.roles),
-            created_at: r.created_at as u64,
-            updated_at: r.updated_at as u64,
-        }
+        let mut u = User::new(
+            Id::new(r.id.clone()),
+            r.external_id.clone(),
+            r.name.clone(),
+            r.created_at as u64,
+        );
+        u.email = r.email;
+        u.roles = json_to_roles(&r.roles);
+        u.updated_at = r.updated_at as u64;
+        u
     }
 }
 
@@ -78,7 +79,7 @@ impl UserRepository for PgStorage {
             let record = UserRecord {
                 id: u.id.as_str(),
                 external_id: &u.external_id,
-                name: &u.name,
+                name: &u.display_name,
                 email: u.email.as_deref(),
                 roles,
                 created_at: u.created_at as i64,
@@ -145,7 +146,7 @@ impl UserRepository for PgStorage {
             diesel::update(users::table.find(u.id.as_str()))
                 .set((
                     users::external_id.eq(&u.external_id),
-                    users::name.eq(&u.name),
+                    users::name.eq(&u.display_name),
                     users::email.eq(u.email.as_deref()),
                     users::roles.eq(&roles),
                     users::updated_at.eq(u.updated_at as i64),
