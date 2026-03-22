@@ -51,7 +51,8 @@
 
   async function loadTasks() {
     try {
-      tasks = await api.tasks();
+      const raw = await api.tasks();
+      tasks = Array.isArray(raw) ? raw : (raw?.tasks ?? raw ?? []);
     } catch (err) {
       error = err.message;
     }
