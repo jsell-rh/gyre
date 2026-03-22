@@ -231,6 +231,7 @@ pub async fn create_mirror_repo(
         mirror_url: Some(req.url.clone()),
         mirror_interval_secs: req.interval_secs,
         last_mirror_sync: None,
+        workspace_id: None,
     };
     state.repos.create(&repo).await?;
 

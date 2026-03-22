@@ -29,6 +29,7 @@ pub mod review;
 pub mod spec_approval;
 pub mod task;
 pub mod user;
+pub mod workspace;
 
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus};
@@ -51,3 +52,4 @@ pub use review::{Review, ReviewComment, ReviewDecision};
 pub use spec_approval::SpecApproval;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
 pub use user::{User, UserRole};
+pub use workspace::{Persona, PersonaScope, Workspace};

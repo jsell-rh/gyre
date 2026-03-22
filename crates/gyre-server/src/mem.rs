@@ -6,15 +6,17 @@ use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
     DependencyEdge, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
-    Project, Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus, User,
+    Persona, PersonaScope, Project, Repository, Review, ReviewComment, ReviewDecision, Task,
+    TaskStatus, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, DependencyRepository, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, UserRepository, WorktreeRepository,
+    NetworkPeerRepository, PersonaRepository, ProjectRepository, RepoRepository, ReviewRepository,
+    SpawnLogEntry, SpawnLogRepository, TaskRepository, UserRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1128,6 +1130,102 @@ impl SpawnLogRepository for MemSpawnLogRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemWorkspaceRepository {
+    store: Arc<Mutex<HashMap<String, Workspace>>>,
+}
+
+#[async_trait]
+impl WorkspaceRepository for MemWorkspaceRepository {
+    async fn create(&self, workspace: &Workspace) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace.id.to_string(), workspace.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<Workspace>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn list_by_tenant(&self, tenant_id: &Id) -> Result<Vec<Workspace>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|ws| ws.tenant_id.as_str() == tenant_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn update(&self, workspace: &Workspace) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace.id.to_string(), workspace.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemPersonaRepository {
+    store: Arc<Mutex<HashMap<String, Persona>>>,
+}
+
+#[async_trait]
+impl PersonaRepository for MemPersonaRepository {
+    async fn create(&self, persona: &Persona) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(persona.id.to_string(), persona.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Persona>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<Persona>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn list_by_scope(&self, scope: &PersonaScope) -> Result<Vec<Persona>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|p| &p.scope == scope)
+            .cloned()
+            .collect())
+    }
+
+    async fn update(&self, persona: &Persona) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(persona.id.to_string(), persona.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -1204,5 +1302,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         budget_configs: Arc::new(Mutex::new(HashMap::new())),
         budget_usages: Arc::new(Mutex::new(HashMap::new())),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        workspaces: Arc::new(MemWorkspaceRepository::default()),
+        personas: Arc::new(MemPersonaRepository::default()),
+        workspace_repos: Arc::new(Mutex::new(HashMap::new())),
     })
 }

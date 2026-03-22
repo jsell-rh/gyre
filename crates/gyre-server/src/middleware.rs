@@ -171,6 +171,9 @@ mod tests {
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
             search: base.search.clone(),
+            workspaces: base.workspaces.clone(),
+            personas: base.personas.clone(),
+            workspace_repos: base.workspace_repos.clone(),
         });
         crate::build_router(state)
     }

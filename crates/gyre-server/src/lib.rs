@@ -45,9 +45,9 @@ use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, DependencyRepository, GitOpsPort, JjOpsPort, MergeQueueRepository,
-    MergeRequestRepository, NetworkPeerRepository, PreAcceptGate, ProcessHandle, ProjectRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, TaskRepository, UserRepository,
-    WorktreeRepository,
+    MergeRequestRepository, NetworkPeerRepository, PersonaRepository, PreAcceptGate, ProcessHandle,
+    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogRepository, TaskRepository,
+    UserRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -210,6 +210,12 @@ pub struct AppState {
     pub budget_usages: Arc<Mutex<HashMap<String, gyre_domain::BudgetUsage>>>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
+    /// Workspace repository (M22.1).
+    pub workspaces: Arc<dyn WorkspaceRepository>,
+    /// Persona repository (M22.1).
+    pub personas: Arc<dyn PersonaRepository>,
+    /// Workspace-repo membership: workspace_id -> list of repo_ids (M22.1).
+    pub workspace_repos: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -539,6 +545,9 @@ pub fn build_state(
         budget_configs: Arc::new(Mutex::new(HashMap::new())),
         budget_usages: Arc::new(Mutex::new(HashMap::new())),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        workspaces: Arc::new(mem::MemWorkspaceRepository::default()),
+        personas: Arc::new(mem::MemPersonaRepository::default()),
+        workspace_repos: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
