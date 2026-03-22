@@ -934,7 +934,7 @@
     <h3 class="modal-title">{siemModal.mode === 'create' ? 'Add SIEM Target' : 'Edit SIEM Target'}</h3>
     <div class="form-field">
       <label class="form-label" for="siem-url">Webhook URL</label>
-      <input id="siem-url" class="filter-input full-width" bind:value={siemForm.url} placeholder="https://siem.example.com/ingest" />
+      <input id="siem-url" class="filter-input full-width" bind:value={siemForm.url} placeholder="https://siem.example.com/ingest" onkeydown={(e) => e.key === 'Enter' && saveSiem()} />
     </div>
     <div class="form-field">
       <label class="form-label" for="siem-format">Format</label>
@@ -946,7 +946,7 @@
     </div>
     <div class="form-field">
       <label class="form-label" for="siem-filter">Event Filter (optional)</label>
-      <input id="siem-filter" class="filter-input full-width" bind:value={siemForm.filter} placeholder="e.g. agent.spawned,mr.merged" />
+      <input id="siem-filter" class="filter-input full-width" bind:value={siemForm.filter} placeholder="e.g. agent.spawned,mr.merged" onkeydown={(e) => e.key === 'Enter' && saveSiem()} />
     </div>
     <div class="form-field inline-check">
       <input type="checkbox" id="siem-enabled" bind:checked={siemForm.enabled} />
@@ -975,7 +975,7 @@
     <h3 class="modal-title">Add Compute Target</h3>
     <div class="form-field">
       <label class="form-label" for="ct-name">Name</label>
-      <input id="ct-name" class="filter-input full-width" bind:value={computeForm.name} placeholder="e.g. docker-host-1" />
+      <input id="ct-name" class="filter-input full-width" bind:value={computeForm.name} placeholder="e.g. docker-host-1" onkeydown={(e) => e.key === 'Enter' && saveCompute()} />
     </div>
     <div class="form-field">
       <label class="form-label" for="ct-type">Type</label>
@@ -988,7 +988,7 @@
     {#if computeForm.target_type !== 'local'}
       <div class="form-field">
         <label class="form-label" for="ct-host">Host</label>
-        <input id="ct-host" class="filter-input full-width" bind:value={computeForm.host} placeholder="host:port or hostname" />
+        <input id="ct-host" class="filter-input full-width" bind:value={computeForm.host} placeholder="host:port or hostname" onkeydown={(e) => e.key === 'Enter' && saveCompute()} />
       </div>
     {/if}
     <div class="modal-actions">
@@ -1026,7 +1026,7 @@
     </div>
     <div class="form-field">
       <label class="form-label" for="peer-ips">Allowed IPs</label>
-      <input id="peer-ips" class="filter-input full-width" bind:value={peerForm.allowed_ips} placeholder="10.0.0.2/32" />
+      <input id="peer-ips" class="filter-input full-width" bind:value={peerForm.allowed_ips} placeholder="10.0.0.2/32" onkeydown={(e) => e.key === 'Enter' && savePeer()} />
     </div>
     <div class="modal-actions">
       <button class="secondary-btn" onclick={closePeerModal}>Cancel</button>

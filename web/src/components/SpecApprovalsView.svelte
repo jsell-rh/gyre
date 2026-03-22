@@ -175,6 +175,7 @@
       type="text"
       bind:value={approvePath}
       placeholder="specs/system/agent-gates.md"
+      onkeydown={(e) => e.key === 'Enter' && document.getElementById('approve-sha')?.focus()}
     />
     <label class="field-label" for="approve-sha">SHA (40 hex chars)</label>
     <input
@@ -184,6 +185,7 @@
       bind:value={approveSha}
       placeholder="abc123...40 chars"
       maxlength="40"
+      onkeydown={(e) => e.key === 'Enter' && doApprove()}
     />
     <div class="modal-actions">
       <Button variant="secondary" onclick={() => (showApprove = false)}>Cancel</Button>
@@ -287,7 +289,7 @@
 
   .approvals-table th {
     text-align: left;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-4) var(--space-4);
     font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -297,7 +299,7 @@
   }
 
   .approvals-table td {
-    padding: var(--space-3);
+    padding: var(--space-4) var(--space-4);
     border-bottom: 1px solid var(--color-border);
     color: var(--color-text);
     vertical-align: middle;
