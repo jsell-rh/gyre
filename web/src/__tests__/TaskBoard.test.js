@@ -37,7 +37,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-1',
             title: 'Fix the login bug',
-            status: 'Backlog',
+            status: 'backlog',
             priority: 'high',
             assigned_to: null,
             labels: [],
@@ -47,7 +47,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-2',
             title: 'Implement OAuth',
-            status: 'InProgress',
+            status: 'in_progress',
             priority: 'medium',
             assigned_to: 'agent-1',
             labels: [],
@@ -57,7 +57,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-3',
             title: 'Write unit tests',
-            status: 'Review',
+            status: 'review',
             priority: 'low',
             assigned_to: null,
             labels: ['testing'],
@@ -88,7 +88,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-a',
             title: 'Backlog Task',
-            status: 'Backlog',
+            status: 'backlog',
             priority: 'medium',
             assigned_to: null,
             labels: [],
@@ -98,7 +98,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-b',
             title: 'In Progress Task',
-            status: 'InProgress',
+            status: 'in_progress',
             priority: 'high',
             assigned_to: null,
             labels: [],
@@ -108,7 +108,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-c',
             title: 'Done Task',
-            status: 'Done',
+            status: 'done',
             priority: 'low',
             assigned_to: null,
             labels: [],
