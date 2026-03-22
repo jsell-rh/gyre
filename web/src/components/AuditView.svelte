@@ -14,7 +14,7 @@
   let sseConnected = $state(false);
   let activeTab = $state('live');
 
-  const EVENT_TYPES = ['FileAccess', 'NetworkConnect', 'ProcessSpawn', 'SyscallDenied', 'CapabilityRaised', 'ContainerEscape'];
+  const EVENT_TYPES = ['FileAccess', 'NetworkConnect', 'ProcessSpawn', 'SyscallDenied', 'CapabilityRaised', 'ContainerEscape', 'container_started', 'container_stopped', 'container_crashed', 'container_oom', 'container_network_blocked'];
 
   const TYPE_COLORS = {
     FileAccess: 'info',
@@ -23,6 +23,11 @@
     SyscallDenied: 'danger',
     CapabilityRaised: 'danger',
     ContainerEscape: 'danger',
+    container_started: 'success',
+    container_stopped: 'info',
+    container_crashed: 'danger',
+    container_oom: 'danger',
+    container_network_blocked: 'warning',
   };
 
   async function loadHistory() {
