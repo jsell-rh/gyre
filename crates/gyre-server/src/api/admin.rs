@@ -631,6 +631,63 @@ pub async fn admin_seed(
     }))
 }
 
+// ── BCP Endpoints ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct BcpTargetsResponse {
+    pub rto_seconds: u64,
+    pub rpo_seconds: u64,
+}
+
+/// GET /api/v1/admin/bcp/targets — BCP recovery objectives from environment (Admin only).
+pub async fn admin_bcp_targets(_admin: AdminOnly) -> Json<BcpTargetsResponse> {
+    let rto = std::env::var("GYRE_RTO_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300u64);
+    let rpo = std::env::var("GYRE_RPO_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60u64);
+    Json(BcpTargetsResponse {
+        rto_seconds: rto,
+        rpo_seconds: rpo,
+    })
+}
+
+#[derive(Serialize)]
+pub struct BcpDrillResponse {
+    pub snapshot_id: String,
+    pub verified: bool,
+    pub duration_ms: u64,
+}
+
+/// POST /api/v1/admin/bcp/drill — create+verify a snapshot, return drill result (Admin only).
+pub async fn admin_bcp_drill(
+    _admin: AdminOnly,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BcpDrillResponse>, ApiError> {
+    let start = std::time::Instant::now();
+
+    // Create a real snapshot using the existing snapshot infrastructure.
+    let meta = crate::snapshot::create_snapshot(&state)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("bcp drill snapshot failed: {e}")))?;
+
+    // Verify the snapshot file exists on disk.
+    let verified = tokio::fs::metadata(&meta.path).await.is_ok();
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    tracing::info!(snapshot_id = %meta.snapshot_id, verified, duration_ms, "BCP drill completed");
+
+    Ok(Json(BcpDrillResponse {
+        snapshot_id: meta.snapshot_id,
+        verified,
+        duration_ms,
+    }))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

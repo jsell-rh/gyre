@@ -4,7 +4,10 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{Agent, AgentStatus, AgentWorktree, AnalyticsEvent, MergeRequest, TaskStatus};
+use gyre_domain::{
+    Agent, AgentStatus, AgentWorktree, AnalyticsEvent, DisconnectedBehavior, MergeRequest,
+    TaskStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -30,6 +33,8 @@ pub struct SpawnAgentRequest {
     pub parent_id: Option<String>,
     /// Optional compute target to associate with this agent spawn.
     pub compute_target_id: Option<String>,
+    /// How the agent behaves when the server becomes unreachable (BCP graceful degradation).
+    pub disconnected_behavior: Option<DisconnectedBehavior>,
 }
 
 #[derive(Serialize)]
@@ -110,6 +115,9 @@ pub async fn spawn_agent(
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     agent.spawned_by = Some(auth.agent_id.clone());
+    if let Some(behavior) = req.disconnected_behavior {
+        agent.disconnected_behavior = behavior;
+    }
     agent.assign_task(Id::new(&req.task_id));
     agent
         .transition_status(AgentStatus::Active)
