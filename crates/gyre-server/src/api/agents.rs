@@ -183,15 +183,49 @@ pub async fn agent_heartbeat(
     {
         let mut attestations = state.workload_attestations.lock().await;
         if let Some(att) = attestations.get_mut(&id) {
-            let pid_alive = att
-                .pid
-                .map(crate::workload_attestation::pid_is_alive)
-                .unwrap_or(true); // no PID recorded → assume alive
-            let still_ok = crate::workload_attestation::verify_attestation(att, pid_alive, "");
+            // M19.4: If a container_id is present, verify container liveness
+            // via `docker inspect --format='{{.State.Running}}'` in addition to
+            // (or instead of) the PID check.
+            let container_alive = if let Some(ref cid) = att.container_id {
+                // Detect runtime from the container audit record (best-effort).
+                let runtime = {
+                    let audits = state.container_audits.lock().await;
+                    audits
+                        .get(&id)
+                        .map(|r| r.runtime.clone())
+                        .unwrap_or_else(|| "docker".to_string())
+                };
+                let result = tokio::process::Command::new(&runtime)
+                    .args(["inspect", "--format={{.State.Running}}", cid.as_str()])
+                    .output()
+                    .await;
+                match result {
+                    Ok(out) if out.status.success() => {
+                        String::from_utf8_lossy(&out.stdout).trim() == "true"
+                    }
+                    _ => {
+                        tracing::warn!(
+                            agent_id = %id,
+                            container_id = %cid,
+                            "Container liveness check via {} inspect failed on heartbeat",
+                            runtime
+                        );
+                        false
+                    }
+                }
+            } else {
+                att.pid
+                    .map(crate::workload_attestation::pid_is_alive)
+                    .unwrap_or(true) // no PID recorded → assume alive
+            };
+
+            let still_ok =
+                crate::workload_attestation::verify_attestation(att, container_alive, "");
             if !still_ok {
                 tracing::warn!(
                     agent_id = %id,
                     pid = ?att.pid,
+                    container_id = ?att.container_id,
                     "Workload attestation liveness check failed on heartbeat"
                 );
             }

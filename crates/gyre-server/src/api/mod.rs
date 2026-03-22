@@ -12,6 +12,7 @@ pub mod budget;
 pub mod code_awareness;
 pub mod compose;
 pub mod compute;
+pub mod container;
 pub mod dependencies;
 pub mod discover;
 pub mod error;
@@ -215,6 +216,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         // Workload attestation (G10)
         .route("/api/v1/agents/:id/workload", get(workload::get_workload))
+        // Container audit trail (M19.3)
+        .route(
+            "/api/v1/agents/:id/container",
+            get(container::get_agent_container),
+        )
         // Compose
         .route("/api/v1/compose/apply", post(compose_apply))
         .route("/api/v1/compose/status", get(compose_status))

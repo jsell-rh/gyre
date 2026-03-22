@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{auth::AuthenticatedAgent, git_refs, workload_attestation, AppState};
+use crate::{
+    auth::AuthenticatedAgent, container_audit, domain_events::DomainEvent, git_refs,
+    workload_attestation, AppState,
+};
 
 use super::agents::AgentResponse;
 use super::error::ApiError;
@@ -39,6 +42,9 @@ pub struct SpawnAgentResponse {
     pub compute_target_id: Option<String>,
     /// jj change ID created for this agent's worktree, if jj was successfully initialized.
     pub jj_change_id: Option<String>,
+    /// Container ID when the agent was spawned via a container compute target (M19.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -190,75 +196,312 @@ pub async fn spawn_agent(
     // Build clone URL: {base_url}/git/{project_id}/{repo_name}
     let clone_url = format!("{}/git/{}/{}", state.base_url, repo.project_id, repo.name);
 
-    // Launch a real process via LocalTarget and monitor its lifecycle.
-    // Capture the PID so we can embed it in the JWT and workload attestation.
-    let spawned_pid: Option<u32>;
+    // M19.1: Resolve the effective compute target.
+    // Priority: compute_target_id from request → GYRE_DEFAULT_COMPUTE_TARGET env → local.
+    //
+    // When compute_target_id points to a "container" type target, the agent process is
+    // launched inside Docker/Podman with security defaults (G8-A/B/C).
+    // When it points to an "ssh" type target with container_mode enabled (M19.5), the
+    // docker command is executed on the remote SSH host.
     let compute_target_label = req.compute_target_id.as_deref().unwrap_or("local");
+
+    // Resolve which target config to use.
+    let resolved_target_config: Option<super::compute::ComputeTargetConfig> = {
+        if let Some(ref ct_id) = req.compute_target_id {
+            state
+                .compute_targets
+                .lock()
+                .await
+                .get(ct_id.as_str())
+                .cloned()
+        } else {
+            // Check GYRE_DEFAULT_COMPUTE_TARGET env var.
+            let default_mode = std::env::var("GYRE_DEFAULT_COMPUTE_TARGET")
+                .unwrap_or_else(|_| "local".to_string());
+            if default_mode == "container" {
+                // Find first container-type target (if any).
+                state
+                    .compute_targets
+                    .lock()
+                    .await
+                    .values()
+                    .find(|t| t.target_type == "container")
+                    .cloned()
+            } else {
+                None
+            }
+        }
+    };
+
+    // Launch a real process and monitor its lifecycle.
+    // Capture the PID (local) or container ID (container) for workload attestation.
+    let spawned_pid: Option<u32>;
+    let spawned_container_id: Option<String>; // M19.1/M19.3/M19.4
+    let spawned_container_image: Option<String>; // M19.3/M19.4
+
     {
-        // Command is server-controlled only — never from user input (C-1 RCE fix).
-        let command = "echo".to_string();
-        let args = vec![format!("Agent {} started", agent.id)];
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
             worktree_path.clone()
         } else {
             ".".to_string()
         };
+        // Command is server-controlled only — never from user input (C-1 RCE fix).
+        let command = "echo".to_string();
+        let args = vec![format!("Agent {} started", agent.id)];
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
-            command,
-            args,
+            command: command.clone(),
+            args: args.clone(),
             env: std::collections::HashMap::new(),
-            work_dir: effective_work_dir,
+            work_dir: effective_work_dir.clone(),
         };
-        let local = gyre_adapters::compute::LocalTarget;
-        match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
-            Ok(handle) => {
-                spawned_pid = handle.pid;
-                let agent_id_str = agent.id.to_string();
-                state
-                    .process_registry
-                    .lock()
-                    .await
-                    .insert(agent_id_str.clone(), handle.clone());
 
-                // Background monitor: watch for process exit and update agent status.
-                let state_mon = Arc::clone(&state);
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                        let alive = gyre_ports::ComputeTarget::is_alive(
-                            &gyre_adapters::compute::LocalTarget,
-                            &handle,
+        match &resolved_target_config {
+            Some(cfg) if cfg.target_type == "container" => {
+                // M19.1: Spawn via ContainerTarget.
+                let image = cfg.config["image"]
+                    .as_str()
+                    .unwrap_or("gyre-agent:latest")
+                    .to_string();
+                let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
+                // Apply optional config overrides from the stored target config.
+                if let Some(net) = cfg.config["network"].as_str() {
+                    ct = ct.with_network(net);
+                }
+                if let Some(mem) = cfg.config["memory_limit"].as_str() {
+                    ct = ct.with_memory_limit(mem);
+                }
+                if let Some(pids) = cfg.config["pids_limit"].as_u64() {
+                    ct = ct.with_pids_limit(pids as u32);
+                }
+                if let Some(user) = cfg.config["user"].as_str() {
+                    ct = ct.with_user(user);
+                }
+
+                match gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await {
+                    Ok(handle) => {
+                        spawned_pid = handle.pid;
+                        spawned_container_id = Some(handle.id.clone());
+                        spawned_container_image = Some(image.clone());
+
+                        // M19.3: Capture container audit record (best-effort).
+                        let runtime_str = cfg.config["runtime"]
+                            .as_str()
+                            .unwrap_or("docker")
+                            .to_string();
+                        let rec = container_audit::capture_spawn_audit(
+                            &agent.id.to_string(),
+                            &handle.id,
+                            &image,
+                            &runtime_str,
                         )
-                        .await
-                        .unwrap_or(false);
-                        if !alive {
-                            state_mon
-                                .process_registry
-                                .lock()
-                                .await
-                                .remove(&agent_id_str);
-                            if let Ok(Some(mut a)) =
-                                state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
-                            {
-                                if a.status == AgentStatus::Active {
-                                    let _ = a.transition_status(AgentStatus::Idle);
-                                    let _ = state_mon.agents.update(&a).await;
+                        .await;
+                        state
+                            .container_audits
+                            .lock()
+                            .await
+                            .insert(agent.id.to_string(), rec);
+
+                        // M19.3: Emit AgentContainerSpawned domain event.
+                        let _ = state.event_tx.send(DomainEvent::AgentContainerSpawned {
+                            agent_id: agent.id.to_string(),
+                            container_id: handle.id.clone(),
+                            image: image.clone(),
+                            runtime: runtime_str.clone(),
+                        });
+
+                        let agent_id_str = agent.id.to_string();
+                        state
+                            .process_registry
+                            .lock()
+                            .await
+                            .insert(agent_id_str.clone(), handle.clone());
+
+                        // Background monitor: watch for container exit and update agent status.
+                        let state_mon = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                let alive = gyre_ports::ComputeTarget::is_alive(&ct, &handle)
+                                    .await
+                                    .unwrap_or(false);
+                                if !alive {
+                                    state_mon
+                                        .process_registry
+                                        .lock()
+                                        .await
+                                        .remove(&agent_id_str);
+                                    // M19.3: Update audit record on container exit.
+                                    container_audit::capture_exit_audit(
+                                        &state_mon.container_audits,
+                                        &agent_id_str,
+                                    )
+                                    .await;
+                                    if let Ok(Some(mut a)) =
+                                        state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
+                                    {
+                                        if a.status == AgentStatus::Active {
+                                            let _ = a.transition_status(AgentStatus::Idle);
+                                            let _ = state_mon.agents.update(&a).await;
+                                        }
+                                    }
+                                    break;
                                 }
                             }
-                            break;
-                        }
+                        });
                     }
-                });
+                    Err(e) => {
+                        spawned_pid = None;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        tracing::warn!(agent_id = %agent.id, "container spawn failed (best-effort): {e}");
+                    }
+                }
             }
-            Err(e) => {
-                spawned_pid = None;
-                tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
+            Some(cfg) if cfg.target_type == "ssh" => {
+                // M19.5: SSH remote spawn.  When the target config includes
+                // `container_mode: true`, wrap the command in a docker run on
+                // the remote host using container security defaults (G8).
+                let user = cfg.config["user"].as_str().unwrap_or("root").to_string();
+                let host = cfg.config["host"]
+                    .as_str()
+                    .unwrap_or("localhost")
+                    .to_string();
+                let mut ssh_target = gyre_adapters::compute::SshTarget::new(user, host);
+                if let Some(id_file) = cfg.config["identity_file"].as_str() {
+                    ssh_target = ssh_target.with_identity(id_file);
+                }
+                if let Some(port) = cfg.config["port"].as_u64() {
+                    ssh_target = ssh_target.with_port(port as u16);
+                }
+
+                let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(false);
+                let ssh_spawn_config = if container_mode {
+                    // M19.5: Build a docker run command to execute on the remote SSH host.
+                    let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest");
+                    let docker_cmd = format!(
+                        "docker run --detach --rm --network=none --memory=2g --pids-limit=512 --user=65534:65534 --name={} {} {} {}",
+                        agent.name,
+                        image,
+                        command,
+                        args.join(" ")
+                    );
+                    gyre_ports::SpawnConfig {
+                        name: agent.name.clone(),
+                        command: "sh".to_string(),
+                        args: vec!["-c".to_string(), docker_cmd],
+                        env: std::collections::HashMap::new(),
+                        work_dir: effective_work_dir,
+                    }
+                } else {
+                    spawn_config
+                };
+
+                match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config).await
+                {
+                    Ok(handle) => {
+                        spawned_pid = handle.pid;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        let agent_id_str = agent.id.to_string();
+                        state
+                            .process_registry
+                            .lock()
+                            .await
+                            .insert(agent_id_str.clone(), handle.clone());
+                        // Background monitor for SSH.
+                        let state_mon = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                let alive =
+                                    gyre_ports::ComputeTarget::is_alive(&ssh_target, &handle)
+                                        .await
+                                        .unwrap_or(false);
+                                if !alive {
+                                    state_mon
+                                        .process_registry
+                                        .lock()
+                                        .await
+                                        .remove(&agent_id_str);
+                                    if let Ok(Some(mut a)) =
+                                        state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
+                                    {
+                                        if a.status == AgentStatus::Active {
+                                            let _ = a.transition_status(AgentStatus::Idle);
+                                            let _ = state_mon.agents.update(&a).await;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        spawned_pid = None;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        tracing::warn!(agent_id = %agent.id, "SSH spawn failed (best-effort): {e}");
+                    }
+                }
+            }
+            _ => {
+                // Default: local process spawn.
+                let local = gyre_adapters::compute::LocalTarget;
+                match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
+                    Ok(handle) => {
+                        spawned_pid = handle.pid;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        let agent_id_str = agent.id.to_string();
+                        state
+                            .process_registry
+                            .lock()
+                            .await
+                            .insert(agent_id_str.clone(), handle.clone());
+
+                        // Background monitor: watch for process exit and update agent status.
+                        let state_mon = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                let alive = gyre_ports::ComputeTarget::is_alive(
+                                    &gyre_adapters::compute::LocalTarget,
+                                    &handle,
+                                )
+                                .await
+                                .unwrap_or(false);
+                                if !alive {
+                                    state_mon
+                                        .process_registry
+                                        .lock()
+                                        .await
+                                        .remove(&agent_id_str);
+                                    if let Ok(Some(mut a)) =
+                                        state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
+                                    {
+                                        if a.status == AgentStatus::Active {
+                                            let _ = a.transition_status(AgentStatus::Idle);
+                                            let _ = state_mon.agents.update(&a).await;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        spawned_pid = None;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
+                    }
+                }
             }
         }
     }
 
-    // G10: Create workload attestation now that we know the PID.
+    // G10 + M19.4: Create workload attestation now that we know the PID / container ID.
     let att = {
         // Retrieve the stack hash recorded by the agent (M14.1), if any.
         let stack_hash = {
@@ -268,11 +511,13 @@ pub async fn spawn_agent(
                 .map(|s| s.fingerprint())
                 .unwrap_or_default()
         };
-        workload_attestation::attest_agent(
+        workload_attestation::attest_agent_with_container(
             &agent.id.to_string(),
             spawned_pid,
             compute_target_label,
             &stack_hash,
+            spawned_container_id.clone(),
+            spawned_container_image.clone(),
         )
     };
     let wl_hostname = Some(att.hostname.clone());
@@ -282,13 +527,15 @@ pub async fn spawn_agent(
     } else {
         Some(att.stack_fingerprint.clone())
     };
+    let wl_container_id = att.container_id.clone();
+    let wl_image_hash = att.image_hash.clone();
     state
         .workload_attestations
         .lock()
         .await
         .insert(agent.id.to_string(), att);
 
-    // Mint a signed EdDSA JWT as the agent's auth token (M18 + G10).
+    // Mint a signed EdDSA JWT as the agent's auth token (M18 + G10 + M19.4).
     // Embeds workload attestation claims so external verifiers can reconstruct
     // workload identity from the JWT alone without calling the server.
     // Falls back to a UUID if JWT minting fails (defensive).
@@ -305,6 +552,8 @@ pub async fn spawn_agent(
             wl_hostname,
             wl_compute_target,
             wl_stack_hash,
+            wl_container_id,
+            wl_image_hash,
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT minting failed, falling back to UUID token: {e}");
@@ -339,6 +588,7 @@ pub async fn spawn_agent(
             branch: req.branch,
             compute_target_id: req.compute_target_id,
             jj_change_id,
+            container_id: spawned_container_id,
         }),
     ))
 }
