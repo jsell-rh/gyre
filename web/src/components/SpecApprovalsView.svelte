@@ -94,7 +94,12 @@
   <div class="view-header">
     <div class="header-left">
       <h2>Spec Approvals</h2>
-      <p class="header-desc">Cryptographic spec approval ledger (M12.3). Bound spec versions for each merge request.</p>
+      <p class="header-desc">
+        Cryptographic spec approval ledger (M12.3) — records spec SHA bindings for merge requests.
+        For the M21 spec lifecycle dashboard (Pending→Approved state per spec, project-scoped), use
+        <a class="inline-link" href="#specs">Specs</a>
+        in the sidebar.
+      </p>
     </div>
     <Button variant="primary" onclick={() => (showApprove = true)}>Approve Spec</Button>
   </div>
@@ -247,6 +252,12 @@
     font-size: var(--text-sm);
     color: var(--color-text-muted);
     margin: 0;
+  }
+
+  .inline-link {
+    color: var(--color-primary);
+    text-decoration: underline;
+    font-size: inherit;
   }
 
   .filter-bar {
