@@ -293,7 +293,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/admin/compute-targets/{id}/tunnel/{tid}` | Close an SSH tunnel — sends SIGTERM to the `ssh -N` process (G12, Admin only) |
 | `POST` | `/api/v1/admin/seed` | Idempotent demo data seed: 2 projects, 3 repos, 4 agents, 6 tasks, 2 MRs, 1 queue entry, 5 activity events. Returns `{already_seeded:true}` on repeat. AdminOnly. (M9.1) |
 | `GET` | `/api/v1/admin/bcp/targets` | BCP targets: reads `GYRE_RTO` and `GYRE_RPO` env vars; returns recovery time/point objectives in seconds (Admin only) (M23) |
-| `POST` | `/api/v1/admin/bcp/drill` | BCP drill: triggers a real snapshot + verify cycle; returns snapshot path and verify result (Admin only) (M23) |
+| `POST` | `/api/v1/admin/bcp/drill` | BCP drill: triggers a real snapshot + verify cycle; returns `{snapshot_id, verified, duration_ms}` (Admin only) (M23) |
 | `GET` | `/scim/v2/ServiceProviderConfig` | SCIM 2.0 discovery — supported features, auth schemes (no gyre auth required for discovery) (M23) |
 | `GET` | `/scim/v2/Schemas` | SCIM 2.0 schema definitions for User resource type (M23) |
 | `GET` | `/scim/v2/ResourceTypes` | SCIM 2.0 resource type registry (M23) |
