@@ -271,9 +271,10 @@
 
   async function addAbacPolicy() {
     if (!newPolicyName.trim() || !newPolicyClaim.trim() || !newPolicyValue.trim()) return;
+    // Server AbacPolicy format: {resource_type, required_claims: {claim: value}}
     const newPolicy = {
-      name: newPolicyName.trim(),
-      rules: [{ claim: newPolicyClaim.trim(), operator: newPolicyOp, value: newPolicyValue.trim() }],
+      resource_type: newPolicyName.trim(),
+      required_claims: { [newPolicyClaim.trim()]: newPolicyValue.trim() },
     };
     const updated = [...abacPolicies, newPolicy];
     policySaving = true; policySaveMsg = null;
@@ -651,15 +652,15 @@
               {#each abacPolicies as policy, idx (idx)}
                 <div class="abac-card">
                   <div class="abac-card-hdr">
-                    <span class="abac-name">{policy.name || `Policy ${idx + 1}`}</span>
+                    <span class="abac-name">{policy.resource_type || `Policy ${idx + 1}`}</span>
                     <button class="abac-remove-btn" onclick={() => removeAbacPolicy(idx)} disabled={policySaving}>Remove</button>
                   </div>
                   <div class="abac-rules">
-                    {#each (policy.rules ?? []) as rule, ri (ri)}
+                    {#each Object.entries(policy.required_claims ?? {}) as [claim, value], ri (ri)}
                       <div class="abac-rule">
-                        <code class="rule-claim">{rule.claim}</code>
-                        <span class="rule-op">{rule.operator}</span>
-                        <code class="rule-value">"{rule.value}"</code>
+                        <code class="rule-claim">{claim}</code>
+                        <span class="rule-op">=</span>
+                        <code class="rule-value">"{value}"</code>
                       </div>
                     {/each}
                   </div>
@@ -671,7 +672,7 @@
           <div class="abac-add-form">
             <h4 class="form-title">Add Policy</h4>
             <div class="abac-form-row">
-              <input class="policy-input" type="text" placeholder="Policy name" bind:value={newPolicyName} />
+              <input class="policy-input" type="text" placeholder="Resource type (e.g. repo, task)" bind:value={newPolicyName} />
             </div>
             <div class="abac-form-row">
               <input class="policy-input" type="text" placeholder="JWT claim (e.g. sub, role)" bind:value={newPolicyClaim} />

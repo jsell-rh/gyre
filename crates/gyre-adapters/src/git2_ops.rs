@@ -76,10 +76,11 @@ impl GitOpsPort for Git2OpsAdapter {
         tokio::task::spawn_blocking(move || {
             let repo = Repository::open(&repo_path).context("failed to open repository")?;
 
-            // Resolve branch to commit OID
-            let branch_ref = repo
-                .find_branch(&branch, BranchType::Local)
-                .context("branch not found")?;
+            // Resolve branch to commit OID — return empty if branch doesn't exist
+            let branch_ref = match repo.find_branch(&branch, BranchType::Local) {
+                Ok(b) => b,
+                Err(_) => return Ok(Vec::new()),
+            };
             let head_commit = branch_ref.get().peel_to_commit()?;
 
             let mut walk = repo.revwalk()?;
