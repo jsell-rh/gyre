@@ -109,6 +109,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -165,6 +166,7 @@ pub async fn get_persona(
 }
 
 pub async fn update_persona(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdatePersonaRequest>,
@@ -203,6 +205,7 @@ pub async fn update_persona(
 }
 
 pub async fn delete_persona(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -250,6 +253,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/personas")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -304,6 +308,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/personas")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -320,6 +325,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/personas/{id}"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
