@@ -89,6 +89,7 @@ pub async fn search_handler(
 
 /// POST /api/v1/search/reindex — force full reindex (Admin only).
 pub async fn reindex_handler(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let count = state

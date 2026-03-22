@@ -109,6 +109,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -165,6 +166,7 @@ pub async fn get_persona(
 }
 
 pub async fn update_persona(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdatePersonaRequest>,
@@ -203,6 +205,7 @@ pub async fn update_persona(
 }
 
 pub async fn delete_persona(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
