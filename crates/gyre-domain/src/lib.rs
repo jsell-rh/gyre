@@ -36,7 +36,7 @@ pub mod workspace;
 pub mod workspace_membership;
 
 pub use activity::ActivityEvent;
-pub use agent::{Agent, AgentError, AgentStatus};
+pub use agent::{Agent, AgentError, AgentStatus, DisconnectedBehavior};
 pub use agent_card::AgentCard;
 pub use agent_tracking::{AgentCommit, AgentWorktree, RalphStep};
 pub use analytics::{AnalyticsEvent, CostEntry};

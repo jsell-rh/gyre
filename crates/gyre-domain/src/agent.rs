@@ -8,6 +8,19 @@ pub enum AgentError {
     InvalidTransition { from: AgentStatus, to: AgentStatus },
 }
 
+/// How an agent should behave when it detects the Gyre server is unreachable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DisconnectedBehavior {
+    /// Stop accepting new work and wait for reconnection (default).
+    #[default]
+    Pause,
+    /// Continue working locally (git ops, local state) until reconnected.
+    ContinueOffline,
+    /// Abort immediately: mark self Dead, clean worktrees.
+    Abort,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
     Idle,
@@ -15,6 +28,8 @@ pub enum AgentStatus {
     Blocked,
     Error,
     Dead,
+    /// Agent is alive but paused due to server disconnection.
+    Paused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +44,9 @@ pub struct Agent {
     pub last_heartbeat: Option<u64>,
     /// Identity of the agent or user who spawned this agent (M13.2).
     pub spawned_by: Option<String>,
+    /// How the agent should behave when the server is unreachable (BCP graceful degradation).
+    #[serde(default)]
+    pub disconnected_behavior: DisconnectedBehavior,
 }
 
 impl Agent {
@@ -43,6 +61,7 @@ impl Agent {
             spawned_at,
             last_heartbeat: None,
             spawned_by: None,
+            disconnected_behavior: DisconnectedBehavior::default(),
         }
     }
 
@@ -71,8 +90,11 @@ impl Agent {
                 | (AgentStatus::Active, AgentStatus::Idle)
                 | (AgentStatus::Active, AgentStatus::Blocked)
                 | (AgentStatus::Active, AgentStatus::Error)
+                | (AgentStatus::Active, AgentStatus::Paused)
                 | (AgentStatus::Blocked, AgentStatus::Active)
                 | (AgentStatus::Error, AgentStatus::Idle)
+                | (AgentStatus::Paused, AgentStatus::Active)
+                | (AgentStatus::Paused, AgentStatus::Dead)
                 | (_, AgentStatus::Dead)
         );
         if valid {
