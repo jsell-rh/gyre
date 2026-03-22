@@ -167,6 +167,16 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/abac-policy` | Get the ABAC policy list for a repo — array of `AbacPolicy` objects; each policy has `id`, `name`, `rules` (AND within), evaluated as OR across policies (G6) |
 | `PUT` | `/api/v1/repos/{id}/abac-policy` | Replace the ABAC policy list (**Admin only**); policies are matched against JWT claims on push and spawn; `rules` is a list of `{claim, operator, value}` match conditions combined with AND; multiple policies in the array are OR'd together (G6) |
 | `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
+| `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, preferences); PUT updates profile fields (M22.8) |
+| `GET` | `/api/v1/users/me/agents` | Agents spawned by the current authenticated user (M22.8) |
+| `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current authenticated user (M22.8) |
+| `GET` | `/api/v1/users/me/mrs` | Merge requests authored by the current authenticated user (M22.8) |
+| `GET` | `/api/v1/users/me/notifications` | Notifications for the current user (16 `NotificationType` variants including `MrNeedsReview`, `GateFailure`, `MrMerged`; 4 priority levels) (M22.8) |
+| `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark a notification as read (M22.8) |
+| `POST/GET` | `/api/v1/workspaces/{id}/members` | Invite / list workspace members; `WorkspaceRole`: Owner, Admin, Developer, Viewer; membership has accept/pending lifecycle (M22.8) |
+| `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member from a workspace (M22.8) |
+| `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create / list workspace-scoped teams (M22.8) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Read / update / delete team; `add_member`/`remove_member` are idempotent (M22.8) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
