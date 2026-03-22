@@ -30,6 +30,7 @@
   let ttyLines = $state([]);
   let ttyWs = $state(null);
   let ttyConnecting = $state(false);
+  let containerRecord = $state(null);
 
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 
@@ -78,11 +79,13 @@
   }
 
   function selectAgent(a) {
-    if (selected?.id === a.id) { selected = null; closeTtyWs(); return; }
+    if (selected?.id === a.id) { selected = null; closeTtyWs(); containerRecord = null; return; }
     closeTtyWs();
     selected = a;
     detailTab = 'info';
     agentLogLines = [];
+    containerRecord = null;
+    api.agentContainer(a.id).then((r) => { containerRecord = r; }).catch(() => { containerRecord = null; });
   }
 
   function switchDetailTab(tab) {
@@ -330,6 +333,23 @@
               <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
               <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
             </dl>
+            {#if containerRecord}
+              <div class="container-section">
+                <h4 class="section-label">Container</h4>
+                <dl class="detail-dl">
+                  <dt>Container ID</dt><dd class="mono">{containerRecord.container_id ?? '—'}</dd>
+                  <dt>Image</dt><dd class="mono">{containerRecord.image ?? '—'}</dd>
+                  <dt>Image Hash</dt><dd class="mono">{containerRecord.image_hash ?? '—'}</dd>
+                  <dt>Spawned</dt><dd>{formatTime(containerRecord.spawned_at)}</dd>
+                  {#if containerRecord.exited_at}
+                    <dt>Exited</dt><dd>{formatTime(containerRecord.exited_at)}</dd>
+                  {/if}
+                  {#if containerRecord.exit_code != null}
+                    <dt>Exit Code</dt><dd>{containerRecord.exit_code}</dd>
+                  {/if}
+                </dl>
+              </div>
+            {/if}
             <AgentCardPanel agentId={selected.id} />
           </div>
         {:else if detailTab === 'logs'}
@@ -632,6 +652,21 @@
 
   .detail-dl dt { color: var(--color-text-muted); }
   .detail-dl dd { margin: 0; color: var(--color-text-secondary); }
+
+  .container-section {
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-3);
+  }
+
+  .section-label {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-3);
+  }
 
   /* Modal */
   .modal-backdrop {
