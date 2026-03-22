@@ -1226,6 +1226,98 @@ impl PersonaRepository for MemPersonaRepository {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MemPolicyRepository
+// ---------------------------------------------------------------------------
+
+/// In-memory implementation of `PolicyRepository` for testing and dev mode.
+#[derive(Default)]
+pub struct MemPolicyRepository {
+    policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
+    decisions: Arc<Mutex<Vec<gyre_domain::PolicyDecision>>>,
+}
+
+#[async_trait]
+impl gyre_ports::PolicyRepository for MemPolicyRepository {
+    async fn create(&self, policy: &gyre_domain::Policy) -> Result<()> {
+        self.policies
+            .lock()
+            .await
+            .insert(policy.id.to_string(), policy.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &str) -> Result<Option<gyre_domain::Policy>> {
+        Ok(self.policies.lock().await.get(id).cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<gyre_domain::Policy>> {
+        Ok(self.policies.lock().await.values().cloned().collect())
+    }
+
+    async fn list_by_scope(
+        &self,
+        scope: &gyre_domain::PolicyScope,
+        scope_id: Option<&str>,
+    ) -> Result<Vec<gyre_domain::Policy>> {
+        Ok(self
+            .policies
+            .lock()
+            .await
+            .values()
+            .filter(|p| &p.scope == scope && p.scope_id.as_deref() == scope_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn update(&self, policy: &gyre_domain::Policy) -> Result<()> {
+        self.policies
+            .lock()
+            .await
+            .insert(policy.id.to_string(), policy.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        let mut store = self.policies.lock().await;
+        if let Some(p) = store.get(id) {
+            if p.built_in {
+                return Err(anyhow::anyhow!("cannot delete built-in policy '{id}'"));
+            }
+        }
+        store.remove(id);
+        Ok(())
+    }
+
+    async fn record_decision(&self, decision: &gyre_domain::PolicyDecision) -> Result<()> {
+        self.decisions.lock().await.push(decision.clone());
+        Ok(())
+    }
+
+    async fn list_decisions(
+        &self,
+        subject_id: Option<&str>,
+        resource_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<gyre_domain::PolicyDecision>> {
+        let store = self.decisions.lock().await;
+        let filtered: Vec<_> = store
+            .iter()
+            .filter(|d| {
+                subject_id.is_none_or(|s| d.subject_id == s)
+                    && resource_type.is_none_or(|r| d.resource_type == r)
+            })
+            .cloned()
+            .collect();
+        let start = if filtered.len() > limit {
+            filtered.len() - limit
+        } else {
+            0
+        };
+        Ok(filtered[start..].to_vec())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -1305,5 +1397,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         workspaces: Arc::new(MemWorkspaceRepository::default()),
         personas: Arc::new(MemPersonaRepository::default()),
         workspace_repos: Arc::new(Mutex::new(HashMap::new())),
+        policies: Arc::new(MemPolicyRepository::default()),
     })
 }
