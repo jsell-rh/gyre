@@ -240,7 +240,7 @@ test.describe('Agent management', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('MCP Tool Catalog', () => {
-  test('mcp_catalog_shows_8_tools', async ({ page }) => {
+  test('mcp_catalog_shows_9_tools', async ({ page }) => {
     await page.goto('/');
     await navigateTo(page, 'MCP Tools');
     await page.waitForLoadState('networkidle');
@@ -249,7 +249,7 @@ test.describe('MCP Tool Catalog', () => {
     const toolCards = page.locator('.tool-card, [class*="tool-card"], [class*="mcp-tool"]');
     await toolCards.first().waitFor({ state: 'visible', timeout: 5000 });
     const count = await toolCards.count();
-    expect(count).toBe(8);
+    expect(count).toBe(9); // gyre_search added in M22.7 (PR #255)
   });
 
   test('mcp_tool_card_expands_schema', async ({ page }) => {
