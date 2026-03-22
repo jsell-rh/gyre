@@ -21,19 +21,19 @@
   let taskTitle = $state('');
   let taskDesc = $state('');
   let taskPriority = $state('Medium');
-  let taskStatus = $state('Backlog');
+  let taskStatus = $state('backlog');
   let taskCreating = $state(false);
 
   let columns = $derived([
-    { key: 'Backlog',    label: $t('tasks.status.backlog'),     colorClass: 'col-backlog' },
-    { key: 'InProgress', label: $t('tasks.status.in_progress'), colorClass: 'col-inprogress' },
-    { key: 'Review',     label: $t('tasks.status.review'),      colorClass: 'col-review' },
-    { key: 'Done',       label: $t('tasks.status.done'),        colorClass: 'col-done' },
-    { key: 'Blocked',    label: $t('tasks.status.blocked'),     colorClass: 'col-blocked' },
+    { key: 'backlog',     label: $t('tasks.status.backlog'),     colorClass: 'col-backlog' },
+    { key: 'in_progress', label: $t('tasks.status.in_progress'), colorClass: 'col-inprogress' },
+    { key: 'review',      label: $t('tasks.status.review'),      colorClass: 'col-review' },
+    { key: 'done',        label: $t('tasks.status.done'),        colorClass: 'col-done' },
+    { key: 'blocked',     label: $t('tasks.status.blocked'),     colorClass: 'col-blocked' },
   ]);
 
   const priorities = ['Critical', 'High', 'Medium', 'Low'];
-  const statuses = ['Backlog', 'InProgress', 'Review', 'Done', 'Blocked'];
+  const statuses = ['backlog', 'in_progress', 'review', 'done', 'blocked'];
 
   const agents = $derived([...new Set(tasks.map((t) => t.assigned_to).filter(Boolean))].sort());
 
@@ -72,7 +72,7 @@
       });
       toastSuccess('Task created');
       showNewTask = false;
-      taskTitle = ''; taskDesc = ''; taskPriority = 'Medium'; taskStatus = 'Backlog';
+      taskTitle = ''; taskDesc = ''; taskPriority = 'Medium'; taskStatus = 'backlog';
       loading = true;
       await loadTasks();
     } catch (e) {

@@ -9,7 +9,7 @@
   let personas = $state([]);
   let loading = $state(true);
   let createOpen = $state(false);
-  let form = $state({ name: '', description: '', scope: 'Workspace', capabilities: '', system_prompt: '' });
+  let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
 
   $effect(() => { load(); });
@@ -25,15 +25,28 @@
     }
   }
 
+  function autoSlug(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
   async function create() {
     if (!form.name.trim()) return;
     saving = true;
     try {
       const caps = form.capabilities.split(',').map(s => s.trim()).filter(Boolean);
-      await api.createPersona({ ...form, capabilities: caps });
+      const slug = form.slug.trim() || autoSlug(form.name.trim());
+      const scope = { kind: form.scopeKind, id: form.scopeId.trim() };
+      await api.createPersona({
+        name: form.name.trim(),
+        slug,
+        description: form.description.trim() || undefined,
+        scope,
+        capabilities: caps,
+        system_prompt: form.system_prompt.trim() || undefined,
+      });
       showToast('Persona created', { type: 'success' });
       createOpen = false;
-      form = { name: '', description: '', scope: 'Workspace', capabilities: '', system_prompt: '' };
+      form = { name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' };
       await load();
     } catch (e) {
       showToast('Failed to create persona: ' + e.message, { type: 'error' });
@@ -118,16 +131,24 @@
     <label class="field-label">Name *
       <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Developer" />
     </label>
+    <label class="field-label">Slug (auto-generated if blank)
+      <input class="field-input" bind:value={form.slug} placeholder="backend-developer" />
+    </label>
     <label class="field-label">Description
       <input class="field-input" bind:value={form.description} placeholder="Short description" />
     </label>
     <label class="field-label">Scope
-      <select class="field-input" bind:value={form.scope}>
-        <option value="Tenant">Tenant</option>
+      <select class="field-input" bind:value={form.scopeKind}>
+        <option value="Tenant">Tenant (global)</option>
         <option value="Workspace">Workspace</option>
         <option value="Repo">Repo</option>
       </select>
     </label>
+    {#if form.scopeKind === 'Workspace' || form.scopeKind === 'Repo'}
+      <label class="field-label">{form.scopeKind} ID *
+        <input class="field-input" bind:value={form.scopeId} placeholder="UUID of the {form.scopeKind.toLowerCase()}" />
+      </label>
+    {/if}
     <label class="field-label">Capabilities (comma-separated)
       <input class="field-input" bind:value={form.capabilities} placeholder="rust, api-design, code-review" />
     </label>
