@@ -175,6 +175,9 @@ mod tests {
             personas: base.personas.clone(),
             workspace_repos: base.workspace_repos.clone(),
             policies: base.policies.clone(),
+            workspace_memberships: base.workspace_memberships.clone(),
+            teams: base.teams.clone(),
+            notifications: base.notifications.clone(),
         });
         crate::build_router(state)
     }

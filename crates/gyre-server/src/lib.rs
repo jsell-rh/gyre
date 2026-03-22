@@ -31,6 +31,7 @@ pub(crate) mod spa;
 pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
+pub mod notifications;
 pub mod policy_engine;
 pub mod stale_agents;
 pub mod telemetry;
@@ -46,9 +47,10 @@ use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, DependencyRepository, GitOpsPort, JjOpsPort, MergeQueueRepository,
-    MergeRequestRepository, NetworkPeerRepository, PersonaRepository, PolicyRepository,
-    PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository, ReviewRepository,
-    SpawnLogRepository, TaskRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
+    MergeRequestRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
+    PolicyRepository, PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository,
+    ReviewRepository, SpawnLogRepository, TaskRepository, TeamRepository, UserRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -219,6 +221,12 @@ pub struct AppState {
     pub workspace_repos: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Full declarative ABAC policy engine (M22.6).
     pub policies: Arc<dyn PolicyRepository>,
+    /// Workspace membership repository (M22.8).
+    pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
+    /// Team repository (M22.8).
+    pub teams: Arc<dyn TeamRepository>,
+    /// Notification repository (M22.8).
+    pub notifications: Arc<dyn NotificationRepository>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -552,6 +560,9 @@ pub fn build_state(
         personas: Arc::new(mem::MemPersonaRepository::default()),
         workspace_repos: Arc::new(Mutex::new(HashMap::new())),
         policies: Arc::new(mem::MemPolicyRepository::default()),
+        workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
+        teams: Arc::new(mem::MemTeamRepository::default()),
+        notifications: Arc::new(mem::MemNotificationRepository::default()),
     })
 }
 

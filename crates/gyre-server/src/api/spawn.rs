@@ -473,6 +473,16 @@ pub async fn complete_agent(
         super::budget::decrement_active_agents(&state, &repo.project_id.to_string()).await;
     }
 
+    // Notify the spawning user that an MR needs review (M22.8).
+    if let Some(ref spawned_by) = agent.spawned_by {
+        crate::notifications::notify_mr_needs_review(
+            state.as_ref(),
+            spawned_by,
+            &mr.id.to_string(),
+        )
+        .await;
+    }
+
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
