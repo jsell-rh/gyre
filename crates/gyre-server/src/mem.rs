@@ -1203,5 +1203,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(Mutex::new(HashMap::new())),
         budget_usages: Arc::new(Mutex::new(HashMap::new())),
+        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
     })
 }

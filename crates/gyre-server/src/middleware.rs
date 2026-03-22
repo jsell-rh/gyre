@@ -170,6 +170,7 @@ mod tests {
             spec_links_store: base.spec_links_store.clone(),
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
+            search: base.search.clone(),
         });
         crate::build_router(state)
     }

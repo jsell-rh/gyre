@@ -269,4 +269,12 @@ export const api = {
   getSpecHistory: (path) => request(`/specs/${encodeURIComponent(path)}/history`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
+  // Search (M22.7)
+  search: ({ q, entity_type, workspace_id, limit = 20 } = {}) => {
+    const params = new URLSearchParams({ q: q || '' });
+    if (entity_type) params.set('entity_type', entity_type);
+    if (workspace_id) params.set('workspace_id', workspace_id);
+    params.set('limit', String(limit));
+    return request(`/search?${params.toString()}`);
+  },
 };

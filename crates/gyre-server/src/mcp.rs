@@ -217,6 +217,24 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["agent_id"]
                 }
+            },
+            {
+                "name": "gyre_search",
+                "description": "Full-text search across tasks, agents, MRs, and specs. Returns matching entities ranked by relevance.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "q": { "type": "string", "description": "Search query" },
+                        "entity_type": {
+                            "type": "string",
+                            "enum": ["task", "agent", "mr", "spec"],
+                            "description": "Filter by entity type (optional)"
+                        },
+                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional)" },
+                        "limit": { "type": "number", "description": "Max results to return (default 10)" }
+                    },
+                    "required": ["q"]
+                }
             }
         ]
     })
@@ -520,6 +538,46 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
     }
 }
 
+async fn handle_search(state: &AppState, args: &Value) -> Value {
+    let q = match get_str(args, "q") {
+        Some(q) => q.to_string(),
+        None => return tool_error("missing required field: q"),
+    };
+    let entity_type = get_str(args, "entity_type").map(|s| s.to_string());
+    let workspace_id = get_str(args, "workspace_id").map(|s| s.to_string());
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+    match state
+        .search
+        .search(gyre_ports::search::SearchQuery {
+            query: q.clone(),
+            entity_type,
+            workspace_id,
+            limit,
+        })
+        .await
+    {
+        Ok(results) => {
+            let text = if results.is_empty() {
+                format!("No results for '{q}'")
+            } else {
+                let lines: Vec<String> = results
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "[{}] {} (id: {}) — {}",
+                            r.entity_type, r.title, r.entity_id, r.snippet
+                        )
+                    })
+                    .collect();
+                format!("Found {} result(s):\n{}", results.len(), lines.join("\n"))
+            };
+            tool_result(text)
+        }
+        Err(e) => tool_error(format!("Search failed: {e}")),
+    }
+}
+
 // ── Main MCP request dispatcher ───────────────────────────────────────────────
 
 #[instrument(skip(state, req), fields(method = %req.method))]
@@ -558,6 +616,7 @@ pub async fn mcp_handler(
                 "gyre_record_activity" => handle_record_activity(&state, &args).await,
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
+                "gyre_search" => handle_search(&state, &args).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
@@ -671,6 +730,7 @@ mod tests {
         assert!(names.contains(&"gyre_record_activity"));
         assert!(names.contains(&"gyre_agent_heartbeat"));
         assert!(names.contains(&"gyre_agent_complete"));
+        assert!(names.contains(&"gyre_search"));
     }
 
     #[tokio::test]

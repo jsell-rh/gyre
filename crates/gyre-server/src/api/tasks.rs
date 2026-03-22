@@ -5,8 +5,9 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus};
+use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tracing::instrument;
 
 use crate::domain_events::DomainEvent;
@@ -137,6 +138,22 @@ pub async fn create_task(
     task.parent_task_id = req.parent_task_id.map(Id::new);
     task.labels = req.labels.unwrap_or_default();
     state.tasks.create(&task).await?;
+    // Index for search.
+    let mut facets = HashMap::new();
+    facets.insert("status".to_string(), "backlog".to_string());
+    facets.insert("priority".to_string(), task_priority_str(&task.priority));
+    let _ = state
+        .search
+        .index(SearchDocument {
+            entity_type: "task".to_string(),
+            entity_id: task.id.to_string(),
+            title: task.title.clone(),
+            body: task.description.clone().unwrap_or_default(),
+            workspace_id: None,
+            repo_id: None,
+            facets,
+        })
+        .await;
     let _ = state.event_tx.send(DomainEvent::TaskCreated {
         id: task.id.to_string(),
     });
