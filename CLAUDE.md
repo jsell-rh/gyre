@@ -265,7 +265,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 
 ### Authentication
 
-All REST and git HTTP endpoints require a Bearer token in the `Authorization` header:
+All REST and git HTTP endpoints require a Bearer token in the `Authorization` header. **SSE endpoints** (`/api/v1/agents/{id}/logs/stream`, `/api/v1/audit/stream`) also accept a `?token=<token>` query parameter as a fallback, since `EventSource` cannot set request headers:
 
 ```
 Authorization: Bearer <token>
