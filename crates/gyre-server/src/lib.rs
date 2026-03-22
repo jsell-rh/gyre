@@ -5,6 +5,7 @@ pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
 pub mod commit_signatures;
+pub mod container_audit;
 pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
@@ -201,6 +202,8 @@ pub struct AppState {
         Arc<Mutex<HashMap<String, workload_attestation::WorkloadAttestation>>>,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
+    /// Container audit records: agent_id -> ContainerAuditRecord (M19.3).
+    pub container_audits: container_audit::ContainerAuditStore,
     /// Spec registry ledger: spec path -> SpecLedgerEntry (M21.1).
     pub spec_ledger: spec_registry::SpecLedger,
     /// Spec approval history: ordered list of SpecApprovalEvent (M21.1).
@@ -550,6 +553,7 @@ pub fn build_state(
         abac_policies: Arc::new(Mutex::new(HashMap::new())),
         workload_attestations: Arc::new(Mutex::new(HashMap::new())),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
+        container_audits: container_audit::new_store(),
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),

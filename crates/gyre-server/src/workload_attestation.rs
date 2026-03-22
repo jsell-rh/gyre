@@ -31,6 +31,12 @@ pub struct WorkloadAttestation {
     pub alive: bool,
     /// Unix epoch seconds of the last liveness verification.
     pub last_verified_at: u64,
+    /// Container ID when spawned via ContainerTarget (M19.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    /// Image digest (sha256) when spawned via ContainerTarget (M19.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_hash: Option<String>,
 }
 
 /// Create a new workload attestation for an agent process at spawn time.
@@ -39,6 +45,18 @@ pub fn attest_agent(
     pid: Option<u32>,
     compute_target: &str,
     stack_hash: &str,
+) -> WorkloadAttestation {
+    attest_agent_with_container(agent_id, pid, compute_target, stack_hash, None, None)
+}
+
+/// Create a workload attestation with optional container metadata (M19.4).
+pub fn attest_agent_with_container(
+    agent_id: &str,
+    pid: Option<u32>,
+    compute_target: &str,
+    stack_hash: &str,
+    container_id: Option<String>,
+    image_hash: Option<String>,
 ) -> WorkloadAttestation {
     let now = now_secs();
     let hostname = read_hostname();
@@ -51,6 +69,8 @@ pub fn attest_agent(
         attested_at: now,
         alive: true,
         last_verified_at: now,
+        container_id,
+        image_hash,
     }
 }
 

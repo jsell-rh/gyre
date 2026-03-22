@@ -74,6 +74,13 @@ pub struct AgentJwtClaims {
     /// Stack fingerprint hash at spawn time (G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wl_stack_hash: Option<String>,
+    // -- M19.4: Container workload claims -------------------------------------
+    /// Container ID when the agent was spawned via ContainerTarget (M19.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wl_container_id: Option<String>,
+    /// Image digest (sha256) when spawned via ContainerTarget (M19.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wl_image_hash: Option<String>,
 }
 
 /// Ed25519 key pair used to mint and verify agent JWTs.
@@ -159,11 +166,12 @@ impl AgentSigningKey {
         ttl_secs: u64,
     ) -> Result<String, String> {
         self.mint_with_workload(
-            agent_id, task_id, spawned_by, issuer, ttl_secs, None, None, None, None,
+            agent_id, task_id, spawned_by, issuer, ttl_secs, None, None, None, None, None, None,
         )
     }
 
     /// Mint a signed EdDSA JWT with embedded G10 workload attestation claims.
+    /// Optionally includes M19.4 container identity claims.
     #[allow(clippy::too_many_arguments)]
     pub fn mint_with_workload(
         &self,
@@ -176,6 +184,8 @@ impl AgentSigningKey {
         wl_hostname: Option<String>,
         wl_compute_target: Option<String>,
         wl_stack_hash: Option<String>,
+        wl_container_id: Option<String>,
+        wl_image_hash: Option<String>,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -193,6 +203,8 @@ impl AgentSigningKey {
             wl_hostname,
             wl_compute_target,
             wl_stack_hash,
+            wl_container_id,
+            wl_image_hash,
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
@@ -1562,6 +1574,8 @@ mod tests {
             wl_hostname: None,
             wl_compute_target: None,
             wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash: None,
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(remote_key.kid.clone());
