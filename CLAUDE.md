@@ -167,6 +167,12 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/abac-policy` | Get the ABAC policy list for a repo — array of `AbacPolicy` objects; each policy has `id`, `name`, `rules` (AND within), evaluated as OR across policies (G6) |
 | `PUT` | `/api/v1/repos/{id}/abac-policy` | Replace the ABAC policy list (**Admin only**); policies are matched against JWT claims on push and spawn; `rules` is a list of `{claim, operator, value}` match conditions combined with AND; multiple policies in the array are OR'd together (G6) |
 | `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
+| `GET` | `/api/v1/repos/{id}/dependencies` | Outgoing dependency edges from this repo (`DependencyType`: Code/Spec/Api/Schema/Manual; `DetectionMethod`: auto/manual) (M22.4) |
+| `GET` | `/api/v1/repos/{id}/dependents` | Incoming dependency edges — repos that declare a dependency on this one (M22.4) |
+| `POST` | `/api/v1/repos/{id}/dependencies` | Add a manual dependency edge: `{target_repo_id, dep_type, notes?}` (M22.4) |
+| `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dependency edge (M22.4) |
+| `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents — all repos that would be affected if this one changes, with depth (M22.4) |
+| `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes: [{repo_id, name},...], edges: [{from, to, dep_type, detection_method},...]}` (M22.4) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
@@ -207,7 +213,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6) |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for any matching Gyre-hosted repos (M22.4) |
 | `GET` | `/api/v1/auth/token-info` | Token introspection — returns token kind (`agent_jwt`, `uuid_token`, `api_key`, `global`) and decoded JWT claims including `task_id`, `spawned_by`, `exp` (M18) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
@@ -241,6 +247,13 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/costs` | Record a cost entry (agent_id, task_id, cost_type, amount) |
 | `GET` | `/api/v1/costs` | Query cost entries (`?agent_id=&task_id=&since=`) |
 | `GET` | `/api/v1/costs/summary` | Aggregated cost totals by agent |
+| `GET` | `/api/v1/search` | Full-text search across all entities (`?q=&entity_type=&workspace_id=&limit=20`); returns `{query, total, results: [{entity_type, id, title, snippet, score},...]}` (M22.7) |
+| `POST` | `/api/v1/search/reindex` | Admin: trigger full reindex of all searchable entities; **Admin only** (M22.7) |
+| `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies (`Policy`, `Condition`, `ConditionOp`, `PolicyEffect`, `PolicyScope`); 8 operators: Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists; first-match-wins evaluation; default-deny (M22.6) |
+| `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6) |
+| `POST` | `/api/v1/policies/evaluate` | Dry-run policy evaluation: `{context: {claims, ...}}` → `{decision: "Allow"\|"Deny", matched_policy?, reason}` (M22.6) |
+| `GET` | `/api/v1/policies/decisions` | Query decision audit log (`?policy_id=&effect=&since=`) (M22.6) |
+| `GET` | `/api/v1/policies/effective` | Effective permissions explorer — all policies that would match a given attribute context (M22.6) |
 | `POST` | `/api/v1/admin/jobs/{name}/run` | Manually trigger a named background job (Admin only) |
 | `POST` | `/api/v1/admin/snapshot` | Create point-in-time DB snapshot (Admin only) |
 | `GET` | `/api/v1/admin/snapshots` | List all snapshots (Admin only) |
@@ -405,6 +418,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_record_activity` | Log a typed AG-UI activity event |
 | `gyre_agent_heartbeat` | Send agent heartbeat |
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
+| `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params) |
 
 Example MCP `initialize` call:
 ```json
@@ -597,7 +611,7 @@ The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 - **Admin Panel** (M4.3 + M8.3, Admin role required): tab-based navigation (Health / Jobs / Audit / Agents / SIEM / Compute / Network / Snapshots / Retention) via `Tabs` component. Health tab: uptime, agent/task/project metric cards. Jobs tab: merge processor + stale agent detector status table. Audit tab: searchable activity feed with agent_id / event_type filters. Agents tab: Kill and Reassign action buttons per agent; **Spawn Log** inline timeline per row shows each spawn step with status badge, timestamp, and detail (expand/collapse). SIEM tab: table of forwarding targets with add/edit/delete; modal form (URL, format JSON/CEF/LEEF, event filter, enabled toggle). Compute tab: table of compute targets (local/docker/ssh) with create/delete; modal with name, type, host fields. Network tab: WireGuard peer registry table with register/remove actions; DERP relay map JSON viewer below the table.
 
 Access at `http://localhost:3000` after starting the server. Admin Panel requires `Admin` role via Keycloak JWT (`GYRE_OIDC_ISSUER`) or the global `GYRE_AUTH_TOKEN`.
-- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 8 MCP tools available on `/mcp`.
+- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 9 MCP tools available on `/mcp` (including `gyre_search` added in M22.7).
 - **Compose View** (M5.2 + M8.3, sidebar: "Compose"): structured section cards with a mono textarea editor. Paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states in an interactive tree visualization, and teardown the session.
 - **Agent Card Panel** (M5.2 + M8.3): per-agent panel to view and edit the A2A AgentCard (capabilities as `Badge` pills, protocols, endpoint). Improved empty state when no card is published.
 - **Analytics View** (M6.1): event counts bar chart and recent events list with property drill-down. Tracks auto-emitted events: `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`, `merge_queue.processed`.
