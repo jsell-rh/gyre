@@ -1336,6 +1336,7 @@ mod tests {
             mirror_url: None,
             mirror_interval_secs: None,
             last_mirror_sync: None,
+            workspace_id: None,
         };
         state.repos.create(&repo).await.unwrap();
 

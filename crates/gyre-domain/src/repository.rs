@@ -13,6 +13,7 @@ pub struct Repository {
     pub mirror_url: Option<String>,
     pub mirror_interval_secs: Option<u64>,
     pub last_mirror_sync: Option<u64>,
+    pub workspace_id: Option<Id>,
 }
 
 impl Repository {
@@ -34,6 +35,7 @@ impl Repository {
             mirror_url: None,
             mirror_interval_secs: None,
             last_mirror_sync: None,
+            workspace_id: None,
         }
     }
 }

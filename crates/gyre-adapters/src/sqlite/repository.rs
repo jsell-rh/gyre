@@ -40,6 +40,7 @@ impl From<RepositoryRow> for Repository {
             mirror_url: r.mirror_url,
             mirror_interval_secs: r.mirror_interval_secs.map(|v| v as u64),
             last_mirror_sync: r.last_mirror_sync.map(|v| v as u64),
+            workspace_id: None,
         }
     }
 }

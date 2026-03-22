@@ -22,6 +22,7 @@ pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
 pub mod network;
+pub mod personas;
 pub mod projects;
 pub mod provenance;
 pub mod push_gates;
@@ -36,6 +37,7 @@ pub mod stack_attest;
 pub mod tasks;
 pub mod version;
 pub mod workload;
+pub mod workspaces;
 
 use audit::{
     audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
@@ -420,6 +422,32 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
         .route("/api/v1/search/reindex", post(search::reindex_handler))
+        // Workspaces (M22.1)
+        .route(
+            "/api/v1/workspaces",
+            post(workspaces::create_workspace).get(workspaces::list_workspaces),
+        )
+        .route(
+            "/api/v1/workspaces/:id",
+            get(workspaces::get_workspace)
+                .put(workspaces::update_workspace)
+                .delete(workspaces::delete_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/:id/repos",
+            post(workspaces::add_repo_to_workspace).get(workspaces::list_workspace_repos),
+        )
+        // Personas (M22.1)
+        .route(
+            "/api/v1/personas",
+            post(personas::create_persona).get(personas::list_personas),
+        )
+        .route(
+            "/api/v1/personas/:id",
+            get(personas::get_persona)
+                .put(personas::update_persona)
+                .delete(personas::delete_persona),
+        )
 }
 
 pub(crate) fn now_secs() -> u64 {

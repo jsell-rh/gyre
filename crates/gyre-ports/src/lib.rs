@@ -24,6 +24,7 @@ pub mod spawn_log;
 pub mod storage;
 pub mod task;
 pub mod user;
+pub mod workspace;
 
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
@@ -46,3 +47,4 @@ pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use storage::StoragePort;
 pub use task::TaskRepository;
 pub use user::{ApiKeyRepository, UserRepository};
+pub use workspace::{PersonaRepository, WorkspaceRepository};
