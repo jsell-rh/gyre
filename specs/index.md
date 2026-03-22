@@ -97,6 +97,9 @@ How Gyre gets built - process and standards for the agent team.
 | M17: Integration Testing | [`milestones/m17-integration-testing.md`](milestones/m17-integration-testing.md) | 67 API tests, 21 auth/RBAC tests, 12 git tests, 20 Playwright E2E tests |
 | M18: Agent Identity | [`milestones/m18-agent-identity.md`](milestones/m18-agent-identity.md) | EdDSA JWT agent tokens, OIDC provider, token introspection, JWT revocation, stale-spec detection |
 | M19: Container Runtime | [`milestones/m19-container-runtime.md`](milestones/m19-container-runtime.md) | Container-first agent runtime: Docker/Podman ContainerTarget with security defaults, procfs liveness monitor, workload attestation, SSH compute targets + reverse tunnels |
+| M20: UI Accountability | [`milestones/m20-ui-coverage.md`](milestones/m20-ui-coverage.md) | 19 frontend findings resolved: admin panels, Repo Detail tabs, MR dependency panel, merge queue DAG, task detail view, token introspection, spec approvals |
+| M21: Spec Registry | [`milestones/m21-spec-registry.md`](milestones/m21-spec-registry.md) | Spec manifest + ledger state machine (Approved/Pending/Deprecated), 8 `/api/v1/specs/` endpoints, Spec Dashboard UI |
+| M22: Platform Entities | [`milestones/m22-platform-entities.md`](milestones/m22-platform-entities.md) | Workspace+Persona (M22.1), Budget (M22.2), SpecLinks (M22.3), DepGraph (M22.4), Platform UI - 7 views (M22.5), ABAC engine (M22.6), Search (M22.7), UserMgmt (M22.8) |
 
 ## Open Questions
 
