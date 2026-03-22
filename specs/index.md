@@ -94,7 +94,7 @@ How Gyre gets built - process and standards for the agent team.
 | M14: Supply Chain Security | [`milestones/m14-supply-chain.md`](milestones/m14-supply-chain.md) | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | [`milestones/m15-diesel-migrations.md`](milestones/m15-diesel-migrations.md) | Diesel ORM + migrations, full SQLite persistence, multi-tenancy |
 | M16: Security Hardening | [`milestones/m16-security-hardening.md`](milestones/m16-security-hardening.md) | Release automation endpoint, git argument injection prevention (M16-A), CISO finding resolutions |
-| M17: Integration Testing | [`milestones/m17-integration-testing.md`](milestones/m17-integration-testing.md) | 67 API tests, 21 auth/RBAC tests, 12 git tests, 20 Playwright E2E tests |
+| M17: Integration Testing | [`milestones/m17-integration-testing.md`](milestones/m17-integration-testing.md) | 68 API tests, 21 auth/RBAC tests, 12 git tests, 28 Playwright E2E tests |
 | M18: Agent Identity | [`milestones/m18-agent-identity.md`](milestones/m18-agent-identity.md) | EdDSA JWT agent tokens, OIDC provider, token introspection, JWT revocation, stale-spec detection |
 | M19: Container Runtime | [`milestones/m19-container-runtime.md`](milestones/m19-container-runtime.md) | Container-first agent runtime: Docker/Podman ContainerTarget with security defaults, procfs liveness monitor, workload attestation, SSH compute targets + reverse tunnels |
 | M20: UI Accountability | [`milestones/m20-ui-coverage.md`](milestones/m20-ui-coverage.md) | 19 frontend findings resolved: admin panels, Repo Detail tabs, MR dependency panel, merge queue DAG, task detail view, token introspection, spec approvals |
