@@ -174,9 +174,10 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/users/me/notifications` | Notifications for the current user (16 `NotificationType` variants including `MrNeedsReview`, `GateFailure`, `MrMerged`; 4 priority levels) (M22.8) |
 | `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark a notification as read (M22.8) |
 | `POST/GET` | `/api/v1/workspaces/{id}/members` | Invite / list workspace members; `WorkspaceRole`: Owner, Admin, Developer, Viewer; membership has accept/pending lifecycle (M22.8) |
+| `PUT` | `/api/v1/workspaces/{id}/members/{user_id}` | Update a member's `WorkspaceRole` (M22.8) |
 | `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member from a workspace (M22.8) |
 | `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create / list workspace-scoped teams (M22.8) |
-| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Read / update / delete team; `add_member`/`remove_member` are idempotent (M22.8) |
+| `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; `add_member`/`remove_member` are idempotent (M22.8) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
