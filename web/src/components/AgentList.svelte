@@ -340,9 +340,10 @@
                   <dt>Container ID</dt><dd class="mono">{containerRecord.container_id ?? '—'}</dd>
                   <dt>Image</dt><dd class="mono">{containerRecord.image ?? '—'}</dd>
                   <dt>Image Hash</dt><dd class="mono">{containerRecord.image_hash ?? '—'}</dd>
-                  <dt>Spawned</dt><dd>{formatTime(containerRecord.spawned_at)}</dd>
-                  {#if containerRecord.exited_at}
-                    <dt>Exited</dt><dd>{formatTime(containerRecord.exited_at)}</dd>
+                  <dt>Runtime</dt><dd>{containerRecord.runtime ?? '—'}</dd>
+                  <dt>Started</dt><dd>{formatTime(containerRecord.started_at)}</dd>
+                  {#if containerRecord.stopped_at}
+                    <dt>Stopped</dt><dd>{formatTime(containerRecord.stopped_at)}</dd>
                   {/if}
                   {#if containerRecord.exit_code != null}
                     <dt>Exit Code</dt><dd>{containerRecord.exit_code}</dd>
