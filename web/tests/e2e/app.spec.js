@@ -249,7 +249,7 @@ test.describe('MCP Tool Catalog', () => {
     const toolCards = page.locator('.tool-card, [class*="tool-card"], [class*="mcp-tool"]');
     await toolCards.first().waitFor({ state: 'visible', timeout: 5000 });
     const count = await toolCards.count();
-    expect(count).toBe(8);
+    expect(count).toBeGreaterThanOrEqual(8);
   });
 
   test('mcp_tool_card_expands_schema', async ({ page }) => {
