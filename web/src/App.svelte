@@ -21,6 +21,13 @@
   import SpecApprovalsView from './components/SpecApprovalsView.svelte';
   import SpecDashboard from './components/SpecDashboard.svelte';
   import AuditView from './components/AuditView.svelte';
+  import WorkspaceList from './components/WorkspaceList.svelte';
+  import WorkspaceDetail from './components/WorkspaceDetail.svelte';
+  import PersonaCatalog from './components/PersonaCatalog.svelte';
+  import BudgetDashboard from './components/BudgetDashboard.svelte';
+  import DependencyGraph from './components/DependencyGraph.svelte';
+  import SpecGraph from './components/SpecGraph.svelte';
+  import UserProfile from './components/UserProfile.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
@@ -32,6 +39,7 @@
   let selectedRepo = $state(null);
   let selectedMr = $state(null);
   let selectedTask = $state(null);
+  let selectedWorkspace = $state(null);
   let wsStatus = $state('disconnected');
   let wsStore = $state(null);
   let tokenModalOpen = $state(false);
@@ -95,6 +103,7 @@
       '',
       '#' + view,
     );
+    if (ctx.workspace !== undefined) selectedWorkspace = ctx.workspace;
   }
 
   // Sync browser history ↔ app state using onMount to avoid reactive loops
@@ -124,24 +133,31 @@
   });
 
   const viewTitles = {
-    dashboard:       'Dashboard',
-    activity:        'Activity Feed',
-    agents:          'Agents',
-    tasks:           'Task Board',
-    'task-detail':   'Task Detail',
-    projects:        'Projects',
-    'repo-detail':   'Repository',
-    'mr-detail':     'Merge Request',
-    'merge-queue':   'Merge Queue',
-    'mcp-catalog':   'MCP Tool Catalog',
-    compose:         'Agent Compose',
-    analytics:       'Analytics',
-    costs:           'Cost Tracking',
-    audit:           'Audit Events',
-    'spec-approvals': 'Spec Approvals',
-    specs:           'Spec Registry',
-    admin:           'Admin Panel',
-    settings:        'Settings',
+    dashboard:          'Dashboard',
+    activity:           'Activity Feed',
+    agents:             'Agents',
+    tasks:              'Task Board',
+    'task-detail':      'Task Detail',
+    projects:           'Projects',
+    'repo-detail':      'Repository',
+    'mr-detail':        'Merge Request',
+    'merge-queue':      'Merge Queue',
+    'mcp-catalog':      'MCP Tool Catalog',
+    compose:            'Agent Compose',
+    analytics:          'Analytics',
+    costs:              'Cost Tracking',
+    audit:              'Audit Events',
+    'spec-approvals':   'Spec Approvals',
+    specs:              'Spec Registry',
+    'spec-graph':       'Spec Link Graph',
+    admin:              'Admin Panel',
+    settings:           'Settings',
+    workspaces:         'Workspaces',
+    'workspace-detail': 'Workspace',
+    personas:           'Persona Catalog',
+    budget:             'Budget Dashboard',
+    dependencies:       'Dependency Graph',
+    profile:            'My Profile',
   };
 
   let breadcrumbs = $derived(() => {
@@ -254,6 +270,23 @@
         <SpecApprovalsView />
       {:else if currentView === 'specs'}
         <SpecDashboard />
+      {:else if currentView === 'spec-graph'}
+        <SpecGraph />
+      {:else if currentView === 'workspaces'}
+        <WorkspaceList onSelect={(ws) => navigate('workspace-detail', { workspace: ws })} />
+      {:else if currentView === 'workspace-detail' && selectedWorkspace}
+        <WorkspaceDetail
+          workspace={selectedWorkspace}
+          onBack={() => navigate('workspaces')}
+        />
+      {:else if currentView === 'personas'}
+        <PersonaCatalog />
+      {:else if currentView === 'budget'}
+        <BudgetDashboard />
+      {:else if currentView === 'dependencies'}
+        <DependencyGraph />
+      {:else if currentView === 'profile'}
+        <UserProfile />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}
