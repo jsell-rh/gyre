@@ -315,7 +315,7 @@
   }
 
   .schema-table td {
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--color-border);
   }
 
