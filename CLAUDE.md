@@ -783,6 +783,9 @@ Key specs to read before making changes:
 | M18 milestone deliverables | [specs/milestones/m18-agent-identity.md](specs/milestones/m18-agent-identity.md) |
 | M19 milestone deliverables | [specs/milestones/m19-container-runtime.md](specs/milestones/m19-container-runtime.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
+| User management & notification system | [specs/system/user-management.md](specs/system/user-management.md) |
+| Full-text search (all entities, FTS5/tsvector, MCP tool) | [specs/system/search.md](specs/system/search.md) |
+| ABAC policy engine (attribute-based access, scope cascade, audit) | [specs/system/abac-policy-engine.md](specs/system/abac-policy-engine.md) |
 | Forge-native advantages | [specs/system/forge-advantages.md](specs/system/forge-advantages.md) |
 | Trusted Foundry integration (future pattern) | [specs/system/trusted-foundry-integration.md](specs/system/trusted-foundry-integration.md) |
 | Agent experience + legibility | [specs/development/agent-experience.md](specs/development/agent-experience.md) |
