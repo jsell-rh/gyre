@@ -378,6 +378,14 @@ pub async fn git_receive_pack(
                 now,
             )
             .await;
+            // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
+            detect_dependencies_on_push(
+                &state_clone,
+                &repo_id_clone,
+                &repo_path_clone,
+                &update.new_sha,
+            )
+            .await;
         }
     });
 
@@ -1110,6 +1118,170 @@ async fn process_spec_lifecycle(
                             id: task_id.to_string(),
                         });
                 }
+            }
+        }
+    }
+}
+
+// ── Cargo.toml path dep auto-detection (M22.4) ─────────────────────────────
+
+/// Parse `path = "..."` entries from a Cargo.toml `[dependencies]` section.
+///
+/// Returns the list of local path values (e.g. `"../other-repo"`).
+/// Only path-based dependencies are returned; crates.io / git deps are ignored.
+/// This is the auto-detection stub for M22.4 — only Cargo.toml path deps are
+/// detected in this milestone; other detection methods are stubs.
+pub fn detect_cargo_path_deps(toml_content: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut in_dependencies = false;
+
+    for line in toml_content.lines() {
+        let trimmed = line.trim();
+
+        // Detect section headers.
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]"
+                || trimmed == "[dev-dependencies]"
+                || trimmed == "[build-dependencies]";
+            continue;
+        }
+
+        if !in_dependencies {
+            continue;
+        }
+
+        // Match lines with: crate-name = { path = "../sibling" }
+        if let Some(path_val) = extract_path_value(trimmed) {
+            paths.push(path_val);
+        }
+    }
+
+    paths
+}
+
+/// Extract the value of `path = "..."` from a TOML dependency line.
+fn extract_path_value(line: &str) -> Option<String> {
+    let path_idx = line.find("path")?;
+    let after_path = line[path_idx + 4..].trim_start();
+    let after_eq = after_path.strip_prefix('=')?;
+    let value_str = after_eq.trim();
+
+    // Strip the opening quote and find the closing quote.
+    let (quote_char, rest) = if let Some(s) = value_str.strip_prefix('"') {
+        ('"', s)
+    } else if let Some(s) = value_str.strip_prefix('\'') {
+        ('\'', s)
+    } else {
+        return None;
+    };
+
+    let end = rest.find(quote_char)?;
+    Some(rest[..end].to_string())
+}
+
+/// Post-push auto-detection: scan Cargo.toml changes for path deps pointing to sibling repos.
+///
+/// On pushes to the default branch, reads the Cargo.toml at the new SHA and creates
+/// DependencyEdge records for any path deps whose basename matches a known Gyre repo name.
+pub(crate) async fn detect_dependencies_on_push(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    new_sha: &str,
+) {
+    use gyre_common::Id;
+    use gyre_domain::{DependencyEdge, DependencyType, DetectionMethod};
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    // Check whether Cargo.toml was changed in this commit.
+    let diff_out = match Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("diff-tree")
+        .arg("--no-commit-id")
+        .arg("-r")
+        .arg("--name-only")
+        .arg(new_sha)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let changed_files = String::from_utf8_lossy(&diff_out);
+    let has_cargo_toml = changed_files
+        .lines()
+        .any(|f| f == "Cargo.toml" || f.ends_with("/Cargo.toml"));
+
+    if !has_cargo_toml {
+        return;
+    }
+
+    // Read Cargo.toml content from the new commit.
+    let toml_out = match Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("show")
+        .arg(format!("{new_sha}:Cargo.toml"))
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let toml_content = String::from_utf8_lossy(&toml_out);
+    let path_deps = detect_cargo_path_deps(&toml_content);
+
+    if path_deps.is_empty() {
+        return;
+    }
+
+    let all_repos = match state.repos.list().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("dep-detection: failed to list repos: {e}");
+            return;
+        }
+    };
+
+    let source_id = Id::new(repo_id);
+    let now = crate::api::now_secs();
+
+    for path_dep in path_deps {
+        // Extract basename: "../other-repo" -> "other-repo"
+        let basename = std::path::Path::new(&path_dep)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&path_dep)
+            .to_string();
+
+        if let Some(target_repo) = all_repos.iter().find(|r| r.name == basename) {
+            if target_repo.id.as_str() == repo_id {
+                continue;
+            }
+
+            let edge = DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                source_id.clone(),
+                target_repo.id.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                basename.as_str(),
+                DetectionMethod::CargoToml,
+                now,
+            );
+
+            if let Err(e) = state.dependencies.save(&edge).await {
+                warn!("dep-detection: failed to save edge: {e}");
+            } else {
+                tracing::info!(
+                    source_repo = repo_id,
+                    target_repo = %target_repo.id,
+                    "auto-detected Cargo.toml path dependency"
+                );
             }
         }
     }

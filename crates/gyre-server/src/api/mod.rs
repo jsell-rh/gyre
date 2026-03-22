@@ -11,6 +11,7 @@ pub mod auth;
 pub mod code_awareness;
 pub mod compose;
 pub mod compute;
+pub mod dependencies;
 pub mod discover;
 pub mod error;
 pub mod federation;
@@ -383,6 +384,24 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/network/peers/:id", delete(network::delete_peer))
         .route("/api/v1/network/derp-map", get(network::derp_map))
+        // Cross-repo dependency graph (M22.4)
+        .route(
+            "/api/v1/repos/:id/dependencies",
+            get(dependencies::list_dependencies).post(dependencies::add_dependency),
+        )
+        .route(
+            "/api/v1/repos/:id/dependencies/:dep_id",
+            delete(dependencies::delete_dependency),
+        )
+        .route(
+            "/api/v1/repos/:id/dependents",
+            get(dependencies::list_dependents),
+        )
+        .route(
+            "/api/v1/repos/:id/blast-radius",
+            get(dependencies::blast_radius),
+        )
+        .route("/api/v1/dependencies/graph", get(dependencies::get_graph))
         // Federation (G11)
         .route(
             "/api/v1/federation/trusted-issuers",
