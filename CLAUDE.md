@@ -203,7 +203,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees; POST: JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
-| `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task; writes `refs/agents/{id}/head` and `refs/ralph/{task-id}/implement` (M13.6); JWT bearers are evaluated against the target repo's ABAC policy before spawning — returns 403 if no policy matches (G6) |
+| `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task; writes `refs/agents/{id}/head` and `refs/ralph/{task-id}/implement` (M13.6); JWT bearers are evaluated against the target repo's ABAC policy before spawning — returns 403 if no policy matches (G6); returns **429** if workspace or tenant budget limits are exceeded (`max_concurrent_agents`, `max_tokens_per_day`, `max_cost_per_day`) (M22.2) |
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
@@ -213,7 +213,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
-| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor + stale agent detector (Admin only) |
+| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
@@ -241,6 +241,9 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/costs` | Record a cost entry (agent_id, task_id, cost_type, amount) |
 | `GET` | `/api/v1/costs` | Query cost entries (`?agent_id=&task_id=&since=`) |
 | `GET` | `/api/v1/costs/summary` | Aggregated cost totals by agent |
+| `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
+| `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
+| `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
 | `POST` | `/api/v1/admin/jobs/{name}/run` | Manually trigger a named background job (Admin only) |
 | `POST` | `/api/v1/admin/snapshot` | Create point-in-time DB snapshot (Admin only) |
 | `GET` | `/api/v1/admin/snapshots` | List all snapshots (Admin only) |

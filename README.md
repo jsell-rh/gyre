@@ -114,7 +114,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M19: Container Runtime | Done | Docker/Podman ContainerTarget with security defaults, procfs agent monitor, workload attestation, SSH compute targets + reverse tunnels |
 | M20: UI Accountability | Done | 19 frontend findings resolved: admin panels (SIEM/Compute/Network/Spawn Log), Repo Detail Policy/Activity/Gates tabs, MR dependency panel, merge queue DAG view, task detail view, token introspection, spec approvals view |
 | M21: Spec Registry | In Progress | Spec manifest (`specs/manifest.yaml`), ledger state machine (Approved/Pending/Deprecated), 8 new `/api/v1/specs/` endpoints, Spec Dashboard UI |
-| M22: Spec Links | In Progress | `SpecLink`/`SpecLinkType` in manifest; 6 link types (implements, supersedes, depends_on, conflicts_with, extends, references); forge enforcement (supersedes→deprecate, extends→drift); approval gates; 2 new endpoints (`/specs/{path}/links`, `/specs/graph`) |
+| M22: Spec Links + Budget | In Progress | **M22.2** `BudgetConfig`/`BudgetUsage` domain types; 3 new budget endpoints (`/workspaces/{id}/budget`, `/budget/summary`); spawn 429 gate; daily reset job. **M22.3** `SpecLink`/`SpecLinkType` in manifest; 6 link types (implements, supersedes, depends_on, conflicts_with, extends, references); forge enforcement; approval gates; 2 new endpoints (`/specs/{path}/links`, `/specs/graph`) |
 
 741 Rust + 95 vitest component + 20 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
