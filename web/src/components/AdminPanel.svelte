@@ -53,6 +53,10 @@
   let peerForm = $state({ agent_id: '', public_key: '', endpoint: '', allowed_ips: '' });
   let peerLoading = $state(false);
 
+  // BCP state
+  let bcpTargets = $state(null);
+  let bcpDrillLoading = $state(false);
+
   // Agent spawn log drill-down
   let selectedAgentId = $state(null);
   let spawnLog = $state([]);
@@ -68,6 +72,7 @@
     { id: 'siem',      label: 'SIEM' },
     { id: 'compute',   label: 'Compute' },
     { id: 'network',   label: 'Network' },
+    { id: 'bcp',       label: 'BCP' },
   ];
 
   $effect(() => {
@@ -78,7 +83,7 @@
     loading = true;
     error = null;
     try {
-      const [h, j, a, ag, snaps, ret, siem, compute, peers, derp] = await Promise.all([
+      const [h, j, a, ag, snaps, ret, siem, compute, peers, derp, bcp] = await Promise.all([
         api.adminHealth(),
         api.adminJobs(),
         api.adminAudit(),
@@ -89,6 +94,7 @@
         api.computeList().catch(() => []),
         api.networkPeers().catch(() => []),
         api.networkDerpMap().catch(() => null),
+        api.bcpTargets().catch(() => null),
       ]);
       health = h;
       jobs = j;
@@ -100,6 +106,7 @@
       computeTargets = Array.isArray(compute) ? compute : (compute?.targets ?? []);
       networkPeers = Array.isArray(peers) ? peers : (peers?.peers ?? []);
       derpMap = derp;
+      bcpTargets = bcp;
     } catch (e) {
       error = e.message;
     } finally {
@@ -233,6 +240,18 @@
       spawnLog = [];
     } finally {
       spawnLogLoading = false;
+    }
+  }
+
+  async function runBcpDrill() {
+    bcpDrillLoading = true;
+    try {
+      const result = await api.bcpDrill();
+      toastSuccess(`BCP drill complete — snapshot: ${result.snapshot_path ?? 'ok'}`);
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      bcpDrillLoading = false;
     }
   }
 
@@ -817,6 +836,29 @@
             {/each}
           </tbody>
         </table>
+      {/if}
+
+    <!-- BCP TAB -->
+    {:else if activeTab === 'bcp'}
+      <div class="section-actions">
+        <p class="section-desc">Business Continuity — Recovery Time/Point Objectives and drill management (M23).</p>
+        <button class="primary-btn" onclick={runBcpDrill} disabled={bcpDrillLoading}>
+          {bcpDrillLoading ? 'Running Drill…' : 'Run BCP Drill'}
+        </button>
+      </div>
+      {#if bcpTargets}
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span class="metric-label">RTO (Recovery Time Objective)</span>
+            <span class="metric-value mono">{bcpTargets.rto_secs != null ? bcpTargets.rto_secs + 's' : '—'}</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">RPO (Recovery Point Objective)</span>
+            <span class="metric-value mono">{bcpTargets.rpo_secs != null ? bcpTargets.rpo_secs + 's' : '—'}</span>
+          </div>
+        </div>
+      {:else}
+        <EmptyState title="BCP targets not configured" description="Set GYRE_RTO and GYRE_RPO environment variables to define recovery objectives." />
       {/if}
 
     <!-- NETWORK TAB -->
