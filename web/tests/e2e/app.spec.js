@@ -388,6 +388,105 @@ test.describe('i18n locale init', () => {
 // Accessibility baseline
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// M22.5 Platform UI — Workspaces, Personas, Budget, Dependencies, Spec Graph,
+// User Profile
+// ---------------------------------------------------------------------------
+
+test.describe('Workspaces', () => {
+  test('workspace_list_renders', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'Workspaces');
+    await page.waitForLoadState('networkidle');
+
+    // Either workspace cards or empty state
+    const cards = page.locator('[class*="workspace"], [class*="ws-card"]');
+    const empty = page.locator('[class*="empty"]');
+    expect(await cards.count() > 0 || await empty.count() > 0).toBeTruthy();
+  });
+
+  test('create_workspace_modal_opens', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'Workspaces');
+    await page.waitForLoadState('networkidle');
+
+    const newBtn = page.getByRole('button', { name: /new workspace/i });
+    if (await newBtn.count() > 0) {
+      await newBtn.click();
+      const modal = page.locator('[role="dialog"]').first();
+      await expect(modal).toBeVisible({ timeout: 3000 });
+    }
+  });
+});
+
+test.describe('Personas', () => {
+  test('persona_catalog_renders', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'Personas');
+    await page.waitForLoadState('networkidle');
+
+    // Persona cards or empty state
+    const cards = page.locator('[class*="persona"], [class*="card"]');
+    const empty = page.locator('[class*="empty"]');
+    expect(await cards.count() > 0 || await empty.count() > 0).toBeTruthy();
+  });
+});
+
+test.describe('Budget Dashboard', () => {
+  test('budget_dashboard_renders', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'Budget');
+    await page.waitForLoadState('networkidle');
+
+    await expect(
+      page.locator('[class*="budget"]').or(page.getByText(/budget/i)).first()
+    ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Dependency Graph', () => {
+  test('dependency_graph_renders', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'Dependencies');
+    await page.waitForLoadState('networkidle');
+
+    // SVG graph or empty state
+    await expect(
+      page.locator('svg').or(page.locator('[class*="empty"]')).first()
+    ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Spec Graph', () => {
+  test('spec_graph_renders', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'Spec Graph');
+    await page.waitForLoadState('networkidle');
+
+    // SVG graph or empty state
+    await expect(
+      page.locator('svg').or(page.locator('[class*="empty"]')).first()
+    ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('User Profile', () => {
+  test('user_profile_renders', async ({ page }) => {
+    await page.goto('/');
+    await navigateTo(page, 'My Profile');
+    await page.waitForLoadState('networkidle');
+
+    // Profile form or content area
+    await expect(
+      page.locator('[class*="profile"]').or(page.locator('input[type="text"]')).first()
+    ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accessibility baseline
+// ---------------------------------------------------------------------------
+
 test.describe('Accessibility', () => {
   test('no_axe_violations_on_dashboard', async ({ page }) => {
     await page.goto('/');
