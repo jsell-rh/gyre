@@ -1,5 +1,5 @@
 <script>
-  let { current = $bindable('dashboard') } = $props();
+  let { current = $bindable('dashboard'), onnavigate = undefined } = $props();
 
   let collapsed = $state(false);
 
@@ -114,7 +114,7 @@
               <button
                 class="nav-item"
                 class:active={isActive(item.id)}
-                onclick={() => (current = item.id)}
+                onclick={() => { current = item.id; onnavigate?.(item.id); }}
                 aria-label={item.label}
                 aria-current={isActive(item.id) ? 'page' : undefined}
               >
