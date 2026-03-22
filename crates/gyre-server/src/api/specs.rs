@@ -17,7 +17,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::spec_registry::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+use crate::spec_registry::{
+    ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry, SpecLinkEntry, SpecLinkType,
+};
 use crate::AppState;
 
 use super::error::ApiError;
@@ -277,6 +279,40 @@ pub async fn approve_spec(
         }
     }
 
+    // Enforce link-based approval gates.
+    {
+        let links = state.spec_links_store.lock().await;
+        let ledger = state.spec_ledger.lock().await;
+
+        for link in links.iter().filter(|l| l.source_path == spec_path) {
+            match &link.link_type {
+                SpecLinkType::Implements => {
+                    // Parent spec must be approved before this spec can be approved.
+                    if let Some(parent) = ledger.get(&link.target_path) {
+                        if parent.approval_status != ApprovalStatus::Approved {
+                            return Err(ApiError::InvalidInput(format!(
+                                "cannot approve '{}': implements '{}' which is not yet approved",
+                                spec_path, link.target_path
+                            )));
+                        }
+                    }
+                }
+                SpecLinkType::ConflictsWith => {
+                    // Conflicting spec must not be approved.
+                    if let Some(conflicting) = ledger.get(&link.target_path) {
+                        if conflicting.approval_status == ApprovalStatus::Approved {
+                            return Err(ApiError::InvalidInput(format!(
+                                "cannot approve '{}': conflicts with '{}' which is already approved — resolve the conflict first",
+                                spec_path, link.target_path
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Determine approver type from auth token kind (not request body).
     // JWT bearer tokens → agent; global token / API key → human.
     let (approver_type, approver_id) = if auth.jwt_claims.is_some() {
@@ -397,6 +433,124 @@ pub async fn spec_approval_history(
         .map(Into::into)
         .collect();
     Json(events)
+}
+
+// ---------------------------------------------------------------------------
+// Response types for link endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct SpecLinkResponse {
+    pub id: String,
+    pub source_path: String,
+    pub link_type: String,
+    pub target_path: String,
+    pub target_sha: Option<String>,
+    pub reason: Option<String>,
+    pub status: String,
+    pub created_at: u64,
+    pub stale_since: Option<u64>,
+}
+
+impl From<SpecLinkEntry> for SpecLinkResponse {
+    fn from(e: SpecLinkEntry) -> Self {
+        Self {
+            id: e.id,
+            source_path: e.source_path,
+            link_type: e.link_type.to_string(),
+            target_path: e.target_path,
+            target_sha: e.target_sha,
+            reason: e.reason,
+            status: e.status,
+            created_at: e.created_at,
+            stale_since: e.stale_since,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct SpecGraphNode {
+    pub path: String,
+    pub title: String,
+    pub approval_status: String,
+}
+
+#[derive(Serialize)]
+pub struct SpecGraphEdge {
+    pub source: String,
+    pub target: String,
+    pub link_type: String,
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SpecGraphResponse {
+    pub nodes: Vec<SpecGraphNode>,
+    pub edges: Vec<SpecGraphEdge>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/specs/:path/links — outbound + inbound links for one spec
+// ---------------------------------------------------------------------------
+
+pub async fn get_spec_links(
+    State(state): State<Arc<AppState>>,
+    Path(encoded_path): Path<String>,
+) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
+    let spec_path = encoded_path;
+
+    // Verify spec exists.
+    {
+        let ledger = state.spec_ledger.lock().await;
+        if !ledger.contains_key(&spec_path) {
+            return Err(ApiError::NotFound(format!(
+                "spec '{spec_path}' not in registry"
+            )));
+        }
+    }
+
+    let links = state.spec_links_store.lock().await;
+    let mut result: Vec<SpecLinkResponse> = links
+        .iter()
+        .filter(|l| l.source_path == spec_path || l.target_path == spec_path)
+        .cloned()
+        .map(Into::into)
+        .collect();
+    result.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/specs/graph — full spec dependency graph
+// ---------------------------------------------------------------------------
+
+pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGraphResponse> {
+    let ledger = state.spec_ledger.lock().await;
+    let links = state.spec_links_store.lock().await;
+
+    let mut nodes: Vec<SpecGraphNode> = ledger
+        .values()
+        .map(|e| SpecGraphNode {
+            path: e.path.clone(),
+            title: e.title.clone(),
+            approval_status: e.approval_status.to_string(),
+        })
+        .collect();
+    nodes.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let edges: Vec<SpecGraphEdge> = links
+        .iter()
+        .map(|l| SpecGraphEdge {
+            source: l.source_path.clone(),
+            target: l.target_path.clone(),
+            link_type: l.link_type.to_string(),
+            status: l.status.clone(),
+            reason: l.reason.clone(),
+        })
+        .collect();
+
+    Json(SpecGraphResponse { nodes, edges })
 }
 
 // ---------------------------------------------------------------------------
@@ -684,6 +838,426 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json.as_array().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: seed a spec with a given approval status
+    // -----------------------------------------------------------------------
+
+    fn seed_spec(
+        ledger: &mut std::collections::HashMap<String, SpecLedgerEntry>,
+        path: &str,
+        status: ApprovalStatus,
+    ) {
+        ledger.insert(
+            path.to_string(),
+            SpecLedgerEntry {
+                path: path.to_string(),
+                title: path.to_string(),
+                owner: "user:jsell".to_string(),
+                current_sha: "a".repeat(40),
+                approval_mode: "human_only".to_string(),
+                approval_status: status,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "unknown".to_string(),
+                created_at: 1700000000,
+                updated_at: 1700000000,
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Link enforcement: implements gate
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_blocked_by_implements_gate() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        // parent spec: pending (not yet approved)
+        // child spec: implements parent
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ledger = state.spec_ledger.lock().await;
+                seed_spec(&mut ledger, "system/parent.md", ApprovalStatus::Pending);
+                seed_spec(&mut ledger, "system/child.md", ApprovalStatus::Pending);
+                let mut links = state.spec_links_store.lock().await;
+                links.push(SpecLinkEntry {
+                    id: "child-implements-parent".to_string(),
+                    source_path: "system/child.md".to_string(),
+                    link_type: SpecLinkType::Implements,
+                    target_path: "system/parent.md".to_string(),
+                    target_sha: None,
+                    reason: None,
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fchild.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Parent not approved → 400
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_allowed_when_parent_approved() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ledger = state.spec_ledger.lock().await;
+                seed_spec(&mut ledger, "system/parent.md", ApprovalStatus::Approved);
+                seed_spec(&mut ledger, "system/child.md", ApprovalStatus::Pending);
+                let mut links = state.spec_links_store.lock().await;
+                links.push(SpecLinkEntry {
+                    id: "child-implements-parent".to_string(),
+                    source_path: "system/child.md".to_string(),
+                    link_type: SpecLinkType::Implements,
+                    target_path: "system/parent.md".to_string(),
+                    target_sha: None,
+                    reason: None,
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fchild.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Parent approved → 201
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // -----------------------------------------------------------------------
+    // Link enforcement: conflicts_with gate
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_blocked_by_conflicts_with_gate() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ledger = state.spec_ledger.lock().await;
+                seed_spec(&mut ledger, "system/old.md", ApprovalStatus::Approved);
+                seed_spec(&mut ledger, "system/new.md", ApprovalStatus::Pending);
+                let mut links = state.spec_links_store.lock().await;
+                links.push(SpecLinkEntry {
+                    id: "new-conflicts-old".to_string(),
+                    source_path: "system/new.md".to_string(),
+                    link_type: SpecLinkType::ConflictsWith,
+                    target_path: "system/old.md".to_string(),
+                    target_sha: None,
+                    reason: Some("incompatible permission model".to_string()),
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fnew.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Conflict approved → 400
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_allowed_when_conflict_not_approved() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ledger = state.spec_ledger.lock().await;
+                seed_spec(&mut ledger, "system/old.md", ApprovalStatus::Pending);
+                seed_spec(&mut ledger, "system/new.md", ApprovalStatus::Pending);
+                let mut links = state.spec_links_store.lock().await;
+                links.push(SpecLinkEntry {
+                    id: "new-conflicts-old".to_string(),
+                    source_path: "system/new.md".to_string(),
+                    link_type: SpecLinkType::ConflictsWith,
+                    target_path: "system/old.md".to_string(),
+                    target_sha: None,
+                    reason: None,
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fnew.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Conflict not approved → allowed
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/v1/specs/:path/links
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_links_not_found() {
+        let resp = app()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/specs/system%2Fnonexistent.md/links")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_links_returns_outbound_and_inbound() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ledger = state.spec_ledger.lock().await;
+                seed_spec(&mut ledger, "system/a.md", ApprovalStatus::Pending);
+                seed_spec(&mut ledger, "system/b.md", ApprovalStatus::Pending);
+                let mut links = state.spec_links_store.lock().await;
+                // a → b (outbound from a, inbound to b)
+                links.push(SpecLinkEntry {
+                    id: "a-depends-b".to_string(),
+                    source_path: "system/a.md".to_string(),
+                    link_type: SpecLinkType::DependsOn,
+                    target_path: "system/b.md".to_string(),
+                    target_sha: None,
+                    reason: None,
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        // Query links for b — should get the inbound link from a
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/specs/system%2Fb.md/links")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["link_type"], "depends_on");
+        assert_eq!(arr[0]["source_path"], "system/a.md");
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/v1/specs/graph
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_graph_returns_nodes_and_edges() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ledger = state.spec_ledger.lock().await;
+                seed_spec(&mut ledger, "system/a.md", ApprovalStatus::Approved);
+                seed_spec(&mut ledger, "system/b.md", ApprovalStatus::Pending);
+                let mut links = state.spec_links_store.lock().await;
+                links.push(SpecLinkEntry {
+                    id: "b-implements-a".to_string(),
+                    source_path: "system/b.md".to_string(),
+                    link_type: SpecLinkType::Implements,
+                    target_path: "system/a.md".to_string(),
+                    target_sha: None,
+                    reason: None,
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/specs/graph")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let nodes = json["nodes"].as_array().unwrap();
+        let edges = json["edges"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["link_type"], "implements");
+        assert_eq!(edges[0]["source"], "system/b.md");
+        assert_eq!(edges[0]["target"], "system/a.md");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync: supersedes marks target deprecated
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_supersedes_marks_target_deprecated() {
+        use crate::spec_registry::SpecLinksStore;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let ledger: crate::spec_registry::SpecLedger =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let now = 1700000000u64;
+
+        // Pre-populate the target spec that will be superseded.
+        {
+            let mut l = ledger.lock().await;
+            seed_spec(&mut l, "development/old-spec.md", ApprovalStatus::Approved);
+        }
+
+        // Parse a manifest where new-spec supersedes old-spec.
+        let manifest_yaml = r#"
+version: 1
+specs:
+  - path: system/new-spec.md
+    title: New Spec
+    owner: user:jsell
+    links:
+      - type: supersedes
+        target: development/old-spec.md
+        reason: "Replaced by new-spec"
+  - path: development/old-spec.md
+    title: Old Spec
+    owner: user:jsell
+"#;
+
+        // Simulate what sync_spec_ledger does for link processing only
+        // (we can't call the full function without a real git repo).
+        // Instead, directly test the ledger logic using parsed manifest data.
+        let manifest = crate::spec_registry::parse_manifest(manifest_yaml).unwrap();
+        {
+            let mut l = ledger.lock().await;
+            // Simulate new-spec being added.
+            seed_spec(&mut l, "system/new-spec.md", ApprovalStatus::Pending);
+        }
+
+        // Process links as sync_spec_ledger would.
+        {
+            let mut new_links: Vec<crate::spec_registry::SpecLinkEntry> = Vec::new();
+            for entry in &manifest.specs {
+                for link in &entry.links {
+                    new_links.push(crate::spec_registry::SpecLinkEntry {
+                        id: format!("{}-{}-{}", entry.path, link.link_type, link.target),
+                        source_path: entry.path.clone(),
+                        link_type: link.link_type.clone(),
+                        target_path: link.target.clone(),
+                        target_sha: link.target_sha.clone(),
+                        reason: link.reason.clone(),
+                        status: "active".to_string(),
+                        created_at: now,
+                        stale_since: None,
+                    });
+                }
+            }
+            let mut l = ledger.lock().await;
+            for link in &new_links {
+                if link.link_type == crate::spec_registry::SpecLinkType::Supersedes {
+                    if let Some(target_entry) = l.get_mut(&link.target_path) {
+                        target_entry.approval_status = ApprovalStatus::Deprecated;
+                    }
+                }
+            }
+            let mut store = links_store.lock().await;
+            store.extend(new_links);
+        }
+
+        // Verify target was deprecated.
+        let l = ledger.lock().await;
+        let old = l.get("development/old-spec.md").unwrap();
+        assert_eq!(old.approval_status, ApprovalStatus::Deprecated);
+
+        // Verify link was stored.
+        let store = links_store.lock().await;
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store[0].link_type,
+            crate::spec_registry::SpecLinkType::Supersedes
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

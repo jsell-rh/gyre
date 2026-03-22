@@ -52,6 +52,44 @@ fn default_true() -> bool {
     true
 }
 
+/// Link type between specs — drives mechanical enforcement.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecLinkType {
+    Implements,
+    Supersedes,
+    DependsOn,
+    ConflictsWith,
+    Extends,
+    References,
+}
+
+impl std::fmt::Display for SpecLinkType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpecLinkType::Implements => write!(f, "implements"),
+            SpecLinkType::Supersedes => write!(f, "supersedes"),
+            SpecLinkType::DependsOn => write!(f, "depends_on"),
+            SpecLinkType::ConflictsWith => write!(f, "conflicts_with"),
+            SpecLinkType::Extends => write!(f, "extends"),
+            SpecLinkType::References => write!(f, "references"),
+        }
+    }
+}
+
+/// A link declared in the manifest between specs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpecLink {
+    #[serde(rename = "type")]
+    pub link_type: SpecLinkType,
+    /// Target spec path relative to `specs/`, e.g. `system/source-control.md`.
+    pub target: String,
+    /// SHA the link was pinned to. Stale if target spec SHA advances.
+    pub target_sha: Option<String>,
+    /// Human-readable rationale.
+    pub reason: Option<String>,
+}
+
 /// A single spec entry in the manifest.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpecEntry {
@@ -70,6 +108,9 @@ pub struct SpecEntry {
     pub auto_invalidate_on_change: Option<bool>,
     /// If set, this spec has been superseded by another.
     pub superseded_by: Option<String>,
+    /// Links to other specs (machine-readable graph edges).
+    #[serde(default)]
+    pub links: Vec<SpecLink>,
 }
 
 impl SpecEntry {
@@ -219,6 +260,27 @@ pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
 /// Type alias for the shared approval history store.
 pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
 
+/// A resolved link entry stored in the forge's spec link graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecLinkEntry {
+    pub id: String,
+    /// Source spec path (the spec that declares this link).
+    pub source_path: String,
+    pub link_type: SpecLinkType,
+    /// Target spec path.
+    pub target_path: String,
+    /// SHA the link was pinned to.
+    pub target_sha: Option<String>,
+    pub reason: Option<String>,
+    /// Link health: "active" | "stale" | "broken" | "conflicted"
+    pub status: String,
+    pub created_at: u64,
+    pub stale_since: Option<u64>,
+}
+
+/// Type alias for the shared spec links store.
+pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
+
 // ---------------------------------------------------------------------------
 // Ledger sync — called after a push to the default branch
 // ---------------------------------------------------------------------------
@@ -231,7 +293,15 @@ pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
 /// - Changed SHA: update SHA, reset `approval_status = Pending` if `auto_invalidate_on_change`.
 /// - Entry in ledger but not manifest: mark `Deprecated`.
 /// - Files under `specs/` not in manifest: log a warning.
-pub async fn sync_spec_ledger(ledger: &SpecLedger, repo_path: &str, new_sha: &str, now: u64) {
+/// - `supersedes` links: target spec is marked Deprecated in ledger.
+/// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted".
+pub async fn sync_spec_ledger(
+    ledger: &SpecLedger,
+    links_store: &SpecLinksStore,
+    repo_path: &str,
+    new_sha: &str,
+    now: u64,
+) {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
     // 1. Read manifest from the new HEAD.
@@ -338,7 +408,87 @@ pub async fn sync_spec_ledger(ledger: &SpecLedger, repo_path: &str, new_sha: &st
         }
     }
 
-    // 6. Warn about spec files not in manifest.
+    // 6. Process spec links from manifest — enforce supersedes/extends, update links store.
+    {
+        // Collect all links declared in this manifest push.
+        let mut new_links: Vec<SpecLinkEntry> = Vec::new();
+        for entry in &manifest.specs {
+            for link in &entry.links {
+                let id = format!("{}-{}-{}", entry.path, link.link_type, link.target);
+                new_links.push(SpecLinkEntry {
+                    id,
+                    source_path: entry.path.clone(),
+                    link_type: link.link_type.clone(),
+                    target_path: link.target.clone(),
+                    target_sha: link.target_sha.clone(),
+                    reason: link.reason.clone(),
+                    status: "active".to_string(),
+                    created_at: now,
+                    stale_since: None,
+                });
+            }
+        }
+
+        // Enforce link semantics inside the ledger.
+        {
+            let mut ledger_guard = ledger.lock().await;
+
+            for link in &new_links {
+                match link.link_type {
+                    SpecLinkType::Supersedes => {
+                        // Mark the target spec as Deprecated.
+                        if let Some(target_entry) = ledger_guard.get_mut(&link.target_path) {
+                            if target_entry.approval_status != ApprovalStatus::Deprecated {
+                                info!(
+                                    source = %link.source_path,
+                                    target = %link.target_path,
+                                    "spec-registry: supersedes link — marking target deprecated"
+                                );
+                                target_entry.approval_status = ApprovalStatus::Deprecated;
+                                target_entry.updated_at = now;
+                            }
+                        }
+                    }
+                    SpecLinkType::Extends => {
+                        // Check if the target's SHA changed since the link was pinned.
+                        // If so, mark the extending spec as drifted.
+                        if let Some(pinned_sha) = &link.target_sha {
+                            let target_sha_current = ledger_guard
+                                .get(&link.target_path)
+                                .map(|e| e.current_sha.clone());
+                            if let Some(current_sha) = target_sha_current {
+                                if !current_sha.is_empty() && &current_sha != pinned_sha {
+                                    info!(
+                                        source = %link.source_path,
+                                        target = %link.target_path,
+                                        "spec-registry: extends target SHA changed — marking extending spec drifted"
+                                    );
+                                    if let Some(source_entry) =
+                                        ledger_guard.get_mut(&link.source_path)
+                                    {
+                                        source_entry.drift_status = "drifted".to_string();
+                                        source_entry.updated_at = now;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Replace all links originating from specs in this manifest (full refresh).
+        {
+            let source_paths: std::collections::HashSet<String> =
+                manifest.specs.iter().map(|e| e.path.clone()).collect();
+            let mut store = links_store.lock().await;
+            store.retain(|l| !source_paths.contains(&l.source_path));
+            store.extend(new_links);
+        }
+    }
+
+    // 7. Warn about spec files not in manifest.
     check_unregistered_specs(&git_bin, repo_path, new_sha, &manifest_paths).await;
 }
 

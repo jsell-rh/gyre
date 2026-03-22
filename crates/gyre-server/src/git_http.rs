@@ -373,6 +373,7 @@ pub async fn git_receive_pack(
             let now = crate::api::now_secs();
             crate::spec_registry::sync_spec_ledger(
                 &state_clone.spec_ledger,
+                &state_clone.spec_links_store,
                 &repo_path_clone,
                 &update.new_sha,
                 now,

@@ -166,6 +166,7 @@ mod tests {
             tunnel_store: base.tunnel_store.clone(),
             spec_ledger: base.spec_ledger.clone(),
             spec_approval_history: base.spec_approval_history.clone(),
+            spec_links_store: base.spec_links_store.clone(),
         });
         crate::build_router(state)
     }
