@@ -136,7 +136,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
-| `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope`: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
+| `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope` JSON wire format: `{"kind": "Tenant"|"Workspace"|"Repo", "id": "<uuid>"}` (serde tagged enum — both `kind` and `id` fields required; `id` is the tenant/workspace/repo UUID); Rust type: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona -- fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
 | `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5); response includes `workspace_id: Option<Id>` when repo belongs to a workspace (M22.1) |
@@ -192,7 +192,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/agents/{id}/workload` | Current workload attestation — `{pid, hostname, compute_target, stack_hash, alive}`: captured at spawn; `alive` re-checked via `/proc/{pid}` on Linux (G10) |
 | `GET` | `/api/v1/agents/{id}/container` | Container audit record for this agent -- `ContainerAuditRecord`: `container_id`, `image`, `image_hash`, `spawned_at`, `exited_at?`, `exit_code?`; 404 if agent was not container-spawned (M19.3) |
 | `GET` | `/ws/agents/{id}/tty` | WebSocket TTY attach — auth via first-message Bearer token; replays buffered logs then streams live PTY output (M11.2) |
-| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`) |
+| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
 | `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=`) |
