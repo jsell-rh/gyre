@@ -63,7 +63,7 @@
 {#if open}
   <div class="modal-backdrop">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" onclick={close} aria-hidden="true"></div>
+    <div class="modal-overlay" onclick={close} role="presentation"></div>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       class="modal modal-{size}"
@@ -108,13 +108,14 @@
   .modal-overlay {
     position: absolute;
     inset: 0;
+    z-index: 0;
     background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(2px);
   }
 
   .modal {
     position: relative;
-    z-index: 1;
+    z-index: 10;
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-lg);
