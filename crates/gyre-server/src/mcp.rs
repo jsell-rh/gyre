@@ -219,6 +219,25 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "gyre_analytics_query",
+                "description": "Query analytics data. Supports usage (count + trend), compare (before/after pivot), and top N events.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query_type": {
+                            "type": "string",
+                            "enum": ["usage", "compare", "top"],
+                            "description": "Type of analytics query"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Query parameters. For 'usage': {event_name, since?, until?}. For 'compare': {event_name, before, pivot, after?}. For 'top': {limit?, since?}."
+                        }
+                    },
+                    "required": ["query_type", "params"]
+                }
+            },
+            {
                 "name": "gyre_search",
                 "description": "Full-text search across tasks, agents, MRs, and specs. Returns matching entities ranked by relevance.",
                 "inputSchema": {
@@ -538,6 +557,153 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
     }
 }
 
+async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
+    let query_type = match get_str(args, "query_type") {
+        Some(q) => q,
+        None => return tool_error("missing required field: query_type"),
+    };
+    let params = args.get("params").cloned().unwrap_or(json!({}));
+    let now = now_secs();
+
+    match query_type {
+        "usage" => {
+            let event_name = match get_str(&params, "event_name") {
+                Some(n) => n.to_string(),
+                None => return tool_error("params.event_name is required for 'usage' query"),
+            };
+            let until = params.get("until").and_then(|v| v.as_u64()).unwrap_or(now);
+            let since = params
+                .get("since")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| until.saturating_sub(86400));
+            let period_len = until.saturating_sub(since);
+
+            let count = match state.analytics.count(&event_name, since, until).await {
+                Ok(c) => c,
+                Err(e) => return tool_error(format!("analytics query failed: {e}")),
+            };
+            let events = state
+                .analytics
+                .query(Some(&event_name), Some(since), 10_000)
+                .await
+                .unwrap_or_default();
+            let unique_agents = events
+                .iter()
+                .filter(|e| e.timestamp <= until)
+                .filter_map(|e| e.agent_id.as_deref())
+                .collect::<std::collections::HashSet<_>>()
+                .len() as u64;
+
+            let prev_count = state
+                .analytics
+                .count(&event_name, since.saturating_sub(period_len), since)
+                .await
+                .unwrap_or(0);
+            let trend = if prev_count == 0 {
+                if count > 0 {
+                    "up"
+                } else {
+                    "flat"
+                }
+            } else {
+                let change = (count as f64 - prev_count as f64) / prev_count as f64;
+                if change > 0.10 {
+                    "up"
+                } else if change < -0.10 {
+                    "down"
+                } else {
+                    "flat"
+                }
+            };
+
+            tool_result(
+                serde_json::to_string_pretty(&json!({
+                    "event_name": event_name,
+                    "count": count,
+                    "unique_agents": unique_agents,
+                    "trend": trend,
+                }))
+                .unwrap_or_default(),
+            )
+        }
+        "compare" => {
+            let event_name = match get_str(&params, "event_name") {
+                Some(n) => n.to_string(),
+                None => return tool_error("params.event_name is required for 'compare' query"),
+            };
+            let before = match params.get("before").and_then(|v| v.as_u64()) {
+                Some(b) => b,
+                None => return tool_error("params.before is required for 'compare' query"),
+            };
+            let pivot = match params.get("pivot").and_then(|v| v.as_u64()) {
+                Some(p) => p,
+                None => return tool_error("params.pivot is required for 'compare' query"),
+            };
+            let after_end = params.get("after").and_then(|v| v.as_u64()).unwrap_or(now);
+
+            let before_count = state
+                .analytics
+                .count(&event_name, before, pivot)
+                .await
+                .unwrap_or(0);
+            let after_count = state
+                .analytics
+                .count(&event_name, pivot, after_end)
+                .await
+                .unwrap_or(0);
+            let change_pct = if before_count == 0 {
+                None
+            } else {
+                Some((after_count as f64 - before_count as f64) / before_count as f64 * 100.0)
+            };
+
+            tool_result(
+                serde_json::to_string_pretty(&json!({
+                    "event_name": event_name,
+                    "before_count": before_count,
+                    "after_count": after_count,
+                    "change_pct": change_pct,
+                    "improved": after_count > before_count,
+                }))
+                .unwrap_or_default(),
+            )
+        }
+        "top" => {
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10)
+                .min(100) as usize;
+            let since = params
+                .get("since")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| now.saturating_sub(86400));
+
+            let events = state
+                .analytics
+                .query(None, Some(since), 100_000)
+                .await
+                .unwrap_or_default();
+            let mut counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for e in events {
+                *counts.entry(e.event_name).or_default() += 1;
+            }
+            let mut entries: Vec<_> = counts
+                .into_iter()
+                .map(|(n, c)| json!({"event_name": n, "count": c}))
+                .collect();
+            entries.sort_by(|a, b| b["count"].as_u64().cmp(&a["count"].as_u64()));
+            entries.truncate(limit);
+
+            tool_result(serde_json::to_string_pretty(&json!(entries)).unwrap_or_default())
+        }
+        other => tool_error(format!(
+            "unknown query_type: {other}. Use 'usage', 'compare', or 'top'"
+        )),
+    }
+}
+
 async fn handle_search(state: &AppState, args: &Value) -> Value {
     let q = match get_str(args, "q") {
         Some(q) => q.to_string(),
@@ -616,6 +782,7 @@ pub async fn mcp_handler(
                 "gyre_record_activity" => handle_record_activity(&state, &args).await,
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
+                "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_search" => handle_search(&state, &args).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
@@ -835,6 +1002,93 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         // Unknown tool returns a tool_error result (isError: true), not an RPC error
         assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_query_usage() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_query",
+                    "arguments": {
+                        "query_type": "usage",
+                        "params": { "event_name": "agent.spawned", "since": 0, "until": 9999999999u64 }
+                    }
+                }
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("count"));
+        assert!(text.contains("trend"));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_query_top() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_query",
+                    "arguments": {
+                        "query_type": "top",
+                        "params": { "limit": 5, "since": 0 }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_query_compare() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_query",
+                    "arguments": {
+                        "query_type": "compare",
+                        "params": { "event_name": "mr.merged", "before": 0, "pivot": 1000, "after": 9999999999u64 }
+                    }
+                }
+            }),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("before_count"));
+        assert!(text.contains("improved"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_includes_analytics_query() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"gyre_analytics_query"));
     }
 
     #[tokio::test]
