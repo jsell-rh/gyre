@@ -322,6 +322,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/analytics/count", get(analytics::count_events))
         .route("/api/v1/analytics/daily", get(analytics::daily_events))
+        // Analytics Decision API (M23)
+        .route("/api/v1/analytics/usage", get(analytics::usage))
+        .route("/api/v1/analytics/compare", get(analytics::compare))
+        .route("/api/v1/analytics/top", get(analytics::top_events))
         // Costs
         .route(
             "/api/v1/costs",
