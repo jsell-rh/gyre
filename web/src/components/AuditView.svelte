@@ -45,26 +45,45 @@
     loadHistory();
   });
 
-  let es = $state(null);
+  let abortCtrl = $state(null);
 
-  function connectSSE() {
-    if (es) { es.close(); es = null; }
+  async function connectSSE() {
+    disconnectSSE();
     const token = localStorage.getItem('gyre_auth_token') || 'gyre-dev-token';
-    const url = `/api/v1/audit/stream`;
-    const source = new EventSource(`${url}?token=${encodeURIComponent(token)}`);
-    source.onopen = () => { sseConnected = true; };
-    source.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
-        liveEvents = [evt, ...liveEvents].slice(0, 200);
-      } catch { /* ignore parse errors */ }
-    };
-    source.onerror = () => { sseConnected = false; };
-    es = source;
+    const ctrl = new AbortController();
+    abortCtrl = ctrl;
+    try {
+      const resp = await fetch('/api/v1/audit/stream', {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) { sseConnected = false; return; }
+      sseConnected = true;
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const evt = JSON.parse(line.slice(5).trim());
+              liveEvents = [evt, ...liveEvents].slice(0, 200);
+            } catch { /* ignore parse errors */ }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') sseConnected = false;
+    }
   }
 
   function disconnectSSE() {
-    if (es) { es.close(); es = null; }
+    if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
     sseConnected = false;
   }
 
