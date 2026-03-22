@@ -1,7 +1,7 @@
 use anyhow::Result;
 use gyre_server::{
     audit_simulator, build_router, build_state, merge_processor, procfs_monitor, siem,
-    spawn_stale_agent_detector, telemetry, JwtConfig,
+    spawn_budget_daily_reset, spawn_stale_agent_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
     // Simulator still available for testing via GYRE_AUDIT_SIMULATE=true.
     procfs_monitor::spawn_procfs_monitor(state.clone());
     audit_simulator::spawn_audit_simulator(state.clone());
+    spawn_budget_daily_reset(state.clone());
 
     let app = build_router(state);
 

@@ -201,6 +201,10 @@ pub struct AppState {
     pub spec_approval_history: spec_registry::SpecApprovalHistory,
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
+    /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
+    pub budget_configs: Arc<Mutex<HashMap<String, gyre_domain::BudgetConfig>>>,
+    /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
+    pub budget_usages: Arc<Mutex<HashMap<String, gyre_domain::BudgetUsage>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -526,12 +530,29 @@ pub fn build_state(
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        budget_configs: Arc::new(Mutex::new(HashMap::new())),
+        budget_usages: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
 pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
     stale_agents::spawn_stale_agent_detector(state);
+}
+
+/// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
+pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let secs_until_midnight = 86400 - (now % 86400);
+            tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_midnight)).await;
+            api::budget::reset_daily_counters(&state).await;
+        }
+    });
 }
 
 #[cfg(test)]

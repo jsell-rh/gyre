@@ -76,6 +76,11 @@ pub async fn spawn_agent(
         .await
         .map_err(ApiError::Forbidden)?;
 
+    // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
+    super::budget::check_spawn_budget(&state, &repo.project_id.to_string())
+        .await
+        .map_err(ApiError::TooManyRequests)?;
+
     // Verify task exists
     let mut task = state
         .tasks
@@ -321,6 +326,9 @@ pub async fn spawn_agent(
     );
     let _ = state.analytics.record(&ev).await;
 
+    // M22.2: Increment budget active-agent counter for the workspace.
+    super::budget::increment_active_agents(&state, &repo.project_id.to_string()).await;
+
     Ok((
         StatusCode::CREATED,
         Json(SpawnAgentResponse {
@@ -459,6 +467,11 @@ pub async fn complete_agent(
         now,
     );
     let _ = state.analytics.record(&ev).await;
+
+    // M22.2: Decrement budget active-agent counter when agent completes.
+    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
+        super::budget::decrement_active_agents(&state, &repo.project_id.to_string()).await;
+    }
 
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
