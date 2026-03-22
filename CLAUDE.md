@@ -283,7 +283,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET/PUT` | `/api/v1/admin/retention` | List / update retention policies (Admin only) |
 | `POST/GET` | `/api/v1/admin/siem` | Create / list SIEM forwarding targets (Admin only) |
 | `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
-| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **Container security defaults (G8):** `--network=none` (no outbound network — opt in via `network` field), `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). (Admin only) |
+| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** `--network=none` (no outbound network — opt in via `network` field), `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). (Admin only) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
 | `POST` | `/api/v1/admin/compute-targets/{id}/tunnel` | Open an SSH tunnel for a compute target: `{direction: "forward"|"reverse", local_port, remote_port, local_host?, remote_host?}` (`local_host` and `remote_host` default to `"localhost"`). Reverse tunnels (`-R`) let air-gapped agents dial out so the server can reach them through NAT. (G12, Admin only) |
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
@@ -515,7 +515,7 @@ Agents are created in dependency order (parents before children). Parent links a
 ```json
 // Request
 {
-  "name": "worker-1",
+  "name": "worker-1",               // required; must match [a-zA-Z0-9._-]{1,63} -- shell metacharacters rejected with 400 (M19.5-A)
   "repo_id": "<repo-uuid>",
   "task_id": "<task-uuid>",
   "branch": "feat/my-feature",
