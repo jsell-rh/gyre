@@ -133,11 +133,11 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
 | `POST/GET` | `/api/v1/projects` | Create / list projects |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
-| `POST/GET` | `/api/v1/workspaces` | Create / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
-| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update / delete workspace (M22.1) |
+| `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace — manages workspace-repo membership (M22.1) |
-| `POST/GET` | `/api/v1/personas` | Create / list personas (`?scope=tenant\|workspace\|repo&scope_id=` filter); `PersonaScope` is one of `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
-| `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update / delete persona — fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget` (M22.1) |
+| `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant\|workspace\|repo&scope_id=` filter); `PersonaScope` is one of `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
+| `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona — fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
 | `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5); response includes `workspace_id: Option<Id>` — set when the repo belongs to a workspace (M22.1) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); URL must use `https://` (M12.2) |
