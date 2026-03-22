@@ -22,6 +22,7 @@ pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
 pub mod network_peer;
+pub mod policy;
 pub mod project;
 pub mod quality_gate;
 pub mod repository;
@@ -45,6 +46,10 @@ pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use message_type::MessageType;
 pub use network_peer::NetworkPeer;
+pub use policy::{
+    builtin_policies, Condition, ConditionOp, ConditionValue, Policy, PolicyDecision, PolicyEffect,
+    PolicyScope,
+};
 pub use project::Project;
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
 pub use repository::Repository;
