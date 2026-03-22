@@ -33,6 +33,8 @@ What Gyre does - the product.
 | Spec Lifecycle | [`system/spec-lifecycle.md`](system/spec-lifecycle.md) | Auto-task on spec change, approval invalidation, drift detection, forge-native hooks |
 | Merge Dependencies | [`system/merge-dependencies.md`](system/merge-dependencies.md) | MR dependency DAG, atomic groups, auto-detection from branch lineage, dependency-aware merge queue |
 | Spec Registry | [`system/spec-registry.md`](system/spec-registry.md) | Git manifest + forge ledger for explicit spec registration, per-spec policies, approval tracking, auto-generated index |
+| Spec Links | [`system/spec-links.md`](system/spec-links.md) | SHA-pinned links between specs (implements, supersedes, depends_on, conflicts_with, extends), mechanical gates, tenant-wide spec graph |
+| Cross-Repo Dependency Graph | [`system/dependency-graph.md`](system/dependency-graph.md) | Auto-detected code/spec/API/schema dependencies, breaking change enforcement, cascade testing, version drift, impact analysis |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
