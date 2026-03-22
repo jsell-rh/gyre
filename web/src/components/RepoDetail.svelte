@@ -53,7 +53,6 @@
   // New ABAC policy editing state
   let newPolicyName = $state('');
   let newPolicyClaim = $state('');
-  let newPolicyOp = $state('eq');
   let newPolicyValue = $state('');
 
   // Gates tab
@@ -678,12 +677,7 @@
             </div>
             <div class="abac-form-row">
               <input class="policy-input" type="text" placeholder="JWT claim (e.g. sub, role)" bind:value={newPolicyClaim} />
-              <select class="policy-select" bind:value={newPolicyOp}>
-                <option value="eq">eq</option>
-                <option value="neq">neq</option>
-                <option value="contains">contains</option>
-                <option value="starts_with">starts_with</option>
-              </select>
+              <span class="policy-op-label">=</span>
               <input class="policy-input" type="text" placeholder="Value" bind:value={newPolicyValue} />
               <button class="policy-btn primary" onclick={addAbacPolicy} disabled={policySaving}>Add</button>
             </div>
@@ -1312,14 +1306,11 @@
 
   .policy-input:focus { outline: none; border-color: var(--color-primary); }
 
-  .policy-select {
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-body);
+  .policy-op-label {
     font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-3);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    padding: 0 var(--space-1);
   }
 
   .inline-code {
