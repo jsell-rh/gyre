@@ -82,10 +82,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, change_id }),
     }),
-  // ABAC policy
-  repoAbacPolicy: (id) => request(`/repos/${id}/abac-policy`),
+  // ABAC policy — server returns {repo_id, policies: [...]}; unwrap to array
+  repoAbacPolicy: (id) => request(`/repos/${id}/abac-policy`).then(r => r?.policies ?? []),
   setRepoAbacPolicy: (id, policies) =>
-    request(`/repos/${id}/abac-policy`, { method: 'PUT', body: JSON.stringify(policies) }),
+    request(`/repos/${id}/abac-policy`, { method: 'PUT', body: JSON.stringify({ policies }) }),
   // Spec policy
   repoSpecPolicy: (id) => request(`/repos/${id}/spec-policy`),
   setRepoSpecPolicy: (id, policy) =>
