@@ -483,7 +483,7 @@ pub async fn update_team(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateTeamRequest>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let ws_id = Id::new(workspace_id);
+    let _ws_id = Id::new(workspace_id);
     let tid = Id::new(team_id);
     let mut team = state
         .teams
@@ -505,7 +505,7 @@ pub async fn delete_team(
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let ws_id = Id::new(workspace_id);
+    let _ws_id = Id::new(workspace_id);
     let tid = Id::new(team_id);
     state.teams.delete(&tid).await?;
     Ok(StatusCode::NO_CONTENT)
