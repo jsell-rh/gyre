@@ -5,16 +5,16 @@ use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
-    MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer, Project,
-    Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus, User,
+    DependencyEdge, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
+    Project, Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus, User,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    CostRepository, MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository,
-    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, UserRepository, WorktreeRepository,
+    CostRepository, DependencyRepository, MergeQueueRepository, MergeRequestRepository,
+    NetworkPeerRepository, ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, UserRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1010,6 +1010,65 @@ impl NetworkPeerRepository for MemNetworkPeerRepository {
     }
 }
 
+/// In-memory cross-repo dependency graph store (M22.4).
+#[derive(Default)]
+pub struct MemDependencyRepository {
+    store: Arc<Mutex<Vec<DependencyEdge>>>,
+}
+
+#[async_trait]
+impl DependencyRepository for MemDependencyRepository {
+    async fn save(&self, edge: &DependencyEdge) -> Result<()> {
+        let mut store = self.store.lock().await;
+        store.retain(|e| e.id.as_str() != edge.id.as_str());
+        store.push(edge.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<DependencyEdge>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|e| e.id.as_str() == id.as_str())
+            .cloned())
+    }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<DependencyEdge>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.source_repo_id.as_str() == repo_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn list_dependents(&self, repo_id: &Id) -> Result<Vec<DependencyEdge>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.target_repo_id.as_str() == repo_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn list_all(&self) -> Result<Vec<DependencyEdge>> {
+        Ok(self.store.lock().await.clone())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        let before = store.len();
+        store.retain(|e| e.id.as_str() != id.as_str());
+        Ok(store.len() < before)
+    }
+}
+
 /// In-memory spawn log + revoked tokens store (M13.7).
 #[derive(Default)]
 pub struct MemSpawnLogRepository {
@@ -1115,6 +1174,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         audit_broadcast_tx: broadcast::channel(64).0,
         compute_targets: Arc::new(Mutex::new(HashMap::new())),
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
+        dependencies: Arc::new(MemDependencyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),

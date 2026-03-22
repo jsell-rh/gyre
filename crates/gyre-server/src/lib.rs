@@ -44,9 +44,10 @@ use gyre_common::ActivityEventData;
 use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    CostRepository, GitOpsPort, JjOpsPort, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository,
-    ReviewRepository, SpawnLogRepository, TaskRepository, UserRepository, WorktreeRepository,
+    CostRepository, DependencyRepository, GitOpsPort, JjOpsPort, MergeQueueRepository,
+    MergeRequestRepository, NetworkPeerRepository, PreAcceptGate, ProcessHandle, ProjectRepository,
+    RepoRepository, ReviewRepository, SpawnLogRepository, TaskRepository, UserRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -146,6 +147,8 @@ pub struct AppState {
     pub compute_targets: Arc<Mutex<HashMap<String, api::compute::ComputeTargetConfig>>>,
     /// WireGuard network peer registry.
     pub network_peers: Arc<dyn NetworkPeerRepository>,
+    /// Cross-repo dependency graph (M22.4).
+    pub dependencies: Arc<dyn DependencyRepository>,
     /// Request rate limiter (requests/sec).
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
@@ -493,6 +496,7 @@ pub fn build_state(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
         ),
+        dependencies: Arc::new(mem::MemDependencyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
