@@ -371,7 +371,7 @@
   .config-table tbody tr:hover { background: var(--color-surface-elevated); }
 
   .config-table td {
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-4);
     vertical-align: middle;
   }
 

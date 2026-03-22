@@ -381,7 +381,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
-  .data-table td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); color: var(--color-text); }
+  .data-table td { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); color: var(--color-text); }
 
   .muted { color: var(--color-text-muted); font-size: var(--text-xs); }
 
