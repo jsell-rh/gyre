@@ -31,6 +31,10 @@
 
   async function create() {
     if (!form.name.trim()) return;
+    if (!form.scopeId.trim()) {
+      showToast('Scope ID (workspace/tenant/repo UUID) is required', { type: 'error' });
+      return;
+    }
     saving = true;
     try {
       const caps = form.capabilities.split(',').map(s => s.trim()).filter(Boolean);
@@ -42,7 +46,7 @@
         description: form.description.trim() || undefined,
         scope,
         capabilities: caps,
-        system_prompt: form.system_prompt.trim() || undefined,
+        system_prompt: form.system_prompt.trim(),
       });
       showToast('Persona created', { type: 'success' });
       createOpen = false;
@@ -144,11 +148,10 @@
         <option value="Repo">Repo</option>
       </select>
     </label>
-    {#if form.scopeKind === 'Workspace' || form.scopeKind === 'Repo'}
-      <label class="field-label">{form.scopeKind} ID *
-        <input class="field-input" bind:value={form.scopeId} placeholder="UUID of the {form.scopeKind.toLowerCase()}" />
-      </label>
-    {/if}
+    <label class="field-label">Scope ID *
+      <input class="field-input" bind:value={form.scopeId} placeholder="UUID of the {form.scopeKind.toLowerCase()}" />
+      <span class="field-hint">Required UUID identifying the {form.scopeKind.toLowerCase()} this persona is scoped to.</span>
+    </label>
     <label class="field-label">Capabilities (comma-separated)
       <input class="field-input" bind:value={form.capabilities} placeholder="rust, api-design, code-review" />
     </label>
@@ -311,5 +314,7 @@
   }
   .field-input:focus { outline: none; border-color: var(--color-primary); }
   .field-textarea { min-height: 80px; resize: vertical; font-family: var(--font-mono); }
+
+  .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; display: block; }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>

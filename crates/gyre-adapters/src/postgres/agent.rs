@@ -16,6 +16,7 @@ fn status_to_str(s: &AgentStatus) -> &'static str {
         AgentStatus::Blocked => "Blocked",
         AgentStatus::Error => "Error",
         AgentStatus::Dead => "Dead",
+        AgentStatus::Paused => "Paused",
     }
 }
 
@@ -26,6 +27,7 @@ fn str_to_status(s: &str) -> Result<AgentStatus> {
         "Blocked" => Ok(AgentStatus::Blocked),
         "Error" => Ok(AgentStatus::Error),
         "Dead" => Ok(AgentStatus::Dead),
+        "Paused" => Ok(AgentStatus::Paused),
         other => Err(anyhow!("unknown agent status: {}", other)),
     }
 }
@@ -59,6 +61,7 @@ impl AgentRow {
             spawned_at: self.spawned_at as u64,
             last_heartbeat: self.last_heartbeat.map(|v| v as u64),
             spawned_by: self.spawned_by,
+            disconnected_behavior: Default::default(),
         })
     }
 }

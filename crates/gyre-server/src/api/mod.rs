@@ -30,6 +30,7 @@ pub mod provenance;
 pub mod push_gates;
 pub mod release;
 pub mod repos;
+pub mod scim;
 pub mod search;
 pub mod spawn;
 pub mod spec_policy;
@@ -322,6 +323,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/analytics/count", get(analytics::count_events))
         .route("/api/v1/analytics/daily", get(analytics::daily_events))
+        // Analytics Decision API (M23)
+        .route("/api/v1/analytics/usage", get(analytics::usage))
+        .route("/api/v1/analytics/compare", get(analytics::compare))
+        .route("/api/v1/analytics/top", get(analytics::top_events))
         // Costs
         .route(
             "/api/v1/costs",
@@ -356,6 +361,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/admin/snapshots/:id",
             delete(admin::admin_delete_snapshot),
         )
+        // BCP (Business Continuity)
+        .route("/api/v1/admin/bcp/targets", get(admin::admin_bcp_targets))
+        .route("/api/v1/admin/bcp/drill", post(admin::admin_bcp_drill))
         // Seed data
         .route("/api/v1/admin/seed", post(admin::admin_seed))
         // Data Export
@@ -506,6 +514,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/teams/:team_id",
             put(update_team).delete(delete_team),
         )
+        // ── SCIM 2.0 Provisioning ─────────────────────────────────────────
+        .route(
+            "/scim/v2/Users",
+            get(scim::scim_list_users).post(scim::scim_create_user),
+        )
+        .route(
+            "/scim/v2/Users/:id",
+            get(scim::scim_get_user)
+                .put(scim::scim_update_user)
+                .delete(scim::scim_delete_user),
+        )
+        .route(
+            "/scim/v2/ServiceProviderConfig",
+            get(scim::scim_service_provider_config),
+        )
+        .route("/scim/v2/Schemas", get(scim::scim_schemas))
+        .route("/scim/v2/ResourceTypes", get(scim::scim_resource_types))
 }
 
 pub(crate) fn now_secs() -> u64 {

@@ -1,7 +1,8 @@
 //! Stale agent detection: marks agents Dead when heartbeat times out.
+//! Honors each agent's `disconnected_behavior` setting (BCP graceful degradation).
 
 use gyre_common::{ActivityEventData, AgEventType};
-use gyre_domain::AgentStatus;
+use gyre_domain::{AgentStatus, DisconnectedBehavior};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -18,42 +19,79 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 
     let agents = state.agents.list().await?;
     for mut agent in agents {
-        if agent.status != AgentStatus::Dead && !agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS) {
-            info!(agent_id = %agent.id, agent_name = %agent.name, "marking stale agent as dead");
-            let _ = agent.transition_status(AgentStatus::Dead);
-            let _ = state.agents.update(&agent).await;
+        // Skip already-dead or already-paused agents.
+        if agent.status == AgentStatus::Dead || agent.status == AgentStatus::Paused {
+            continue;
+        }
+        if agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS) {
+            continue;
+        }
 
-            // Clean up worktrees
-            if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-                for wt in worktrees {
-                    if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                        if let Err(e) = state.git_ops.remove_worktree(&repo.path, &wt.path).await {
-                            warn!("remove_worktree failed for agent {}: {e}", agent.id);
+        match agent.disconnected_behavior {
+            DisconnectedBehavior::Abort => {
+                info!(agent_id = %agent.id, agent_name = %agent.name,
+                    "aborting stale agent (disconnected_behavior=abort)");
+                let _ = agent.transition_status(AgentStatus::Dead);
+                let _ = state.agents.update(&agent).await;
+
+                // Clean up worktrees
+                if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+                    for wt in worktrees {
+                        if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+                            if let Err(e) =
+                                state.git_ops.remove_worktree(&repo.path, &wt.path).await
+                            {
+                                warn!("remove_worktree failed for agent {}: {e}", agent.id);
+                            }
+                        }
+                        let _ = state.worktrees.delete(&wt.id).await;
+                    }
+                }
+
+                // Block the assigned task
+                if let Some(task_id) = &agent.current_task_id {
+                    if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+                        use gyre_domain::TaskStatus;
+                        if task.status == TaskStatus::InProgress {
+                            let _ = task.transition_status(TaskStatus::Blocked);
+                            task.updated_at = now;
+                            let _ = state.tasks.update(&task).await;
                         }
                     }
-                    let _ = state.worktrees.delete(&wt.id).await;
                 }
+
+                state.activity_store.record(ActivityEventData {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: agent.id.to_string(),
+                    event_type: AgEventType::StateChanged,
+                    description: format!(
+                        "Agent {} aborted (no heartbeat, abort behavior)",
+                        agent.name
+                    ),
+                    timestamp: now,
+                });
             }
 
-            // Block the assigned task
-            if let Some(task_id) = &agent.current_task_id {
-                if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
-                    use gyre_domain::TaskStatus;
-                    if task.status == TaskStatus::InProgress {
-                        let _ = task.transition_status(TaskStatus::Blocked);
-                        task.updated_at = now;
-                        let _ = state.tasks.update(&task).await;
-                    }
-                }
+            DisconnectedBehavior::Pause => {
+                info!(agent_id = %agent.id, agent_name = %agent.name,
+                    "pausing stale agent (disconnected_behavior=pause)");
+                let _ = agent.transition_status(AgentStatus::Paused);
+                let _ = state.agents.update(&agent).await;
+
+                state.activity_store.record(ActivityEventData {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: agent.id.to_string(),
+                    event_type: AgEventType::StateChanged,
+                    description: format!("Agent {} paused (no heartbeat)", agent.name),
+                    timestamp: now,
+                });
             }
 
-            state.activity_store.record(ActivityEventData {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                agent_id: agent.id.to_string(),
-                event_type: AgEventType::StateChanged,
-                description: format!("Agent {} marked dead (no heartbeat)", agent.name),
-                timestamp: now,
-            });
+            DisconnectedBehavior::ContinueOffline => {
+                // Leave agent running; log a warning only.
+                warn!(agent_id = %agent.id, agent_name = %agent.name,
+                    "agent heartbeat timed out but disconnected_behavior=continue_offline; leaving running");
+            }
         }
     }
     Ok(())
