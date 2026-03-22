@@ -133,8 +133,13 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
 | `POST/GET` | `/api/v1/projects` | Create / list projects |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
+| `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
+| `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
+| `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope`: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
+| `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona -- fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
-| `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5) |
+| `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5); response includes `workspace_id: Option<Id>` when repo belongs to a workspace (M22.1) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
@@ -167,6 +172,12 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/repos/{id}/abac-policy` | Get the ABAC policy list for a repo — array of `AbacPolicy` objects; each policy has `id`, `name`, `rules` (AND within), evaluated as OR across policies (G6) |
 | `PUT` | `/api/v1/repos/{id}/abac-policy` | Replace the ABAC policy list (**Admin only**); policies are matched against JWT claims on push and spawn; `rules` is a list of `{claim, operator, value}` match conditions combined with AND; multiple policies in the array are OR'd together (G6) |
 | `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
+| `GET` | `/api/v1/repos/{id}/dependencies` | Outgoing dependency edges (`DependencyType`: Code/Spec/Api/Schema/Manual; `DetectionMethod`: auto/manual) (M22.4) |
+| `GET` | `/api/v1/repos/{id}/dependents` | Incoming dependency edges (M22.4) |
+| `POST` | `/api/v1/repos/{id}/dependencies` | Add a manual dep edge: `{target_repo_id, dep_type, notes?}`; **Admin only** (H-12, M22.4) |
+| `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
+| `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
+| `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
@@ -207,8 +218,19 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6) |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for Gyre-hosted repos (M22.4) |
 | `GET` | `/api/v1/auth/token-info` | Token introspection — returns token kind (`agent_jwt`, `uuid_token`, `api_key`, `global`) and decoded JWT claims including `task_id`, `spawned_by`, `exp` (M18) |
+| `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
+| `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
+| `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
+| `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
+| `GET` | `/api/v1/users/me/notifications` | Notifications (16 `NotificationType` variants: `MrNeedsReview`, `GateFailure`, `MrMerged`, etc.; 4 priority levels); auto-created on agent complete, gate failure, and MR merge (M22.8) |
+| `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark notification read (M22.8) |
+| `POST/GET` | `/api/v1/workspaces/{id}/members` | Invite / list members; `WorkspaceRole`: Owner, Admin, Developer, Viewer; accept/pending lifecycle (M22.8) |
+| `PUT` | `/api/v1/workspaces/{id}/members/{user_id}` | Update a member's `WorkspaceRole` (M22.8) |
+| `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member (M22.8) |
+| `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create / list workspace-scoped teams (M22.8) |
+| `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; `add_member`/`remove_member` idempotent (M22.8) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
@@ -244,6 +266,13 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
 | `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
+| `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
+| `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
+| `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins; default-deny (M22.6) |
+| `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6) |
+| `POST` | `/api/v1/policies/evaluate` | Dry-run evaluation: `{context}` -> `{decision: Allow|Deny, matched_policy?, reason}` (M22.6) |
+| `GET` | `/api/v1/policies/decisions` | Decision audit log (`?policy_id=&effect=&since=`) (M22.6) |
+| `GET` | `/api/v1/policies/effective` | Effective permissions explorer for a given attribute context (M22.6) |
 | `POST` | `/api/v1/admin/jobs/{name}/run` | Manually trigger a named background job (Admin only) |
 | `POST` | `/api/v1/admin/snapshot` | Create point-in-time DB snapshot (Admin only) |
 | `GET` | `/api/v1/admin/snapshots` | List all snapshots (Admin only) |
@@ -408,6 +437,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_record_activity` | Log a typed AG-UI activity event |
 | `gyre_agent_heartbeat` | Send agent heartbeat |
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
+| `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params) (M22.7) |
 
 Example MCP `initialize` call:
 ```json
@@ -600,7 +630,7 @@ The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 - **Admin Panel** (M4.3 + M8.3, Admin role required): tab-based navigation (Health / Jobs / Audit / Agents / SIEM / Compute / Network / Snapshots / Retention) via `Tabs` component. Health tab: uptime, agent/task/project metric cards. Jobs tab: merge processor + stale agent detector status table. Audit tab: searchable activity feed with agent_id / event_type filters. Agents tab: Kill and Reassign action buttons per agent; **Spawn Log** inline timeline per row shows each spawn step with status badge, timestamp, and detail (expand/collapse). SIEM tab: table of forwarding targets with add/edit/delete; modal form (URL, format JSON/CEF/LEEF, event filter, enabled toggle). Compute tab: table of compute targets (local/docker/ssh) with create/delete; modal with name, type, host fields. Network tab: WireGuard peer registry table with register/remove actions; DERP relay map JSON viewer below the table.
 
 Access at `http://localhost:3000` after starting the server. Admin Panel requires `Admin` role via Keycloak JWT (`GYRE_OIDC_ISSUER`) or the global `GYRE_AUTH_TOKEN`.
-- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 8 MCP tools available on `/mcp`.
+- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 9 MCP tools available on `/mcp` (including `gyre_search` added in M22.7).
 - **Compose View** (M5.2 + M8.3, sidebar: "Compose"): structured section cards with a mono textarea editor. Paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states in an interactive tree visualization, and teardown the session.
 - **Agent Card Panel** (M5.2 + M8.3): per-agent panel to view and edit the A2A AgentCard (capabilities as `Badge` pills, protocols, endpoint). Improved empty state when no card is published.
 - **Analytics View** (M6.1): event counts bar chart and recent events list with property drill-down. Tracks auto-emitted events: `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`, `merge_queue.processed`.
