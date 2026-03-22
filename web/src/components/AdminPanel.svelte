@@ -247,7 +247,7 @@
     bcpDrillLoading = true;
     try {
       const result = await api.bcpDrill();
-      toastSuccess(`BCP drill complete — snapshot: ${result.snapshot_path ?? 'ok'}`);
+      toastSuccess(`BCP drill complete — snapshot ${result.snapshot_id ?? result.snapshot_path ?? 'ok'} (${result.duration_ms ?? '?'}ms)`);
     } catch (e) {
       toastError(e.message);
     } finally {
@@ -850,11 +850,11 @@
         <div class="metric-grid">
           <div class="metric-card">
             <span class="metric-label">RTO (Recovery Time Objective)</span>
-            <span class="metric-value mono">{bcpTargets.rto_secs != null ? bcpTargets.rto_secs + 's' : '—'}</span>
+            <span class="metric-value mono">{(bcpTargets.rto_seconds ?? bcpTargets.rto_secs) != null ? (bcpTargets.rto_seconds ?? bcpTargets.rto_secs) + 's' : '—'}</span>
           </div>
           <div class="metric-card">
             <span class="metric-label">RPO (Recovery Point Objective)</span>
-            <span class="metric-value mono">{bcpTargets.rpo_secs != null ? bcpTargets.rpo_secs + 's' : '—'}</span>
+            <span class="metric-value mono">{(bcpTargets.rpo_seconds ?? bcpTargets.rpo_secs) != null ? (bcpTargets.rpo_seconds ?? bcpTargets.rpo_secs) + 's' : '—'}</span>
           </div>
         </div>
       {:else}
