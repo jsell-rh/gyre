@@ -109,7 +109,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M14: Supply Chain Security | Done | Agent stack fingerprinting, push attestation, AIBOM generation |
 | M15: Diesel ORM | Done | Diesel ORM + migrations, SQLite + PostgreSQL adapters, full persistence, multi-tenancy (tenant_id scoping) |
 | M16: Security Hardening | Done | Constant-time token compare, SHA-256 API key hashing, path redaction, CORS hardening, audit guard, SSH host key enforcement |
-| M17: Integration Testing | Done | 67 REST API contract tests, 21 auth/RBAC tests, 12 git smart HTTP tests, 20 Playwright E2E tests |
+| M17: Integration Testing | Done | 68 REST API contract tests, 21 auth/RBAC tests, 12 git smart HTTP tests, 20 Playwright E2E tests |
 | M18: Agent Identity | Done | EdDSA JWT agent tokens, built-in OIDC provider, token introspection, JWT revocation on complete, stale-spec detection |
 | M19: Container Runtime | Done | Docker/Podman ContainerTarget with security defaults, procfs agent monitor, workload attestation, SSH compute targets + reverse tunnels |
 | M20: UI Accountability | Done | 19 frontend findings resolved: admin panels (SIEM/Compute/Network/Spawn Log), Repo Detail Policy/Activity/Gates tabs, MR dependency panel, merge queue DAG view, task detail view, token introspection, spec approvals view |
