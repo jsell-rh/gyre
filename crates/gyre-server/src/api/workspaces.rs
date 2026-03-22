@@ -240,6 +240,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -290,6 +291,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -306,6 +308,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/workspaces/{id}"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
@@ -327,6 +330,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -341,6 +345,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

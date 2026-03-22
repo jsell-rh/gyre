@@ -253,6 +253,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/personas")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -307,6 +308,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/personas")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -323,6 +325,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/personas/{id}"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
