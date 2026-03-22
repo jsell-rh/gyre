@@ -81,7 +81,7 @@
   }
 
   th {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4) var(--space-4);
     text-align: left;
     font-family: var(--font-display);
     font-weight: 600;
@@ -116,7 +116,7 @@
   }
 
   td {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4) var(--space-4);
     border-bottom: 1px solid var(--color-border);
     color: var(--color-text);
     vertical-align: middle;

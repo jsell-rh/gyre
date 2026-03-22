@@ -75,12 +75,52 @@
     };
   });
 
+  // Token kind → human-readable label
+  const TOKEN_KIND_LABELS = {
+    global:      'Global admin token',
+    agent_jwt:   'Agent JWT (EdDSA, scoped)',
+    uuid_token:  'Per-agent UUID token (legacy)',
+    api_key:     'API key',
+  };
+
   function navigate(view, ctx = {}) {
     currentView = view;
     if (ctx.repo !== undefined) selectedRepo = ctx.repo;
     if (ctx.mr !== undefined) selectedMr = ctx.mr;
     if (ctx.task !== undefined) selectedTask = ctx.task;
+    // Push to browser history so back button works
+    window.history.pushState(
+      { view, selectedRepo, selectedMr, selectedTask },
+      '',
+      '#' + view,
+    );
   }
+
+  // Sync browser history ↔ app state
+  $effect(() => {
+    const initHash = window.location.hash.slice(1);
+    if (initHash && initHash in viewTitles) {
+      currentView = initHash;
+    }
+    window.history.replaceState(
+      { view: currentView, selectedRepo, selectedMr, selectedTask },
+      '',
+      '#' + currentView,
+    );
+
+    function handlePopstate(e) {
+      if (e.state?.view) {
+        currentView  = e.state.view;
+        selectedRepo = e.state.selectedRepo ?? null;
+        selectedMr   = e.state.selectedMr   ?? null;
+        selectedTask = e.state.selectedTask  ?? null;
+      } else {
+        currentView = 'dashboard';
+      }
+    }
+    window.addEventListener('popstate', handlePopstate);
+    return () => window.removeEventListener('popstate', handlePopstate);
+  });
 
   const viewTitles = {
     dashboard:       'Dashboard',
@@ -233,7 +273,7 @@
       <div class="token-info-box">
         <div class="token-info-row">
           <span class="token-info-label">Kind</span>
-          <span class="token-info-val">{tokenInfo.kind ?? '—'}</span>
+          <span class="token-info-val">{TOKEN_KIND_LABELS[tokenInfo.kind] ?? tokenInfo.kind ?? '—'}</span>
         </div>
         {#if tokenInfo.agent_id}
           <div class="token-info-row">
