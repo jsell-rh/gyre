@@ -209,7 +209,9 @@
       loadAgentCommits();
       if (shas.length > 0) loadSignatures(shas);
     } catch (e) {
-      error = e.message;
+      error = e.message.includes('500')
+        ? `Could not load commits for branch '${branch}' — the branch may not exist or the repository may be empty.`
+        : e.message;
     } finally {
       loading = false;
     }

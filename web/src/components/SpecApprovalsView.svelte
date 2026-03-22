@@ -97,7 +97,7 @@
       <p class="header-desc">
         Cryptographic spec approval ledger (M12.3) — records spec SHA bindings for merge requests.
         For the M21 spec lifecycle dashboard (Pending→Approved state per spec, project-scoped), use
-        <a class="inline-link" href="#specs">Specs</a>
+        <a class="inline-link" href="/specs">Specs</a>
         in the sidebar.
       </p>
     </div>

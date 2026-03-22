@@ -635,13 +635,13 @@
 
   /* Modal */
   .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000;
     display: flex; align-items: center; justify-content: center;
   }
 
   .modal {
     position: fixed;
-    z-index: 101;
+    z-index: 1001;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
