@@ -27,7 +27,7 @@ describe('TaskBoard', () => {
     expect(labels.some(l => l.includes('New Task'))).toBe(true);
   });
 
-  it('renders task cards when API returns tasks with lowercase status', async () => {
+  it('renders task cards when API returns tasks', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({
         ok: true,
@@ -37,7 +37,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-1',
             title: 'Fix the login bug',
-            status: 'backlog',
+            status: 'Backlog',
             priority: 'high',
             assigned_to: null,
             labels: [],
@@ -47,7 +47,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-2',
             title: 'Implement OAuth',
-            status: 'in_progress',
+            status: 'InProgress',
             priority: 'medium',
             assigned_to: 'agent-1',
             labels: [],
@@ -57,7 +57,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-3',
             title: 'Write unit tests',
-            status: 'review',
+            status: 'Review',
             priority: 'low',
             assigned_to: null,
             labels: ['testing'],
@@ -88,7 +88,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-a',
             title: 'Backlog Task',
-            status: 'backlog',
+            status: 'Backlog',
             priority: 'medium',
             assigned_to: null,
             labels: [],
@@ -98,7 +98,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-b',
             title: 'In Progress Task',
-            status: 'in_progress',
+            status: 'InProgress',
             priority: 'high',
             assigned_to: null,
             labels: [],
@@ -108,7 +108,7 @@ describe('TaskBoard', () => {
           {
             id: 'task-c',
             title: 'Done Task',
-            status: 'done',
+            status: 'Done',
             priority: 'low',
             assigned_to: null,
             labels: [],
