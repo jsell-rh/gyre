@@ -208,6 +208,8 @@ pub struct AppState {
     pub budget_configs: Arc<Mutex<HashMap<String, gyre_domain::BudgetConfig>>>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<Mutex<HashMap<String, gyre_domain::BudgetUsage>>>,
+    /// Full-text search index (M22.7).
+    pub search: Arc<dyn gyre_ports::SearchPort>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -536,6 +538,7 @@ pub fn build_state(
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(Mutex::new(HashMap::new())),
         budget_usages: Arc::new(Mutex::new(HashMap::new())),
+        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
     })
 }
 

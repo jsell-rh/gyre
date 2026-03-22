@@ -5,8 +5,9 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{Agent, AgentStatus};
+use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::domain_events::DomainEvent;
 use crate::AppState;
@@ -82,6 +83,21 @@ pub async fn create_agent(
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     state.agents.create(&agent).await?;
+    // Index for search.
+    let mut facets = HashMap::new();
+    facets.insert("status".to_string(), "idle".to_string());
+    let _ = state
+        .search
+        .index(SearchDocument {
+            entity_type: "agent".to_string(),
+            entity_id: agent.id.to_string(),
+            title: agent.name.clone(),
+            body: String::new(),
+            workspace_id: None,
+            repo_id: None,
+            facets,
+        })
+        .await;
     let _ = state.event_tx.send(DomainEvent::AgentCreated {
         id: agent.id.to_string(),
     });

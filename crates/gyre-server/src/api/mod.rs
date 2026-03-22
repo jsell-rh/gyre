@@ -27,6 +27,7 @@ pub mod provenance;
 pub mod push_gates;
 pub mod release;
 pub mod repos;
+pub mod search;
 pub mod spawn;
 pub mod spec_policy;
 pub mod specs;
@@ -416,6 +417,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(budget::get_workspace_budget).put(budget::set_workspace_budget),
         )
         .route("/api/v1/budget/summary", get(budget::budget_summary))
+        // Search (M22.7)
+        .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/reindex", post(search::reindex_handler))
 }
 
 pub(crate) fn now_secs() -> u64 {
