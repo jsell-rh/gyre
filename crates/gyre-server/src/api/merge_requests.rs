@@ -5,8 +5,9 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, MergeRequest, MrStatus, Review, ReviewComment, ReviewDecision};
+use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
 use crate::domain_events::DomainEvent;
@@ -290,6 +291,22 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
+    // Index for search.
+    let mut facets = HashMap::new();
+    facets.insert("status".to_string(), "open".to_string());
+    facets.insert("repo_id".to_string(), mr.repository_id.to_string());
+    let _ = state
+        .search
+        .index(SearchDocument {
+            entity_type: "mr".to_string(),
+            entity_id: mr.id.to_string(),
+            title: mr.title.clone(),
+            body: format!("{} -> {}", mr.source_branch, mr.target_branch),
+            workspace_id: None,
+            repo_id: Some(mr.repository_id.to_string()),
+            facets,
+        })
+        .await;
     let _ = state.event_tx.send(DomainEvent::MrCreated {
         id: mr.id.to_string(),
     });

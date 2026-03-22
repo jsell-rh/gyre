@@ -11,6 +11,7 @@
 pub mod compute;
 pub mod git2_ops;
 pub mod jj_ops;
+pub mod mem_search;
 pub mod postgres;
 pub mod schema;
 pub mod sqlite;
@@ -18,5 +19,6 @@ pub mod sqlite;
 pub use compute::{DockerTarget, LocalTarget, SshTarget};
 pub use git2_ops::Git2OpsAdapter;
 pub use jj_ops::JjOpsAdapter;
+pub use mem_search::MemSearchAdapter;
 pub use postgres::PgStorage;
 pub use sqlite::SqliteStorage;
