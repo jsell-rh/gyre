@@ -625,7 +625,7 @@ The task description records the spec path and repo ID. The `SpecChanged` domain
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
-**Navigation is hash-based** — append `#<view>` to the server URL to deep-link directly to any view. Valid view IDs: `dashboard`, `activity`, `agents`, `tasks`, `projects`, `merge-queue`, `mcp-catalog`, `compose`, `analytics`, `costs`, `audit`, `spec-approvals`, `specs`, `admin`, `settings`. Browser back/forward buttons work via `popstate`. Example: `http://localhost:3000/#agents`
+**Navigation is hash-based** — append `#<view>` to the server URL to deep-link directly to any view. Valid view IDs: `dashboard`, `activity`, `agents`, `tasks`, `projects`, `merge-queue`, `mcp-catalog`, `compose`, `analytics`, `costs`, `audit`, `spec-approvals`, `specs`, `admin`, `settings`, `workspaces`, `personas`, `budget`, `dependencies`, `spec-graph`, `profile`. Browser back/forward buttons work via `popstate`. Example: `http://localhost:3000/#agents`
 
 - **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, branch dropdowns). On success, displays the agent token and clone URL for use by the spawned agent.
 - **Repo Detail**: shows a clone URL bar with one-click copy, pre-filled with the correct `Authorization: Bearer` git credential command.
