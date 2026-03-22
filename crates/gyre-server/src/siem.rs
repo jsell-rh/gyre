@@ -155,6 +155,11 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::NetworkConnect => 5,
         gyre_domain::AuditEventType::FileAccess => 3,
         gyre_domain::AuditEventType::Syscall => 5,
+        gyre_domain::AuditEventType::ContainerStarted => 3,
+        gyre_domain::AuditEventType::ContainerStopped => 3,
+        gyre_domain::AuditEventType::ContainerCrashed => 7,
+        gyre_domain::AuditEventType::ContainerOom => 8,
+        gyre_domain::AuditEventType::ContainerNetworkBlocked => 6,
         gyre_domain::AuditEventType::Custom(_) => 3,
     };
     let event_type = event.event_type.as_str();

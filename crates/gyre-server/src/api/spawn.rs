@@ -310,6 +310,21 @@ pub async fn spawn_agent(
                             runtime: runtime_str.clone(),
                         });
 
+                        // M23: Emit container_started audit event.
+                        {
+                            let ctx = crate::container_audit::AuditCtx {
+                                audit: state.audit.as_ref(),
+                                broadcast_tx: &state.audit_broadcast_tx,
+                            };
+                            crate::container_audit::emit_started(
+                                &ctx,
+                                &agent.id.to_string(),
+                                &handle.id,
+                                &image,
+                            )
+                            .await;
+                        }
+
                         let agent_id_str = agent.id.to_string();
                         state
                             .process_registry
@@ -337,6 +352,34 @@ pub async fn spawn_agent(
                                         &agent_id_str,
                                     )
                                     .await;
+
+                                    // M23: Emit container_stopped audit event (best-effort).
+                                    {
+                                        let exit_code = state_mon
+                                            .container_audits
+                                            .lock()
+                                            .await
+                                            .get(&agent_id_str)
+                                            .and_then(|r| r.exit_code);
+                                        let ctx = crate::container_audit::AuditCtx {
+                                            audit: state_mon.audit.as_ref(),
+                                            broadcast_tx: &state_mon.audit_broadcast_tx,
+                                        };
+                                        let container_id_for_evt = state_mon
+                                            .container_audits
+                                            .lock()
+                                            .await
+                                            .get(&agent_id_str)
+                                            .map(|r| r.container_id.clone())
+                                            .unwrap_or_default();
+                                        crate::container_audit::emit_stopped(
+                                            &ctx,
+                                            &agent_id_str,
+                                            &container_id_for_evt,
+                                            exit_code,
+                                        )
+                                        .await;
+                                    }
                                     if let Ok(Some(mut a)) =
                                         state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
                                     {
