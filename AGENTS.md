@@ -353,6 +353,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
 | `GYRE_PROCFS_MONITOR` | _(enabled)_ | Set to `false` to disable the procfs-based agent process monitor (G7). Polls `/proc/{pid}/fd/` and `/proc/{pid}/net/tcp` every 5 s per live agent PID; emits real `FileAccess` and `NetworkConnect` audit events. No-op on non-Linux platforms. |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
+| `GYRE_GIT_PATH` | `git` | Path to the `git` binary. Defaults to `git` (resolved via `PATH`). Override for NixOS/container environments where git is at a fixed store path (e.g. `/nix/store/.../bin/git`). Used by smart HTTP handlers, merge processor, and spec lifecycle hooks. |
 | `GYRE_DATABASE_URL` | _(unset — in-memory)_ | Database URL. `sqlite://gyre.db` for SQLite or `postgres://user:pass@host/db` for PostgreSQL. When set, all port traits persist via Diesel ORM with auto-migrations. Unset = in-memory (default, stateless). (M10.1, M15.1, M15.2) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
