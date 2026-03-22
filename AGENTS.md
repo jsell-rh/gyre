@@ -261,6 +261,9 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/analytics/events` | Query analytics events (`?event_name=&agent_id=&since=`) |
 | `GET` | `/api/v1/analytics/count` | Count events by name (aggregated) |
 | `GET` | `/api/v1/analytics/daily` | Daily event counts (time-series) |
+| `GET` | `/api/v1/analytics/usage` | Event count, unique agent count, and trend (`up`/`down`/`flat` vs prior equal-length period); `?event_name=&since=&until=` (M23) |
+| `GET` | `/api/v1/analytics/compare` | Before/after pivot comparison: `before_count`, `after_count`, `change_pct` (null when before=0), `improved`; `?event_name=&before=&pivot=&after=` (M23) |
+| `GET` | `/api/v1/analytics/top` | Top N event names by count; `?limit=10&since=` (M23) |
 | `POST` | `/api/v1/costs` | Record a cost entry (agent_id, task_id, cost_type, amount) |
 | `GET` | `/api/v1/costs` | Query cost entries (`?agent_id=&task_id=&since=`) |
 | `GET` | `/api/v1/costs/summary` | Aggregated cost totals by agent |
@@ -289,6 +292,16 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
 | `DELETE` | `/api/v1/admin/compute-targets/{id}/tunnel/{tid}` | Close an SSH tunnel — sends SIGTERM to the `ssh -N` process (G12, Admin only) |
 | `POST` | `/api/v1/admin/seed` | Idempotent demo data seed: 2 projects, 3 repos, 4 agents, 6 tasks, 2 MRs, 1 queue entry, 5 activity events. Returns `{already_seeded:true}` on repeat. AdminOnly. (M9.1) |
+| `GET` | `/api/v1/admin/bcp/targets` | BCP targets: reads `GYRE_RTO` and `GYRE_RPO` env vars; returns recovery time/point objectives in seconds (Admin only) (M23) |
+| `POST` | `/api/v1/admin/bcp/drill` | BCP drill: triggers a real snapshot + verify cycle; returns snapshot path and verify result (Admin only) (M23) |
+| `GET` | `/scim/v2/ServiceProviderConfig` | SCIM 2.0 discovery — supported features, auth schemes (no gyre auth required for discovery) (M23) |
+| `GET` | `/scim/v2/Schemas` | SCIM 2.0 schema definitions for User resource type (M23) |
+| `GET` | `/scim/v2/ResourceTypes` | SCIM 2.0 resource type registry (M23) |
+| `GET` | `/scim/v2/Users` | SCIM 2.0 list users (`?startIndex=&count=&filter=`); auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
+| `POST` | `/scim/v2/Users` | SCIM 2.0 provision a new user; auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
+| `GET` | `/scim/v2/Users/{id}` | SCIM 2.0 get user by SCIM id; auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
+| `PUT` | `/scim/v2/Users/{id}` | SCIM 2.0 replace user attributes; auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
+| `DELETE` | `/scim/v2/Users/{id}` | SCIM 2.0 deprovision user; auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
 | `POST` | `/api/v1/release/prepare` | Admin: compute next semver version from conventional commits + generate changelog with agent/task attribution; optionally open a release MR. Request: `{repo_id, branch?, from?, create_mr?, mr_title?}`; `branch` and `from` validated against git argument injection — must not start with `-` or contain `..` (M16-A). Response: `{next_version, changelog, commit_count, mr?}` (M16) |
 | `POST/GET` | `/api/v1/audit/events` | Record / query eBPF audit events (`?agent_id=&event_type=&since=`) |
 | `GET` | `/api/v1/audit/stream` | SSE stream of live audit events |
@@ -357,6 +370,9 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
 | `GYRE_GIT_PATH` | `git` | Path to the `git` binary. Defaults to `git` (resolved via `PATH`). Override for NixOS/container environments where git is at a fixed store path (e.g. `/nix/store/.../bin/git`). Used by smart HTTP handlers, merge processor, and spec lifecycle hooks. |
 | `GYRE_DATABASE_URL` | _(unset — in-memory)_ | Database URL. `sqlite://gyre.db` for SQLite or `postgres://user:pass@host/db` for PostgreSQL. When set, all port traits persist via Diesel ORM with auto-migrations. Unset = in-memory (default, stateless). (M10.1, M15.1, M15.2) |
+| `GYRE_SCIM_TOKEN` | _(unset — SCIM disabled)_ | Bearer token SCIM clients must send to `/scim/v2/` endpoints. When unset, SCIM provisioning endpoints return 401. Separate from `GYRE_AUTH_TOKEN`. (M23) |
+| `GYRE_RTO` | _(unset)_ | Recovery Time Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
+| `GYRE_RPO` | _(unset)_ | Recovery Point Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
@@ -419,6 +435,21 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 | `ERROR` | Error occurred |
 | `<custom>` | Any other string maps to `Custom(String)` |
 
+#### Audit Event Taxonomy (`gyre-domain::AuditEventType`)
+
+`event_type` in audit events flowing through `GET /api/v1/audit/events` and `GET /api/v1/audit/stream` is a typed `AuditEventType` enum. Accepted values (snake_case strings):
+
+| Value | Meaning |
+|---|---|
+| `file_access` | Agent accessed a file path (procfs monitor, G7) |
+| `network_connect` | Agent made a network connection (procfs monitor, G7) |
+| `process_exec` | Agent exec'd a subprocess |
+| `container_started` | Container successfully started for an agent (M23) |
+| `container_stopped` | Container exited cleanly (M23) |
+| `container_crashed` | Container exited with non-zero code or was force-killed (M23) |
+| `container_oom` | Container OOM-killed by the kernel (M23) |
+| `container_network_blocked` | Outbound network attempt blocked by `--network=none` (G8, M23) |
+
 ### MCP Server (M5.1)
 
 Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discover and call Gyre capabilities as MCP tools.
@@ -442,6 +473,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_agent_heartbeat` | Send agent heartbeat |
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
 | `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params) (M22.7) |
+| `gyre_analytics_query` | Decision-support analytics (`query_type`: `usage`\|`compare`\|`top`); wraps the three M23 analytics endpoints (M23) |
 
 Example MCP `initialize` call:
 ```json
@@ -520,7 +552,8 @@ Agents are created in dependency order (parents before children). Parent links a
   "task_id": "<task-uuid>",
   "branch": "feat/my-feature",
   "parent_id": "<orchestrator-agent-uuid>",    // optional
-  "compute_target_id": "<target-uuid>"         // optional — remote compute target
+  "compute_target_id": "<target-uuid>",        // optional — remote compute target
+  "disconnected_behavior": "Pause"             // optional — "Pause" (default) | "ContinueOffline" | "Abort"; controls stale-agent-detector behavior when agent loses connectivity
 }
 
 // Response 201
@@ -637,7 +670,7 @@ The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 - **Admin Panel** (M4.3 + M8.3, Admin role required): tab-based navigation (Health / Jobs / Audit / Agents / SIEM / Compute / Network / Snapshots / Retention) via `Tabs` component. Health tab: uptime, agent/task/project metric cards. Jobs tab: merge processor + stale agent detector status table. Audit tab: searchable activity feed with agent_id / event_type filters. Agents tab: Kill and Reassign action buttons per agent; **Spawn Log** inline timeline per row shows each spawn step with status badge, timestamp, and detail (expand/collapse). SIEM tab: table of forwarding targets with add/edit/delete; modal form (URL, format JSON/CEF/LEEF, event filter, enabled toggle). Compute tab: table of compute targets (local/docker/ssh) with create/delete; modal with name, type, host fields. Network tab: WireGuard peer registry table with register/remove actions; DERP relay map JSON viewer below the table.
 
 Access at `http://localhost:3000` after starting the server. Admin Panel requires `Admin` role via Keycloak JWT (`GYRE_OIDC_ISSUER`) or the global `GYRE_AUTH_TOKEN`.
-- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 9 MCP tools available on `/mcp` (including `gyre_search` added in M22.7).
+- **MCP Tool Catalog** (M5.1 + M8.3, sidebar: "MCP Tools"): card grid layout — one card per tool with name, description, and collapsible JSON schema. Lists all 10 MCP tools available on `/mcp` (including `gyre_search` added in M22.7, `gyre_analytics_query` added in M23).
 - **Compose View** (M5.2 + M8.3, sidebar: "Compose"): structured section cards with a mono textarea editor. Paste/upload an agent-compose spec (JSON or YAML), apply it, monitor agent states in an interactive tree visualization, and teardown the session.
 - **Agent Card Panel** (M5.2 + M8.3): per-agent panel to view and edit the A2A AgentCard (capabilities as `Badge` pills, protocols, endpoint). Improved empty state when no card is published.
 - **Analytics View** (M6.1): event counts bar chart and recent events list with property drill-down. Tracks auto-emitted events: `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`, `merge_queue.processed`.
@@ -654,7 +687,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Sidebar** (M8.1): grouped nav sections (Overview / Source Control / Agents / Operations / Admin), collapsible to icon-only mode via chevron toggle, server status footer.
 - **Global Search** (M8.1): Cmd+K opens `SearchBar` overlay with keyboard navigation across agents, tasks, repos, and MRs.
 - **Activity Feed** (M8.2): timeline layout with colored event-type nodes, multi-select filter pills (toggle per event type), relative timestamps, skeleton loading, `EmptyState` when no events match.
-- **Agent List** (M8.2 + M11.2): 3-column card grid with table-view toggle, status filter pills, skeleton grid on load, slide-in detail panel with tabbed Info/Logs/Terminal view. Logs tab shows scrollable monospace agent output with live SSE streaming; Terminal tab streams live PTY output via `/ws/agents/{id}/tty` (M11.2).
+- **Agent List** (M8.2 + M11.2 + M19.3): 3-column card grid with table-view toggle, status filter pills, skeleton grid on load, slide-in detail panel with tabbed Info/Logs/Terminal view. Info tab shows agent metadata; when the agent was container-spawned, a **Container** subsection displays `container_id`, `image`, `image_hash`, `spawned_at`, `exited_at`, and `exit_code` sourced from `GET /api/v1/agents/{id}/container` (absent for non-container agents, M19.3). Logs tab shows scrollable monospace agent output with live SSE streaming; Terminal tab streams live PTY output via `/ws/agents/{id}/tty` (M11.2).
 - **Task Board** (M8.2 + M9.2 + M20): kanban columns with semantic color-coded top borders per status, `Badge` component for priority, `EmptyState` per empty column, skeleton loading. "New Task" button opens Modal (title, description, priority, status) -> POST `/api/v1/tasks`; card appears in the correct column immediately. M20: **cards are clickable** and navigate to **Task Detail view** — Info tab (all task fields: title, description, priority, status, assigned_to, parent) + Artifacts tab (linked PR, Ralph refs).
 - **Project List** (M8.2 + M9.2): responsive card grid, skeleton loading, `EmptyState` when no projects exist. "New Project" button opens Modal (name + description) -> POST `/api/v1/projects`. Selecting a project shows "Add Repo" button -> Modal -> POST `/api/v1/repos`. Toast notifications on success/error.
 - **Repo Detail** (M8.2 + M20): uses `lib/Tabs` + `lib/Table` components, `Badge` for MR status, relative timestamps, `EmptyState` per empty tab. New M20 tabs: **Policy tab** — ABAC policy editor (`GET/PUT /api/v1/repos/{id}/abac-policy`, Admin) with claim/operator/value rule list + add/remove; spec-policy toggles (`GET/PUT /api/v1/repos/{id}/spec-policy`) for `require_spec_ref`, `require_approved_spec`, `warn_stale_spec`, `require_current_spec`. **Activity tab** — hot files panel (`GET /api/v1/repos/{id}/hot-files`) with agent-weighted counts; click a file to load per-line blame attribution (`GET /api/v1/repos/{id}/blame?path=`). **Gates tab** — quality gate table with delete action + inline create-gate form (name, type, command); push-gate toggles for `ConventionalCommit`, `TaskRef`, `NoEmDash` (`GET/PUT /api/v1/repos/{id}/push-gates`). **Commits tab enhancements** — agent attribution column (`GET /api/v1/repos/{id}/agent-commits`) + Ed25519 signature badge per commit (`GET /api/v1/repos/{id}/commits/{sha}/signature`). **Branches tab enhancement** — speculative merge status badge per branch (`GET /api/v1/repos/{id}/speculative`): conflict/clean chip.
@@ -663,7 +696,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card, language selector (current locale; add locales by dropping JSON files in `web/src/locales/`).
 - **Workspace List** (M22.5, sidebar: "Workspaces" under Overview): workspace switcher grid; create-workspace modal (name + description); click a workspace to drill into detail view.
 - **Workspace Detail** (M22.5, drill-in from Workspace List): budget usage progress bars (tokens/day, cost/day, concurrent agents); three tabs: Repos (listed repos in workspace), Members (invite/remove with `WorkspaceRole`), Teams (create/manage).
-- **Persona Catalog** (M22.5, sidebar: "Personas" under Agents): card grid with scope badge (`Tenant`/`Workspace`/`Repo`), capabilities list, model/temperature metadata; create-persona modal + delete action.
+- **Persona Catalog** (M22.5, sidebar: "Personas" under Agents): card grid with scope badge (`Tenant`/`Workspace`/`Repo`), capabilities list, model/temperature metadata; create-persona modal + delete action. Scope ID is always required in the create modal (all scope kinds); a UUID hint is shown beneath the field.
 - **Budget Dashboard** (M22.5, sidebar: "Budget" under Operations): tenant-wide summary cards (total tokens, cost, active agents vs limits); per-workspace breakdown with progress bars showing usage against budget config; calls `GET /api/v1/budget/summary`.
 - **Dependency Graph** (M22.5, sidebar: "Dependencies" under Source Control): SVG circular layout of cross-repo `DependencyEdge` records; edge coloring by `DependencyType` (Code/Spec/Api/Schema); click a node to open blast-radius panel (BFS transitive dependents); calls `GET /api/v1/dependencies/graph` and `GET /api/v1/repos/{id}/blast-radius`.
 - **Spec Graph** (M22.5, sidebar: "Spec Graph" under Source Control): SVG DAG of `SpecLink` records with link-type colored edges + legend (`implements`, `supersedes`, `depends_on`, `conflicts_with`, `extends`, `references`); node detail panel on click; calls `GET /api/v1/specs/graph`.
