@@ -174,6 +174,7 @@ mod tests {
             workspaces: base.workspaces.clone(),
             personas: base.personas.clone(),
             workspace_repos: base.workspace_repos.clone(),
+            policies: base.policies.clone(),
         });
         crate::build_router(state)
     }

@@ -23,6 +23,7 @@ pub mod merge_queue;
 pub mod merge_requests;
 pub mod network;
 pub mod personas;
+pub mod policies;
 pub mod projects;
 pub mod provenance;
 pub mod push_gates;
@@ -447,6 +448,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(personas::get_persona)
                 .put(personas::update_persona)
                 .delete(personas::delete_persona),
+        )
+        // ABAC policy engine (M22.6)
+        .route(
+            "/api/v1/policies",
+            get(policies::list_policies).post(policies::create_policy),
+        )
+        .route("/api/v1/policies/evaluate", post(policies::evaluate_policy))
+        .route("/api/v1/policies/decisions", get(policies::list_decisions))
+        .route(
+            "/api/v1/policies/effective",
+            get(policies::effective_permissions),
+        )
+        .route(
+            "/api/v1/policies/:id",
+            get(policies::get_policy)
+                .put(policies::update_policy)
+                .delete(policies::delete_policy),
         )
 }
 

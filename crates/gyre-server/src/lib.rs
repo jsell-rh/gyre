@@ -31,6 +31,7 @@ pub(crate) mod spa;
 pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
+pub mod policy_engine;
 pub mod stale_agents;
 pub mod telemetry;
 pub(crate) mod tty;
@@ -45,9 +46,9 @@ use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     CostRepository, DependencyRepository, GitOpsPort, JjOpsPort, MergeQueueRepository,
-    MergeRequestRepository, NetworkPeerRepository, PersonaRepository, PreAcceptGate, ProcessHandle,
-    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogRepository, TaskRepository,
-    UserRepository, WorkspaceRepository, WorktreeRepository,
+    MergeRequestRepository, NetworkPeerRepository, PersonaRepository, PolicyRepository,
+    PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository, ReviewRepository,
+    SpawnLogRepository, TaskRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use messages::AgentMessage;
@@ -216,6 +217,8 @@ pub struct AppState {
     pub personas: Arc<dyn PersonaRepository>,
     /// Workspace-repo membership: workspace_id -> list of repo_ids (M22.1).
     pub workspace_repos: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Full declarative ABAC policy engine (M22.6).
+    pub policies: Arc<dyn PolicyRepository>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -548,6 +551,7 @@ pub fn build_state(
         workspaces: Arc::new(mem::MemWorkspaceRepository::default()),
         personas: Arc::new(mem::MemPersonaRepository::default()),
         workspace_repos: Arc::new(Mutex::new(HashMap::new())),
+        policies: Arc::new(mem::MemPolicyRepository::default()),
     })
 }
 
