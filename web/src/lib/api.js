@@ -237,6 +237,22 @@ export const api = {
   agentSpawnLog: (id) => request(`/admin/agents/${id}/spawn-log`),
   // Container audit record (M19.3) — 404 if agent was not container-spawned
   agentContainer: (id) => request(`/agents/${id}/container`),
+  // BCP (M23)
+  bcpTargets: () => request('/admin/bcp/targets'),
+  bcpDrill: () => request('/admin/bcp/drill', { method: 'POST' }),
+  // M23 analytics (usage, compare, top)
+  analyticsUsage: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/usage${qs ? '?' + qs : ''}`);
+  },
+  analyticsCompare: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/compare${qs ? '?' + qs : ''}`);
+  },
+  analyticsTop: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/top${qs ? '?' + qs : ''}`);
+  },
   // Token introspection (M18)
   tokenInfo: () => request('/auth/token-info'),
   // Spec approvals ledger (M12.3)
