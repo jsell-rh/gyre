@@ -165,6 +165,7 @@ mod tests {
             abac_policies: base.abac_policies.clone(),
             workload_attestations: base.workload_attestations.clone(),
             tunnel_store: base.tunnel_store.clone(),
+            container_audits: base.container_audits.clone(),
             spec_ledger: base.spec_ledger.clone(),
             spec_approval_history: base.spec_approval_history.clone(),
             spec_links_store: base.spec_links_store.clone(),

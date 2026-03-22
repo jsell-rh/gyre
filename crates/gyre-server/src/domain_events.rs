@@ -89,4 +89,11 @@ pub enum DomainEvent {
         spec_sha: String,
         current_sha: String,
     },
+    /// Emitted when an agent is successfully spawned inside a container (M19.3).
+    AgentContainerSpawned {
+        agent_id: String,
+        container_id: String,
+        image: String,
+        runtime: String,
+    },
 }
