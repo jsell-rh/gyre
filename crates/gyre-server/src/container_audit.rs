@@ -1,4 +1,8 @@
-//! M19.3: Container audit trail — records lifecycle events for agent containers.
+//! M19.3 + M23: Container audit trail — records lifecycle events for agent containers.
+//!
+//! M23 adds typed `AuditEventType` variants for container lifecycle transitions
+//! (Started, Stopped, Crashed, OOM, NetworkBlocked) that flow through the shared
+//! audit event system and are broadcast over the SSE stream.
 //!
 //! After spawning a container, the spawn handler calls [`capture_spawn_audit`]
 //! to run `{runtime} inspect` and persist a [`ContainerAuditRecord`] in the
@@ -7,6 +11,8 @@
 //!
 //! The record is returned by `GET /api/v1/agents/{id}/container`.
 
+use gyre_common::Id;
+use gyre_domain::{AuditEvent, AuditEventType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -171,6 +177,131 @@ fn parse_rfc3339_approx(s: &str) -> Option<u64> {
         + (dp[2] as u64).saturating_sub(1);
     let secs = approx_days * 86400 + (tp[0] as u64) * 3600 + (tp[1] as u64) * 60 + (tp[2] as u64);
     Some(secs)
+}
+
+// ---------------------------------------------------------------------------
+// M23 Container lifecycle audit event emission
+// ---------------------------------------------------------------------------
+
+/// Context passed to container lifecycle emit functions so they can record
+/// the event through the shared audit store and broadcast it on the SSE stream.
+pub struct AuditCtx<'a> {
+    pub audit: &'a dyn gyre_ports::AuditRepository,
+    pub broadcast_tx: &'a tokio::sync::broadcast::Sender<String>,
+}
+
+/// Emit a container lifecycle `AuditEvent` and broadcast it to SSE subscribers.
+/// Failures are silently swallowed (best-effort audit trail).
+async fn emit(
+    ctx: &AuditCtx<'_>,
+    agent_id: &str,
+    event_type: AuditEventType,
+    details: serde_json::Value,
+) {
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        Id::new(agent_id),
+        event_type,
+        None,
+        details,
+        None,
+        now_secs(),
+    );
+    let _ = ctx.audit.record(&event).await;
+    if let Ok(json) = serde_json::to_string(&serde_json::json!({
+        "id": event.id.to_string(),
+        "agent_id": event.agent_id.to_string(),
+        "event_type": event.event_type.as_str(),
+        "details": event.details,
+        "timestamp": event.timestamp,
+    })) {
+        let _ = ctx.broadcast_tx.send(json);
+    }
+}
+
+/// Emit `container_started` — call immediately after a successful container spawn.
+pub async fn emit_started(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, image: &str) {
+    emit(
+        ctx,
+        agent_id,
+        AuditEventType::ContainerStarted,
+        serde_json::json!({
+            "container_id": container_id,
+            "image": image,
+            "started_at": now_secs(),
+        }),
+    )
+    .await;
+}
+
+/// Emit `container_stopped` — call when a container exits cleanly.
+pub async fn emit_stopped(
+    ctx: &AuditCtx<'_>,
+    agent_id: &str,
+    container_id: &str,
+    exit_code: Option<i32>,
+) {
+    emit(
+        ctx,
+        agent_id,
+        AuditEventType::ContainerStopped,
+        serde_json::json!({
+            "container_id": container_id,
+            "exit_code": exit_code,
+            "stopped_at": now_secs(),
+        }),
+    )
+    .await;
+}
+
+/// Emit `container_crashed` — call when a container exits with a non-zero code unexpectedly.
+pub async fn emit_crashed(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, error: &str) {
+    emit(
+        ctx,
+        agent_id,
+        AuditEventType::ContainerCrashed,
+        serde_json::json!({
+            "container_id": container_id,
+            "error": error,
+            "crashed_at": now_secs(),
+        }),
+    )
+    .await;
+}
+
+/// Emit `container_oom` — call when a container is killed by the OOM killer.
+pub async fn emit_oom(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, memory_limit: &str) {
+    emit(
+        ctx,
+        agent_id,
+        AuditEventType::ContainerOom,
+        serde_json::json!({
+            "container_id": container_id,
+            "memory_limit": memory_limit,
+            "oom_at": now_secs(),
+        }),
+    )
+    .await;
+}
+
+/// Emit `container_network_blocked` — call when the network policy drops a connection.
+pub async fn emit_network_blocked(
+    ctx: &AuditCtx<'_>,
+    agent_id: &str,
+    container_id: &str,
+    destination: &str,
+) {
+    emit(
+        ctx,
+        agent_id,
+        AuditEventType::ContainerNetworkBlocked,
+        serde_json::json!({
+            "container_id": container_id,
+            "destination": destination,
+            "blocked_at": now_secs(),
+        }),
+    )
+    .await;
 }
 
 fn now_secs() -> u64 {
