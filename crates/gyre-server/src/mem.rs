@@ -1140,5 +1140,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
+        spec_links_store: Arc::new(Mutex::new(Vec::new())),
     })
 }

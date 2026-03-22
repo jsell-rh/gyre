@@ -274,6 +274,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/pending", get(specs::list_pending_specs))
         .route("/api/v1/specs/drifted", get(specs::list_drifted_specs))
         .route("/api/v1/specs/index", get(specs::spec_index))
+        .route("/api/v1/specs/graph", get(specs::get_spec_graph))
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -284,6 +285,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/specs/:path/history",
             get(specs::spec_approval_history),
         )
+        .route("/api/v1/specs/:path/links", get(specs::get_spec_links))
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
         .route(

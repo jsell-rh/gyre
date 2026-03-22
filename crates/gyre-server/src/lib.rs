@@ -199,6 +199,8 @@ pub struct AppState {
     pub spec_ledger: spec_registry::SpecLedger,
     /// Spec approval history: ordered list of SpecApprovalEvent (M21.1).
     pub spec_approval_history: spec_registry::SpecApprovalHistory,
+    /// Spec links graph: all inter-spec links from manifests (M22.3).
+    pub spec_links_store: spec_registry::SpecLinksStore,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -523,6 +525,7 @@ pub fn build_state(
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
+        spec_links_store: Arc::new(Mutex::new(Vec::new())),
     })
 }
 
