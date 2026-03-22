@@ -86,3 +86,18 @@
 - **H-14**: reindex — AdminOnly (prevents DoS via expensive reindex)
 - **H-15**: workspace write endpoints — AdminOnly (prevents budget bypass)
 - **H-16**: persona write endpoints — AdminOnly (prevents prompt injection)
+
+### M22.5 – Platform UI (Svelte Dashboard)
+7 new Svelte components surfacing all M22 backend capabilities in the dashboard:
+
+| Component | Sidebar | Key Features |
+|---|---|---|
+| `WorkspaceList` | Overview → Workspaces | Workspace switcher grid, create modal |
+| `WorkspaceDetail` | (drill-in) | Budget usage bars, Repos/Members/Teams tabs |
+| `PersonaCatalog` | Agents → Personas | Card grid with scope badges, create/delete |
+| `BudgetDashboard` | Operations → Budget | Tenant summary cards, per-workspace progress bars |
+| `DependencyGraph` | Source Control → Dependencies | SVG circular layout, edge-type coloring, blast-radius panel |
+| `SpecGraph` | Source Control → Spec Graph | SVG DAG, link-type colored edges + legend, node detail panel |
+| `UserProfile` | Overview → My Profile | Profile edit form, My Agents/Tasks/MRs/Notifications tabs |
+
+20+ new API methods added to `api.js` covering workspaces, budget, personas, dependencies, spec graph, and user/me endpoints.
