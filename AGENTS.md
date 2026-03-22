@@ -190,6 +190,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/stack` | Agent self-reports its runtime stack fingerprint at spawn (M14.1) |
 | `GET` | `/api/v1/agents/{id}/stack` | Query agent's registered stack fingerprint (M14.1) |
 | `GET` | `/api/v1/agents/{id}/workload` | Current workload attestation — `{pid, hostname, compute_target, stack_hash, alive}`: captured at spawn; `alive` re-checked via `/proc/{pid}` on Linux (G10) |
+| `GET` | `/api/v1/agents/{id}/container` | Container audit record for this agent -- `ContainerAuditRecord`: `container_id`, `image`, `image_hash`, `spawned_at`, `exited_at?`, `exit_code?`; 404 if agent was not container-spawned (M19.3) |
 | `GET` | `/ws/agents/{id}/tty` | WebSocket TTY attach — auth via first-message Bearer token; replays buffered logs then streams live PTY output (M11.2) |
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`) |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
@@ -282,7 +283,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET/PUT` | `/api/v1/admin/retention` | List / update retention policies (Admin only) |
 | `POST/GET` | `/api/v1/admin/siem` | Create / list SIEM forwarding targets (Admin only) |
 | `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
-| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **Container security defaults (G8):** `--network=none` (no outbound network — opt in via `network` field), `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). (Admin only) |
+| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** `--network=none` (no outbound network — opt in via `network` field), `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). (Admin only) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
 | `POST` | `/api/v1/admin/compute-targets/{id}/tunnel` | Open an SSH tunnel for a compute target: `{direction: "forward"|"reverse", local_port, remote_port, local_host?, remote_host?}` (`local_host` and `remote_host` default to `"localhost"`). Reverse tunnels (`-R`) let air-gapped agents dial out so the server can reach them through NAT. (G12, Admin only) |
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
@@ -351,6 +352,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_TRUSTED_ISSUERS` | _(disabled)_ | Comma-separated base URLs of trusted remote Gyre instances (e.g. `https://gyre-2.example.com`). Enables G11 federation: JWTs minted by these instances are verified via remote OIDC discovery + JWKS (cached 5 min). Federated agents receive `Agent` role; `agent_id = "<remote-host>/<sub>"`. (G11) |
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
 | `GYRE_AUDIT_SIMULATE` | _(disabled)_ | Set to `true` to run the audit event simulator on startup (M7.1) |
+| `GYRE_DEFAULT_COMPUTE_TARGET` | `local` | Default compute target type when no `compute_target_id` is supplied on spawn: `local` (subprocess) or `container` (Docker/Podman with G8 security defaults); requires Docker or Podman on `PATH` when set to `container` (M19.1) |
 | `GYRE_PROCFS_MONITOR` | _(enabled)_ | Set to `false` to disable the procfs-based agent process monitor (G7). Polls `/proc/{pid}/fd/` and `/proc/{pid}/net/tcp` every 5 s per live agent PID; emits real `FileAccess` and `NetworkConnect` audit events. No-op on non-Linux platforms. |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
 | `GYRE_GIT_PATH` | `git` | Path to the `git` binary. Defaults to `git` (resolved via `PATH`). Override for NixOS/container environments where git is at a fixed store path (e.g. `/nix/store/.../bin/git`). Used by smart HTTP handlers, merge processor, and spec lifecycle hooks. |
@@ -380,6 +382,7 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 // 5. Domain event push (server → client, M10.2) — emitted automatically on mutations:
 {"type":"DomainEvent","event":"AgentCreated","id":"<uuid>"}
 {"type":"DomainEvent","event":"AgentStatusChanged","id":"<uuid>","status":"Active"}
+{"type":"DomainEvent","event":"AgentContainerSpawned","id":"<agent-uuid>","container_id":"<docker-container-id>","image":"<image-ref>","image_hash":"<sha256-digest>"}
 {"type":"DomainEvent","event":"TaskCreated","id":"<uuid>"}
 {"type":"DomainEvent","event":"TaskTransitioned","id":"<uuid>","status":"in_progress"}
 {"type":"DomainEvent","event":"MrCreated","id":"<uuid>"}
@@ -512,7 +515,7 @@ Agents are created in dependency order (parents before children). Parent links a
 ```json
 // Request
 {
-  "name": "worker-1",
+  "name": "worker-1",               // required; must match [a-zA-Z0-9._-]{1,63} -- shell metacharacters rejected with 400 (M19.5-A)
   "repo_id": "<repo-uuid>",
   "task_id": "<task-uuid>",
   "branch": "feat/my-feature",
@@ -527,11 +530,12 @@ Agents are created in dependency order (parents before children). Parent links a
     "spawned_by": "<caller-agent-id or user-id>",   // M13.2: who initiated spawn
     ...
   },
-  "token": "<signed-EdDSA-JWT>",   // M18: starts with "ey", 3 dot-separated parts; claims: sub=agent_id, task_id, spawned_by, exp. G10: when spawned on a real process, also embeds wl_pid, wl_hostname, wl_compute_target, wl_stack_hash. Verify via /.well-known/jwks.json. Legacy UUID tokens still accepted from POST /api/v1/agents.
+  "token": "<signed-EdDSA-JWT>",   // M18: starts with "ey", 3 dot-separated parts; claims: sub=agent_id, task_id, spawned_by, exp. G10: when spawned on a real process, also embeds wl_pid, wl_hostname, wl_compute_target, wl_stack_hash. M19.4: container-spawned agents additionally embed wl_container_id, wl_image_hash. Verify via /.well-known/jwks.json. Legacy UUID tokens still accepted from POST /api/v1/agents.
   "worktree_path": "/path/to/worktree",
   "clone_url": "http://localhost:3000/git/project/repo.git",
   "branch": "feat/my-feature",
-  "jj_change_id": "<jj-change-id-or-null>"   // present when jj is initialized in worktree (best-effort)
+  "jj_change_id": "<jj-change-id-or-null>",   // present when jj is initialized in worktree (best-effort)
+  "container_id": "<docker-container-id-or-null>"   // present when agent was launched in a container via GYRE_DEFAULT_COMPUTE_TARGET=container or a container compute_target_id (M19.1)
 }
 ```
 

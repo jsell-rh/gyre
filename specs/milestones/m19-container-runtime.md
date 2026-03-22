@@ -60,6 +60,7 @@ Wire Docker/Podman as a first-class compute target for agent workloads, with har
 - [x] `POST /api/v1/admin/compute-targets/{id}/tunnel` -- open SSH tunnel: `{direction: "forward"|"reverse", local_port, remote_port, local_host?, remote_host?}`; reverse tunnels (`-R`) let air-gapped agents dial out through NAT
 - [x] `GET /api/v1/admin/compute-targets/{id}/tunnel` -- list active tunnels
 - [x] `DELETE /api/v1/admin/compute-targets/{id}/tunnel/{tid}` -- close tunnel (SIGTERM to `ssh -N` process)
+- [x] **M19.5-A (MEDIUM):** `agent.name` validated against `[a-zA-Z0-9._-]{1,63}` -- shell metacharacters rejected with 400; SSH+container spawn uses direct docker arg array instead of `sh -c` to prevent command injection (PR #278)
 
 ---
 
@@ -82,3 +83,4 @@ Wire Docker/Podman as a first-class compute target for agent workloads, with har
 | G7: procfs agent monitor | LOW | Closed -- procfs polling every 5s on Linux |
 | G10: workload attestation | LOW | Closed -- JWT claims + `/workload` endpoint |
 | G12: SSH tunnel support | -- | Closed -- forward/reverse tunnel API |
+| M19.5-A: shell injection in SSH+container spawn | MEDIUM | Closed -- `agent.name` validated against `[a-zA-Z0-9._-]{1,63}`; direct docker arg array replaces `sh -c` (PR #278) |
