@@ -141,6 +141,7 @@ mod tests {
             audit_broadcast_tx: base.audit_broadcast_tx.clone(),
             compute_targets: base.compute_targets.clone(),
             network_peers: base.network_peers.clone(),
+            dependencies: base.dependencies.clone(),
             event_tx: base.event_tx.clone(),
             process_registry: base.process_registry.clone(),
             agent_logs: base.agent_logs.clone(),
