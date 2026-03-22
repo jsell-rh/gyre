@@ -82,7 +82,7 @@
   }
 </script>
 
-<Modal bind:open={showNewTask} title={$t('tasks.new_task.title')}>
+<Modal bind:open={showNewTask} title={$t('tasks.new_task.title')} onsubmit={createTask}>
   <div class="form">
     <label class="form-label">{$t('tasks.new_task.title_label')}
       <input class="form-input" bind:value={taskTitle} placeholder={$t('tasks.new_task.title_placeholder')} />
