@@ -9,6 +9,7 @@ pub enum ApiError {
     NotFound(String),
     InvalidInput(String),
     Forbidden(String),
+    TooManyRequests(String),
     Internal(anyhow::Error),
 }
 
@@ -24,6 +25,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+            ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
             ApiError::Internal(err) => {
                 tracing::error!("internal error: {err:#}");
                 (

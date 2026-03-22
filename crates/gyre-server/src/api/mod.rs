@@ -8,6 +8,7 @@ pub mod aibom;
 pub mod analytics;
 pub mod audit;
 pub mod auth;
+pub mod budget;
 pub mod code_awareness;
 pub mod compose;
 pub mod compute;
@@ -390,6 +391,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/federation/trusted-issuers",
             get(federation::list_trusted_issuers),
         )
+        // Budget governance (M22.2)
+        .route(
+            "/api/v1/workspaces/:id/budget",
+            get(budget::get_workspace_budget).put(budget::set_workspace_budget),
+        )
+        .route("/api/v1/budget/summary", get(budget::budget_summary))
 }
 
 pub(crate) fn now_secs() -> u64 {
