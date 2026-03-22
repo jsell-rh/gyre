@@ -612,8 +612,36 @@ The release process creates artifacts but doesn't deploy them:
 ## Relationship to Existing Specs
 
 - **Platform Model** (`platform-model.md`): users belong to tenants, access workspaces through membership. This spec defines the membership model.
-- **Identity & Security** (`identity-security.md`): SSO provides the external_id, email, and initial profile. This spec defines what Gyre does with that identity beyond auth.
+- **Identity & Security** (`identity-security.md`): SSO provides the external_id, email, and initial profile. This spec defines what Gyre does with that identity beyond auth. **SCIM 2.0 provisioning** (the `/scim/v2/*` endpoint stubs, schema, and group-to-workspace mapping) is specified in `identity-security.md` — user-management.md covers the Gyre-side user model that SCIM populates.
 - **Spec Registry** (`spec-registry.md`): spec approvers are users. Notifications route approval requests to the right humans.
 - **Agent Gates** (`agent-gates.md`): gate failures notify the MR author's spawning user.
 - **Resource Governance** (`platform-model.md` section 5): budget warnings/exhaustion notify workspace admins.
 - **Admin Panel** (`admin-panel.md`): user management and session management are admin panel features.
+
+## Completeness Assessment (M22.8 Baseline)
+
+As of M22, the following user management features are **implemented**:
+
+| Feature | Status |
+|---|---|
+| `GET/PUT /api/v1/users/me` — profile + preferences | ✅ Implemented |
+| `GET /api/v1/users/me/{agents,tasks,mrs}` — "my stuff" | ✅ Implemented |
+| `GET /api/v1/users/me/notifications` — notification list | ✅ Implemented |
+| `PUT /api/v1/users/me/notifications/{id}/read` — mark read | ✅ Implemented |
+| `POST/GET /api/v1/workspaces/{id}/members` — invite + list | ✅ Implemented |
+| `PUT/DELETE /api/v1/workspaces/{id}/members/{user_id}` — role change + remove | ✅ Implemented |
+| `POST/GET /api/v1/workspaces/{id}/teams` — create + list | ✅ Implemented |
+| `PUT/DELETE /api/v1/workspaces/{id}/teams/{team_id}` — update + delete | ✅ Implemented |
+
+The following features are **not yet implemented** (future milestones):
+
+| Feature | Gap |
+|---|---|
+| SCIM 2.0 provisioning endpoints (`/scim/v2/*`) | Spec in `identity-security.md`; no implementation |
+| Tenant invitation flow (`POST /api/v1/tenant/invite`) | Specced above; not yet implemented |
+| Session management (`GET/DELETE /api/v1/users/me/sessions`) | Specced above; not yet implemented |
+| Notification channels (email digest, Slack webhook) | Spec complete; backend delivery not implemented |
+| User profile pages (`/@username`) | Specced; UI not built |
+| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | Specced; not yet implemented |
+| User deactivation (`PUT /api/v1/users/{id}/deactivate`) | Specced; not yet implemented |
+| Impersonation | Specced in `identity-security.md`; not yet implemented |

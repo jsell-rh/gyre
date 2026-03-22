@@ -1,6 +1,6 @@
 # Spec Registry
 
-> **Status: Design** — This spec describes planned functionality. `specs/manifest.yaml` and the forge ledger are not yet implemented. `specs/index.md` is still hand-maintained.
+> **Status: Implemented (M21)** — The forge spec ledger (`spec_registry` + `spec_approvals` tables), all `GET/POST /api/v1/specs/*` endpoints, spec link graph, and Spec Dashboard UI are live. `specs/manifest.yaml` is not yet enforced server-side (push rejection for unregistered spec files is future work). `specs/index.md` is still hand-maintained but can be regenerated via `GET /api/v1/specs/index`.
 
 ## Problem
 
