@@ -126,7 +126,7 @@
   {/if}
 </div>
 
-<Modal bind:open={createOpen} title="New Persona" size="md">
+<Modal bind:open={createOpen} title="New Persona" size="md" onsubmit={create}>
   <div class="create-form">
     <label class="field-label">Name *
       <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Developer" />

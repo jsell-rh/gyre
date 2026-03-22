@@ -113,7 +113,7 @@
   }
 </script>
 
-<Modal bind:open={showNewProject} title="New Project">
+<Modal bind:open={showNewProject} title="New Project" onsubmit={createProject}>
   <div class="form">
     <label class="form-label">Name
       <input class="form-input" bind:value={projName} placeholder="my-project" />
@@ -130,7 +130,7 @@
   {/snippet}
 </Modal>
 
-<Modal bind:open={showAddRepo} title="Add Repository">
+<Modal bind:open={showAddRepo} title="Add Repository" onsubmit={addRepo}>
   <div class="form">
     <label class="form-label">Repository Name
       <input class="form-input" bind:value={repoName} placeholder="my-repo" />
@@ -147,7 +147,7 @@
   {/snippet}
 </Modal>
 
-<Modal bind:open={showMirrorRepo} title="Mirror Repository">
+<Modal bind:open={showMirrorRepo} title="Mirror Repository" onsubmit={addMirrorRepo}>
   <div class="form">
     <label class="form-label">Repository Name
       <input class="form-input" bind:value={mirrorName} placeholder="my-mirror" />

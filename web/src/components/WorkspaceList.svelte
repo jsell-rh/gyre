@@ -83,7 +83,7 @@
   {/if}
 </div>
 
-<Modal bind:open={createOpen} title="New Workspace" size="sm">
+<Modal bind:open={createOpen} title="New Workspace" size="sm" onsubmit={create}>
   <div class="create-form">
     <label class="field-label">Name *
       <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Team" onkeydown={(e) => e.key === 'Enter' && create()} />
