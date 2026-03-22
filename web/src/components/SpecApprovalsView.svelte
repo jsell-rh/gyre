@@ -171,7 +171,7 @@
 </div>
 
 <!-- Approve Modal -->
-<Modal bind:open={showApprove} title="Approve Spec" size="sm">
+<Modal bind:open={showApprove} title="Approve Spec" size="sm" onsubmit={doApprove}>
   <div class="modal-form">
     <label class="field-label" for="approve-path">Spec Path</label>
     <input
@@ -202,7 +202,7 @@
 </Modal>
 
 <!-- Revoke Modal -->
-<Modal bind:open={showRevoke} title="Revoke Approval" size="sm">
+<Modal bind:open={showRevoke} title="Revoke Approval" size="sm" onsubmit={doRevoke}>
   <div class="modal-form">
     <label class="field-label" for="revoke-reason">Reason</label>
     <textarea
