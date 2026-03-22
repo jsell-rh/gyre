@@ -195,7 +195,10 @@
       aria-modal="true"
       tabindex="-1"
       aria-label="Spawn Agent"
-      onkeydown={(e) => { if (e.key === 'Escape') closeSpawnModal(); }}
+      onkeydown={(e) => {
+        if (e.key === 'Escape') { closeSpawnModal(); return; }
+        if (e.key === 'Enter' && !spawnResult && e.target.tagName !== 'SELECT') doSpawn();
+      }}
     >
         <h3>Spawn Agent</h3>
         {#if spawnResult}

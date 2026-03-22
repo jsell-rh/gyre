@@ -4,6 +4,7 @@
     title = '',
     size = 'md',
     onclose = undefined,
+    onsubmit = undefined,
     children,
     footer = undefined,
   } = $props();
@@ -20,6 +21,12 @@
   function onkeydown(e) {
     if (e.key === 'Escape') {
       close();
+      return;
+    }
+    // Enter submits if an onsubmit handler is provided (skip textarea and select)
+    if (e.key === 'Enter' && onsubmit && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
+      e.preventDefault();
+      onsubmit();
       return;
     }
     // Focus trap: keep Tab within modal
