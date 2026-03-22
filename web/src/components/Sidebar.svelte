@@ -7,30 +7,36 @@
     {
       label: 'Overview',
       items: [
-        { id: 'dashboard', label: 'Dashboard', icon: dashboardIcon() },
-        { id: 'activity',  label: 'Activity',  icon: activityIcon() },
+        { id: 'dashboard',   label: 'Dashboard',  icon: dashboardIcon() },
+        { id: 'activity',    label: 'Activity',   icon: activityIcon() },
+        { id: 'workspaces',  label: 'Workspaces', icon: workspacesIcon() },
+        { id: 'profile',     label: 'My Profile', icon: profileIcon() },
       ],
     },
     {
       label: 'Source Control',
       items: [
-        { id: 'projects',    label: 'Projects',    icon: projectsIcon() },
-        { id: 'specs',       label: 'Specs',       icon: specRegistryIcon() },
-        { id: 'merge-queue', label: 'Merge Queue', icon: queueIcon() },
+        { id: 'projects',      label: 'Projects',      icon: projectsIcon() },
+        { id: 'specs',         label: 'Specs',          icon: specRegistryIcon() },
+        { id: 'spec-graph',    label: 'Spec Graph',     icon: graphIcon() },
+        { id: 'dependencies',  label: 'Dependencies',   icon: dependenciesIcon() },
+        { id: 'merge-queue',   label: 'Merge Queue',    icon: queueIcon() },
       ],
     },
     {
       label: 'Agents',
       items: [
-        { id: 'agents',  label: 'Agents',  icon: agentsIcon() },
-        { id: 'tasks',   label: 'Tasks',   icon: tasksIcon() },
-        { id: 'compose', label: 'Compose', icon: composeIcon() },
+        { id: 'agents',   label: 'Agents',   icon: agentsIcon() },
+        { id: 'tasks',    label: 'Tasks',    icon: tasksIcon() },
+        { id: 'personas', label: 'Personas', icon: personasIcon() },
+        { id: 'compose',  label: 'Compose',  icon: composeIcon() },
       ],
     },
     {
       label: 'Operations',
       items: [
-        { id: 'analytics',      label: 'Analytics',     icon: analyticsIcon() },
+        { id: 'budget',         label: 'Budget',         icon: budgetIcon() },
+        { id: 'analytics',      label: 'Analytics',      icon: analyticsIcon() },
         { id: 'costs',          label: 'Costs',          icon: costsIcon() },
         { id: 'audit',          label: 'Audit',          icon: auditIcon() },
         { id: 'spec-approvals', label: 'Spec Approvals', icon: specIcon() },
@@ -49,6 +55,9 @@
   function isActive(id) {
     if (id === 'projects') {
       return current === 'projects' || current === 'repo-detail' || current === 'mr-detail';
+    }
+    if (id === 'workspaces') {
+      return current === 'workspaces' || current === 'workspace-detail';
     }
     return current === id;
   }
@@ -69,6 +78,12 @@
   function auditIcon()      { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>'; }
   function specIcon()       { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>'; }
   function specRegistryIcon() { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/><path d="M13 13h4"/><path d="M13 17h4"/></svg>'; }
+  function workspacesIcon()   { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><path d="M12 12v4"/><path d="M8 12h8"/></svg>'; }
+  function profileIcon()      { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>'; }
+  function graphIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h10M17 7l-10 4M17 17L7 13"/></svg>'; }
+  function dependenciesIcon() { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M9 6h6M7.5 8.5l3 7M16.5 8.5l-3 7"/></svg>'; }
+  function personasIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>'; }
+  function budgetIcon()       { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/><circle cx="12" cy="15" r="2"/></svg>'; }
 </script>
 
 <nav class="sidebar" class:collapsed aria-label="Main navigation">

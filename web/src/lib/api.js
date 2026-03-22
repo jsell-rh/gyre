@@ -277,4 +277,46 @@ export const api = {
     params.set('limit', String(limit));
     return request(`/search?${params.toString()}`);
   },
+  // Spec graph (M22.3)
+  specsGraph: () => request('/specs/graph'),
+  // Workspaces (M22.5)
+  workspaces: () => request('/workspaces'),
+  workspace: (id) => request(`/workspaces/${id}`),
+  createWorkspace: (data) =>
+    request('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
+  workspaceBudget: (id) => request(`/workspaces/${id}/budget`),
+  setWorkspaceBudget: (id, data) =>
+    request(`/workspaces/${id}/budget`, { method: 'PUT', body: JSON.stringify(data) }),
+  budgetSummary: () => request('/budget/summary'),
+  workspaceRepos: (id) => request(`/workspaces/${id}/repos`),
+  workspaceMembers: (id) => request(`/workspaces/${id}/members`),
+  workspaceTeams: (id) => request(`/workspaces/${id}/teams`),
+  addWorkspaceMember: (id, data) =>
+    request(`/workspaces/${id}/members`, { method: 'POST', body: JSON.stringify(data) }),
+  removeWorkspaceMember: (id, userId) =>
+    request(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
+  // Personas (M22.5)
+  personas: () => request('/personas'),
+  persona: (id) => request(`/personas/${id}`),
+  createPersona: (data) =>
+    request('/personas', { method: 'POST', body: JSON.stringify(data) }),
+  updatePersona: (id, data) =>
+    request(`/personas/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deletePersona: (id) =>
+    request(`/personas/${id}`, { method: 'DELETE' }),
+  // Dependency graph (M22.5)
+  dependencyGraph: () => request('/dependencies/graph'),
+  repoDependencies: (id) => request(`/repos/${id}/dependencies`),
+  repoDependents: (id) => request(`/repos/${id}/dependents`),
+  repoBlastRadius: (id) => request(`/repos/${id}/blast-radius`),
+  // User profile (M22.5)
+  me: () => request('/users/me'),
+  updateMe: (data) =>
+    request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
+  myAgents: () => request('/users/me/agents'),
+  myTasks: () => request('/users/me/tasks'),
+  myMrs: () => request('/users/me/mrs'),
+  myNotifications: () => request('/users/me/notifications'),
+  markNotificationRead: (id) =>
+    request(`/users/me/notifications/${id}/read`, { method: 'POST' }),
 };
