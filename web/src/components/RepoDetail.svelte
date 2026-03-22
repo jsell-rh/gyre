@@ -63,11 +63,11 @@
   let gatesError = $state(null);
   let showGateForm = $state(false);
   let newGateName = $state('');
-  let newGateType = $state('TestCommand');
+  let newGateType = $state('test_command');
   let newGateCmd = $state('');
   let creatingGate = $state(false);
   let deletingGateId = $state(null);
-  const GATE_TYPES = ['TestCommand', 'LintCommand', 'AgentReview', 'AgentValidation', 'RequiredApprovals'];
+  const GATE_TYPES = ['test_command', 'lint_command', 'agent_review', 'agent_validation', 'required_approvals'];
   const BUILTIN_PUSH_GATES = ['ConventionalCommit', 'TaskRef', 'NoEmDash'];
 
   const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
@@ -325,7 +325,7 @@
       const gate = await api.createRepoGate(repo.id, body);
       gates = [...gates, gate];
       newGateName = '';
-      newGateType = 'TestCommand';
+      newGateType = 'test_command';
       newGateCmd = '';
       showGateForm = false;
       toastSuccess('Gate created.');
