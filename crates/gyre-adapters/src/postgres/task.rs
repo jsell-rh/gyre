@@ -67,6 +67,7 @@ struct TaskRow {
     updated_at: i64,
     #[allow(dead_code)]
     tenant_id: String,
+    workspace_id: Option<String>,
 }
 
 impl TaskRow {
@@ -85,6 +86,7 @@ impl TaskRow {
             pr_link: self.pr_link,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
+            workspace_id: self.workspace_id.map(Id::new),
         })
     }
 }
@@ -105,6 +107,7 @@ struct NewTaskRow<'a> {
     created_at: i64,
     updated_at: i64,
     tenant_id: &'a str,
+    workspace_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -130,6 +133,7 @@ impl TaskRepository for PgStorage {
                 created_at: t.created_at as i64,
                 updated_at: t.updated_at as i64,
                 tenant_id: &tenant,
+                workspace_id: t.workspace_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -146,6 +150,7 @@ impl TaskRepository for PgStorage {
                     tasks::branch.eq(row.branch),
                     tasks::pr_link.eq(row.pr_link),
                     tasks::updated_at.eq(row.updated_at),
+                    tasks::workspace_id.eq(row.workspace_id),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -260,6 +265,7 @@ impl TaskRepository for PgStorage {
                 tasks::branch.eq(t.branch.as_deref()),
                 tasks::pr_link.eq(t.pr_link.as_deref()),
                 tasks::updated_at.eq(t.updated_at as i64),
+                tasks::workspace_id.eq(t.workspace_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)
             .context("update task")?;
@@ -285,4 +291,21 @@ impl TaskRepository for PgStorage {
         })
         .await?
     }
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Task>> {
+        let pool = Arc::clone(&self.pool);
+        let workspace_id = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
+                .filter(tasks::workspace_id.eq(workspace_id.as_str()))
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks by workspace")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
+        })
+        .await?
+    }
+
 }

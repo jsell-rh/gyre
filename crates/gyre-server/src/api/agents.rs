@@ -24,6 +24,7 @@ pub struct CreateAgentRequest {
 #[derive(Deserialize)]
 pub struct ListAgentsQuery {
     pub status: Option<String>,
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,7 +123,9 @@ pub async fn list_agents(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListAgentsQuery>,
 ) -> Result<Json<Vec<AgentResponse>>, ApiError> {
-    let agents = if let Some(status_str) = params.status {
+    let agents = if let Some(ws_id) = params.workspace_id {
+        state.agents.list_by_workspace(&Id::new(ws_id)).await?
+    } else if let Some(status_str) = params.status {
         let status = parse_agent_status(&status_str)?;
         state.agents.list_by_status(&status).await?
     } else {

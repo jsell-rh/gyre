@@ -46,6 +46,7 @@ pub struct ListTasksQuery {
     pub status: Option<String>,
     pub assigned_to: Option<String>,
     pub parent_task_id: Option<String>,
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -164,14 +165,18 @@ pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListTasksQuery>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiError> {
-    let tasks = match (params.status, params.assigned_to, params.parent_task_id) {
-        (Some(status_str), _, _) => {
-            let status = parse_task_status(&status_str)?;
-            state.tasks.list_by_status(&status).await?
+    let tasks = if let Some(ws_id) = params.workspace_id {
+        state.tasks.list_by_workspace(&Id::new(ws_id)).await?
+    } else {
+        match (params.status, params.assigned_to, params.parent_task_id) {
+            (Some(status_str), _, _) => {
+                let status = parse_task_status(&status_str)?;
+                state.tasks.list_by_status(&status).await?
+            }
+            (_, Some(agent_id), _) => state.tasks.list_by_assignee(&Id::new(agent_id)).await?,
+            (_, _, Some(parent_id)) => state.tasks.list_by_parent(&Id::new(parent_id)).await?,
+            _ => state.tasks.list().await?,
         }
-        (_, Some(agent_id), _) => state.tasks.list_by_assignee(&Id::new(agent_id)).await?,
-        (_, _, Some(parent_id)) => state.tasks.list_by_parent(&Id::new(parent_id)).await?,
-        _ => state.tasks.list().await?,
     };
     Ok(Json(tasks.into_iter().map(TaskResponse::from).collect()))
 }
