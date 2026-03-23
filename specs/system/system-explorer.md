@@ -16,6 +16,62 @@ Code is an act of learning as much as it is an application of learning. When age
 
 The System Explorer makes the realized system the primary object of interaction. Specs are handles on the code — you read them to understand intent, you see their implementations to understand realization, and you edit them to direct change. The spec and its realization are always visible together.
 
+## Why This Is the Centerpiece
+
+### Structure Is the Moat
+
+Models are commoditized. Every company has access to the same LLMs. If you feed specs to agents and accept whatever structure they produce, you have zero structural differentiation — your competitors can produce identical code from identical models.
+
+The differentiation is in **human understanding of structure**. Good structure is a function of the problem itself — you discover it by building, seeing the result, recognizing what works, and encoding that recognition. These domain-specific structural insights are not in any model. They're accumulated through iteration: each cycle of discover → encode → enforce widens the gap.
+
+- **Company A** rapidly churns out code and iterates on specs. Understands behavior well. Has little understanding of specific structure; only generic patterns. Structure drifts with every model update. Fragile.
+- **Company B** rapidly churns out code and iterates on specs AND structure. Understands behavior AND structure. Encodes structural insights into specs and meta-specs. Each cycle makes the next one cheaper and better. Durable.
+
+Company B vastly outperforms Company A over time because its meta-spec corpus — the accumulated, domain-specific structural knowledge — is a compounding asset. Company A's heavy outsourcing of structure to undifferentiated LLMs produces undifferentiated systems.
+
+### Structure Is Discovered, Not Prescribed
+
+You cannot define good structure up front. Generic principles (hexagonal architecture, DDD, CQRS) are reasonable starting points, but "the right decomposition for this specific problem domain" emerges from building. Good structure is a function of the problem, and you only understand the problem by seeing what the code reveals about it.
+
+The System Explorer exists to accelerate this discovery. The loop:
+
+```
+Start with generic principles (meta-specs)
+  → Agents produce code
+    → Human explores realized model, sees actual structure
+      → Human recognizes: "this works" or "this is wrong"
+        → Human encodes that recognition into a spec or meta-spec
+          → System enforces going forward + reconciles
+            → Agents produce better-structured code
+              → Human sees new structure, learns more → ...
+```
+
+The system doesn't guarantee good structure. It **accelerates the discovery of good structure** by making the feedback loop fast:
+
+- **Discover**: the realized model shows you structure you didn't write
+- **Encode**: specs and meta-specs capture structural insights
+- **Enforce**: gates, assertions, and reconciliation guarantee adherence
+
+Each cycle compounds. The meta-spec corpus grows. The structural moat widens.
+
+### The Right Abstraction Level
+
+When humans stop caring about code syntax — method bodies, variable names, formatting — what remains is the **essential design**: interfaces exposed by boundaries, data shapes that cross them, integration points, behavioral contracts. This is what the explorer shows.
+
+This is analogous to the transition from assembly to higher-level languages. You don't review JIT machine code. You shouldn't review method-level syntax either. The explorer presents code at the abstraction level where human judgment adds value: interfaces, boundaries, data, and integration. Implementation detail is a drill-down, not the default view.
+
+### Three Lenses
+
+The realized system can be viewed through three complementary lenses:
+
+| Lens | What It Shows | Why It Matters |
+|---|---|---|
+| **Structural** | Interfaces, boundaries, data shapes, dependencies | The essential design decisions. What can change independently? What's coupled? |
+| **Evaluative** | Test results, gate outcomes, spec assertion status | Evidence of correctness. Proof that the structure produces correct behavior. |
+| **Observable** | SLIs, error rates, latency, throughput per endpoint | How structure manifests at runtime. Is the design actually working in production? |
+
+The structural lens is the default. The evaluative lens overlays evidence on the structure. The observable lens (future work — requires production integration) closes the loop between "what we built" and "how it performs."
+
 ## Design
 
 ### 1. The Navigable Architecture
@@ -29,21 +85,26 @@ The default view when entering a workspace is the **realized architecture** — 
 | Acme Corp > Payments > payment-api          [scope breadcrumb]   |
 +------------------------------------------------------------------+
 |          |                                                        |
-| Sidebar  |  Architecture Canvas                                  |
+| Sidebar  |  Architecture Canvas (default: boundaries + interfaces)|
 |          |                                                        |
-| Modules  |  ┌─────────────┐    ┌──────────────┐                 |
-| ▸ domain |  │  api/       │───>│  domain/     │                  |
-| ▸ api    |  │  handlers   │    │  task.rs     │                  |
-| ▸ adapters| │  routes     │    │  agent.rs    │                  |
-|          |  └─────────────┘    │  merge.rs    │                  |
-| Types    |         │           └──────────────┘                  |
-| ▸ Task   |         │                  │                          |
-| ▸ Agent  |         v                  v                          |
-| ▸ MR     |  ┌─────────────┐    ┌──────────────┐                 |
-|          |  │  ports/     │    │  adapters/   │                  |
-| Specs    |  │  TaskPort   │<───│  SqliteTask  │                  |
-| ▸ search |  │  AgentPort  │    │  SqliteAgent │                  |
-| ▸ auth   |  └─────────────┘    └──────────────┘                 |
+| Boundaries| ┌─────────────────────────────────────────────┐       |
+| ▸ api    |  │  API Boundary                               │       |
+| ▸ domain |  │  POST /agents/spawn ─── POST /agents/complete│      |
+| ▸ ports  |  │  GET /tasks ─── PUT /tasks/{id}/status       │      |
+| ▸ adapters| └────────────────────┬────────────────────────┘       |
+|          |                       │ uses                            |
+| Interfaces|  ┌───────────────────▼──────────────────────┐         |
+| ▸ TaskPort|  │  Ports (interfaces)                       │         |
+| ▸ AgentPort| │  TaskPort: create, get, list, update      │         |
+| ▸ RepoPort|  │  AgentPort: create, get, list, spawn     │         |
+|          |  │  RepoPort: create, get, list, branches    │         |
+| Data     |  └────────────────────┬──────────────────────┘         |
+| ▸ Task   |                       │ implemented by                  |
+| ▸ Agent  |  ┌───────────────────▼──────────────────────┐         |
+|          |  │  Adapters                                  │         |
+| Specs    |  │  SqliteTaskRepo ── SqliteAgentRepo        │         |
+| ▸ search |  │  SqliteRepoRepo                           │         |
+| ▸ auth   |  └──────────────────────────────────────────┘         |
 |          |                                                        |
 |          |  [Timeline scrubber: ●────────────────────○ Mar 1-23] |
 +------------------------------------------------------------------+
@@ -51,7 +112,9 @@ The default view when entering a workspace is the **realized architecture** — 
 +------------------------------------------------------------------+
 ```
 
-The canvas is zoomable and pannable. Nodes are clustered by module/package. Edges show dependencies. Colors indicate spec coverage (green = governed by spec, amber = suggested link, red = no spec). Size indicates complexity or churn.
+The canvas is zoomable and pannable. The **default zoom level shows boundaries and interfaces** — the essential design. Types, functions, and implementation detail are visible on drill-down. This is the "higher level code" view: stop caring about method syntax, focus on what boundaries exist, what interfaces they expose, and what data crosses them.
+
+Colors indicate spec coverage (green = governed by spec, amber = suggested link, red = no spec). Size indicates complexity or churn. Lens toggle (top-right): Structural (default) / Evaluative (overlay test status + assertion results) / Observable (future: overlay runtime SLIs).
 
 #### Interaction Model
 
