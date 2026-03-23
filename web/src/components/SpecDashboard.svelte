@@ -9,10 +9,14 @@
   import Tabs from '../lib/Tabs.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
+  let { repoId = '' } = $props();
+
   let specs = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let filterStatus = $state('all');
+  let filterRepo = $state('');
+  let repos = $state([]);
   let selected = $state(null);
   let detailTab = $state('info');
   let historyLoading = $state(false);
@@ -43,12 +47,30 @@
 
   $effect(() => { load(); });
 
+  // Sync repoId prop into filterRepo
+  $effect(() => { filterRepo = repoId || ''; });
+
+  // Fetch repos for the filter dropdown
+  $effect(() => {
+    api.allRepos().then((data) => { repos = Array.isArray(data) ? data : []; }).catch(() => {});
+  });
+
   const filtered = $derived(() => {
-    if (filterStatus === 'all') return specs;
-    if (filterStatus === 'approved') return specs.filter((s) => s.approval_status === 'approved');
-    if (filterStatus === 'pending') return specs.filter((s) => s.approval_status === 'pending');
-    if (filterStatus === 'drifted') return specs.filter((s) => s.drift_status === 'drifted');
-    return specs;
+    let result = specs;
+    // Apply repo filter (match by repo name or owner field)
+    if (filterRepo) {
+      const repo = repos.find(r => r.id === filterRepo);
+      if (repo) {
+        result = result.filter((s) =>
+          (s.owner ?? '').toLowerCase().includes(repo.name.toLowerCase()) ||
+          (s.path ?? '').toLowerCase().includes(repo.name.toLowerCase())
+        );
+      }
+    }
+    if (filterStatus === 'approved') return result.filter((s) => s.approval_status === 'approved');
+    if (filterStatus === 'pending') return result.filter((s) => s.approval_status === 'pending');
+    if (filterStatus === 'drifted') return result.filter((s) => s.drift_status === 'drifted');
+    return result;
   });
 
   const stats = $derived(() => ({
@@ -189,7 +211,7 @@
       </div>
     </div>
 
-    <!-- Filter pills -->
+    <!-- Filter bar: status pills + repo dropdown -->
     <div class="filter-bar">
       {#each filters as f}
         <button
@@ -200,6 +222,20 @@
           {f.charAt(0).toUpperCase() + f.slice(1)}
         </button>
       {/each}
+      {#if repos.length > 0}
+        <div class="repo-filter-wrap">
+          <select
+            class="repo-filter-select"
+            bind:value={filterRepo}
+            aria-label="Filter specs by repo"
+          >
+            <option value="">All Repos</option>
+            {#each repos as r}
+              <option value={r.id}>{r.name}</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
     </div>
 
     <!-- Table -->
@@ -553,6 +589,28 @@
     border-color: var(--color-primary);
     color: var(--color-primary);
     font-weight: 500;
+  }
+
+  .repo-filter-wrap {
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+  }
+
+  .repo-filter-select {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+    outline: none;
+  }
+
+  .repo-filter-select:focus {
+    border-color: var(--color-primary);
   }
 
   /* Table */
