@@ -124,11 +124,29 @@ pub async fn spawn_agent(
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
 
-    // JWT minting is deferred until after process spawn so workload claims
-    // (PID, hostname, compute target) can be embedded.  We declare `token`
-    // here and populate it below after the spawn block.
-    // Using a temporary placeholder that will be replaced before the function returns.
-    let token_placeholder = String::new();
+    // Pre-mint a JWT without workload claims so it can be injected into the
+    // container environment at spawn time.  After spawn we create the workload
+    // attestation record (stored in state.workload_attestations) which is
+    // queryable via GET /api/v1/agents/{id}/workload.
+    let token = state
+        .agent_signing_key
+        .mint(
+            &agent.id.to_string(),
+            &req.task_id,
+            &auth.agent_id,
+            &state.base_url,
+            state.agent_jwt_ttl_secs,
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
+            uuid::Uuid::new_v4().to_string()
+        });
+    // Store now so the container can authenticate immediately upon start.
+    state
+        .agent_tokens
+        .lock()
+        .await
+        .insert(agent.id.to_string(), token.clone());
 
     // Compute worktree path: {repo_path}/worktrees/{branch_slug}
     let branch_slug = req.branch.replace('/', "-");
@@ -254,13 +272,39 @@ pub async fn spawn_agent(
             ".".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
-        let command = "echo".to_string();
-        let args = vec![format!("Agent {} started", agent.id)];
+        // Use compute target's configured command, or fall back to /gyre/entrypoint.sh
+        let command = resolved_target_config
+            .as_ref()
+            .and_then(|cfg| cfg.config.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("/gyre/entrypoint.sh")
+            .to_string();
+        let args: Vec<String> = resolved_target_config
+            .as_ref()
+            .and_then(|cfg| cfg.config.get("args"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Inject agent context env vars so the container can bootstrap itself.
+        let mut container_env = std::collections::HashMap::new();
+        container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
+        container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
+        container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
+        container_env.insert("GYRE_BRANCH".to_string(), req.branch.clone());
+        container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
+        container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
+        container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
+
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
             command: command.clone(),
             args: args.clone(),
-            env: std::collections::HashMap::new(),
+            env: container_env.clone(),
             work_dir: effective_work_dir.clone(),
         };
 
@@ -273,9 +317,11 @@ pub async fn spawn_agent(
                     .to_string();
                 let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
                 // Apply optional config overrides from the stored target config.
-                if let Some(net) = cfg.config["network"].as_str() {
-                    ct = ct.with_network(net);
-                }
+                // Default to bridge networking for agent containers so they can
+                // reach the Gyre server; --network=none is preserved only when
+                // explicitly configured (e.g. for untrusted/gate containers).
+                let network = cfg.config["network"].as_str().unwrap_or("bridge");
+                ct = ct.with_network(network);
                 if let Some(mem) = cfg.config["memory_limit"].as_str() {
                     ct = ct.with_memory_limit(mem);
                 }
@@ -589,50 +635,15 @@ pub async fn spawn_agent(
             spawned_container_image.clone(),
         )
     };
-    let wl_hostname = Some(att.hostname.clone());
-    let wl_compute_target = Some(att.compute_target.clone());
-    let wl_stack_hash = if att.stack_fingerprint.is_empty() {
-        None
-    } else {
-        Some(att.stack_fingerprint.clone())
-    };
-    let wl_container_id = att.container_id.clone();
-    let wl_image_hash = att.image_hash.clone();
     state
         .workload_attestations
         .lock()
         .await
         .insert(agent.id.to_string(), att);
 
-    // Mint a signed EdDSA JWT as the agent's auth token (M18 + G10 + M19.4).
-    // Embeds workload attestation claims so external verifiers can reconstruct
-    // workload identity from the JWT alone without calling the server.
-    // Falls back to a UUID if JWT minting fails (defensive).
-    let _ = token_placeholder; // consumed
-    let token = state
-        .agent_signing_key
-        .mint_with_workload(
-            &agent.id.to_string(),
-            &task.id.to_string(),
-            &auth.agent_id,
-            &state.base_url,
-            state.agent_jwt_ttl_secs,
-            spawned_pid,
-            wl_hostname,
-            wl_compute_target,
-            wl_stack_hash,
-            wl_container_id,
-            wl_image_hash,
-        )
-        .unwrap_or_else(|e| {
-            tracing::error!("JWT minting failed, falling back to UUID token: {e}");
-            uuid::Uuid::new_v4().to_string()
-        });
-    state
-        .agent_tokens
-        .lock()
-        .await
-        .insert(agent.id.to_string(), token.clone());
+    // Token was pre-minted above and already stored in agent_tokens.
+    // Workload attestation claims are stored in state.workload_attestations
+    // and queryable via GET /api/v1/agents/{id}/workload.
 
     // Auto-track agent spawn
     let ev = AnalyticsEvent::new(
