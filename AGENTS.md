@@ -236,7 +236,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
-| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC) (Admin only) |
+| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
@@ -308,6 +308,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/audit/stats` | Audit event statistics and counts |
 | `POST/GET` | `/api/v1/network/peers` | Register / list WireGuard mesh peers |
 | `GET` | `/api/v1/network/peers/agent/{agent_id}` | Get peer record for a specific agent |
+| `PUT` | `/api/v1/network/peers/{id}` | Update peer endpoint (roaming): `{endpoint: "host:port"}` — JWT caller must own the peer (agent_id match); updates `last_seen` (M26.2) |
 | `DELETE` | `/api/v1/network/peers/{id}` | Remove a peer from the mesh |
 | `GET` | `/api/v1/network/derp-map` | Get DERP relay map for WireGuard coordination |
 
@@ -618,7 +619,7 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8765` | Routes Anthropic SDK calls through cred-proxy; raw API key never exposed to agent process (M27) |
 | `ANTHROPIC_API_KEY` | `proxy-managed` | Placeholder so Anthropic SDK initialises; cred-proxy injects the real `x-api-key` header per request (M27) |
 
-The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Node 22 Alpine + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or — if unset — `node /gyre/agent-runner.mjs` for fully autonomous operation. `agent-runner.mjs` connects to the Gyre MCP server, reads the assigned task, implements it, commits, pushes, and calls `gyre_agent_complete`. Build and register:
+The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Node 22 Alpine + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or — if unset — `node /gyre/agent-runner.mjs` for fully autonomous operation. `agent-runner.mjs` connects to the Gyre MCP server, reads the assigned task, implements it, commits, pushes, and calls `gyre_agent_complete`. **WireGuard mesh (M26):** `setup-wg.sh` in the same directory handles agent-side mesh setup — generates a Curve25519 keypair, registers the pubkey via `POST /api/v1/network/peers`, fetches the peer list, brings up the `wg0` interface with the allocated `mesh_ip`, and adds routes. Run it after clone and before `agent-runner.mjs` when `GYRE_WG_ENABLED=true`. The peer response includes `mesh_ip: Option<String>` (allocated from `GYRE_WG_CIDR` pool) and `is_stale: bool`. Build and register:
 ```bash
 docker build -t gyre-agent:latest docker/gyre-agent/
 
