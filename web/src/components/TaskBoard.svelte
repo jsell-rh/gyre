@@ -8,7 +8,7 @@
   import Button from '../lib/Button.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
-  let { onSelectTask = undefined } = $props();
+  let { onSelectTask = undefined, workspaceId = '' } = $props();
 
   let tasks = $state([]);
   let loading = $state(true);

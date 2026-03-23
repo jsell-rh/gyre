@@ -1,10 +1,13 @@
 <script>
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Tabs from '../lib/Tabs.svelte';
   import Button from '../lib/Button.svelte';
+
+  const navigate = getContext('navigate');
 
   let { task, onBack = undefined } = $props();
 
@@ -101,13 +104,25 @@
           {#if detail.assigned_to}
             <div class="info-row">
               <span class="info-label">Assigned To</span>
-              <span class="info-val mono">{detail.assigned_to}</span>
+              <span class="info-val mono">
+                {#if navigate}
+                  <button class="link-btn" onclick={() => navigate('agents')}>{detail.assigned_to}</button>
+                {:else}
+                  {detail.assigned_to}
+                {/if}
+              </span>
             </div>
           {/if}
           {#if detail.parent_task_id}
             <div class="info-row">
               <span class="info-label">Parent Task</span>
-              <span class="info-val mono">{detail.parent_task_id}</span>
+              <span class="info-val mono">
+                {#if navigate}
+                  <button class="link-btn" onclick={() => navigate('task-detail', { task: { id: detail.parent_task_id } })}>{detail.parent_task_id}</button>
+                {:else}
+                  {detail.parent_task_id}
+                {/if}
+              </span>
             </div>
           {/if}
           <div class="info-row">
@@ -327,4 +342,18 @@
   }
 
   .artifact-link:hover { text-decoration: underline; }
+
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .link-btn:hover { opacity: 0.8; }
 </style>
