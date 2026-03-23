@@ -11,8 +11,20 @@
   let createOpen = $state(false);
   let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
+  let scopeObjects = $state([]);
 
   $effect(() => { load(); });
+
+  $effect(() => {
+    if (form.scopeKind === 'Workspace') {
+      api.workspaces().then(data => { scopeObjects = Array.isArray(data) ? data : []; }).catch(() => { scopeObjects = []; });
+    } else if (form.scopeKind === 'Repo') {
+      api.allRepos().then(data => { scopeObjects = Array.isArray(data) ? data : []; }).catch(() => { scopeObjects = []; });
+    } else {
+      scopeObjects = [];
+    }
+    form.scopeId = '';
+  });
 
   async function load() {
     loading = true;
@@ -149,8 +161,20 @@
       </select>
     </label>
     <label class="field-label">Scope ID *
-      <input class="field-input" bind:value={form.scopeId} placeholder="UUID of the {form.scopeKind.toLowerCase()}" />
-      <span class="field-hint">Required UUID identifying the {form.scopeKind.toLowerCase()} this persona is scoped to.</span>
+      {#if scopeObjects.length > 0}
+        <select class="field-input" bind:value={form.scopeId}>
+          <option value="">— select {form.scopeKind.toLowerCase()} —</option>
+          {#each scopeObjects as obj}
+            <option value={obj.id}>{obj.name} ({obj.id.substring(0, 8)}…)</option>
+          {/each}
+        </select>
+      {:else}
+        <input class="field-input" bind:value={form.scopeId} placeholder="UUID of the {form.scopeKind.toLowerCase()}" />
+      {/if}
+      <span class="field-hint">
+        {#if form.scopeKind === 'Tenant'}Tenant scope applies globally. Enter a tenant UUID (or use "default").
+        {:else}Select or enter the UUID of the {form.scopeKind.toLowerCase()} this persona is scoped to.{/if}
+      </span>
     </label>
     <label class="field-label">Capabilities (comma-separated)
       <input class="field-input" bind:value={form.capabilities} placeholder="rust, api-design, code-review" />
