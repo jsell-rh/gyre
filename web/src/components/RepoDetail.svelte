@@ -67,7 +67,7 @@
   let creatingGate = $state(false);
   let deletingGateId = $state(null);
   const GATE_TYPES = ['TestCommand', 'LintCommand', 'AgentReview', 'AgentValidation', 'RequiredApprovals'];
-  const BUILTIN_PUSH_GATES = ['ConventionalCommit', 'TaskRef', 'NoEmDash'];
+  const BUILTIN_PUSH_GATES = ['conventional-commit', 'task-ref', 'no-em-dash'];
 
   const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
 
@@ -353,12 +353,12 @@
 
   async function togglePushGate(gateName) {
     if (!pushGates) return;
-    const active = pushGates.active_gates ?? [];
+    const active = pushGates.gates ?? pushGates.active_gates ?? [];
     const next = active.includes(gateName)
       ? active.filter(g => g !== gateName)
       : [...active, gateName];
     try {
-      pushGates = await api.setRepoPushGates(repo.id, { active_gates: next });
+      pushGates = await api.setRepoPushGates(repo.id, { gates: next });
       toastSuccess('Push gates updated.');
     } catch (e) {
       toastError(e.message);
@@ -751,7 +751,7 @@
           </div>
           <div class="push-gates-list">
             {#each BUILTIN_PUSH_GATES as gateName (gateName)}
-              {@const active = (pushGates.active_gates ?? []).includes(gateName)}
+              {@const active = (pushGates.gates ?? pushGates.active_gates ?? []).includes(gateName)}
               <label class="push-gate-toggle">
                 <input
                   type="checkbox"
