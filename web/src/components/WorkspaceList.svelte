@@ -30,7 +30,8 @@
     if (!form.name.trim()) return;
     saving = true;
     try {
-      await api.createWorkspace(form);
+      const slug = form.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      await api.createWorkspace({ ...form, tenant_id: 'default', slug });
       showToast('Workspace created', { type: 'success' });
       createOpen = false;
       form = { name: '', description: '' };

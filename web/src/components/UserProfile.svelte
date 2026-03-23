@@ -46,11 +46,11 @@
           locale: me.locale ?? '',
         };
       }
-      if (agR.status === 'fulfilled') agents = agR.value ?? [];
-      if (tkR.status === 'fulfilled') tasks = tkR.value ?? [];
-      if (mrR.status === 'fulfilled') mrs = mrR.value ?? [];
+      if (agR.status === 'fulfilled') agents = agR.value?.agents ?? agR.value ?? [];
+      if (tkR.status === 'fulfilled') tasks = tkR.value?.tasks ?? tkR.value ?? [];
+      if (mrR.status === 'fulfilled') mrs = mrR.value?.merge_requests ?? mrR.value ?? [];
       if (ntR.status === 'fulfilled') {
-        notifications = ntR.value ?? [];
+        notifications = ntR.value?.notifications ?? ntR.value ?? [];
         unread = notifications.filter(n => !n.read).length;
       }
     } catch (e) {
