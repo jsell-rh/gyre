@@ -180,6 +180,7 @@ mod tests {
             teams: base.teams.clone(),
             notifications: base.notifications.clone(),
             wg_config: base.wg_config.clone(),
+            graph_store: base.graph_store.clone(),
         });
         crate::build_router(state)
     }

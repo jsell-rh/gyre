@@ -161,7 +161,8 @@ pub async fn spawn_agent(
         .await
     {
         let msg = e.to_string();
-        if msg.contains("not a valid object") || msg.contains("bad default revision") {
+        let msg_lc = msg.to_lowercase();
+        if msg_lc.contains("not a valid object") || msg_lc.contains("bad default revision") {
             return Err(ApiError::InvalidInput(format!(
                 "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
                 req.branch
@@ -494,7 +495,13 @@ pub async fn spawn_agent(
                         spawned_pid = None;
                         spawned_container_id = None;
                         spawned_container_image = None;
-                        tracing::warn!(agent_id = %agent.id, "container spawn failed (best-effort): {e}");
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "container spawn failed (best-effort): {e}. \
+                            If the image is missing, build it first: \
+                            `docker build -t gyre-agent:latest docker/gyre-agent/`. \
+                            Then restart the server with GYRE_AGENT_CREDENTIALS set."
+                        );
                     }
                 }
             }
