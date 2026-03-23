@@ -73,7 +73,12 @@
       .catch((err) => { error = err.message; loading = false; });
     api.allRepos().then((data) => { repos = data; }).catch(() => {});
     api.tasks().then((data) => { tasks = data; }).catch(() => {});
-    api.computeList().then((data) => { computeTargets = Array.isArray(data) ? data : []; }).catch(() => {});
+    api.computeList().then((data) => {
+      computeTargets = Array.isArray(data) ? data : [];
+      // M25: pre-select the default Claude Code runner target if it exists
+      const defaultTarget = computeTargets.find(ct => ct.name === 'gyre-agent-default');
+      if (defaultTarget && !spawnComputeTarget) spawnComputeTarget = defaultTarget.id;
+    }).catch(() => {});
   });
 
   $effect(() => {

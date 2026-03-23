@@ -1,13 +1,15 @@
-FROM ubuntu:22.04
+FROM node:18-alpine
 
-RUN apt-get update && apt-get install -y \
-    git curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache git bash curl ca-certificates
 
-# Create workspace directory
+# Install Claude Agent SDK globally
+RUN npm install -g @anthropic-ai/claude-agent-sdk
+
+# Create workspace and gyre directories
 RUN mkdir -p /gyre /workspace
 
-# Copy entrypoint script
+# Copy agent runner script and entrypoint
+COPY agent-runner.mjs /gyre/agent-runner.mjs
 COPY entrypoint.sh /gyre/entrypoint.sh
 RUN chmod +x /gyre/entrypoint.sh
 
