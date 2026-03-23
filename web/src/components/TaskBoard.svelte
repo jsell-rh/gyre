@@ -75,7 +75,7 @@
       showNewTask = false;
       taskTitle = ''; taskDesc = ''; taskPriority = 'Medium'; taskStatus = 'backlog';
       loading = true;
-      await loadTasks();
+      await loadTasks(workspaceId);
     } catch (e) {
       toastError(e.message);
     }

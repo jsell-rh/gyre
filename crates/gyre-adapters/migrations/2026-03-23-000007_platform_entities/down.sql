@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS budget_configs;
+DROP TABLE IF EXISTS dependency_edges;
+DROP TABLE IF EXISTS spec_approvals;
+DROP TABLE IF EXISTS policy_decisions;
+DROP TABLE IF EXISTS policies;
+DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS workspace_memberships;
+DROP TABLE IF EXISTS teams;
+DROP TABLE IF EXISTS personas;
+DROP TABLE IF EXISTS workspaces;

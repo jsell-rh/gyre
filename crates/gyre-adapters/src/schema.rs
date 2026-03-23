@@ -248,6 +248,156 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    workspaces (id) {
+        id -> Text,
+        tenant_id -> Text,
+        name -> Text,
+        slug -> Text,
+        description -> Nullable<Text>,
+        budget -> Nullable<Text>,
+        max_repos -> Nullable<Integer>,
+        max_agents_per_repo -> Nullable<Integer>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    personas (id) {
+        id -> Text,
+        name -> Text,
+        slug -> Text,
+        scope -> Text,
+        system_prompt -> Text,
+        capabilities -> Text,
+        protocols -> Text,
+        model -> Nullable<Text>,
+        temperature -> Nullable<Double>,
+        max_tokens -> Nullable<Integer>,
+        budget -> Nullable<Text>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    teams (id) {
+        id -> Text,
+        workspace_id -> Text,
+        name -> Text,
+        description -> Nullable<Text>,
+        member_ids -> Text,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    workspace_memberships (id) {
+        id -> Text,
+        user_id -> Text,
+        workspace_id -> Text,
+        role -> Text,
+        invited_by -> Text,
+        accepted -> Integer,
+        accepted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    notifications (id) {
+        id -> Text,
+        user_id -> Text,
+        notification_type -> Text,
+        title -> Text,
+        body -> Text,
+        entity_type -> Nullable<Text>,
+        entity_id -> Nullable<Text>,
+        priority -> Text,
+        action_url -> Nullable<Text>,
+        read -> Integer,
+        read_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    policies (id) {
+        id -> Text,
+        name -> Text,
+        description -> Text,
+        scope -> Text,
+        scope_id -> Nullable<Text>,
+        priority -> Integer,
+        effect -> Text,
+        conditions -> Text,
+        actions -> Text,
+        resource_types -> Text,
+        enabled -> Integer,
+        built_in -> Integer,
+        created_by -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    policy_decisions (request_id) {
+        request_id -> Text,
+        subject_id -> Text,
+        subject_type -> Text,
+        action -> Text,
+        resource_type -> Text,
+        resource_id -> Text,
+        decision -> Text,
+        matched_policy -> Nullable<Text>,
+        evaluated_policies -> Integer,
+        evaluation_ms -> Double,
+        evaluated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    spec_approvals (id) {
+        id -> Text,
+        spec_path -> Text,
+        spec_sha -> Text,
+        approver_id -> Text,
+        signature -> Nullable<Text>,
+        approved_at -> BigInt,
+        revoked_at -> Nullable<BigInt>,
+        revoked_by -> Nullable<Text>,
+        revocation_reason -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    dependency_edges (id) {
+        id -> Text,
+        source_repo_id -> Text,
+        target_repo_id -> Text,
+        dependency_type -> Text,
+        source_artifact -> Text,
+        target_artifact -> Text,
+        version_pinned -> Nullable<Text>,
+        version_drift -> Nullable<Integer>,
+        detection_method -> Text,
+        status -> Text,
+        detected_at -> BigInt,
+        last_verified_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    budget_configs (entity_key) {
+        entity_key -> Text,
+        max_tokens_per_day -> Nullable<BigInt>,
+        max_cost_per_day -> Nullable<Double>,
+        max_concurrent_agents -> Nullable<Integer>,
+        max_agent_lifetime_secs -> Nullable<BigInt>,
+        updated_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     projects,
     repositories,
@@ -268,4 +418,14 @@ diesel::allow_tables_to_appear_in_same_query!(
     network_peers,
     spawn_log,
     revoked_tokens,
+    workspaces,
+    personas,
+    teams,
+    workspace_memberships,
+    notifications,
+    policies,
+    policy_decisions,
+    spec_approvals,
+    dependency_edges,
+    budget_configs,
 );

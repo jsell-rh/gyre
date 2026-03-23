@@ -71,7 +71,7 @@
       showNewProject = false;
       projName = ''; projDesc = '';
       loading = true;
-      await loadProjects();
+      await loadProjects(workspaceId);
     } catch (e) {
       toastError(e.message);
     }
