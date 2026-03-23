@@ -300,6 +300,19 @@ pub async fn spawn_agent(
         container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
         container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
 
+        // M25: Inject operator-configured credentials (e.g. ANTHROPIC_API_KEY).
+        // Format: KEY1=VALUE1,KEY2=VALUE2  (values may contain '=' — split on first '=' only).
+        if let Ok(creds) = std::env::var("GYRE_AGENT_CREDENTIALS") {
+            for pair in creds.split(',') {
+                let pair = pair.trim();
+                if let Some((k, v)) = pair.split_once('=') {
+                    if !k.is_empty() {
+                        container_env.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
             command: command.clone(),
@@ -317,10 +330,10 @@ pub async fn spawn_agent(
                     .to_string();
                 let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
                 // Apply optional config overrides from the stored target config.
-                // Default to bridge networking for agent containers so they can
-                // reach the Gyre server; --network=none is preserved only when
-                // explicitly configured (e.g. for untrusted/gate containers).
-                let network = cfg.config["network"].as_str().unwrap_or("bridge");
+                // G8: default --network=none (secure). Compute target config
+                // must explicitly set "network": "bridge" for agents that
+                // need to reach the server (clone, heartbeat, complete).
+                let network = cfg.config["network"].as_str().unwrap_or("none");
                 ct = ct.with_network(network);
                 if let Some(mem) = cfg.config["memory_limit"].as_str() {
                     ct = ct.with_memory_limit(mem);

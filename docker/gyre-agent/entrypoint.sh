@@ -14,19 +14,23 @@ echo "Agent ID: $GYRE_AGENT_ID"
 echo "Server: $GYRE_SERVER_URL"
 echo "Branch: $GYRE_BRANCH"
 
-# Configure git credentials for Gyre server
-git config --global credential.helper '!f() { echo "password=$GYRE_AUTH_TOKEN"; }; f'
+# Configure git credentials via credential helper (avoids embedding
+# token in URLs, .git/config, or process listings).
+cat > /tmp/git-credential-gyre <<'CRED_EOF'
+#!/bin/bash
+echo "username=agent"
+echo "password=$GYRE_AUTH_TOKEN"
+CRED_EOF
+chmod +x /tmp/git-credential-gyre
+git config --global credential.helper '/tmp/git-credential-gyre'
 git config --global user.name "gyre-agent-$GYRE_AGENT_ID"
 git config --global user.email "agent-$GYRE_AGENT_ID@gyre.local"
 
-# Embed auth token in clone URL for git
-CLONE_URL_WITH_AUTH=$(echo "$GYRE_CLONE_URL" | sed "s|://|://agent:$GYRE_AUTH_TOKEN@|")
-
-# Clone the repository
+# Clone the repository (token provided via credential helper, not in URL)
 echo "Cloning $GYRE_CLONE_URL..."
-if ! git clone -b "$GYRE_BRANCH" "$CLONE_URL_WITH_AUTH" /workspace/repo 2>&1; then
+if ! git clone -b "$GYRE_BRANCH" "$GYRE_CLONE_URL" /workspace/repo 2>&1; then
     # Branch might not exist yet — clone default and create branch
-    git clone "$CLONE_URL_WITH_AUTH" /workspace/repo 2>&1
+    git clone "$GYRE_CLONE_URL" /workspace/repo 2>&1
     cd /workspace/repo
     git checkout -b "$GYRE_BRANCH"
 fi
@@ -40,14 +44,12 @@ curl -s -X PUT "$GYRE_SERVER_URL/api/v1/agents/$GYRE_AGENT_ID/heartbeat" \
     -d '{"pid": '"$$"'}' || true
 
 echo "=== Agent ready. Workspace: /workspace/repo ==="
-echo "=== Run your agent command or Claude Agent SDK here ==="
 
-# If GYRE_AGENT_COMMAND is set, run it
+# If GYRE_AGENT_COMMAND is set, run it (server-controlled, not user input)
 if [ -n "${GYRE_AGENT_COMMAND:-}" ]; then
-    eval "$GYRE_AGENT_COMMAND"
+    exec $GYRE_AGENT_COMMAND
 else
-    # Keep container alive for interactive/SDK use
-    echo "No GYRE_AGENT_COMMAND set. Container will stay alive for 1 hour."
-    echo "Connect via: docker exec -it <container_id> bash"
-    sleep 3600
+    # Default: run the Claude Agent SDK runner (M25 zero-config)
+    echo "Starting Claude agent runner..."
+    exec node /gyre/agent-runner.mjs
 fi

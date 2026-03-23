@@ -286,7 +286,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET/PUT` | `/api/v1/admin/retention` | List / update retention policies (Admin only) |
 | `POST/GET` | `/api/v1/admin/siem` | Create / list SIEM forwarding targets (Admin only) |
 | `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
-| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** `--network=none` (no outbound network — opt in via `network` field), `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). (Admin only) |
+| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** `--network=none` (default for all container types — G8 security invariant). Agent containers needing server access (clone/heartbeat/complete) must opt in via `"network": "bridge"` in the compute target config. Git credentials are passed via a credential helper script (not embedded in the clone URL). `GYRE_AGENT_COMMAND` is launched via `exec` (not `eval`) for a clean process tree. `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). `config` JSON also accepts `command` (entrypoint binary, default `/gyre/entrypoint.sh`) and `args` (argument list) to configure the container entrypoint. (Admin only, M24) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
 | `POST` | `/api/v1/admin/compute-targets/{id}/tunnel` | Open an SSH tunnel for a compute target: `{direction: "forward"|"reverse", local_port, remote_port, local_host?, remote_host?}` (`local_host` and `remote_host` default to `"localhost"`). Reverse tunnels (`-R`) let air-gapped agents dial out so the server can reach them through NAT. (G12, Admin only) |
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
@@ -599,6 +599,27 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 
 **Spec binding on MR create (M12.3):** `POST /api/v1/merge-requests` accepts an optional `spec_ref` field in the request body — a string of the form `"specs/system/agent-gates.md@<40-char-sha>"` — to cryptographically bind the MR to the spec version it implements. A `GateFailure` domain event is broadcast if an `AgentReview` or `AgentValidation` gate fails.
 
+**Container Agent Environment Variables (M24):** When spawning an agent into a container compute target, the server pre-mints the JWT (so it can be passed in at container start) and injects the following environment variables into the container:
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `GYRE_SERVER_URL` | Server base URL | API endpoint for heartbeat, complete, logs |
+| `GYRE_AUTH_TOKEN` | Pre-minted EdDSA JWT | Bearer token for all API calls — revoked on `complete` |
+| `GYRE_CLONE_URL` | Git Smart HTTP URL | Clone URL for the assigned repo |
+| `GYRE_BRANCH` | Branch name | Branch to clone and work on |
+| `GYRE_AGENT_ID` | Agent UUID | Identity for API calls |
+| `GYRE_TASK_ID` | Task UUID | Assigned task reference |
+| `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
+| `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
+
+The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Ubuntu 22.04 + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or sleeps for interactive use. Build and register:
+```bash
+docker build -t gyre-agent:latest docker/gyre-agent/
+# Then create a container compute target in the UI (Admin → Compute → Add) with type=container
+# Agent containers need bridge networking to reach server:
+# Set config: {"image": "gyre-agent:latest", "network": "bridge"}
+```
+
 **Custom git ref namespaces (M13.6):** The server writes refs into reserved namespaces on each lifecycle event:
 
 | Event | Ref written | Purpose |
@@ -665,7 +686,7 @@ The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
 **Navigation is path-based** — navigate directly to `/<view>` in the URL bar or click the sidebar. Valid view paths: `dashboard`, `activity`, `agents`, `tasks`, `projects`, `merge-queue`, `mcp-catalog`, `compose`, `analytics`, `costs`, `audit`, `spec-approvals`, `specs`, `admin`, `settings`, `workspaces`, `personas`, `budget`, `dependencies`, `spec-graph`, `profile`. Browser back/forward buttons work correctly via `history.pushState`/`popstate`. Legacy `#<view>` hash URLs are still supported on initial load for backwards compatibility. Example: `http://localhost:3000/agents`
 
-- **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, branch dropdowns). On success, displays the agent token and clone URL for use by the spawned agent.
+- **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, compute target dropdowns; branch is a free-text input with **datalist autocomplete** populated from `GET /api/v1/repos/{id}/branches` when a repo is selected — placeholder `feat/my-feature (new branch name)` guides users to enter a new or existing branch name — M24). On success, displays the agent token and clone URL for use by the spawned agent.
 - **Repo Detail**: shows a clone URL bar with one-click copy, pre-filled with the correct `Authorization: Bearer` git credential command.
 - **Admin Panel** (M4.3 + M8.3, Admin role required): tab-based navigation (Health / Jobs / Audit / Agents / SIEM / Compute / Network / Snapshots / Retention / BCP) via `Tabs` component. Health tab: uptime, agent/task/project metric cards. Jobs tab: merge processor + stale agent detector status table. Audit tab: searchable activity feed with agent_id / event_type filters. Agents tab: Kill and Reassign action buttons per agent; **Spawn Log** inline timeline per row shows each spawn step with status badge, timestamp, and detail (expand/collapse). SIEM tab: table of forwarding targets with add/edit/delete; modal form (URL, format JSON/CEF/LEEF, event filter, enabled toggle). Compute tab: table of compute targets (local/docker/ssh) with create/delete; modal with name, type, host fields. Network tab: WireGuard peer registry table with register/remove actions; DERP relay map JSON viewer below the table. BCP tab: RTO/RPO metric cards (from `GET /api/v1/admin/bcp/targets`) and a **Run BCP Drill** button (`POST /api/v1/admin/bcp/drill`) that triggers a live snapshot+verify cycle.
 
@@ -696,7 +717,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Settings** (M8.3): server info card (name, version, milestone fetched from `/api/v1/version`), pulsing WebSocket connection indicator (connected / connecting / disconnected / error with semantic colors), configuration reference table, Gyre branding card, language selector (current locale; add locales by dropping JSON files in `web/src/locales/`).
 - **Workspace List** (M22.5, sidebar: "Workspaces" under Overview): workspace switcher grid; create-workspace modal (name + description); click a workspace to drill into detail view.
 - **Workspace Detail** (M22.5, drill-in from Workspace List): budget usage progress bars (tokens/day, cost/day, concurrent agents); three tabs: Repos (listed repos in workspace), Members (invite/remove with `WorkspaceRole`), Teams (create/manage).
-- **Persona Catalog** (M22.5, sidebar: "Personas" under Agents): card grid with scope badge (`Tenant`/`Workspace`/`Repo`), capabilities list, model/temperature metadata; create-persona modal + delete action. Scope ID is always required in the create modal (all scope kinds); a UUID hint is shown beneath the field.
+- **Persona Catalog** (M22.5, sidebar: "Personas" under Agents): card grid with scope badge (`Tenant`/`Workspace`/`Repo`), capabilities list, model/temperature metadata; create-persona modal + delete action. Scope ID field adapts to the selected scope kind: **Workspace** renders a dropdown populated from `GET /api/v1/workspaces`; **Repo** renders a dropdown from `GET /api/v1/repos`; **Tenant** shows a free-text input with hint to use `"default"`. `scopeId` resets when `scopeKind` changes to prevent stale UUIDs.
 - **Budget Dashboard** (M22.5, sidebar: "Budget" under Operations): tenant-wide summary cards (total tokens, cost, active agents vs limits); per-workspace breakdown with progress bars showing usage against budget config; calls `GET /api/v1/budget/summary`.
 - **Dependency Graph** (M22.5, sidebar: "Dependencies" under Source Control): SVG circular layout of cross-repo `DependencyEdge` records; edge coloring by `DependencyType` (Code/Spec/Api/Schema); click a node to open blast-radius panel (BFS transitive dependents); calls `GET /api/v1/dependencies/graph` and `GET /api/v1/repos/{id}/blast-radius`.
 - **Spec Graph** (M22.5, sidebar: "Spec Graph" under Source Control): SVG DAG of `SpecLink` records with link-type colored edges + legend (`implements`, `supersedes`, `depends_on`, `conflicts_with`, `extends`, `references`); node detail panel on click; calls `GET /api/v1/specs/graph`.

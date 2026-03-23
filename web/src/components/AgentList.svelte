@@ -25,6 +25,7 @@
   let spawnBranch = $state('');
   let spawnComputeTarget = $state('');
   let computeTargets = $state([]);
+  let repoBranches = $state([]);
 
   let detailTab = $state('info');
   let agentLogLines = $state([]);
@@ -72,7 +73,22 @@
       .catch((err) => { error = err.message; loading = false; });
     api.allRepos().then((data) => { repos = data; }).catch(() => {});
     api.tasks().then((data) => { tasks = data; }).catch(() => {});
-    api.computeList().then((data) => { computeTargets = Array.isArray(data) ? data : []; }).catch(() => {});
+    api.computeList().then((data) => {
+      computeTargets = Array.isArray(data) ? data : [];
+      // M25: pre-select the default Claude Code runner target if it exists
+      const defaultTarget = computeTargets.find(ct => ct.name === 'gyre-agent-default');
+      if (defaultTarget && !spawnComputeTarget) spawnComputeTarget = defaultTarget.id;
+    }).catch(() => {});
+  });
+
+  $effect(() => {
+    if (spawnRepoId) {
+      api.repoBranches(spawnRepoId).then((data) => {
+        repoBranches = Array.isArray(data) ? data.map(b => b.name ?? b) : [];
+      }).catch(() => { repoBranches = []; });
+    } else {
+      repoBranches = [];
+    }
   });
 
   function closeTtyWs() {
@@ -236,7 +252,13 @@
                 {#each tasks as t}<option value={t.id}>{t.title}</option>{/each}
               </select>
             </label>
-            <label>Branch<input bind:value={spawnBranch} placeholder="feat/my-feature" /></label>
+            <label>Branch
+              <input bind:value={spawnBranch} list="branch-suggestions" placeholder="feat/my-feature (new branch name)" />
+              <datalist id="branch-suggestions">
+                {#each repoBranches as b}<option value={b}></option>{/each}
+              </datalist>
+              <span class="field-hint">Enter a new branch name. Existing branches shown as suggestions.</span>
+            </label>
             {#if computeTargets.length > 0}
             <label>Compute Target
               <select bind:value={spawnComputeTarget}>
@@ -739,6 +761,8 @@
   }
 
   .form input:focus, .form select:focus { outline: none; border-color: var(--color-primary); }
+
+  .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; }
 
   .form-error { color: var(--color-danger); font-size: var(--text-xs); margin: 0; }
 
