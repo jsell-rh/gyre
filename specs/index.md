@@ -103,6 +103,8 @@ How Gyre gets built - process and standards for the agent team.
 | M23: Platform Operations | [`milestones/m23-platform-operations.md`](milestones/m23-platform-operations.md) | Container lifecycle audit (M23.1), Analytics Decision API (M23.2), BCP graceful degradation (M23.3), SCIM 2.0 provisioning (M23.4) |
 | M24: E2E Docker Agent | [`milestones/m24-e2e-docker.md`](milestones/m24-e2e-docker.md) | Full Docker agent Ralph loop: JWT pre-mint, container env injection, bridge networking, gyre-agent image, spawn modal compute target field (M24) |
 | M25: Agent Runner | [`milestones/m25-agent-runner.md`](milestones/m25-agent-runner.md) | Bundled Claude Code runner (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default`, `GYRE_AGENT_CREDENTIALS` passthrough, Node 22 Alpine + pinned SDK |
+| M26: WireGuard Mesh | [`milestones/m26-wireguard-mesh.md`](milestones/m26-wireguard-mesh.md) | Real WireGuard mesh networking: peer key exchange, DERP relay coordination, agent-to-agent encrypted tunnels _(Draft)_ |
+| M27: Credential Opacity | [`milestones/m27-credential-opacity.md`](milestones/m27-credential-opacity.md) | Unix socket credential proxy (`cred-proxy` sidecar): credentials held in memory, never exposed to agent process env; supports Anthropic direct API, Vertex AI (GCP SA JSON), and git tokens _(Draft)_ |
 
 ## Open Questions
 

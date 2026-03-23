@@ -360,7 +360,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_SNAPSHOT_PATH` | `./snapshots/` | Directory for DB snapshot files (`POST /api/v1/admin/snapshot`) |
 | `GYRE_MAX_BODY_SIZE` | `10485760` (10 MB) | Maximum HTTP request body size in bytes (M7.3) |
 | `GYRE_CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated allowed CORS origins. Default: localhost:2222, localhost:3000, localhost:5173 **plus `http://localhost:{GYRE_PORT}` appended automatically when not already present**. Set to `*` to allow all (not recommended for production). (M7.3, M-5) |
-| `GYRE_AGENT_JWT_TTL` | `3600` | Lifetime in seconds for EdDSA JWT agent tokens issued by `POST /api/v1/agents/spawn`. After expiry, token is rejected even if not explicitly revoked. (M18) |
+| `GYRE_AGENT_JWT_TTL` | `300` | Lifetime in seconds for EdDSA JWT agent tokens issued by `POST /api/v1/agents/spawn`. After expiry, token is rejected even if not explicitly revoked. Reduced from 3600 to 300 in M27.5. (M18, M27) |
 | `GYRE_SIGSTORE_MODE` | `local` | Commit signing backend for `jj squash`: `local` signs with the forge's Ed25519 key; `fulcio` is reserved for future external Fulcio CA integration (logs a warning, does not block). (M13.8) |
 | `GYRE_TRUSTED_ISSUERS` | _(disabled)_ | Comma-separated base URLs of trusted remote Gyre instances (e.g. `https://gyre-2.example.com`). Enables G11 federation: JWTs minted by these instances are verified via remote OIDC discovery + JWKS (cached 5 min). Federated agents receive `Agent` role; `agent_id = "<remote-host>/<sub>"`. (G11) |
 | `GYRE_RATE_LIMIT` | `100` | Requests per second allowed per IP before 429 (M7.3) |
@@ -373,7 +373,8 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_SCIM_TOKEN` | _(unset — SCIM disabled)_ | Bearer token SCIM clients must send to `/scim/v2/` endpoints. When unset, SCIM provisioning endpoints return 401. Separate from `GYRE_AUTH_TOKEN`. (M23) |
 | `GYRE_RTO` | _(unset)_ | Recovery Time Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
 | `GYRE_RPO` | _(unset)_ | Recovery Point Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
-| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Newline-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). Used by `agent-runner.mjs` to authenticate with the Claude API. On startup, if Docker/Podman is on `PATH`, the server auto-registers a `gyre-agent-default` container compute target pointing to `gyre-agent:latest` with bridge networking; the spawn modal pre-selects this target when it exists. (M25) |
+| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). **M27:** credentials are injected as `GYRE_CRED_KEY=value` and held by the `cred-proxy` sidecar — raw values are never in the agent process env. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. On startup, if Docker/Podman is on `PATH`, the server auto-registers a `gyre-agent-default` container compute target. (M25, M27) |
+| `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON (full JSON string) for Vertex AI provider. Injected as `GYRE_CRED_GCP_SA_JSON` and held by `cred-proxy` which emulates the GCE metadata server on `127.0.0.1:8080` for OAuth2 token exchange. Agent env gets `GCE_METADATA_HOST=127.0.0.1:8080`. (M27) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
@@ -612,6 +613,9 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 | `GYRE_TASK_ID` | Task UUID | Assigned task reference |
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
+| `GYRE_CRED_PROXY` | `http://127.0.0.1:8765` | Address of the `cred-proxy` sidecar (M27); injected so entrypoint and agent-runner can reference the proxy address |
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8765` | Routes Anthropic SDK calls through cred-proxy; raw API key never exposed to agent process (M27) |
+| `ANTHROPIC_API_KEY` | `proxy-managed` | Placeholder so Anthropic SDK initialises; cred-proxy injects the real `x-api-key` header per request (M27) |
 
 The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Node 22 Alpine + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or — if unset — `node /gyre/agent-runner.mjs` for fully autonomous operation. `agent-runner.mjs` connects to the Gyre MCP server, reads the assigned task, implements it, commits, pushes, and calls `gyre_agent_complete`. Build and register:
 ```bash

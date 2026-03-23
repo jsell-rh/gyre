@@ -64,7 +64,8 @@ All settings are environment variables. The server starts with safe defaults —
 | `GYRE_BASE_URL` | `http://localhost:<port>` | Public URL used in clone URLs |
 | `RUST_LOG` | `info` | Log level (`debug`, `trace`, `warn`) |
 | `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL — enables JWT auth |
-| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Newline-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). Used by `agent-runner.mjs` to authenticate with the Claude API. |
+| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected at container spawn. Credentials are held by the `cred-proxy` sidecar — raw values are never exposed in the agent process environment. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. (M25, M27) |
+| `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON for Vertex AI. Held by `cred-proxy`; agent gets `GCE_METADATA_HOST` pointing to the proxy's OAuth2 token emulator. (M27) |
 
 See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
