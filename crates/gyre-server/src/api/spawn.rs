@@ -152,13 +152,20 @@ pub async fn spawn_agent(
     let branch_slug = req.branch.replace('/', "-");
     let worktree_path = format!("{}/worktrees/{}", repo.path, branch_slug);
 
-    // Create git worktree (best effort -- failure is logged, not fatal)
+    // Create git worktree — failure on empty repos gives a clear error.
     if let Err(e) = state
         .git_ops
         .create_worktree(&repo.path, &worktree_path, &req.branch)
         .await
     {
-        tracing::warn!("create_worktree failed: {e}");
+        let msg = e.to_string();
+        if msg.contains("invalid reference") || msg.contains("not a valid object") {
+            return Err(ApiError::InvalidInput(format!(
+                "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
+                req.branch
+            )));
+        }
+        tracing::warn!("create_worktree failed (non-fatal): {e}");
     }
 
     // Initialize jj in the worktree and create an initial change (best-effort).
@@ -269,7 +276,8 @@ pub async fn spawn_agent(
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
             worktree_path.clone()
         } else {
-            ".".to_string()
+            // For containers, use /workspace (absolute path required by Docker).
+            "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
         // Use compute target's configured command, or fall back to /gyre/entrypoint.sh
