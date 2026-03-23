@@ -23,6 +23,8 @@
   let spawnRepoId = $state('');
   let spawnTaskId = $state('');
   let spawnBranch = $state('');
+  let spawnComputeTargetId = $state('');
+  let computeTargets = $state([]);
 
   let detailTab = $state('info');
   let agentLogLines = $state([]);
@@ -70,6 +72,7 @@
       .catch((err) => { error = err.message; loading = false; });
     api.allRepos().then((data) => { repos = data; }).catch(() => {});
     api.tasks().then((data) => { tasks = data; }).catch(() => {});
+    api.computeList().then((data) => { computeTargets = Array.isArray(data) ? data : (data?.targets ?? []); }).catch(() => {});
   });
 
   function closeTtyWs() {
@@ -117,7 +120,7 @@
   }
 
   function openSpawnModal() {
-    spawnName = ''; spawnRepoId = ''; spawnTaskId = ''; spawnBranch = '';
+    spawnName = ''; spawnRepoId = ''; spawnTaskId = ''; spawnBranch = ''; spawnComputeTargetId = '';
     spawnResult = null; spawnError = null;
     showSpawnModal = true;
   }
@@ -131,7 +134,9 @@
     }
     spawnLoading = true; spawnError = null; spawnResult = null;
     try {
-      spawnResult = await api.spawnAgent({ name: spawnName, repo_id: spawnRepoId, task_id: spawnTaskId, branch: spawnBranch });
+      const spawnReq = { name: spawnName, repo_id: spawnRepoId, task_id: spawnTaskId, branch: spawnBranch };
+      if (spawnComputeTargetId) spawnReq.compute_target_id = spawnComputeTargetId;
+      spawnResult = await api.spawnAgent(spawnReq);
       agents = await api.agents();
     } catch (e) {
       spawnError = e.message;
@@ -231,7 +236,13 @@
                 {#each tasks as t}<option value={t.id}>{t.title}</option>{/each}
               </select>
             </label>
-            <label>Branch<input bind:value={spawnBranch} placeholder="feat/my-feature" /></label>
+            <label>Branch<input bind:value={spawnBranch} placeholder="feat/my-feature (must be a valid new branch name)" /></label>
+            <label>Compute Target (optional)
+              <select bind:value={spawnComputeTargetId}>
+                <option value="">Local (default)</option>
+                {#each computeTargets as ct}<option value={ct.id}>{ct.name} ({ct.target_type ?? ct.kind ?? 'unknown'})</option>{/each}
+              </select>
+            </label>
             {#if spawnError}<p class="form-error">{spawnError}</p>{/if}
             <div class="form-actions">
               <button class="modal-btn secondary" onclick={closeSpawnModal}>Cancel</button>
