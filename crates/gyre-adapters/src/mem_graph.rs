@@ -44,7 +44,7 @@ impl GraphPort for MemGraphStore {
         Ok(nodes
             .iter()
             .filter(|n| &n.repo_id == repo_id)
-            .filter(|n| node_type.as_ref().map_or(true, |nt| &n.node_type == nt))
+            .filter(|n| node_type.as_ref().is_none_or(|nt| &n.node_type == nt))
             .cloned()
             .collect())
     }
@@ -63,7 +63,7 @@ impl GraphPort for MemGraphStore {
         Ok(edges
             .iter()
             .filter(|e| &e.repo_id == repo_id)
-            .filter(|e| edge_type.as_ref().map_or(true, |et| &e.edge_type == et))
+            .filter(|e| edge_type.as_ref().is_none_or(|et| &e.edge_type == et))
             .cloned()
             .collect())
     }
@@ -97,8 +97,8 @@ impl GraphPort for MemGraphStore {
         Ok(deltas
             .iter()
             .filter(|d| &d.repo_id == repo_id)
-            .filter(|d| since.map_or(true, |s| d.timestamp >= s))
-            .filter(|d| until.map_or(true, |u| d.timestamp <= u))
+            .filter(|d| since.is_none_or(|s| d.timestamp >= s))
+            .filter(|d| until.is_none_or(|u| d.timestamp <= u))
             .cloned()
             .collect())
     }
