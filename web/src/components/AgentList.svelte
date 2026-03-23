@@ -1,10 +1,15 @@
 <script>
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Table from '../lib/Table.svelte';
   import AgentCardPanel from './AgentCardPanel.svelte';
+
+  const navigate = getContext('navigate');
+
+  let { workspaceId = '' } = $props();
 
   let agents = $state([]);
   let repos = $state([]);
@@ -368,7 +373,15 @@
               <dt>ID</dt><dd class="mono">{selected.id}</dd>
               <dt>Status</dt><dd><Badge value={selected.status} /></dd>
               <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
-              <dt>Current Task</dt><dd title={selected.current_task_id ?? ''}>{taskLabel(selected.current_task_id)}</dd>
+              <dt>Current Task</dt><dd title={selected.current_task_id ?? ''}>
+                {#if selected.current_task_id && navigate}
+                  <button class="link-btn" onclick={() => navigate('task-detail', { task: { id: selected.current_task_id } })}>
+                    {taskLabel(selected.current_task_id)}
+                  </button>
+                {:else}
+                  {taskLabel(selected.current_task_id)}
+                {/if}
+              </dd>
               <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
               <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
               <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
@@ -808,4 +821,18 @@
     text-align: center;
     font-size: var(--text-sm);
   }
+
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .link-btn:hover { opacity: 0.8; }
 </style>

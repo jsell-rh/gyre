@@ -6,7 +6,7 @@
   import Button from '../lib/Button.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
-  let { onSelectRepo } = $props();
+  let { onSelectRepo, workspaceId = '' } = $props();
 
   let projects = $state([]);
   let loading = $state(true);

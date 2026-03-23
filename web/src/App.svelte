@@ -32,7 +32,7 @@
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
   import Modal from './lib/Modal.svelte';
-  import { onMount } from 'svelte';
+  import { onMount, setContext } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
 
   let currentView = $state('dashboard');
@@ -47,6 +47,10 @@
   let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
   let tokenInfo = $state(null);
   let searchOpen = $state(false);
+
+  // Workspace selector state
+  let workspaces = $state([]);
+  let selectedWorkspaceId = $state(localStorage.getItem('gyre_workspace_id') || '');
 
   async function openTokenModal() {
     tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token';
@@ -92,6 +96,19 @@
     api_key:     'API key',
   };
 
+  // Generate a pretty URL for a view + context
+  function urlFor(view, ctx) {
+    const repo = ctx.repo ?? selectedRepo;
+    const mr = ctx.mr ?? selectedMr;
+    const task = ctx.task ?? selectedTask;
+    const workspace = ctx.workspace ?? selectedWorkspace;
+    if (view === 'repo-detail' && repo?.id) return `/repos/${repo.id}`;
+    if (view === 'task-detail' && task?.id) return `/tasks/${task.id}`;
+    if (view === 'mr-detail' && mr?.id) return `/merge-requests/${mr.id}`;
+    if (view === 'workspace-detail' && workspace?.id) return `/workspaces/${workspace.id}`;
+    return '/' + view;
+  }
+
   function navigate(view, ctx = {}) {
     currentView = view;
     if (ctx.repo !== undefined) selectedRepo = ctx.repo;
@@ -101,29 +118,96 @@
     // Push plain (non-proxy) objects — history.pushState uses structuredClone
     // which cannot serialize Svelte 5 reactive Proxy objects.
     const snap = (o) => { try { return JSON.parse(JSON.stringify(o ?? null)); } catch { return null; } };
+    const url = urlFor(view, ctx);
     window.history.pushState(
       { view, selectedRepo: snap(selectedRepo), selectedMr: snap(selectedMr), selectedTask: snap(selectedTask), selectedWorkspace: snap(selectedWorkspace) },
       '',
-      '/' + view,
+      url,
     );
   }
 
+  // Expose navigate via context so child components can navigate without prop drilling
+  setContext('navigate', navigate);
+
   // Sync browser history ↔ app state using onMount to avoid reactive loops
-  onMount(() => {
-    // Support both path-based (/agents) and legacy hash-based (#agents) URLs
-    const pathView = window.location.pathname.slice(1);
+  onMount(async () => {
+    // Fetch workspaces for the selector
+    try { workspaces = await api.workspaces(); } catch { /* ignore */ }
+
+    // Support both path-based URLs and legacy hash-based URLs
+    const path = window.location.pathname;
+    const parts = path.split('/').filter(Boolean);
     const hashView = window.location.hash.slice(1);
-    const initView = (pathView && pathView in viewTitles) ? pathView
-                   : (hashView && hashView in viewTitles) ? hashView
-                   : null;
+
+    let initView = null;
+    let initCtx = {};
+
+    if (parts.length === 2) {
+      // Detail view URLs: /repos/:id, /tasks/:id, /merge-requests/:id, /workspaces/:id
+      const [segment, id] = parts;
+      if (segment === 'repos') {
+        initView = 'repo-detail';
+        try {
+          const allRepos = await api.allRepos();
+          const repo = allRepos.find(r => r.id === id);
+          if (repo) initCtx = { repo };
+        } catch { /* fallback to projects view */ initView = 'projects'; }
+      } else if (segment === 'tasks') {
+        initView = 'task-detail';
+        try {
+          const task = await api.task(id);
+          initCtx = { task };
+        } catch { initView = 'tasks'; }
+      } else if (segment === 'merge-requests') {
+        initView = 'mr-detail';
+        try {
+          const mr = await api.mergeRequest(id);
+          initCtx = { mr };
+        } catch { initView = 'projects'; }
+      } else if (segment === 'workspaces') {
+        initView = 'workspace-detail';
+        try {
+          const workspace = await api.workspace(id);
+          initCtx = { workspace };
+          // Update the workspace in selector too
+          if (workspace) {
+            selectedWorkspace = workspace;
+            selectedWorkspaceId = workspace.id;
+            localStorage.setItem('gyre_workspace_id', workspace.id);
+          }
+        } catch { initView = 'workspaces'; }
+      } else if (segment === 'agents') {
+        initView = 'agents';
+      }
+    } else if (parts.length === 1) {
+      const pathView = parts[0];
+      initView = (pathView && pathView in viewTitles) ? pathView : null;
+    }
+
+    // Fall back to hash-based for legacy support
+    if (!initView && hashView && hashView in viewTitles) {
+      initView = hashView;
+    }
+
     if (initView) {
       currentView = initView;
+      if (initCtx.repo !== undefined) selectedRepo = initCtx.repo;
+      if (initCtx.mr !== undefined) selectedMr = initCtx.mr;
+      if (initCtx.task !== undefined) selectedTask = initCtx.task;
+      if (initCtx.workspace !== undefined) selectedWorkspace = initCtx.workspace;
     }
+
+    // Restore selected workspace from localStorage (if not set by URL)
+    if (!selectedWorkspace && selectedWorkspaceId && workspaces.length > 0) {
+      const ws = workspaces.find(w => w.id === selectedWorkspaceId);
+      if (ws) selectedWorkspace = ws;
+    }
+
     const snap = (o) => { try { return JSON.parse(JSON.stringify(o ?? null)); } catch { return null; } };
     window.history.replaceState(
       { view: currentView, selectedRepo: snap(selectedRepo), selectedMr: snap(selectedMr), selectedTask: snap(selectedTask), selectedWorkspace: snap(selectedWorkspace) },
       '',
-      '/' + currentView,
+      urlFor(currentView, {}),
     );
 
     function handlePopstate(e) {
@@ -140,6 +224,18 @@
     window.addEventListener('popstate', handlePopstate);
     return () => window.removeEventListener('popstate', handlePopstate);
   });
+
+  function onWorkspaceChange(e) {
+    const id = e.target.value;
+    selectedWorkspaceId = id;
+    localStorage.setItem('gyre_workspace_id', id);
+    if (id) {
+      const ws = workspaces.find(w => w.id === id);
+      selectedWorkspace = ws ?? null;
+    } else {
+      selectedWorkspace = null;
+    }
+  }
 
   const viewTitles = {
     dashboard:          'Dashboard',
@@ -202,7 +298,25 @@
         {/if}
       </div>
       <div class="topbar-right">
-        {#if selectedWorkspace}
+        <!-- Workspace selector -->
+        {#if workspaces.length > 0}
+          <div class="ws-selector-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" class="ws-icon" aria-hidden="true">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+            <select
+              class="ws-selector"
+              value={selectedWorkspaceId}
+              onchange={onWorkspaceChange}
+              aria-label="Select workspace"
+            >
+              <option value="">All Workspaces</option>
+              {#each workspaces as ws}
+                <option value={ws.id}>{ws.name}</option>
+              {/each}
+            </select>
+          </div>
+        {:else if selectedWorkspace}
           <button
             class="scope-chip"
             onclick={() => navigate('workspace-detail', { workspace: selectedWorkspace })}
@@ -214,6 +328,7 @@
             <span>{selectedWorkspace.name}</span>
           </button>
         {/if}
+
         <button class="search-trigger" onclick={() => (searchOpen = true)} aria-label="Open search (Ctrl+K)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
@@ -253,16 +368,16 @@
       {:else if currentView === 'activity'}
         <ActivityFeed {wsStore} />
       {:else if currentView === 'agents'}
-        <AgentList />
+        <AgentList workspaceId={selectedWorkspaceId} />
       {:else if currentView === 'tasks'}
-        <TaskBoard onSelectTask={(task) => navigate('task-detail', { task })} />
+        <TaskBoard workspaceId={selectedWorkspaceId} onSelectTask={(task) => navigate('task-detail', { task })} />
       {:else if currentView === 'task-detail' && selectedTask}
         <TaskDetail
           task={selectedTask}
           onBack={() => navigate('tasks')}
         />
       {:else if currentView === 'projects'}
-        <ProjectList onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
+        <ProjectList workspaceId={selectedWorkspaceId} onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
       {:else if currentView === 'repo-detail' && selectedRepo}
         <RepoDetail
           repo={selectedRepo}
@@ -423,6 +538,41 @@
     flex-shrink: 0;
   }
 
+  /* Workspace selector */
+  .ws-selector-wrap {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-radius: var(--radius);
+  }
+
+  .ws-icon {
+    color: var(--color-primary);
+    flex-shrink: 0;
+  }
+
+  .ws-selector {
+    background: transparent;
+    border: none;
+    color: var(--color-primary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+    max-width: 140px;
+    appearance: none;
+    outline: none;
+  }
+
+  .ws-selector option {
+    background: var(--color-surface);
+    color: var(--color-text);
+  }
+
   /* Search trigger button */
   .search-trigger {
     display: flex;
@@ -454,7 +604,7 @@
     color: var(--color-text-muted);
   }
 
-  /* Workspace scope chip */
+  /* Workspace scope chip (fallback when dropdown not shown) */
   .scope-chip {
     display: flex;
     align-items: center;
