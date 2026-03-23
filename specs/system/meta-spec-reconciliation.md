@@ -33,6 +33,7 @@ Therefore: **meta-spec iteration is speculative re-implementation.** Fork the wo
 | **Drift** | Code produced under a superseded meta-spec version. |
 | **Reconciliation** | Re-implementing drifted code under the current meta-spec set. |
 | **Blast radius** | The set of repos, specs, and code affected by a proposed meta-spec change. |
+| **Preview** | A fast, ceremony-free agent run against a real spec under a draft meta-spec. Throwaway output for human evaluation. |
 
 ## Design
 
@@ -147,13 +148,99 @@ Blast radius:
 
 This is a database query over provenance records + workspace meta-spec set bindings. The blast radius is computed, not guessed.
 
-### 5. Reconciliation: The Evaluation Loop
+### 5. Preview Mode: The Fast Iteration Loop
 
-Reconciliation is the process of re-implementing code under updated meta-specs. It is **speculative re-implementation**: the system re-runs the Ralph loop with the same specs but new rules, on branches, without touching main.
+Before committing to a meta-spec change, humans need a fast way to see what it actually produces. Reports and static analysis are insufficient -- the only way to know what a changed persona produces is to run it against real code.
+
+**Preview mode strips all ceremony from the Ralph loop.** Same agent, same spec, same repo -- but no gates, no MR, no merge queue, no provenance recording. Just: spawn an agent with a draft meta-spec, point it at a real spec in a real repo, see what it produces. Throwaway branch, garbage-collected after review.
+
+#### The Preview Endpoint
+
+```
+POST /api/v1/meta-specs/preview
+{
+  "draft": {
+    "kind": "meta:persona",
+    "content": "<full draft persona text -- not yet committed>"
+  },
+  "targets": [
+    { "repo_id": "<uuid>", "spec_path": "specs/system/search.md" },
+    { "repo_id": "<uuid>", "spec_path": "specs/system/identity.md" }
+  ]
+}
+
+// Response 202
+{
+  "preview_id": "<uuid>",
+  "agents": [
+    { "agent_id": "<uuid>", "repo_id": "<uuid>", "spec_path": "...", "branch": "preview/<preview_id>/search" },
+    { "agent_id": "<uuid>", "repo_id": "<uuid>", "spec_path": "...", "branch": "preview/<preview_id>/identity" }
+  ]
+}
+```
+
+The draft doesn't need to be committed or approved. It's ephemeral -- the human is editing inline, hitting preview, seeing output. Multiple targets run in parallel.
+
+#### What's Skipped in Preview Mode
+
+| Ralph Loop Step | Preview Mode |
+|---|---|
+| Spec approval check | Skipped -- the spec is already approved; we're testing the meta-spec |
+| Quality gates | Skipped -- this is a draft, not production |
+| MR creation | Skipped -- no MR overhead |
+| Merge queue | Skipped -- nothing to merge |
+| Provenance recording | Skipped -- draft meta-spec has no SHA yet |
+| Budget accounting | Separate preview budget (configurable, defaults to workspace budget) |
+| Token revocation | Normal -- preview agent tokens are short-lived |
+
+#### The Iteration Cycle
+
+```
+1. Human drafts a meta-spec change (UI editor or file)
+2. Human selects 1-3 real specs from repos they own
+3. "Preview" -> agents spawn with draft meta-spec, implement the specs
+4. UI shows diff: existing code vs. new code produced under draft
+5. Human reviews, adjusts the meta-spec
+6. "Preview" again -> new agents, new output, new diff
+7. Repeat until satisfied (typically 3-8 iterations)
+8. "Publish" -> commit the meta-spec, trigger approval + reconciliation
+```
+
+Steps 2-6 are the tight loop. Each iteration is one agent run -- minutes, not hours. The total time to converge on a good meta-spec change is an afternoon, not a week.
+
+#### Why Real Specs, Not Synthetic Tests
+
+The targets must be real specs in real repos. Synthetic "golden specs" are mocks -- they test what the persona does in a controlled environment, not what it does against your actual complexity. The best test is the real thing.
+
+The human picks specs they know well -- specs where they can judge whether the output is better, worse, or equivalent. They pick diverse specs: one simple CRUD service, one domain-heavy aggregate, one with tricky edge cases. But these are specs they own, in repos they understand.
+
+#### Preview Cleanup
+
+Preview branches (`preview/{preview_id}/*`) are ephemeral:
+- Auto-deleted after 24 hours (configurable)
+- Manually deletable via `DELETE /api/v1/meta-specs/preview/{preview_id}`
+- No refs, no provenance, no audit trail (this is scratch work)
+- Preview agents are killed on completion (no idle state)
+
+#### UI Integration
+
+The meta-spec editor in the UI combines:
+- **Left panel:** inline editor for the meta-spec content (markdown with live preview)
+- **Right panel:** target spec selector (browse repos you have access to, pick specs)
+- **Bottom panel:** diff viewer showing existing code vs. preview output
+- **Action bar:** "Preview" (run), "Clear" (delete preview branches), "Publish" (commit + approve flow)
+
+The diff viewer updates as each preview agent completes. Multiple targets show as tabs.
+
+### 6. Reconciliation: The Slow Rollout
+
+After a meta-spec change is published and approved, reconciliation propagates the change across the blast radius. This is the thorough, budget-constrained, autonomous process -- distinct from the fast preview loop.
+
+Reconciliation re-runs the Ralph loop with the same specs but new rules, on branches, without touching main.
 
 #### Trigger
 
-Reconciliation is triggered when a workspace's meta-spec set is updated to reference a new version of a meta-spec:
+Reconciliation is triggered when a workspace's meta-spec set is updated to reference a new version of a meta-spec (typically after the preview loop has validated the change):
 
 ```
 PUT /api/v1/workspaces/{id}/meta-spec-set
@@ -226,7 +313,7 @@ The agent decides whether to:
 
 No-op MRs (empty diff) are valid outcomes. They mean "this code was evaluated under new rules and found compliant." The provenance is updated to record the new meta-spec version, resolving the drift without changing code.
 
-### 6. Rollout Policy
+### 7. Rollout Policy
 
 Each workspace has a rollout policy that governs how reconciliation proceeds:
 
@@ -270,7 +357,7 @@ pub enum ReconciliationPriority {
 
 **Budget interaction:** Reconciliation agents consume the same workspace budget as feature agents. The budget system (platform-model.md Section 5) applies uniformly. If the workspace budget is exhausted, reconciliation tasks queue until budget is available. Reconciliation does not get a blank check.
 
-### 7. Tenant-Scope Meta-Spec Changes
+### 8. Tenant-Scope Meta-Spec Changes
 
 A tenant-level meta-spec change affects all workspaces in the tenant. This is the "3803 teams" problem.
 
@@ -306,7 +393,7 @@ POST /api/v1/tenant/meta-spec-rollout
 
 After the human approves the plan, execution is autonomous. No further human touchpoints.
 
-### 8. Merge Gate Behavior
+### 9. Merge Gate Behavior
 
 Code produced under a superseded meta-spec version encounters a **drift warning** in the merge queue:
 
@@ -347,7 +434,7 @@ pub struct MetaSpecPolicy {
 
 The opinionated default: **warn always, block never, reconcile in the background.** Velocity over strict consistency, with full visibility into drift state.
 
-### 9. Conformance Sweeps (Steady State)
+### 10. Conformance Sweeps (Steady State)
 
 A background job (like speculative merging) continuously checks for meta-spec drift across all repos:
 
@@ -364,7 +451,7 @@ This catches drift that the reconciliation controller might miss (e.g., a worksp
 
 The sweep is cheap (database queries only, no agent spawns). It ensures the system converges even after disruptions.
 
-### 10. Observability
+### 11. Observability
 
 **Domain events:**
 
