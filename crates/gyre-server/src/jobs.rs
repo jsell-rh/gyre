@@ -213,13 +213,14 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Build and start the default job registry, migrating existing background tasks into it.
+/// Register all background jobs into the state's job registry.
 ///
 /// The actual background loops (merge processor, stale agent detector) are kept in their
-/// existing modules; here we register "stub" handlers used only for manual triggering
-/// and record-keeping. The scheduler calls the real handlers.
-pub async fn start_job_registry(state: Arc<AppState>) -> Arc<JobRegistry> {
-    let registry = Arc::new(JobRegistry::new());
+/// existing modules; this function registers handlers into AppState's registry so that
+/// `GET /admin/jobs` and `POST /admin/jobs/{name}/run` work correctly.
+/// Call once from main after `build_state`.
+pub async fn start_job_registry(state: Arc<AppState>) {
+    let registry = Arc::clone(&state.job_registry);
 
     // Register merge_processor job
     registry
@@ -293,22 +294,9 @@ pub async fn start_job_registry(state: Arc<AppState>) -> Arc<JobRegistry> {
         )
         .await;
 
-    // Spawn schedulers for all registered jobs
-    for job_name in [
-        "merge_processor",
-        "stale_agent_detector",
-        "retention_cleanup",
-        "mirror_sync",
-        "speculative_merge",
-    ] {
-        spawn_job(
-            Arc::clone(&registry),
-            job_name.to_string(),
-            Arc::clone(&state),
-        );
-    }
-
-    registry
+    // Schedulers are NOT spawned here — existing background tasks in main.rs handle
+    // periodic execution. Handlers registered above enable on-demand triggering and
+    // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
 }
 
 #[cfg(test)]
