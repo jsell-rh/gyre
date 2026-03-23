@@ -124,7 +124,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M26: WireGuard Mesh | Done | Real WireGuard mesh networking: pubkey validation (Curve25519), mesh IP allocation from CIDR pool, ownership enforcement, stale peer detector, DERP relay config (`GYRE_DERP_SERVERS`/`GYRE_DERP_URL`), agent-side `setup-wg.sh` |
 | M28: UI Cohesion | Done | Global workspace selector (topbar, localStorage), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
 
-933 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+935 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
