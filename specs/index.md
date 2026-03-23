@@ -39,6 +39,9 @@ What Gyre does - the product.
 | Spec Links | [`system/spec-links.md`](system/spec-links.md) | SHA-pinned links between specs (implements, supersedes, depends_on, conflicts_with, extends), mechanical gates, tenant-wide spec graph |
 | Cross-Repo Dependency Graph | [`system/dependency-graph.md`](system/dependency-graph.md) | Auto-detected code/spec/API/schema dependencies, breaking change enforcement, cascade testing, version drift, impact analysis |
 | Meta-Spec Reconciliation | [`system/meta-spec-reconciliation.md`](system/meta-spec-reconciliation.md) | Safe iteration on personas, principles, and standards: versioned meta-specs, workspace-scoped binding, provenance tracking, Kubernetes-style reconciliation loop, rollout policies, preview mode (fast iteration loop) |
+| Realized System Model | [`system/realized-model.md`](system/realized-model.md) | Language-agnostic code knowledge graph: structural extraction on push, spec linkage, architectural timeline, concept views, risk metrics, narrative generation |
+| System Explorer | [`system/system-explorer.md`](system/system-explorer.md) | GT-inspired live architecture viewer: moldable views per entity, inline spec editing, progressive preview (instant/fast/thorough), ghost overlays, flow traces, conversational exploration |
+| UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | Journey-oriented navigation replacing entity-centric sidebar: Inbox (action queue), Briefing (narrative), Explorer (architecture), Meta-specs (preview loop), scoped to tenant/workspace/repo |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
