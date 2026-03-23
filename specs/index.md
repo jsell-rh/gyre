@@ -106,6 +106,7 @@ How Gyre gets built - process and standards for the agent team.
 | M25: Agent Runner | [`milestones/m25-agent-runner.md`](milestones/m25-agent-runner.md) | Bundled Claude Code runner (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default`, `GYRE_AGENT_CREDENTIALS` passthrough, Node 22 Alpine + pinned SDK |
 | M26: WireGuard Mesh | [`milestones/m26-wireguard-mesh.md`](milestones/m26-wireguard-mesh.md) | Real WireGuard mesh networking: peer key exchange, DERP relay coordination, agent-to-agent encrypted tunnels _(Draft)_ |
 | M27: Credential Opacity | [`milestones/m27-credential-opacity.md`](milestones/m27-credential-opacity.md) | Unix socket credential proxy (`cred-proxy` sidecar): credentials held in memory, never exposed to agent process env; supports Anthropic direct API, Vertex AI (GCP SA JSON), and git tokens _(Draft)_ |
+| M28: UI Cohesion | [`milestones/m28-ui-cohesion.md`](milestones/m28-ui-cohesion.md) | Global workspace selector (topbar, localStorage persistence), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
 | M29: Workspace Integration | [`milestones/m29-workspace-integration.md`](milestones/m29-workspace-integration.md) | Workspace-aware SPA: M29.4 wires `workspace_id` filter to agents/tasks/projects list calls; post-create reload preserves workspace context |
 
 ## Open Questions
