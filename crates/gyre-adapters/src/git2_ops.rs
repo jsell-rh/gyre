@@ -278,6 +278,7 @@ impl GitOpsPort for Git2OpsAdapter {
         let worktree_path = worktree_path.to_string();
         let branch = branch.to_string();
         tokio::task::spawn_blocking(move || {
+            // Try checking out existing branch first.
             let output = std::process::Command::new("git")
                 .args([
                     "-C",
@@ -290,11 +291,32 @@ impl GitOpsPort for Git2OpsAdapter {
                 ])
                 .output()
                 .context("failed to run git worktree add")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("git worktree add failed: {stderr}");
+            if output.status.success() {
+                return Ok(());
             }
-            Ok(())
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // If branch doesn't exist, create it from HEAD.
+            if stderr.contains("invalid reference") || stderr.contains("not a valid object name") {
+                let output2 = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &repo_path,
+                        "worktree",
+                        "add",
+                        "-b",
+                        &branch,
+                        &worktree_path,
+                        "HEAD",
+                    ])
+                    .output()
+                    .context("failed to run git worktree add -b")?;
+                if !output2.status.success() {
+                    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+                    anyhow::bail!("git worktree add -b failed: {stderr2}");
+                }
+                return Ok(());
+            }
+            anyhow::bail!("git worktree add failed: {stderr}");
         })
         .await?
     }
