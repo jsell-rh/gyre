@@ -66,6 +66,7 @@ All settings are environment variables. The server starts with safe defaults —
 | `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL — enables JWT auth |
 | `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected at container spawn. Credentials are held by the `cred-proxy` sidecar — raw values are never exposed in the agent process environment. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. (M25, M27) |
 | `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON for Vertex AI. Held by `cred-proxy`; agent gets `GCE_METADATA_HOST` pointing to the proxy's OAuth2 token emulator. (M27) |
+| `GYRE_CRED_ALLOWED_HOSTS` | `api.anthropic.com,gitlab.com,api.github.com` | Allowlist of hostnames `cred-proxy` will proxy to. Unlisted hosts get 403, preventing SSRF. (M27-A) |
 
 See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
