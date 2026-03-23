@@ -122,6 +122,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M24: E2E Docker Agent | Done | Full Docker agent Ralph loop: JWT pre-mint + env injection at spawn, bridge networking for agent containers, `gyre-agent` Dockerfile + entrypoint.sh, compute target dropdown in spawn modal |
 | M25: Agent Runner | Done | Bundled Claude Code runner image (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default` compute target, `GYRE_AGENT_CREDENTIALS` passthrough for API key injection, spawn modal pre-selects default target |
 | M26: WireGuard Mesh | Done | Real WireGuard mesh networking: pubkey validation (Curve25519), mesh IP allocation from CIDR pool, ownership enforcement, stale peer detector, DERP relay config (`GYRE_DERP_SERVERS`/`GYRE_DERP_URL`), agent-side `setup-wg.sh` |
+| M28: UI Cohesion | Done | Global workspace selector (topbar, localStorage), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
 
 933 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
