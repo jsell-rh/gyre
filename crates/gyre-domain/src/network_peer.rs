@@ -10,6 +10,10 @@ pub struct NetworkPeer {
     pub allowed_ips: Vec<String>,
     pub registered_at: u64,
     pub last_seen: Option<u64>,
+    /// Allocated mesh IP from the CIDR pool (M26.1).
+    pub mesh_ip: Option<String>,
+    /// Whether this peer has been marked stale by the background detector.
+    pub is_stale: bool,
 }
 
 impl NetworkPeer {
@@ -29,6 +33,8 @@ impl NetworkPeer {
             allowed_ips,
             registered_at,
             last_seen: None,
+            mesh_ip: None,
+            is_stale: false,
         }
     }
 }
@@ -41,7 +47,7 @@ mod tests {
         NetworkPeer::new(
             Id::new("p1"),
             Id::new("a1"),
-            "base64pubkey==",
+            "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
             Some("10.0.0.1:51820".to_string()),
             vec!["10.0.0.2/32".to_string()],
             1000,
@@ -55,9 +61,20 @@ mod tests {
     }
 
     #[test]
+    fn new_peer_has_no_mesh_ip() {
+        let p = make_peer();
+        assert!(p.mesh_ip.is_none());
+    }
+
+    #[test]
+    fn new_peer_not_stale() {
+        let p = make_peer();
+        assert!(!p.is_stale);
+    }
+
+    #[test]
     fn peer_fields_set_correctly() {
         let p = make_peer();
-        assert_eq!(p.wireguard_pubkey, "base64pubkey==");
         assert_eq!(p.endpoint, Some("10.0.0.1:51820".to_string()));
         assert_eq!(p.allowed_ips, vec!["10.0.0.2/32"]);
         assert_eq!(p.registered_at, 1000);

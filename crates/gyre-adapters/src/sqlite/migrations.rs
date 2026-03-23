@@ -253,6 +253,11 @@ const MIGRATION_009: &str = "
 ALTER TABLE agents ADD COLUMN spawned_by TEXT;
 ";
 
+const MIGRATION_010: &str = "
+ALTER TABLE network_peers ADD COLUMN mesh_ip TEXT;
+ALTER TABLE network_peers ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT FALSE;
+";
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, MIGRATION_001),
     (2, MIGRATION_002),
@@ -263,6 +268,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, MIGRATION_007),
     (8, MIGRATION_008),
     (9, MIGRATION_009),
+    (10, MIGRATION_010),
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
