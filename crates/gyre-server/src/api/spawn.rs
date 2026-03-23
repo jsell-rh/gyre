@@ -317,10 +317,10 @@ pub async fn spawn_agent(
                     .to_string();
                 let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
                 // Apply optional config overrides from the stored target config.
-                // Default to bridge networking for agent containers so they can
-                // reach the Gyre server; --network=none is preserved only when
-                // explicitly configured (e.g. for untrusted/gate containers).
-                let network = cfg.config["network"].as_str().unwrap_or("bridge");
+                // G8: default --network=none (secure). Compute target config
+                // must explicitly set "network": "bridge" for agents that
+                // need to reach the server (clone, heartbeat, complete).
+                let network = cfg.config["network"].as_str().unwrap_or("none");
                 ct = ct.with_network(network);
                 if let Some(mem) = cfg.config["memory_limit"].as_str() {
                     ct = ct.with_memory_limit(mem);
