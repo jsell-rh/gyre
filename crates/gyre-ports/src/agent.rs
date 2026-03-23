@@ -12,4 +12,5 @@ pub trait AgentRepository: Send + Sync {
     async fn list_by_status(&self, status: &AgentStatus) -> Result<Vec<Agent>>;
     async fn update(&self, agent: &Agent) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Agent>>;
 }

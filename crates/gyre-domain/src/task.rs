@@ -39,6 +39,7 @@ pub struct Task {
     pub pr_link: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    pub workspace_id: Option<Id>,
 }
 
 impl Task {
@@ -56,6 +57,7 @@ impl Task {
             pr_link: None,
             created_at,
             updated_at: created_at,
+            workspace_id: None,
         }
     }
 

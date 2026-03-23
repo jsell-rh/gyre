@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -57,10 +57,20 @@ pub async fn create_project(
     Ok((StatusCode::CREATED, Json(ProjectResponse::from(project))))
 }
 
+#[derive(serde::Deserialize)]
+pub struct ListProjectsQuery {
+    pub workspace_id: Option<String>,
+}
+
 pub async fn list_projects(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<ListProjectsQuery>,
 ) -> Result<Json<Vec<ProjectResponse>>, ApiError> {
-    let projects = state.projects.list().await?;
+    let projects = if let Some(ws_id) = params.workspace_id {
+        state.projects.list_by_workspace(&Id::new(ws_id)).await?
+    } else {
+        state.projects.list().await?
+    };
     Ok(Json(
         projects.into_iter().map(ProjectResponse::from).collect(),
     ))

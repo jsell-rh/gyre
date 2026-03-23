@@ -1,0 +1,2 @@
+-- SQLite does not support DROP COLUMN in older versions; Postgres does
+-- This migration is intentionally left minimal for rollback compatibility

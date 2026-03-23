@@ -47,6 +47,7 @@ pub struct CreateMirrorRequest {
 #[derive(Deserialize)]
 pub struct ListReposQuery {
     pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -132,7 +133,9 @@ pub async fn list_repos(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListReposQuery>,
 ) -> Result<Json<Vec<RepoResponse>>, ApiError> {
-    let repos = if let Some(project_id) = params.project_id {
+    let repos = if let Some(ws_id) = params.workspace_id {
+        state.repos.list_by_workspace(&Id::new(ws_id)).await?
+    } else if let Some(project_id) = params.project_id {
         state.repos.list_by_project(&Id::new(project_id)).await?
     } else {
         state.repos.list().await?

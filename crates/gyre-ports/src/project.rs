@@ -10,4 +10,5 @@ pub trait ProjectRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<Project>>;
     async fn update(&self, project: &Project) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Project>>;
 }

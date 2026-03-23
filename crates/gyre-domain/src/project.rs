@@ -8,6 +8,7 @@ pub struct Project {
     pub description: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    pub workspace_id: Option<Id>,
 }
 
 impl Project {
@@ -18,6 +19,7 @@ impl Project {
             description: None,
             created_at,
             updated_at: created_at,
+            workspace_id: None,
         }
     }
 }

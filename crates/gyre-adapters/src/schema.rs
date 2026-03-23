@@ -9,6 +9,7 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         tenant_id -> Text,
+        workspace_id -> Nullable<Text>,
     }
 }
 
@@ -25,6 +26,7 @@ diesel::table! {
         mirror_interval_secs -> Nullable<BigInt>,
         last_mirror_sync -> Nullable<BigInt>,
         tenant_id -> Text,
+        workspace_id -> Nullable<Text>,
     }
 }
 
@@ -40,6 +42,7 @@ diesel::table! {
         last_heartbeat -> Nullable<BigInt>,
         tenant_id -> Text,
         spawned_by -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
     }
 }
 
@@ -58,6 +61,7 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         tenant_id -> Text,
+        workspace_id -> Nullable<Text>,
     }
 }
 
@@ -80,6 +84,7 @@ diesel::table! {
         tenant_id -> Text,
         depends_on -> Text,
         atomic_group -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
     }
 }
 
