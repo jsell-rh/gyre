@@ -375,6 +375,13 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_RPO` | _(unset)_ | Recovery Point Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
 | `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). **M27:** credentials are injected as `GYRE_CRED_KEY=value` and held by the `cred-proxy` sidecar — raw values are never in the agent process env. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. On startup, if Docker/Podman is on `PATH`, the server auto-registers a `gyre-agent-default` container compute target. (M25, M27) |
 | `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON (full JSON string) for Vertex AI provider. Injected as `GYRE_CRED_GCP_SA_JSON` and held by `cred-proxy` which emulates the GCE metadata server on `127.0.0.1:8080` for OAuth2 token exchange. Agent env gets `GCE_METADATA_HOST=127.0.0.1:8080`. (M27) |
+| `GYRE_WG_ENABLED` | `false` | Enable WireGuard mesh coordination plane. When `true`, `POST /api/v1/network/peers` allocates mesh IPs and the stale peer detector runs. (M26) |
+| `GYRE_WG_CIDR` | `10.100.0.0/16` | CIDR block for mesh IP allocation. The server claims `.1`; agents receive `.2`, `.3`, sequentially. (M26) |
+| `GYRE_WG_SERVER_PUBKEY` | _(unset)_ | Server WireGuard public key (Curve25519, base64). Included in `GET /api/v1/network/peers` so agents can add the server as a peer. (M26) |
+| `GYRE_WG_SERVER_ENDPOINT` | _(unset)_ | Server WireGuard endpoint `host:port` returned alongside `server_pubkey`. (M26) |
+| `GYRE_WG_PEER_TTL` | `300` | Seconds of inactivity before a peer is marked stale and filtered from the peer list. Stale peer detector runs every 60 s. (M26) |
+| `GYRE_DERP_SERVERS` | _(unset)_ | JSON array of DERP relay server configs served by `GET /api/v1/network/derp-map`. (M26) |
+| `GYRE_DERP_URL` | _(unset)_ | URL to fetch the DERP relay map JSON (used when `GYRE_DERP_SERVERS` is unset). (M26) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
