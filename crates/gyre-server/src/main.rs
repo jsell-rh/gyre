@@ -1,7 +1,8 @@
 use anyhow::Result;
 use gyre_server::{
-    audit_simulator, build_router, build_state, merge_processor, procfs_monitor, siem,
-    spawn_budget_daily_reset, spawn_stale_agent_detector, telemetry, JwtConfig,
+    audit_simulator, build_router, build_state, merge_processor, procfs_monitor,
+    register_default_compute_target, siem, spawn_budget_daily_reset,
+    spawn_stale_agent_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -36,6 +37,9 @@ async fn main() -> Result<()> {
     }
 
     let state = build_state(&auth_token, &base_url, jwt_config);
+
+    // M25: Auto-register default container compute target if Docker/Podman is available.
+    register_default_compute_target(&state).await;
 
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
