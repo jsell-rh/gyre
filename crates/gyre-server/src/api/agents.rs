@@ -174,8 +174,14 @@ pub async fn agent_heartbeat(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
-    agent.heartbeat(now_secs());
+    let now = now_secs();
+    agent.heartbeat(now);
     state.agents.update(&agent).await?;
+
+    // M26.4: Update WireGuard peer last_seen on each agent heartbeat.
+    if let Ok(Some(peer)) = state.network_peers.find_by_agent(&agent.id).await {
+        let _ = state.network_peers.update_last_seen(&peer.id, now).await;
+    }
 
     // G10: Verify workload attestation liveness on each heartbeat.
     // Checks PID is still alive; stack hash is left empty (stack re-check

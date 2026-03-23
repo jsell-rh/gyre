@@ -224,6 +224,8 @@ diesel::table! {
         allowed_ips -> Text,
         registered_at -> BigInt,
         last_seen -> Nullable<BigInt>,
+        mesh_ip -> Nullable<Text>,
+        is_stale -> Bool,
     }
 }
 

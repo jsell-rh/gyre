@@ -2,7 +2,7 @@ use anyhow::Result;
 use gyre_server::{
     audit_simulator, build_router, build_state, merge_processor, procfs_monitor,
     register_default_compute_target, siem, spawn_budget_daily_reset, spawn_stale_agent_detector,
-    telemetry, JwtConfig,
+    spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
 
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
+    spawn_stale_peer_detector(state.clone());
     merge_processor::spawn_merge_processor(state.clone());
     siem::spawn_siem_forwarder(state.clone());
     // Real procfs-based agent monitoring (replaces the synthetic simulator).

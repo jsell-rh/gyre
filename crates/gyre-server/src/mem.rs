@@ -1005,6 +1005,33 @@ impl NetworkPeerRepository for MemNetworkPeerRepository {
         Ok(())
     }
 
+    async fn update_endpoint(&self, id: &Id, endpoint: &str) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(p) = store.iter_mut().find(|p| p.id.as_str() == id.as_str()) {
+            p.endpoint = Some(endpoint.to_string());
+        }
+        Ok(())
+    }
+
+    async fn mark_stale_older_than(&self, cutoff: u64) -> Result<usize> {
+        let mut store = self.store.lock().await;
+        let mut count = 0usize;
+        for p in store.iter_mut() {
+            if p.is_stale {
+                continue;
+            }
+            let stale = match p.last_seen {
+                Some(ts) => ts < cutoff,
+                None => p.registered_at < cutoff,
+            };
+            if stale {
+                p.is_stale = true;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         let mut store = self.store.lock().await;
         store.retain(|p| p.id.as_str() != id.as_str());
@@ -1602,5 +1629,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
+        wg_config: crate::WireGuardConfig::from_env(),
     })
 }
