@@ -38,8 +38,13 @@
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 
   const filtered = $derived(
-    statusFilter ? agents.filter((a) => a.status === statusFilter) : agents
+    statusFilter ? agents.filter((a) => (a.status ?? '').toLowerCase() === statusFilter.toLowerCase()) : agents
   );
+  function taskLabel(id) {
+    if (!id) return '—';
+    const t = tasks.find(tk => tk.id === id);
+    return t ? t.title : id.substring(0, 8) + '…';
+  }
 
   function relativeTime(ts) {
     if (!ts) return '—';
@@ -316,7 +321,7 @@
             <div class="card-fields">
               <div class="field">
                 <span class="field-label">Task</span>
-                <span class="field-value mono">{a.current_task_id ?? '—'}</span>
+                <span class="field-value mono" title={a.current_task_id ?? ''}>{taskLabel(a.current_task_id)}</span>
               </div>
               <div class="field">
                 <span class="field-label">Uptime</span>
@@ -337,7 +342,7 @@
             <tr class:row-selected={selected?.id === a.id} onclick={() => selectAgent(a)} style="cursor:pointer">
               <td class="name-cell">{a.name}</td>
               <td><Badge value={a.status} /></td>
-              <td class="mono muted">{a.current_task_id ?? '—'}</td>
+              <td class="muted" title={a.current_task_id ?? ''}>{taskLabel(a.current_task_id)}</td>
               <td class="muted">{relativeTime(a.last_heartbeat)}</td>
               <td class="muted">{uptimeStr(a.spawned_at)}</td>
             </tr>
@@ -363,7 +368,7 @@
               <dt>ID</dt><dd class="mono">{selected.id}</dd>
               <dt>Status</dt><dd><Badge value={selected.status} /></dd>
               <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
-              <dt>Current Task</dt><dd class="mono">{selected.current_task_id ?? '—'}</dd>
+              <dt>Current Task</dt><dd title={selected.current_task_id ?? ''}>{taskLabel(selected.current_task_id)}</dd>
               <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
               <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
               <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
