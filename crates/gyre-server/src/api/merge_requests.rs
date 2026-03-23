@@ -33,6 +33,7 @@ pub struct CreateMrRequest {
 pub struct ListMrsQuery {
     pub status: Option<String>,
     pub repository_id: Option<String>,
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +259,7 @@ pub async fn create_mr(
 
     // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
     if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
+        mr.workspace_id = repo.workspace_id.clone();
         if let Ok(diff) = state
             .git_ops
             .diff(&repo.path, &req.target_branch, &req.source_branch)
@@ -414,13 +416,20 @@ pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
-    let mrs = match (params.status, params.repository_id) {
-        (Some(status_str), _) => {
-            let status = parse_mr_status(&status_str)?;
-            state.merge_requests.list_by_status(&status).await?
+    let mrs = if let Some(ws_id) = params.workspace_id {
+        state
+            .merge_requests
+            .list_by_workspace(&Id::new(ws_id))
+            .await?
+    } else {
+        match (params.status, params.repository_id) {
+            (Some(status_str), _) => {
+                let status = parse_mr_status(&status_str)?;
+                state.merge_requests.list_by_status(&status).await?
+            }
+            (_, Some(repo_id)) => state.merge_requests.list_by_repo(&Id::new(repo_id)).await?,
+            _ => state.merge_requests.list().await?,
         }
-        (_, Some(repo_id)) => state.merge_requests.list_by_repo(&Id::new(repo_id)).await?,
-        _ => state.merge_requests.list().await?,
     };
     Ok(Json(mrs.into_iter().map(MrResponse::from).collect()))
 }

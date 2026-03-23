@@ -25,6 +25,7 @@ struct RepositoryRow {
     last_mirror_sync: Option<i64>,
     #[allow(dead_code)]
     tenant_id: String,
+    workspace_id: Option<String>,
 }
 
 impl From<RepositoryRow> for Repository {
@@ -40,7 +41,7 @@ impl From<RepositoryRow> for Repository {
             mirror_url: r.mirror_url,
             mirror_interval_secs: r.mirror_interval_secs.map(|v| v as u64),
             last_mirror_sync: r.last_mirror_sync.map(|v| v as u64),
-            workspace_id: None,
+            workspace_id: r.workspace_id.map(Id::new),
         }
     }
 }
@@ -59,6 +60,7 @@ struct NewRepositoryRow<'a> {
     mirror_interval_secs: Option<i64>,
     last_mirror_sync: Option<i64>,
     tenant_id: &'a str,
+    workspace_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -80,6 +82,7 @@ impl RepoRepository for PgStorage {
                 mirror_interval_secs: r.mirror_interval_secs.map(|v| v as i64),
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
                 tenant_id: "default",
+                workspace_id: r.workspace_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(repositories::table)
                 .values(&row)
@@ -94,6 +97,7 @@ impl RepoRepository for PgStorage {
                     repositories::mirror_url.eq(row.mirror_url),
                     repositories::mirror_interval_secs.eq(row.mirror_interval_secs),
                     repositories::last_mirror_sync.eq(row.last_mirror_sync),
+                    repositories::workspace_id.eq(row.workspace_id),
                 ))
                 .execute(&mut *conn)
                 .context("insert repository")?;
@@ -160,6 +164,7 @@ impl RepoRepository for PgStorage {
                     repositories::mirror_url.eq(r.mirror_url.as_deref()),
                     repositories::mirror_interval_secs.eq(r.mirror_interval_secs.map(|v| v as i64)),
                     repositories::last_mirror_sync.eq(r.last_mirror_sync.map(|v| v as i64)),
+                    repositories::workspace_id.eq(r.workspace_id.as_ref().map(|id| id.as_str())),
                 ))
                 .execute(&mut *conn)
                 .context("update repository")?;
@@ -177,6 +182,20 @@ impl RepoRepository for PgStorage {
                 .execute(&mut *conn)
                 .context("delete repository")?;
             Ok(())
+        })
+        .await?
+    }
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Repository>> {
+        let pool = Arc::clone(&self.pool);
+        let workspace_id = workspace_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Repository>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = repositories::table
+                .filter(repositories::workspace_id.eq(workspace_id.as_str()))
+                .order(repositories::created_at.asc())
+                .load::<RepositoryRow>(&mut *conn)
+                .context("list repositories by workspace")?;
+            Ok(rows.into_iter().map(Repository::from).collect())
         })
         .await?
     }

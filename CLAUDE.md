@@ -131,14 +131,14 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
 | `GET` | `/api/v1/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
-| `POST/GET` | `/api/v1/projects` | Create / list projects |
+| `POST/GET` | `/api/v1/projects` | Create / list projects (`?workspace_id=` optional filter) |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
 | `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope` JSON wire format: `{"kind": "Tenant"|"Workspace"|"Repo", "id": "<uuid>"}` (serde tagged enum — both `kind` and `id` fields required; `id` is the tenant/workspace/repo UUID); Rust type: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona -- fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
-| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
+| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=&workspace_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
 | `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5); response includes `workspace_id: Option<Id>` when repo belongs to a workspace (M22.1) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
@@ -178,7 +178,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
-| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
+| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
 | `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat; on Linux, verifies PID liveness via `/proc/{pid}` and logs a warning if the process is no longer running (G10) |
@@ -192,10 +192,10 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/agents/{id}/workload` | Current workload attestation — `{pid, hostname, compute_target, stack_hash, alive}`: captured at spawn; `alive` re-checked via `/proc/{pid}` on Linux (G10) |
 | `GET` | `/api/v1/agents/{id}/container` | Container audit record for this agent -- `ContainerAuditRecord`: `container_id`, `image`, `image_hash`, `runtime` (e.g. `"docker"`), `started_at`, `stopped_at?`, `exit_code?`; 404 if agent was not container-spawned (M19.3) |
 | `GET` | `/ws/agents/{id}/tty` | WebSocket TTY attach — auth via first-message Bearer token; replays buffered logs then streams live PTY output (M11.2) |
-| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
+| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=&workspace_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
-| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=`) |
+| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=&workspace_id=`) |
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
@@ -704,6 +704,8 @@ The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
 **Navigation is path-based** — navigate directly to `/<view>` in the URL bar or click the sidebar. Valid view paths: `dashboard`, `activity`, `agents`, `tasks`, `projects`, `merge-queue`, `mcp-catalog`, `compose`, `analytics`, `costs`, `audit`, `spec-approvals`, `specs`, `admin`, `settings`, `workspaces`, `personas`, `budget`, `dependencies`, `spec-graph`, `profile`. Browser back/forward buttons work correctly via `history.pushState`/`popstate`. Legacy `#<view>` hash URLs are still supported on initial load for backwards compatibility. Example: `http://localhost:3000/agents`
 
+**Entity deep-link URLs (M28)** — in addition to sidebar view paths, entity-scoped URLs restore a specific record on direct navigation or page reload: `/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`. On mount, the app fetches the entity by ID and loads the correct detail view. Back/forward still works via `popstate`.
+
 - **Agent List**: shows all registered agents with status. **"Spawn Agent" button** opens a modal to provision a new sub-agent (name, repo, task, compute target dropdowns; branch is a free-text input with **datalist autocomplete** populated from `GET /api/v1/repos/{id}/branches` when a repo is selected — placeholder `feat/my-feature (new branch name)` guides users to enter a new or existing branch name — M24). On success, displays the agent token and clone URL for use by the spawned agent.
 - **Repo Detail**: shows a clone URL bar with one-click copy, pre-filled with the correct `Authorization: Bearer` git credential command.
 - **Admin Panel** (M4.3 + M8.3, Admin role required): tab-based navigation (Health / Jobs / Audit / Agents / SIEM / Compute / Network / Snapshots / Retention / BCP) via `Tabs` component. Health tab: uptime, agent/task/project metric cards. Jobs tab: merge processor + stale agent detector status table. Audit tab: searchable activity feed with agent_id / event_type filters. Agents tab: Kill and Reassign action buttons per agent; **Spawn Log** inline timeline per row shows each spawn step with status badge, timestamp, and detail (expand/collapse). SIEM tab: table of forwarding targets with add/edit/delete; modal form (URL, format JSON/CEF/LEEF, event filter, enabled toggle). Compute tab: table of compute targets (local/docker/ssh) with create/delete; modal with name, type, host fields. Network tab: WireGuard peer registry table with register/remove actions; DERP relay map JSON viewer below the table. BCP tab: RTO/RPO metric cards (from `GET /api/v1/admin/bcp/targets`) and a **Run BCP Drill** button (`POST /api/v1/admin/bcp/drill`) that triggers a live snapshot+verify cycle.
@@ -740,7 +742,7 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **Dependency Graph** (M22.5, sidebar: "Dependencies" under Source Control): SVG circular layout of cross-repo `DependencyEdge` records; edge coloring by `DependencyType` (Code/Spec/Api/Schema); click a node to open blast-radius panel (BFS transitive dependents); calls `GET /api/v1/dependencies/graph` and `GET /api/v1/repos/{id}/blast-radius`.
 - **Spec Graph** (M22.5, sidebar: "Spec Graph" under Source Control): SVG DAG of `SpecLink` records with link-type colored edges + legend (`implements`, `supersedes`, `depends_on`, `conflicts_with`, `extends`, `references`); node detail panel on click; calls `GET /api/v1/specs/graph`.
 - **User Profile** (M22.5, sidebar: "My Profile" under Overview): profile edit form (display_name, avatar_url, timezone, locale, preferences); four tabs: My Agents, My Tasks, My MRs, Notifications (unread badge, mark-read); calls `GET/PUT /api/v1/users/me` and `GET /api/v1/users/me/{agents,tasks,mrs,notifications}`.
-- **Workspace Scope Chip** (topbar): when a workspace is selected, a branded chip showing the workspace name appears in the topbar. Clicking it navigates to the workspace detail view, providing at-a-glance context for the active workspace scope.
+- **Global Workspace Selector** (M28, topbar): dropdown fetches all workspaces via `GET /api/v1/workspaces`; selection persists to `localStorage` (`gyre_selected_workspace_id`); passes `workspaceId` to AgentList, TaskBoard, and ProjectList for filtering. "All Workspaces" clears the filter. A **workspace scope chip** showing the selected workspace name also appears in the topbar (M22.5); clicking it navigates to the workspace detail view.
 - **Auth Token UI** (M9.3 + M20): auth status dot in topbar (green = authenticated, red = error). Click opens Token modal to view/change the API token stored in `localStorage`; saving reconnects the WebSocket. All REST and MCP calls inject `Authorization: Bearer {token}`. Defaults to `gyre-dev-token` when no token is stored. M20: modal fetches `GET /api/v1/auth/token-info` on open and displays token kind (human-readable: `global` = "Global admin token", `agent_jwt` = "Agent JWT (EdDSA, scoped)", `uuid_token` = "Per-agent UUID token (legacy)", `api_key` = "API key"), agent ID, task ID, scope, and expiry timestamp.
 
 ---
@@ -884,6 +886,11 @@ Key specs to read before making changes:
 | Spec Registry (manifest + ledger) | [specs/system/spec-registry.md](specs/system/spec-registry.md) |
 | Spec links (implements, supersedes, depends_on, conflicts_with, extends, references) | [specs/system/spec-links.md](specs/system/spec-links.md) |
 | Cross-repo dependency graph (auto-detect, breaking changes, cascade testing) | [specs/system/dependency-graph.md](specs/system/dependency-graph.md) |
+| Vision (7 principles: judgment not generation, right context, specs as artifact, feedback loop, challenge ceremony) | [specs/system/vision.md](specs/system/vision.md) |
+| Meta-Spec Reconciliation (safe iteration on personas, principles, standards) | [specs/system/meta-spec-reconciliation.md](specs/system/meta-spec-reconciliation.md) |
+| Realized Model (knowledge graph extracted from code, universal node types, architectural timeline) | [specs/system/realized-model.md](specs/system/realized-model.md) |
+| System Explorer UI (live architecture, moldable views, inline spec editing, preview modes) | [specs/system/system-explorer.md](specs/system/system-explorer.md) |
+| UI Journeys (Inbox/Briefing/Explorer/Meta-specs/Admin nav, journey-oriented navigation) | [specs/system/ui-journeys.md](specs/system/ui-journeys.md) |
 | M0 milestone deliverables | [specs/milestones/m0-walking-skeleton.md](specs/milestones/m0-walking-skeleton.md) |
 | M1 milestone deliverables | [specs/milestones/m1-domain-foundation.md](specs/milestones/m1-domain-foundation.md) |
 | M2 milestone deliverables | [specs/milestones/m2-source-control.md](specs/milestones/m2-source-control.md) |

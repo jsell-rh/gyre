@@ -43,6 +43,7 @@ pub struct MergeRequest {
     pub atomic_group: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    pub workspace_id: Option<Id>,
 }
 
 impl MergeRequest {
@@ -70,6 +71,7 @@ impl MergeRequest {
             atomic_group: None,
             created_at,
             updated_at: created_at,
+            workspace_id: None,
         }
     }
 

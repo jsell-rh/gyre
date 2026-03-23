@@ -306,6 +306,17 @@ impl ProjectRepository for MemProjectRepository {
         self.store.lock().await.remove(id.as_str());
         Ok(())
     }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Project>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|p| p.workspace_id.as_ref() == Some(workspace_id))
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Default)]
@@ -353,6 +364,17 @@ impl RepoRepository for MemRepoRepository {
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
         Ok(())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Repository>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.workspace_id.as_ref() == Some(workspace_id))
+            .cloned()
+            .collect())
     }
 }
 
@@ -411,6 +433,17 @@ impl AgentRepository for MemAgentRepository {
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
         Ok(())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Agent>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.workspace_id.as_ref() == Some(workspace_id))
+            .cloned()
+            .collect())
     }
 }
 
@@ -484,6 +517,17 @@ impl TaskRepository for MemTaskRepository {
         self.store.lock().await.remove(id.as_str());
         Ok(())
     }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Task>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|t| t.workspace_id.as_ref() == Some(workspace_id))
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Default)]
@@ -556,6 +600,17 @@ impl MergeRequestRepository for MemMrRepository {
             .map(|mr| mr.id.clone())
             .collect();
         Ok(dependents)
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<MergeRequest>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|mr| mr.workspace_id.as_ref() == Some(workspace_id))
+            .cloned()
+            .collect())
     }
 }
 

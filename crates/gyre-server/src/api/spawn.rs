@@ -119,6 +119,7 @@ pub async fn spawn_agent(
         agent.disconnected_behavior = behavior;
     }
     agent.assign_task(Id::new(&req.task_id));
+    agent.workspace_id = repo.workspace_id.clone();
     agent
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
@@ -152,14 +153,15 @@ pub async fn spawn_agent(
     let branch_slug = req.branch.replace('/', "-");
     let worktree_path = format!("{}/worktrees/{}", repo.path, branch_slug);
 
-    // Create git worktree — failure on empty repos gives a clear error.
+    // Create git worktree. The adapter tries existing branch first, then
+    // creates a new branch from HEAD if the branch doesn't exist yet.
     if let Err(e) = state
         .git_ops
         .create_worktree(&repo.path, &worktree_path, &req.branch)
         .await
     {
         let msg = e.to_string();
-        if msg.contains("invalid reference") || msg.contains("not a valid object") {
+        if msg.contains("not a valid object") || msg.contains("bad default revision") {
             return Err(ApiError::InvalidInput(format!(
                 "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
                 req.branch

@@ -38,16 +38,16 @@
     return new Date(ts * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
   }
 
-  async function loadProjects() {
+  async function loadProjects(wsId = '') {
     try {
-      projects = await api.projects();
+      projects = await api.projects({ workspaceId: wsId });
     } catch (err) {
       error = err.message;
     }
     loading = false;
   }
 
-  $effect(() => { loadProjects(); });
+  $effect(() => { loadProjects(workspaceId); });
 
   async function selectProject(p) {
     if (selected?.id === p.id) { selected = null; repos = []; return; }
@@ -71,7 +71,7 @@
       showNewProject = false;
       projName = ''; projDesc = '';
       loading = true;
-      await loadProjects();
+      await loadProjects(workspaceId);
     } catch (e) {
       toastError(e.message);
     }

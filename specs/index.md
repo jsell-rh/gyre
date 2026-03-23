@@ -16,6 +16,7 @@ What Gyre does - the product.
 
 | Spec | Path | Summary |
 |---|---|---|
+| **Vision** | [`system/vision.md`](system/vision.md) | **Root spec:** Gyre amplifies human judgment across the SDLC. Seven principles: judgment not generation, right context, specs as primary artifact, structure is discovered, feedback loop, challenge every ceremony, human differentiation compounds |
 | **Platform Model** | [`system/platform-model.md`](system/platform-model.md) | **Foundational spec:** tenant/workspace/repo hierarchy, persona model, orchestration, MCP coordination, budgets, rollback, secrets, bootstrap |
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
@@ -38,6 +39,10 @@ What Gyre does - the product.
 | Spec Registry | [`system/spec-registry.md`](system/spec-registry.md) | Git manifest + forge ledger for explicit spec registration, per-spec policies, approval tracking, auto-generated index |
 | Spec Links | [`system/spec-links.md`](system/spec-links.md) | SHA-pinned links between specs (implements, supersedes, depends_on, conflicts_with, extends), mechanical gates, tenant-wide spec graph |
 | Cross-Repo Dependency Graph | [`system/dependency-graph.md`](system/dependency-graph.md) | Auto-detected code/spec/API/schema dependencies, breaking change enforcement, cascade testing, version drift, impact analysis |
+| Meta-Spec Reconciliation | [`system/meta-spec-reconciliation.md`](system/meta-spec-reconciliation.md) | Safe iteration on personas, principles, and standards: versioned meta-specs, workspace-scoped binding, provenance tracking, Kubernetes-style reconciliation loop, rollout policies, preview mode (fast iteration loop) |
+| Realized System Model | [`system/realized-model.md`](system/realized-model.md) | Language-agnostic code knowledge graph: structural extraction on push, spec linkage, architectural timeline, concept views, risk metrics, narrative generation |
+| System Explorer | [`system/system-explorer.md`](system/system-explorer.md) | GT-inspired live architecture viewer: moldable views per entity, inline spec editing, progressive preview (instant/fast/thorough), ghost overlays, flow traces, conversational exploration |
+| UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | Journey-oriented navigation replacing entity-centric sidebar: Inbox (action queue), Briefing (narrative), Explorer (architecture), Meta-specs (preview loop), scoped to tenant/workspace/repo |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
@@ -105,6 +110,8 @@ How Gyre gets built - process and standards for the agent team.
 | M25: Agent Runner | [`milestones/m25-agent-runner.md`](milestones/m25-agent-runner.md) | Bundled Claude Code runner (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default`, `GYRE_AGENT_CREDENTIALS` passthrough, Node 22 Alpine + pinned SDK |
 | M26: WireGuard Mesh | [`milestones/m26-wireguard-mesh.md`](milestones/m26-wireguard-mesh.md) | Real WireGuard mesh networking: peer key exchange, DERP relay coordination, agent-to-agent encrypted tunnels _(Draft)_ |
 | M27: Credential Opacity | [`milestones/m27-credential-opacity.md`](milestones/m27-credential-opacity.md) | Unix socket credential proxy (`cred-proxy` sidecar): credentials held in memory, never exposed to agent process env; supports Anthropic direct API, Vertex AI (GCP SA JSON), and git tokens _(Draft)_ |
+| M28: UI Cohesion | [`milestones/m28-ui-cohesion.md`](milestones/m28-ui-cohesion.md) | Global workspace selector (topbar, localStorage persistence), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
+| M29: Workspace Integration | [`milestones/m29-workspace-integration.md`](milestones/m29-workspace-integration.md) | Workspace-aware SPA: M29.4 wires `workspace_id` filter to agents/tasks/projects list calls; post-create reload preserves workspace context |
 
 ## Open Questions
 
