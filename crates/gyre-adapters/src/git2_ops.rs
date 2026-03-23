@@ -754,4 +754,107 @@ mod tests {
         // No file changes between two commits on empty tree
         assert_eq!(diff.files_changed, 0);
     }
+
+    #[tokio::test]
+    async fn test_create_worktree_new_branch_from_head() {
+        // A bare repo with commits but no feature branch — create_worktree
+        // should fall back to `git worktree add -b <branch> <path> HEAD`.
+        let repo_dir = TempDir::new().unwrap();
+        let wt_dir = TempDir::new().unwrap();
+
+        // Init a bare repo and give it an initial commit via a temporary clone.
+        let non_bare = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", non_bare.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.email", "t@t.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.name", "T"])
+            .output()
+            .unwrap();
+        std::fs::write(non_bare.path().join("README"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "commit", "-m", "init"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["clone", "--bare", non_bare.path().to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        let worktree_path = wt_dir.path().join("feat-new").to_str().unwrap().to_string();
+        let adapter = Git2OpsAdapter::new();
+
+        // Branch "feat/new" does not exist — should create it from HEAD.
+        let result = adapter
+            .create_worktree(
+                repo_dir.path().to_str().unwrap(),
+                &worktree_path,
+                "feat/new",
+            )
+            .await;
+
+        assert!(result.is_ok(), "create_worktree should succeed for new branch: {result:?}");
+        assert!(std::path::Path::new(&worktree_path).exists(), "worktree directory should exist");
+    }
+
+    #[tokio::test]
+    async fn test_create_worktree_existing_branch() {
+        // A bare repo with an existing feature branch — checkout should succeed directly.
+        let repo_dir = TempDir::new().unwrap();
+        let wt_dir = TempDir::new().unwrap();
+
+        let non_bare = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", non_bare.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.email", "t@t.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.name", "T"])
+            .output()
+            .unwrap();
+        std::fs::write(non_bare.path().join("README"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "commit", "-m", "init"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", non_bare.path().to_str().unwrap(), "checkout", "-b", "feat/existing"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["clone", "--bare", non_bare.path().to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        let worktree_path = wt_dir.path().join("feat-existing").to_str().unwrap().to_string();
+        let adapter = Git2OpsAdapter::new();
+
+        let result = adapter
+            .create_worktree(
+                repo_dir.path().to_str().unwrap(),
+                &worktree_path,
+                "feat/existing",
+            )
+            .await;
+
+        assert!(result.is_ok(), "create_worktree should succeed for existing branch: {result:?}");
+        assert!(std::path::Path::new(&worktree_path).exists(), "worktree directory should exist");
+    }
 }
