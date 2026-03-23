@@ -26,12 +26,16 @@ Seven standard environment variables are injected into every container agent at 
 
 Optional: `GYRE_AGENT_COMMAND` — if set, the entrypoint execs this command after setup.
 
-### M24.2 — Bridge Networking for Agent Containers
+### M24.2 — Container Networking (G8)
 
-Container agent networking uses a two-tier model:
+All containers default to `--network=none` (G8 security invariant, PR #302 security fix).
 
-- **Agent containers** (spawned via `/api/v1/agents/spawn`): default to `bridge` networking so they can reach the Gyre server for clone, heartbeat, and complete calls. Override via `network` field on the compute target config.
-- **Gate/validation containers** (spawned by the merge processor for `AgentReview`/`AgentValidation` gates): should use `--network=none` since they only inspect diffs and do not need server access.
+Agent containers needing server access (clone, heartbeat, complete) must opt in to bridge networking explicitly via the compute target `config`:
+```json
+{"image": "gyre-agent:latest", "network": "bridge"}
+```
+
+Gate/validation containers should remain at the `--network=none` default.
 
 ### M24.3 — Configurable Entrypoint
 

@@ -286,7 +286,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET/PUT` | `/api/v1/admin/retention` | List / update retention policies (Admin only) |
 | `POST/GET` | `/api/v1/admin/siem` | Create / list SIEM forwarding targets (Admin only) |
 | `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
-| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** two-tier networking model: **agent containers** default to `bridge` networking so they can reach the Gyre server for clone/heartbeat/complete — override via `network` field; **gate/validation containers** (untrusted code) should use `--network=none`. `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). `config` JSON also accepts `command` (entrypoint binary, default `/gyre/entrypoint.sh`) and `args` (argument list) to configure the container entrypoint. (Admin only, M24) |
+| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** `--network=none` (default for all container types — G8 security invariant). Agent containers needing server access (clone/heartbeat/complete) must opt in via `"network": "bridge"` in the compute target config. Git credentials are passed via a credential helper script (not embedded in the clone URL). `GYRE_AGENT_COMMAND` is launched via `exec` (not `eval`) for a clean process tree. `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). `config` JSON also accepts `command` (entrypoint binary, default `/gyre/entrypoint.sh`) and `args` (argument list) to configure the container entrypoint. (Admin only, M24) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
 | `POST` | `/api/v1/admin/compute-targets/{id}/tunnel` | Open an SSH tunnel for a compute target: `{direction: "forward"|"reverse", local_port, remote_port, local_host?, remote_host?}` (`local_host` and `remote_host` default to `"localhost"`). Reverse tunnels (`-R`) let air-gapped agents dial out so the server can reach them through NAT. (G12, Admin only) |
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
@@ -612,10 +612,12 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
 
-The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Ubuntu 22.04 + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials, clones the branch, sends an initial heartbeat, then execs `GYRE_AGENT_COMMAND` or sleeps for interactive use. Build and register:
+The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Ubuntu 22.04 + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or sleeps for interactive use. Build and register:
 ```bash
 docker build -t gyre-agent:latest docker/gyre-agent/
 # Then create a container compute target in the UI (Admin → Compute → Add) with type=container
+# Agent containers need bridge networking to reach server:
+# Set config: {"image": "gyre-agent:latest", "network": "bridge"}
 ```
 
 **Custom git ref namespaces (M13.6):** The server writes refs into reserved namespaces on each lifecycle event:
