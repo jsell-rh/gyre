@@ -128,7 +128,11 @@ pub async fn create_repo(
         // Create an initial empty commit so HEAD is valid. Without this, `git worktree add -b`
         // fails with "fatal: invalid reference: HEAD" on freshly-created repos.
         let branch = repo.default_branch.clone();
-        if let Err(e) = state.git_ops.create_initial_commit(&repo_path, &branch).await {
+        if let Err(e) = state
+            .git_ops
+            .create_initial_commit(&repo_path, &branch)
+            .await
+        {
             tracing::warn!("create_initial_commit failed for {repo_path}: {e}");
         }
     }
