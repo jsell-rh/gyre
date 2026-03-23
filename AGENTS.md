@@ -879,6 +879,7 @@ Key specs to read before making changes:
 | Spec Registry (manifest + ledger) | [specs/system/spec-registry.md](specs/system/spec-registry.md) |
 | Spec links (implements, supersedes, depends_on, conflicts_with, extends, references) | [specs/system/spec-links.md](specs/system/spec-links.md) |
 | Cross-repo dependency graph (auto-detect, breaking changes, cascade testing) | [specs/system/dependency-graph.md](specs/system/dependency-graph.md) |
+| Vision (7 principles: judgment not generation, right context, specs as artifact, feedback loop, challenge ceremony) | [specs/system/vision.md](specs/system/vision.md) |
 | Meta-Spec Reconciliation (safe iteration on personas, principles, standards) | [specs/system/meta-spec-reconciliation.md](specs/system/meta-spec-reconciliation.md) |
 | Realized Model (knowledge graph extracted from code, universal node types, architectural timeline) | [specs/system/realized-model.md](specs/system/realized-model.md) |
 | System Explorer UI (live architecture, moldable views, inline spec editing, preview modes) | [specs/system/system-explorer.md](specs/system/system-explorer.md) |
