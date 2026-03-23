@@ -38,6 +38,7 @@ What Gyre does - the product.
 | Spec Registry | [`system/spec-registry.md`](system/spec-registry.md) | Git manifest + forge ledger for explicit spec registration, per-spec policies, approval tracking, auto-generated index |
 | Spec Links | [`system/spec-links.md`](system/spec-links.md) | SHA-pinned links between specs (implements, supersedes, depends_on, conflicts_with, extends), mechanical gates, tenant-wide spec graph |
 | Cross-Repo Dependency Graph | [`system/dependency-graph.md`](system/dependency-graph.md) | Auto-detected code/spec/API/schema dependencies, breaking change enforcement, cascade testing, version drift, impact analysis |
+| Meta-Spec Reconciliation | [`system/meta-spec-reconciliation.md`](system/meta-spec-reconciliation.md) | Safe iteration on personas, principles, and standards: versioned meta-specs, workspace-scoped binding, provenance tracking, Kubernetes-style reconciliation loop, rollout policies |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
