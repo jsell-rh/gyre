@@ -373,6 +373,7 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_SCIM_TOKEN` | _(unset — SCIM disabled)_ | Bearer token SCIM clients must send to `/scim/v2/` endpoints. When unset, SCIM provisioning endpoints return 401. Separate from `GYRE_AUTH_TOKEN`. (M23) |
 | `GYRE_RTO` | _(unset)_ | Recovery Time Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
 | `GYRE_RPO` | _(unset)_ | Recovery Point Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
+| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Newline-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). Used by `agent-runner.mjs` to authenticate with the Claude API. On startup, if Docker/Podman is on `PATH`, the server auto-registers a `gyre-agent-default` container compute target pointing to `gyre-agent:latest` with bridge networking; the spawn modal pre-selects this target when it exists. (M25) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
@@ -612,10 +613,14 @@ These fields appear on `AgentCommit` records returned by `GET /api/v1/repos/{id}
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
 
-The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Ubuntu 22.04 + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or sleeps for interactive use. Build and register:
+The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Node 22 Alpine + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat, then `exec`s `GYRE_AGENT_COMMAND` or — if unset — `node /gyre/agent-runner.mjs` for fully autonomous operation. `agent-runner.mjs` connects to the Gyre MCP server, reads the assigned task, implements it, commits, pushes, and calls `gyre_agent_complete`. Build and register:
 ```bash
 docker build -t gyre-agent:latest docker/gyre-agent/
-# Then create a container compute target in the UI (Admin → Compute → Add) with type=container
+
+# M25 zero-config: start server with API key — gyre-agent-default is auto-registered
+GYRE_AGENT_CREDENTIALS=ANTHROPIC_API_KEY=sk-ant-xxx cargo run -p gyre-server
+
+# Or manually create a container compute target (Admin -> Compute -> Add) with type=container
 # Agent containers need bridge networking to reach server:
 # Set config: {"image": "gyre-agent:latest", "network": "bridge"}
 ```
@@ -889,6 +894,7 @@ Key specs to read before making changes:
 | M20 milestone deliverables | [specs/milestones/m20-ui-coverage.md](specs/milestones/m20-ui-coverage.md) |
 | M21 milestone deliverables | [specs/milestones/m21-spec-registry.md](specs/milestones/m21-spec-registry.md) |
 | M22 milestone deliverables | [specs/milestones/m22-platform-entities.md](specs/milestones/m22-platform-entities.md) |
+| M25 milestone deliverables | [specs/milestones/m25-agent-runner.md](specs/milestones/m25-agent-runner.md) |
 | Database & Migrations | [specs/development/database-migrations.md](specs/development/database-migrations.md) |
 | User management & notification system | [specs/system/user-management.md](specs/system/user-management.md) |
 | Full-text search (all entities, FTS5/tsvector, MCP tool) | [specs/system/search.md](specs/system/search.md) |

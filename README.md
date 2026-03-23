@@ -64,6 +64,7 @@ All settings are environment variables. The server starts with safe defaults —
 | `GYRE_BASE_URL` | `http://localhost:<port>` | Public URL used in clone URLs |
 | `RUST_LOG` | `info` | Log level (`debug`, `trace`, `warn`) |
 | `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL — enables JWT auth |
+| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Newline-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). Used by `agent-runner.mjs` to authenticate with the Claude API. |
 
 See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
@@ -117,6 +118,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M22: Platform Entities | Done | **M22.1** Workspace+Persona entities (PersonaScope, 5 endpoints). **M22.2** BudgetConfig/BudgetUsage, 3 budget endpoints, spawn 429 gate. **M22.3** SpecLink/SpecLinkType, 6 link types, forge enforcement. **M22.4** DependencyEdge, 6 dep endpoints, Cargo.toml auto-detect. **M22.5** 7 Svelte views (Workspaces, Personas, Budget, Dep Graph, Spec Graph, User Profile) + 20+ api.js methods. **M22.6** Declarative ABAC Policy engine (8 operators, first-match-wins), 5 endpoints. **M22.7** SearchPort/MemSearchAdapter, 2 endpoints, `gyre_search` MCP tool. **M22.8** Enhanced User, WorkspaceMembership (WorkspaceRole), Team, Notification (16 types), 12 endpoints |
 | M23: Platform Operations | Done | Container lifecycle audit events (5 new `AuditEventType` variants), Analytics Decision API (usage/compare/top endpoints + `gyre_analytics_query` MCP tool), BCP graceful degradation (`DisconnectedBehavior`, `AgentStatus::Paused`), SCIM 2.0 provisioning (11 endpoints), Admin Panel BCP tab |
 | M24: E2E Docker Agent | Done | Full Docker agent Ralph loop: JWT pre-mint + env injection at spawn, bridge networking for agent containers, `gyre-agent` Dockerfile + entrypoint.sh, compute target dropdown in spawn modal |
+| M25: Agent Runner | Done | Bundled Claude Code runner image (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default` compute target, `GYRE_AGENT_CREDENTIALS` passthrough for API key injection, spawn modal pre-selects default target |
 
 924 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
