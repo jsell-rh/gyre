@@ -409,7 +409,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/network/peers/agent/:agent_id",
             get(network::get_peer_by_agent),
         )
-        .route("/api/v1/network/peers/:id", delete(network::delete_peer))
+        .route(
+            "/api/v1/network/peers/:id",
+            put(network::update_peer_endpoint).delete(network::delete_peer),
+        )
         .route("/api/v1/network/derp-map", get(network::derp_map))
         // Cross-repo dependency graph (M22.4)
         .route(
