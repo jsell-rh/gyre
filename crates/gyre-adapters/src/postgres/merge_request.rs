@@ -307,5 +307,4 @@ impl MergeRequestRepository for PgStorage {
         })
         .await?
     }
-
 }

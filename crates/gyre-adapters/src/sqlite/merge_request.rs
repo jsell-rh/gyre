@@ -308,7 +308,6 @@ impl MergeRequestRepository for SqliteStorage {
         })
         .await?
     }
-
 }
 
 #[cfg(test)]

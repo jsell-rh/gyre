@@ -417,7 +417,10 @@ pub async fn list_mrs(
     Query(params): Query<ListMrsQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
     let mrs = if let Some(ws_id) = params.workspace_id {
-        state.merge_requests.list_by_workspace(&Id::new(ws_id)).await?
+        state
+            .merge_requests
+            .list_by_workspace(&Id::new(ws_id))
+            .await?
     } else {
         match (params.status, params.repository_id) {
             (Some(status_str), _) => {
