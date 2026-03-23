@@ -122,7 +122,9 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M24: E2E Docker Agent | Done | Full Docker agent Ralph loop: JWT pre-mint + env injection at spawn, bridge networking for agent containers, `gyre-agent` Dockerfile + entrypoint.sh, compute target dropdown in spawn modal |
 | M25: Agent Runner | Done | Bundled Claude Code runner image (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default` compute target, `GYRE_AGENT_CREDENTIALS` passthrough for API key injection, spawn modal pre-selects default target |
 | M26: WireGuard Mesh | Done | Real WireGuard mesh networking: pubkey validation (Curve25519), mesh IP allocation from CIDR pool, ownership enforcement, stale peer detector, DERP relay config (`GYRE_DERP_SERVERS`/`GYRE_DERP_URL`), agent-side `setup-wg.sh` |
+| M27: Credential Opacity | Done | `cred-proxy` sidecar holds all API keys (`GYRE_CRED_*`), never exposes raw values to agent process; SSRF allowlist for proxy destinations; GCP SA JSON → GCE metadata emulator; Anthropic calls routed via `ANTHROPIC_BASE_URL`; JWT TTL reduced to 300s |
 | M28: UI Cohesion | Done | Global workspace selector (topbar, localStorage), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
+| M29: Workspace Integration | Done | Diesel tables for 9 platform entities, `workspace_id` filtering on agents/tasks/projects/repos/MRs API params, UI workspace selector wires all list views |
 
 935 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
