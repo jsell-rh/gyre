@@ -1,10 +1,13 @@
 <script>
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
   import { detectLang, highlightLine } from '../lib/syntaxHighlight.js';
+
+  const navigate = getContext('navigate');
 
   let { mr: initialMr, repo, onBack } = $props();
 
@@ -193,7 +196,11 @@
           {#if mr.author_agent_id}
             <div class="meta-row">
               <span class="meta-label">Author</span>
-              <span class="meta-value">{mr.author_agent_id}</span>
+              {#if navigate}
+                <button class="meta-link-btn" onclick={() => navigate('agents')}>{mr.author_agent_id}</button>
+              {:else}
+                <span class="meta-value">{mr.author_agent_id}</span>
+              {/if}
             </div>
           {/if}
 
@@ -618,6 +625,22 @@
     color: var(--color-text-secondary);
     text-align: right;
   }
+
+  .meta-link-btn {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0;
+    text-align: right;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    word-break: break-all;
+  }
+
+  .meta-link-btn:hover { opacity: 0.8; }
 
   .branch-ref {
     font-family: var(--font-mono);

@@ -1,10 +1,13 @@
 <script>
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Tabs from '../lib/Tabs.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+
+  const navigate = getContext('navigate');
 
   let { workspace, onBack } = $props();
 
@@ -161,7 +164,13 @@
           <tbody>
             {#each repos as r}
               <tr>
-                <td class="mono">{r.name}</td>
+                <td class="mono">
+                  {#if navigate}
+                    <button class="repo-link-btn" onclick={() => navigate('repo-detail', { repo: r })}>{r.name}</button>
+                  {:else}
+                    {r.name}
+                  {/if}
+                </td>
                 <td>{r.default_branch ?? 'main'}</td>
                 <td>{r.is_mirror ? 'Yes' : 'No'}</td>
               </tr>
@@ -329,6 +338,20 @@
   }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  .repo-link-btn {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .repo-link-btn:hover { opacity: 0.8; }
   .muted { color: var(--color-text-muted); }
 
   .teams-grid {
