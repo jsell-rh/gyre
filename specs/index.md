@@ -102,6 +102,7 @@ How Gyre gets built - process and standards for the agent team.
 | M22: Platform Entities | [`milestones/m22-platform-entities.md`](milestones/m22-platform-entities.md) | Workspace+Persona (M22.1), Budget (M22.2), SpecLinks (M22.3), DepGraph (M22.4), Platform UI - 7 views (M22.5), ABAC engine (M22.6), Search (M22.7), UserMgmt (M22.8) |
 | M23: Platform Operations | [`milestones/m23-platform-operations.md`](milestones/m23-platform-operations.md) | Container lifecycle audit (M23.1), Analytics Decision API (M23.2), BCP graceful degradation (M23.3), SCIM 2.0 provisioning (M23.4) |
 | M24: E2E Docker Agent | [`milestones/m24-e2e-docker.md`](milestones/m24-e2e-docker.md) | Full Docker agent Ralph loop: JWT pre-mint, container env injection, bridge networking, gyre-agent image, spawn modal compute target field (M24) |
+| M25: Agent Runner | [`milestones/m25-agent-runner.md`](milestones/m25-agent-runner.md) | Bundled Claude Code runner (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default`, `GYRE_AGENT_CREDENTIALS` passthrough, Node 22 Alpine + pinned SDK |
 
 ## Open Questions
 
