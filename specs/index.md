@@ -16,6 +16,7 @@ What Gyre does - the product.
 
 | Spec | Path | Summary |
 |---|---|---|
+| **Vision** | [`system/vision.md`](system/vision.md) | **Root spec:** Gyre amplifies human judgment across the SDLC. Seven principles: judgment not generation, right context, specs as primary artifact, structure is discovered, feedback loop, challenge every ceremony, human differentiation compounds |
 | **Platform Model** | [`system/platform-model.md`](system/platform-model.md) | **Foundational spec:** tenant/workspace/repo hierarchy, persona model, orchestration, MCP coordination, budgets, rollback, secrets, bootstrap |
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |

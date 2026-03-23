@@ -18,47 +18,60 @@ The System Explorer makes the realized system the primary object of interaction.
 
 ## Why This Is the Centerpiece
 
-### Structure Is the Moat
+### The Bottleneck Is Human Judgment, Not Code Generation
 
-Models are commoditized. Every company has access to the same LLMs. If you feed specs to agents and accept whatever structure they produce, you have zero structural differentiation — your competitors can produce identical code from identical models.
+Models are commoditized. Code generation is commoditized. The bottleneck in software development is no longer producing code — it's the rate at which humans can apply judgment: deciding what to build, recognizing what's working, changing course when it isn't.
 
-The differentiation is in **human understanding of structure**. Good structure is a function of the problem itself — you discover it by building, seeing the result, recognizing what works, and encoding that recognition. These domain-specific structural insights are not in any model. They're accumulated through iteration: each cycle of discover → encode → enforce widens the gap.
+Today, judgment is bottlenecked by menial context that fills human brains:
+- "Did CI pass?" — the system should handle this invisibly
+- "Which PR needs review?" — irrelevant when agents review
+- "What's the status of TASK-047?" — you shouldn't track tasks, you should track specs
+- "Is this formatted correctly?" — gates handle this, you never see it
+- "What happened overnight?" — you need a briefing, not an event log
 
-- **Company A** rapidly churns out code and iterates on specs. Understands behavior well. Has little understanding of specific structure; only generic patterns. Structure drifts with every model update. Fragile.
-- **Company B** rapidly churns out code and iterates on specs AND structure. Understands behavior AND structure. Encodes structural insights into specs and meta-specs. Each cycle makes the next one cheaper and better. Durable.
+All of this is noise that consumes the finite resource — human attention — without enhancing human reasoning. Strip it away and what's left is the context that actually matters: structural patterns, domain relationships, behavioral signals, the gap between intent and realization.
 
-Company B vastly outperforms Company A over time because its meta-spec corpus — the accumulated, domain-specific structural knowledge — is a compounding asset. Company A's heavy outsourcing of structure to undifferentiated LLMs produces undifferentiated systems.
+**The System Explorer exists to present exactly the context that enhances human reasoning, and nothing else.** Every surface is a context filter. The system has enormous amounts of data. The human's brain is the bottleneck. The system's job is to surface the signal, not the noise.
 
-### Structure Is Discovered, Not Prescribed
+| Bottleneck today | Gyre mechanism | What the human gets |
+|---|---|---|
+| Writing code to explore designs | Preview mode — churn out attempts, throwaway branches | Structural experimentation at LLM speed |
+| Reading code to understand | System explorer — boundaries, interfaces, data shapes | Comprehension without reading a line |
+| Tracking autonomous work | Briefing — spec-level narrative | Situational awareness in 30 seconds |
+| Enforcing decisions | Meta-spec reconciliation — discover, encode, enforce | Decisions stick without vigilance |
+| Understanding production behavior | Observable lens (future) | Behavior mapped to architecture |
 
-You cannot define good structure up front. Generic principles (hexagonal architecture, DDD, CQRS) are reasonable starting points, but "the right decomposition for this specific problem domain" emerges from building. Good structure is a function of the problem, and you only understand the problem by seeing what the code reveals about it.
+### Structure Matters Because It Determines Velocity
 
-The System Explorer exists to accelerate this discovery. The loop:
+Structure is not an end in itself. Obsessing over code organization while competitors ship is Company C — they lose to everyone. The right amount of structural attention is exactly enough to maintain velocity. No more.
+
+But structure IS one dimension of the supply chain where human judgment adds value. Good structure reduces cost-of-change: less tokens per modification, more parallelizable agent work, fewer unintended consequences from changes. Bad structure compounds: each change is harder than the last, agents step on each other, latent bugs emerge through slow SLI degradation.
+
+Good structure is a function of the problem itself. You cannot define it up front. Generic principles (hexagonal, DDD, CQRS) are starting points, but "the right decomposition for this specific problem domain" emerges from building. You discover it by seeing what agents produce, recognizing what works, and encoding that recognition.
+
+The discovery loop:
 
 ```
 Start with generic principles (meta-specs)
   → Agents produce code
     → Human explores realized model, sees actual structure
       → Human recognizes: "this works" or "this is wrong"
-        → Human encodes that recognition into a spec or meta-spec
+        → Human encodes recognition into spec or meta-spec
           → System enforces going forward + reconciles
-            → Agents produce better-structured code
-              → Human sees new structure, learns more → ...
+            → ...
 ```
 
-The system doesn't guarantee good structure. It **accelerates the discovery of good structure** by making the feedback loop fast:
+On prototypes, structure matters for LEARNING — not for producing lasting code. You churn out several structural approaches, see which ones make the domain legible, throw away the code and keep the insight. Preview mode makes this cheap: structural experimentation at the cost of a few agent runs.
 
-- **Discover**: the realized model shows you structure you didn't write
-- **Encode**: specs and meta-specs capture structural insights
-- **Enforce**: gates, assertions, and reconciliation guarantee adherence
-
-Each cycle compounds. The meta-spec corpus grows. The structural moat widens.
+In production, structure matters for VELOCITY — cheaper to change, more agents can work in parallel, fewer surprises. The structural insights you discovered during prototyping are now encoded as meta-specs and enforced automatically.
 
 ### The Right Abstraction Level
 
-When humans stop caring about code syntax — method bodies, variable names, formatting — what remains is the **essential design**: interfaces exposed by boundaries, data shapes that cross them, integration points, behavioral contracts. This is what the explorer shows.
+When humans stop caring about code syntax — method bodies, variable names, formatting — what remains is the **essential design**: interfaces exposed by boundaries, data shapes that cross them, integration points, behavioral contracts.
 
 This is analogous to the transition from assembly to higher-level languages. You don't review JIT machine code. You shouldn't review method-level syntax either. The explorer presents code at the abstraction level where human judgment adds value: interfaces, boundaries, data, and integration. Implementation detail is a drill-down, not the default view.
+
+The human doesn't need to see the traditional code-level syntax any more than they need to see Java bytecode or JIT-compiled machine code. What they need is something **derived from the output** that enters human consciousness at the right level — high enough to reason about, concrete enough to act on.
 
 ### Three Lenses
 
@@ -71,6 +84,8 @@ The realized system can be viewed through three complementary lenses:
 | **Observable** | SLIs, error rates, latency, throughput per endpoint | How structure manifests at runtime. Is the design actually working in production? |
 
 The structural lens is the default. The evaluative lens overlays evidence on the structure. The observable lens (future work — requires production integration) closes the loop between "what we built" and "how it performs."
+
+All three serve the same purpose: enhancing human reasoning about the system. Not showing everything — showing the right things.
 
 ## Design
 
