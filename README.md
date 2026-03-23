@@ -66,6 +66,7 @@ All settings are environment variables. The server starts with safe defaults —
 | `GYRE_OIDC_ISSUER` | _(disabled)_ | Keycloak realm URL — enables JWT auth |
 | `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected at container spawn. Credentials are held by the `cred-proxy` sidecar — raw values are never exposed in the agent process environment. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. (M25, M27) |
 | `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON for Vertex AI. Held by `cred-proxy`; agent gets `GCE_METADATA_HOST` pointing to the proxy's OAuth2 token emulator. (M27) |
+| `GYRE_CRED_ALLOWED_HOSTS` | `api.anthropic.com,gitlab.com,api.github.com` | Allowlist of hostnames `cred-proxy` will proxy to. Unlisted hosts get 403, preventing SSRF. (M27-A) |
 
 See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
@@ -120,8 +121,9 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M23: Platform Operations | Done | Container lifecycle audit events (5 new `AuditEventType` variants), Analytics Decision API (usage/compare/top endpoints + `gyre_analytics_query` MCP tool), BCP graceful degradation (`DisconnectedBehavior`, `AgentStatus::Paused`), SCIM 2.0 provisioning (11 endpoints), Admin Panel BCP tab |
 | M24: E2E Docker Agent | Done | Full Docker agent Ralph loop: JWT pre-mint + env injection at spawn, bridge networking for agent containers, `gyre-agent` Dockerfile + entrypoint.sh, compute target dropdown in spawn modal |
 | M25: Agent Runner | Done | Bundled Claude Code runner image (`agent-runner.mjs`), zero-config spawn via auto-registered `gyre-agent-default` compute target, `GYRE_AGENT_CREDENTIALS` passthrough for API key injection, spawn modal pre-selects default target |
+| M26: WireGuard Mesh | Done | Real WireGuard mesh networking: pubkey validation (Curve25519), mesh IP allocation from CIDR pool, ownership enforcement, stale peer detector, DERP relay config (`GYRE_DERP_SERVERS`/`GYRE_DERP_URL`), agent-side `setup-wg.sh` |
 
-924 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+933 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
