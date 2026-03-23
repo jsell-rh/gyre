@@ -373,7 +373,8 @@ The git HTTP endpoints (`/git/...`) accept all four auth mechanisms so that `gyr
 | `GYRE_SCIM_TOKEN` | _(unset — SCIM disabled)_ | Bearer token SCIM clients must send to `/scim/v2/` endpoints. When unset, SCIM provisioning endpoints return 401. Separate from `GYRE_AUTH_TOKEN`. (M23) |
 | `GYRE_RTO` | _(unset)_ | Recovery Time Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
 | `GYRE_RPO` | _(unset)_ | Recovery Point Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |
-| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Newline-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). Used by `agent-runner.mjs` to authenticate with the Claude API. On startup, if Docker/Podman is on `PATH`, the server auto-registers a `gyre-agent-default` container compute target pointing to `gyre-agent:latest` with bridge networking; the spawn modal pre-selects this target when it exists. (M25) |
+| `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected into every container agent spawn (e.g. `ANTHROPIC_API_KEY=sk-ant-xxx`). **M27:** credentials are injected as `GYRE_CRED_KEY=value` and held by the `cred-proxy` sidecar — raw values are never in the agent process env. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. On startup, if Docker/Podman is on `PATH`, the server auto-registers a `gyre-agent-default` container compute target. (M25, M27) |
+| `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON (full JSON string) for Vertex AI provider. Injected as `GYRE_CRED_GCP_SA_JSON` and held by `cred-proxy` which emulates the GCE metadata server on `127.0.0.1:8080` for OAuth2 token exchange. Agent env gets `GCE_METADATA_HOST=127.0.0.1:8080`. (M27) |
 
 ### WebSocket Protocol (`gyre-common::WsMessage`)
 
