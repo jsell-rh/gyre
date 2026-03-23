@@ -49,9 +49,9 @@
     return filtered.filter((t) => t.status === key);
   }
 
-  async function loadTasks() {
+  async function loadTasks(wsId = '') {
     try {
-      const raw = await api.tasks();
+      const raw = await api.tasks({ workspaceId: wsId });
       tasks = Array.isArray(raw) ? raw : (raw?.tasks ?? raw ?? []);
     } catch (err) {
       error = err.message;
@@ -59,7 +59,7 @@
     loading = false;
   }
 
-  $effect(() => { loadTasks(); });
+  $effect(() => { loadTasks(workspaceId); });
 
   async function createTask() {
     if (!taskTitle.trim()) return;

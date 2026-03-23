@@ -78,11 +78,13 @@
   }
 
   $effect(() => {
-    api.agents()
+    const wsId = workspaceId;
+    loading = true;
+    api.agents({ workspaceId: wsId })
       .then((data) => { agents = data; loading = false; })
       .catch((err) => { error = err.message; loading = false; });
     api.allRepos().then((data) => { repos = data; }).catch(() => {});
-    api.tasks().then((data) => { tasks = data; }).catch(() => {});
+    api.tasks({ workspaceId: wsId }).then((data) => { tasks = data; }).catch(() => {});
     api.computeList().then((data) => {
       computeTargets = Array.isArray(data) ? data : [];
       // M25: pre-select the default Claude Code runner target if it exists
@@ -163,7 +165,7 @@
       const spawnBody = { name: spawnName, repo_id: spawnRepoId, task_id: spawnTaskId, branch: spawnBranch };
       if (spawnComputeTarget) spawnBody.compute_target_id = spawnComputeTarget;
       spawnResult = await api.spawnAgent(spawnBody);
-      agents = await api.agents();
+      agents = await api.agents({ workspaceId });
     } catch (e) {
       spawnError = e.message;
     } finally {
