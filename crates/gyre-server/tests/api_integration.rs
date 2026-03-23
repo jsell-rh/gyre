@@ -1138,13 +1138,13 @@ async fn network_peers_register_list_delete() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
 
-    // Register peer (field is wireguard_pubkey, not public_key)
+    // Register peer — pubkey must be valid 44-char base64 of 32 bytes (M26.4 validation).
     let resp = ctx
         .post(
             "/api/v1/network/peers",
             json!({
                 "agent_id": agent_id,
-                "wireguard_pubkey": "abc123publickey==",
+                "wireguard_pubkey": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
                 "endpoint": "10.0.0.1:51820",
                 "allowed_ips": ["10.1.0.1/32"]
             }),

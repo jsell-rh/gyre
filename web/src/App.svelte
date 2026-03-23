@@ -98,9 +98,11 @@
     if (ctx.mr !== undefined) selectedMr = ctx.mr;
     if (ctx.task !== undefined) selectedTask = ctx.task;
     if (ctx.workspace !== undefined) selectedWorkspace = ctx.workspace;
-    // Push to browser history so back button works (path-based for clean URLs)
+    // Push plain (non-proxy) objects — history.pushState uses structuredClone
+    // which cannot serialize Svelte 5 reactive Proxy objects.
+    const snap = (o) => { try { return JSON.parse(JSON.stringify(o ?? null)); } catch { return null; } };
     window.history.pushState(
-      { view, selectedRepo, selectedMr, selectedTask, selectedWorkspace },
+      { view, selectedRepo: snap(selectedRepo), selectedMr: snap(selectedMr), selectedTask: snap(selectedTask), selectedWorkspace: snap(selectedWorkspace) },
       '',
       '/' + view,
     );
@@ -117,8 +119,9 @@
     if (initView) {
       currentView = initView;
     }
+    const snap = (o) => { try { return JSON.parse(JSON.stringify(o ?? null)); } catch { return null; } };
     window.history.replaceState(
-      { view: currentView, selectedRepo, selectedMr, selectedTask, selectedWorkspace },
+      { view: currentView, selectedRepo: snap(selectedRepo), selectedMr: snap(selectedMr), selectedTask: snap(selectedTask), selectedWorkspace: snap(selectedWorkspace) },
       '',
       '/' + currentView,
     );

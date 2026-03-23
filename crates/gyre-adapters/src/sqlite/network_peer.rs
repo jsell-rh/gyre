@@ -20,6 +20,8 @@ struct NetworkPeerRow {
     allowed_ips: String,
     registered_at: i64,
     last_seen: Option<i64>,
+    mesh_ip: Option<String>,
+    is_stale: bool,
 }
 
 impl NetworkPeerRow {
@@ -34,6 +36,8 @@ impl NetworkPeerRow {
             allowed_ips,
             registered_at: self.registered_at as u64,
             last_seen: self.last_seen.map(|v| v as u64),
+            mesh_ip: self.mesh_ip,
+            is_stale: self.is_stale,
         })
     }
 }
@@ -48,6 +52,8 @@ struct NetworkPeerRecord<'a> {
     allowed_ips: String,
     registered_at: i64,
     last_seen: Option<i64>,
+    mesh_ip: Option<&'a str>,
+    is_stale: bool,
 }
 
 #[async_trait]
@@ -66,6 +72,8 @@ impl NetworkPeerRepository for SqliteStorage {
                 allowed_ips,
                 registered_at: p.registered_at as i64,
                 last_seen: p.last_seen.map(|v| v as i64),
+                mesh_ip: p.mesh_ip.as_deref(),
+                is_stale: p.is_stale,
             };
             diesel::insert_into(network_peers::table)
                 .values(&record)
@@ -114,6 +122,46 @@ impl NetworkPeerRepository for SqliteStorage {
                 .execute(&mut *conn)
                 .context("update_last_seen")?;
             Ok(())
+        })
+        .await?
+    }
+
+    async fn update_endpoint(&self, id: &Id, endpoint: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let endpoint = endpoint.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(network_peers::table.find(id.as_str()))
+                .set(network_peers::endpoint.eq(Some(endpoint)))
+                .execute(&mut *conn)
+                .context("update_endpoint")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn mark_stale_older_than(&self, cutoff: u64) -> Result<usize> {
+        let pool = Arc::clone(&self.pool);
+        let cutoff_i64 = cutoff as i64;
+        tokio::task::spawn_blocking(move || -> Result<usize> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Mark stale where last_seen < cutoff OR (last_seen IS NULL AND registered_at < cutoff)
+            let n = diesel::update(
+                network_peers::table
+                    .filter(network_peers::is_stale.eq(false))
+                    .filter(
+                        network_peers::last_seen
+                            .lt(cutoff_i64)
+                            .or(network_peers::last_seen
+                                .is_null()
+                                .and(network_peers::registered_at.lt(cutoff_i64))),
+                    ),
+            )
+            .set(network_peers::is_stale.eq(true))
+            .execute(&mut *conn)
+            .context("mark_stale_older_than")?;
+            Ok(n)
         })
         .await?
     }

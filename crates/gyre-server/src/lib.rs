@@ -35,6 +35,7 @@ pub mod speculative_merge;
 pub mod notifications;
 pub mod policy_engine;
 pub mod stale_agents;
+pub mod stale_peers;
 pub mod telemetry;
 pub(crate) mod tty;
 pub mod version_compute;
@@ -60,6 +61,70 @@ use siem::SiemStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
+
+/// Configuration for the WireGuard coordination plane (M26.1).
+#[derive(Clone)]
+pub struct WireGuardConfig {
+    /// Whether the WireGuard coordination plane is enabled (GYRE_WG_ENABLED).
+    pub enabled: bool,
+    /// CIDR pool for mesh IP allocation, e.g. "10.100.0.0/16" (GYRE_WG_CIDR).
+    pub cidr: String,
+    /// Server's WireGuard public key (GYRE_WG_SERVER_PUBKEY).
+    pub server_pubkey: Option<String>,
+    /// Server's WireGuard endpoint, e.g. "vpn.example.com:51820" (GYRE_WG_SERVER_ENDPOINT).
+    pub server_endpoint: Option<String>,
+    /// Seconds after which a peer is considered stale (GYRE_WG_PEER_TTL, default 300).
+    pub peer_ttl_secs: u64,
+    /// Monotonically increasing counter for mesh IP allocation (.2, .3, …).
+    /// Counter value N allocates base_ip + N.
+    pub ip_counter: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl WireGuardConfig {
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("GYRE_WG_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let cidr = std::env::var("GYRE_WG_CIDR").unwrap_or_else(|_| "10.100.0.0/16".to_string());
+        let server_pubkey = std::env::var("GYRE_WG_SERVER_PUBKEY").ok();
+        let server_endpoint = std::env::var("GYRE_WG_SERVER_ENDPOINT").ok();
+        let peer_ttl_secs = std::env::var("GYRE_WG_PEER_TTL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        Self {
+            enabled,
+            cidr,
+            server_pubkey,
+            server_endpoint,
+            peer_ttl_secs,
+            ip_counter: Arc::new(std::sync::atomic::AtomicU32::new(2)),
+        }
+    }
+
+    /// Parse the base IP from the CIDR and allocate the next available mesh IP.
+    /// Returns None if the CIDR is malformed or the pool is exhausted.
+    pub fn allocate_ip(&self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let cidr = self.cidr.split('/').next()?;
+        let parts: Vec<u8> = cidr.split('.').filter_map(|p| p.parse().ok()).collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        let base = u32::from_be_bytes([parts[0], parts[1], parts[2], parts[3]]);
+        let offset = self
+            .ip_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let ip_num = base.checked_add(offset)?;
+        let bytes = ip_num.to_be_bytes();
+        Some(format!(
+            "{}.{}.{}.{}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ))
+    }
+}
 
 /// Configuration for OIDC/JWT validation.
 #[derive(Clone)]
@@ -115,7 +180,7 @@ pub struct AppState {
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
-    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 3600).
+    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
     pub agent_jwt_ttl_secs: u64,
     /// User repository for JWT/SSO user management.
     pub users: Arc<dyn UserRepository>,
@@ -230,6 +295,8 @@ pub struct AppState {
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
     pub notifications: Arc<dyn NotificationRepository>,
+    /// WireGuard coordination plane configuration (M26.1).
+    pub wg_config: WireGuardConfig,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -491,10 +558,11 @@ pub fn build_state(
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
         agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
+        // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(3600),
+            .unwrap_or(300),
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
@@ -567,12 +635,18 @@ pub fn build_state(
         workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: Arc::new(mem::MemNotificationRepository::default()),
+        wg_config: WireGuardConfig::from_env(),
     })
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
 pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
     stale_agents::spawn_stale_agent_detector(state);
+}
+
+/// Start the WireGuard stale peer detector background task (M26.4).
+pub fn spawn_stale_peer_detector(state: Arc<AppState>) {
+    stale_peers::spawn_stale_peer_detector(state);
 }
 
 /// Auto-register the default `gyre-agent-default` container compute target on startup (M25).
