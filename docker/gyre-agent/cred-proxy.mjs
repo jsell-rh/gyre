@@ -231,6 +231,21 @@ async function handleProxy(req, res) {
       res.end(JSON.stringify({ error: 'target_url required' }));
       return;
     }
+    // M27-A: Destination allowlist — reject requests to unlisted hosts.
+    const ALLOWED_HOSTS = (process.env.GYRE_CRED_ALLOWED_HOSTS || 'api.anthropic.com,gitlab.com,api.github.com').split(',').map(h => h.trim().toLowerCase());
+    try {
+      const targetHost = new URL(target_url).hostname.toLowerCase();
+      if (!ALLOWED_HOSTS.some(h => targetHost === h || targetHost.endsWith('.' + h))) {
+        auditLog(method, targetHost, 403);
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `host '${targetHost}' not in GYRE_CRED_ALLOWED_HOSTS allowlist` }));
+        return;
+      }
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid target_url' }));
+      return;
+    }
     let logPrefix = target_url;
     try { const u = new URL(target_url); logPrefix = u.hostname + u.pathname.substring(0, 20); } catch {}
     try {
