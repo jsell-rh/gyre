@@ -769,11 +769,23 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.email", "t@t.com"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "config",
+                "user.email",
+                "t@t.com",
+            ])
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.name", "T"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "config",
+                "user.name",
+                "T",
+            ])
             .output()
             .unwrap();
         std::fs::write(non_bare.path().join("README"), "hello").unwrap();
@@ -782,11 +794,22 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "commit", "-m", "init"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "commit",
+                "-m",
+                "init",
+            ])
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["clone", "--bare", non_bare.path().to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                non_bare.path().to_str().unwrap(),
+                repo_dir.path().to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
@@ -802,8 +825,14 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok(), "create_worktree should succeed for new branch: {result:?}");
-        assert!(std::path::Path::new(&worktree_path).exists(), "worktree directory should exist");
+        assert!(
+            result.is_ok(),
+            "create_worktree should succeed for new branch: {result:?}"
+        );
+        assert!(
+            std::path::Path::new(&worktree_path).exists(),
+            "worktree directory should exist"
+        );
     }
 
     #[tokio::test]
@@ -818,11 +847,23 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.email", "t@t.com"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "config",
+                "user.email",
+                "t@t.com",
+            ])
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "config", "user.name", "T"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "config",
+                "user.name",
+                "T",
+            ])
             .output()
             .unwrap();
         std::fs::write(non_bare.path().join("README"), "hello").unwrap();
@@ -831,19 +872,41 @@ mod tests {
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "commit", "-m", "init"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "commit",
+                "-m",
+                "init",
+            ])
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-C", non_bare.path().to_str().unwrap(), "checkout", "-b", "feat/existing"])
+            .args([
+                "-C",
+                non_bare.path().to_str().unwrap(),
+                "checkout",
+                "-b",
+                "feat/existing",
+            ])
             .output()
             .unwrap();
         std::process::Command::new("git")
-            .args(["clone", "--bare", non_bare.path().to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                non_bare.path().to_str().unwrap(),
+                repo_dir.path().to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
-        let worktree_path = wt_dir.path().join("feat-existing").to_str().unwrap().to_string();
+        let worktree_path = wt_dir
+            .path()
+            .join("feat-existing")
+            .to_str()
+            .unwrap()
+            .to_string();
         let adapter = Git2OpsAdapter::new();
 
         let result = adapter
@@ -854,7 +917,13 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok(), "create_worktree should succeed for existing branch: {result:?}");
-        assert!(std::path::Path::new(&worktree_path).exists(), "worktree directory should exist");
+        assert!(
+            result.is_ok(),
+            "create_worktree should succeed for existing branch: {result:?}"
+        );
+        assert!(
+            std::path::Path::new(&worktree_path).exists(),
+            "worktree directory should exist"
+        );
     }
 }
