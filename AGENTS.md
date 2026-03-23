@@ -131,7 +131,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
 | `GET` | `/api/v1/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
-| `POST/GET` | `/api/v1/projects` | Create / list projects |
+| `POST/GET` | `/api/v1/projects` | Create / list projects (`?workspace_id=` optional filter) |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
@@ -178,7 +178,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
-| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=`) |
+| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
 | `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat; on Linux, verifies PID liveness via `/proc/{pid}` and logs a warning if the process is no longer running (G10) |
@@ -192,7 +192,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `GET` | `/api/v1/agents/{id}/workload` | Current workload attestation — `{pid, hostname, compute_target, stack_hash, alive}`: captured at spawn; `alive` re-checked via `/proc/{pid}` on Linux (G10) |
 | `GET` | `/api/v1/agents/{id}/container` | Container audit record for this agent -- `ContainerAuditRecord`: `container_id`, `image`, `image_hash`, `runtime` (e.g. `"docker"`), `started_at`, `stopped_at?`, `exit_code?`; 404 if agent was not container-spawned (M19.3) |
 | `GET` | `/ws/agents/{id}/tty` | WebSocket TTY attach — auth via first-message Bearer token; replays buffered logs then streams live PTY output (M11.2) |
-| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
+| `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=&workspace_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
 | `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=`) |
