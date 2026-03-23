@@ -575,6 +575,62 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
     stale_agents::spawn_stale_agent_detector(state);
 }
 
+/// Auto-register the default `gyre-agent-default` container compute target on startup (M25).
+///
+/// If Docker or Podman is available and no target named `gyre-agent-default` exists yet,
+/// registers a container target pointing at `gyre-agent:latest` with bridge networking
+/// (agents need server access for clone/heartbeat/complete).  This makes agent spawning
+/// zero-config: operators can spawn agents without first creating a compute target.
+pub async fn register_default_compute_target(state: &Arc<AppState>) {
+    const DEFAULT_NAME: &str = "gyre-agent-default";
+    const DEFAULT_IMAGE: &str = "gyre-agent:latest";
+
+    // Only register if Docker or Podman is reachable (same check as ContainerTarget::detect).
+    let docker_ok = tokio::process::Command::new("which")
+        .arg("docker")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let podman_ok = tokio::process::Command::new("which")
+        .arg("podman")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let runtime_available = docker_ok || podman_ok;
+    if !runtime_available {
+        tracing::debug!("no docker/podman on PATH; skipping default compute target registration");
+        return;
+    }
+
+    let mut store = state.compute_targets.lock().await;
+
+    // Idempotent: skip if any target with this name already exists.
+    if store.values().any(|t| t.name == DEFAULT_NAME) {
+        tracing::debug!("default compute target '{DEFAULT_NAME}' already registered");
+        return;
+    }
+
+    let ct = api::compute::ComputeTargetConfig {
+        id: DEFAULT_NAME.to_string(),
+        name: DEFAULT_NAME.to_string(),
+        target_type: "container".to_string(),
+        config: serde_json::json!({
+            "image": DEFAULT_IMAGE,
+            "network": "bridge",
+            "command": "/gyre/entrypoint.sh"
+        }),
+    };
+
+    store.insert(DEFAULT_NAME.to_string(), ct);
+    tracing::info!(
+        name = DEFAULT_NAME,
+        image = DEFAULT_IMAGE,
+        "registered default container compute target (M25)"
+    );
+}
+
 /// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {

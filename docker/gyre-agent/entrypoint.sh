@@ -49,8 +49,7 @@ echo "=== Agent ready. Workspace: /workspace/repo ==="
 if [ -n "${GYRE_AGENT_COMMAND:-}" ]; then
     exec $GYRE_AGENT_COMMAND
 else
-    # Keep container alive for interactive/SDK use
-    echo "No GYRE_AGENT_COMMAND set. Container will stay alive for 1 hour."
-    echo "Connect via: docker exec -it <container_id> bash"
-    sleep 3600
+    # Default: run the Claude Agent SDK runner (M25 zero-config)
+    echo "Starting Claude agent runner..."
+    exec node /gyre/agent-runner.mjs
 fi
