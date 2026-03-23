@@ -40,6 +40,33 @@ All calls without `workspaceId` are backwards compatible (param omitted when uns
 
 ---
 
-## Sub-milestones M29.1–M29.3
+## M29.1 — Diesel Tables for Platform Entities
 
-Not yet defined. M29.4 was the first deliverable merged under this milestone.
+Migration  creates 10 Diesel-managed tables persisting the 9 platform entities introduced in M22 (previously in-memory only):
+
+| Table | Entity |
+|---|---|
+| `workspaces` | Workspace |
+| `personas` | Persona |
+| `teams` | Team |
+| `workspace_memberships` | WorkspaceMembership |
+| `notifications` | Notification |
+| `policies` | Policy |
+| `policy_decisions` | PolicyDecision |
+| `spec_approvals` | SpecApproval |
+| `dependency_edges` | DependencyEdge |
+| `budget_configs` | BudgetConfig |
+
+**New port traits added:** ,  (previously no Diesel-backed port traits existed for these).
+
+**Design decisions:**
+- Complex fields (, enums, , ) → JSON TEXT columns
+-  fields → NULLABLE columns
+-  uses composite  ( or )
+- Both SQLite and Postgres adapters implemented
+
+---
+
+## Sub-milestones M29.2–M29.3
+
+Not yet defined.
