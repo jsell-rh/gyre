@@ -115,7 +115,7 @@ pub struct AppState {
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
-    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 3600).
+    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
     pub agent_jwt_ttl_secs: u64,
     /// User repository for JWT/SSO user management.
     pub users: Arc<dyn UserRepository>,
@@ -491,10 +491,11 @@ pub fn build_state(
         agent_messages: Arc::new(Mutex::new(HashMap::new())),
         agent_tokens: Arc::new(Mutex::new(HashMap::new())),
         agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
+        // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(3600),
+            .unwrap_or(300),
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,

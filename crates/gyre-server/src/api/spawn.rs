@@ -300,18 +300,38 @@ pub async fn spawn_agent(
         container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
         container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
 
-        // M25: Inject operator-configured credentials (e.g. ANTHROPIC_API_KEY).
-        // Format: KEY1=VALUE1,KEY2=VALUE2  (values may contain '=' — split on first '=' only).
+        // M27: Inject operator-configured credentials via GYRE_CRED_* prefix.
+        // The cred-proxy sidecar reads GYRE_CRED_* vars, stores in memory, and scrubs
+        // them before the agent process starts — raw values are never in the agent env.
+        // Format: KEY1=VALUE1,KEY2=VALUE2 (values may contain '=' — split on first '=' only).
         if let Ok(creds) = std::env::var("GYRE_AGENT_CREDENTIALS") {
             for pair in creds.split(',') {
                 let pair = pair.trim();
                 if let Some((k, v)) = pair.split_once('=') {
                     if !k.is_empty() {
-                        container_env.insert(k.to_string(), v.to_string());
+                        container_env.insert(format!("GYRE_CRED_{k}"), v.to_string());
                     }
                 }
             }
         }
+        // GCP service account JSON (may contain commas — injected via a dedicated var).
+        if let Ok(sa_json) = std::env::var("GYRE_AGENT_GCP_SA_JSON") {
+            if !sa_json.is_empty() {
+                container_env.insert("GYRE_CRED_GCP_SA_JSON".to_string(), sa_json);
+            }
+        }
+
+        // M27: cred-proxy addresses for credential routing.
+        container_env.insert(
+            "GYRE_CRED_PROXY".to_string(),
+            "http://127.0.0.1:8765".to_string(),
+        );
+        container_env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "http://127.0.0.1:8765".to_string(),
+        );
+        // Placeholder so the Anthropic SDK initialises; cred-proxy injects the real key per request.
+        container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
 
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
