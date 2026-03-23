@@ -43,7 +43,7 @@ fn validate_wg_pubkey(key: &str) -> bool {
         }
     }
     // total length must be multiple of 4 (with padding counted)
-    if (byte_count + pad_count) % 4 != 0 {
+    if !(byte_count + pad_count).is_multiple_of(4) {
         return false;
     }
     // Decoded bytes = 3 * groups - padding_chars
