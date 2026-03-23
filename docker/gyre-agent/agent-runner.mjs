@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 /**
- * Gyre Agent Runner — M25
+ * Gyre Agent Runner — M25 / M27
  *
  * Runs a Claude agent inside the gyre-agent container using the Claude Agent
  * SDK.  Connects back to the Gyre server via MCP so the agent can manage
  * tasks, send heartbeats, and call gyre_agent_complete when done.
+ *
+ * M27: When GYRE_CRED_PROXY is set, Anthropic API calls are routed through
+ * the credential proxy via ANTHROPIC_BASE_URL (set by entrypoint.sh).
+ * The GYRE_AUTH_TOKEN is still used directly for Gyre API calls as an
+ * interim measure (see spec M27.4 for full opacity plan).
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
@@ -15,10 +20,22 @@ const taskId = process.env.GYRE_TASK_ID;
 const agentId = process.env.GYRE_AGENT_ID;
 const branch = process.env.GYRE_BRANCH;
 const repoId = process.env.GYRE_REPO_ID;
+const credProxy = process.env.GYRE_CRED_PROXY;
 
-if (!serverUrl || !token || !taskId || !agentId || !branch) {
-  console.error('ERROR: Required env vars missing (GYRE_SERVER_URL, GYRE_AUTH_TOKEN, GYRE_TASK_ID, GYRE_AGENT_ID, GYRE_BRANCH)');
+if (!serverUrl || !taskId || !agentId || !branch) {
+  console.error('ERROR: Required env vars missing (GYRE_SERVER_URL, GYRE_TASK_ID, GYRE_AGENT_ID, GYRE_BRANCH)');
   process.exit(1);
+}
+
+// M27: Warn if credentials are unexpectedly present in the environment.
+// The entrypoint should have scrubbed GYRE_CRED_* before exec'ing this process.
+if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'proxy-managed') {
+  console.warn('[m27] WARNING: ANTHROPIC_API_KEY found in agent env — expected proxy-managed. Credential opacity may be incomplete.');
+}
+
+if (credProxy) {
+  console.log(`[m27] Credential proxy active at ${credProxy}`);
+  console.log(`[m27] Anthropic API calls routed via ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL ?? '(not set)'}`);
 }
 
 const model = process.env.GYRE_AGENT_MODEL || 'claude-sonnet-4-6';
@@ -29,7 +46,7 @@ const options = {
     gyre: {
       type: 'http',
       url: `${serverUrl}/mcp`,
-      headers: { Authorization: `Bearer ${token}` },
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     },
   },
   allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'mcp__gyre__*'],
@@ -71,19 +88,17 @@ try {
   for await (const message of query({ prompt: taskPrompt, options })) {
     messageCount++;
 
-    // Print text output from the agent
     if (message.type === 'text') {
       process.stdout.write(message.content);
     } else if (message.type === 'tool_use') {
       console.log(`[tool] ${message.name}`);
     } else if (message.type === 'tool_result') {
-      // Periodically log tool results for debugging
       if (messageCount % 10 === 0) {
         console.log(`[progress] ${messageCount} messages processed`);
       }
     }
 
-    // Send periodic heartbeats if the agent SDK doesn't call gyre_agent_heartbeat itself
+    // Periodic heartbeat using GYRE_AUTH_TOKEN (interim; see M27.4 for full proxy plan)
     const now = Date.now();
     if (now - lastHeartbeat > HEARTBEAT_INTERVAL_MS) {
       lastHeartbeat = now;
@@ -91,14 +106,12 @@ try {
         const resp = await fetch(`${serverUrl}/api/v1/agents/${agentId}/heartbeat`, {
           method: 'PUT',
           headers: {
-            Authorization: `Bearer ${token}`,
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ pid: process.pid }),
         });
-        if (!resp.ok) {
-          console.warn(`[heartbeat] failed: ${resp.status}`);
-        }
+        if (!resp.ok) console.warn(`[heartbeat] failed: ${resp.status}`);
       } catch (e) {
         console.warn(`[heartbeat] error: ${e.message}`);
       }
