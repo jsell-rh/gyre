@@ -1685,5 +1685,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
+        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
     })
 }

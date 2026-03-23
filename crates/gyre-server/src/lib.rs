@@ -48,7 +48,7 @@ use gyre_common::ActivityEventData;
 use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    CostRepository, DependencyRepository, GitOpsPort, JjOpsPort, MergeQueueRepository,
+    CostRepository, DependencyRepository, GitOpsPort, GraphPort, JjOpsPort, MergeQueueRepository,
     MergeRequestRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository,
     ReviewRepository, SpawnLogRepository, TaskRepository, TeamRepository, UserRepository,
@@ -297,6 +297,8 @@ pub struct AppState {
     pub notifications: Arc<dyn NotificationRepository>,
     /// WireGuard coordination plane configuration (M26.1).
     pub wg_config: WireGuardConfig,
+    /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
+    pub graph_store: Arc<dyn GraphPort>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -636,6 +638,7 @@ pub fn build_state(
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: Arc::new(mem::MemNotificationRepository::default()),
         wg_config: WireGuardConfig::from_env(),
+        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
     })
 }
 
