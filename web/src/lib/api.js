@@ -28,13 +28,30 @@ async function request(path, options = {}) {
 export const api = {
   version: () => request('/version'),
   activity: (limit = 100) => request(`/activity?limit=${limit}`),
-  agents: () => request('/agents'),
+  agents: ({ workspaceId, status } = {}) => {
+    const p = new URLSearchParams();
+    if (status) p.set('status', status);
+    if (workspaceId) p.set('workspace_id', workspaceId);
+    const qs = p.toString();
+    return request(`/agents${qs ? '?' + qs : ''}`);
+  },
   agent: (id) => request(`/agents/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
-  tasks: () => request('/tasks'),
+  tasks: ({ workspaceId, status, assigned_to, parent_task_id } = {}) => {
+    const p = new URLSearchParams();
+    if (status) p.set('status', status);
+    if (assigned_to) p.set('assigned_to', assigned_to);
+    if (parent_task_id) p.set('parent_task_id', parent_task_id);
+    if (workspaceId) p.set('workspace_id', workspaceId);
+    const qs = p.toString();
+    return request(`/tasks${qs ? '?' + qs : ''}`);
+  },
   task: (id) => request(`/tasks/${id}`),
-  projects: () => request('/projects'),
+  projects: ({ workspaceId } = {}) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/projects${qs}`);
+  },
   project: (id) => request(`/projects/${id}`),
   repos: (projectId) => request(`/repos?project_id=${projectId}`),
   allRepos: () => request('/repos'),
