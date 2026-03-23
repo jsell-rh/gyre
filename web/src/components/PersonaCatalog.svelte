@@ -81,12 +81,17 @@
     }
   }
 
+  // API returns scope as {kind:"Tenant"|"Workspace"|"Repo", id:"..."} — handle both object and string
   function scopeVariant(scope) {
-    const s = (scope ?? '').toLowerCase();
+    const s = typeof scope === 'object' ? (scope?.kind ?? '').toLowerCase() : (scope ?? '').toLowerCase();
     if (s === 'tenant') return 'danger';
     if (s === 'workspace') return 'info';
     if (s === 'repo') return 'warning';
     return 'default';
+  }
+  function scopeLabel(scope) {
+    if (typeof scope === 'object') return scope?.kind ?? 'workspace';
+    return scope ?? 'workspace';
   }
 </script>
 
@@ -120,7 +125,7 @@
             </div>
             <div class="card-meta">
               <div class="persona-name">{persona.name}</div>
-              <Badge variant={scopeVariant(persona.scope)} label={persona.scope ?? 'workspace'} />
+              <Badge variant={scopeVariant(persona.scope)} label={scopeLabel(persona.scope)} />
             </div>
           </div>
           {#if persona.description}
