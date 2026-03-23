@@ -47,6 +47,7 @@ struct AgentRow {
     #[allow(dead_code)]
     tenant_id: String,
     spawned_by: Option<String>,
+    workspace_id: Option<String>,
 }
 
 impl AgentRow {
@@ -62,6 +63,7 @@ impl AgentRow {
             last_heartbeat: self.last_heartbeat.map(|v| v as u64),
             spawned_by: self.spawned_by,
             disconnected_behavior: Default::default(),
+            workspace_id: self.workspace_id.map(Id::new),
         })
     }
 }
@@ -79,6 +81,7 @@ struct NewAgentRow<'a> {
     last_heartbeat: Option<i64>,
     tenant_id: &'a str,
     spawned_by: Option<&'a str>,
+    workspace_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -100,6 +103,7 @@ impl AgentRepository for PgStorage {
                 last_heartbeat: a.last_heartbeat.map(|v| v as i64),
                 tenant_id: &tenant,
                 spawned_by: a.spawned_by.as_deref(),
+                workspace_id: a.workspace_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -229,4 +233,21 @@ impl AgentRepository for PgStorage {
         })
         .await?
     }
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Agent>> {
+        let pool = Arc::clone(&self.pool);
+        let workspace_id = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
+                .filter(agents::workspace_id.eq(workspace_id.as_str()))
+                .order(agents::spawned_at.asc())
+                .load::<AgentRow>(&mut *conn)
+                .context("list agents by workspace")?;
+            rows.into_iter().map(|r| r.into_agent()).collect()
+        })
+        .await?
+    }
+
 }

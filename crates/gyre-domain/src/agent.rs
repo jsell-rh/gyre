@@ -47,6 +47,7 @@ pub struct Agent {
     /// How the agent should behave when the server is unreachable (BCP graceful degradation).
     #[serde(default)]
     pub disconnected_behavior: DisconnectedBehavior,
+    pub workspace_id: Option<gyre_common::Id>,
 }
 
 impl Agent {
@@ -62,6 +63,7 @@ impl Agent {
             last_heartbeat: None,
             spawned_by: None,
             disconnected_behavior: DisconnectedBehavior::default(),
+            workspace_id: None,
         }
     }
 

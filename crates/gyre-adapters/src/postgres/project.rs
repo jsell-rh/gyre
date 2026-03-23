@@ -20,6 +20,7 @@ struct ProjectRow {
     updated_at: i64,
     #[allow(dead_code)]
     tenant_id: String,
+    workspace_id: Option<String>,
 }
 
 impl From<ProjectRow> for Project {
@@ -30,6 +31,7 @@ impl From<ProjectRow> for Project {
             description: r.description,
             created_at: r.created_at as u64,
             updated_at: r.updated_at as u64,
+            workspace_id: r.workspace_id.map(Id::new),
         }
     }
 }
@@ -43,6 +45,7 @@ struct ProjectRecord<'a> {
     created_at: i64,
     updated_at: i64,
     tenant_id: &'a str,
+    workspace_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -60,6 +63,7 @@ impl ProjectRepository for PgStorage {
                 created_at: p.created_at as i64,
                 updated_at: p.updated_at as i64,
                 tenant_id: &tenant,
+                workspace_id: p.workspace_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(projects::table)
                 .values(&record)
@@ -120,6 +124,7 @@ impl ProjectRepository for PgStorage {
                 projects::name.eq(&p.name),
                 projects::description.eq(p.description.as_deref()),
                 projects::updated_at.eq(p.updated_at as i64),
+                projects::workspace_id.eq(p.workspace_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)
             .context("update project")?;
@@ -145,4 +150,21 @@ impl ProjectRepository for PgStorage {
         })
         .await?
     }
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Project>> {
+        let pool = Arc::clone(&self.pool);
+        let workspace_id = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Project>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = projects::table
+                .filter(projects::tenant_id.eq(&tenant))
+                .filter(projects::workspace_id.eq(workspace_id.as_str()))
+                .order(projects::created_at.asc())
+                .load::<ProjectRow>(&mut *conn)
+                .context("list projects by workspace")?;
+            Ok(rows.into_iter().map(Project::from).collect())
+        })
+        .await?
+    }
+
 }
