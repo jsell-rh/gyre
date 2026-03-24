@@ -7,7 +7,7 @@
   import ActivityFeed from './components/ActivityFeed.svelte';
   import AgentList from './components/AgentList.svelte';
   import TaskBoard from './components/TaskBoard.svelte';
-  import ProjectList from './components/ProjectList.svelte';
+  import RepoList from './components/RepoList.svelte';
   import Settings from './components/Settings.svelte';
   import RepoDetail from './components/RepoDetail.svelte';
   import MergeRequestDetail from './components/MergeRequestDetail.svelte';
@@ -155,7 +155,7 @@
           const allRepos = await api.allRepos();
           const repo = allRepos.find(r => r.id === id);
           if (repo) initCtx = { repo };
-        } catch { /* fallback to projects view */ initView = 'projects'; }
+        } catch { /* fallback to repos view */ initView = 'repos'; }
       } else if (segment === 'tasks') {
         initView = 'task-detail';
         try {
@@ -261,7 +261,7 @@
     agents:             'Agents',
     tasks:              'Task Board',
     'task-detail':      'Task Detail',
-    projects:           'Projects',
+    repos:              'Repositories',
     'repo-detail':      'Repository',
     'mr-detail':        'Merge Request',
     'merge-queue':      'Merge Queue',
@@ -404,12 +404,12 @@
           task={selectedTask}
           onBack={() => navigate('tasks')}
         />
-      {:else if currentView === 'projects'}
-        <ProjectList workspaceId={selectedWorkspaceId} onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
+      {:else if currentView === 'repos'}
+        <RepoList workspaceId={selectedWorkspaceId} onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
       {:else if currentView === 'repo-detail' && selectedRepo}
         <RepoDetail
           repo={selectedRepo}
-          onBack={() => navigate('projects')}
+          onBack={() => navigate('repos')}
           onSelectMr={(mr) => navigate('mr-detail', { mr })}
         />
       {:else if currentView === 'mr-detail' && selectedMr}

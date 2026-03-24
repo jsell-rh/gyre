@@ -202,8 +202,8 @@ impl ReviewRepository for SqliteStorage {
 mod tests {
     use super::*;
     use crate::sqlite::SqliteStorage;
-    use gyre_domain::{MergeRequest, Project, Repository};
-    use gyre_ports::{MergeRequestRepository, ProjectRepository, RepoRepository};
+    use gyre_domain::{MergeRequest, Repository};
+    use gyre_ports::{MergeRequestRepository, RepoRepository};
     use tempfile::NamedTempFile;
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
@@ -213,11 +213,9 @@ mod tests {
     }
 
     async fn seed_mr(s: &SqliteStorage, mr_id: &str) {
-        let p = Project::new(Id::new("p1"), "proj".to_string(), 1000);
-        let _ = ProjectRepository::create(s, &p).await;
         let r = Repository::new(
             Id::new("r1"),
-            Id::new("p1"),
+            Id::new("ws1"),
             "repo".to_string(),
             "/repo".to_string(),
             1000,

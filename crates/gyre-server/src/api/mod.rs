@@ -27,7 +27,6 @@ pub mod meta_specs;
 pub mod network;
 pub mod personas;
 pub mod policies;
-pub mod projects;
 pub mod provenance;
 pub mod push_gates;
 pub mod release;
@@ -73,17 +72,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/version", get(version::version_handler))
         .route("/api/v1/activity", get(activity::activity_handler))
-        // Projects
-        .route(
-            "/api/v1/projects",
-            post(projects::create_project).get(projects::list_projects),
-        )
-        .route(
-            "/api/v1/projects/:id",
-            get(projects::get_project)
-                .put(projects::update_project)
-                .delete(projects::delete_project),
-        )
         // Repos
         .route(
             "/api/v1/repos",

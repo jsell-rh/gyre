@@ -247,7 +247,7 @@ mod tests {
 
     // Helper: create a test repo and return its ID.
     async fn create_repo(app: &Router) -> String {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(

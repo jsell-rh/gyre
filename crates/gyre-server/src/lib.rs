@@ -52,11 +52,10 @@ use gyre_ports::{
     ContainerAuditRepository, CostRepository, DependencyRepository, GateResultRepository,
     GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
     NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
-    PreAcceptGate, ProcessHandle, ProjectRepository, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, UserRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository, RepoRepository,
+    ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository,
+    SpecLedgerRepository, SpecPolicyRepository, TaskRepository, TeamRepository, UserRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -161,7 +160,6 @@ pub struct AppState {
     pub auth_token: String,
     /// Base URL for building clone URLs, e.g. "http://localhost:3000".
     pub base_url: String,
-    pub projects: Arc<dyn ProjectRepository>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -392,15 +390,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
         .route(
-            "/git/:project/:repo/info/refs",
+            "/git/:repo_id/:repo/info/refs",
             get(git_http::git_info_refs),
         )
         .route(
-            "/git/:project/:repo/git-upload-pack",
+            "/git/:repo_id/:repo/git-upload-pack",
             post(git_http::git_upload_pack),
         )
         .route(
-            "/git/:project/:repo/git-receive-pack",
+            "/git/:repo_id/:repo/git-receive-pack",
             post(git_http::git_receive_pack),
         )
         // MCP (Model Context Protocol) endpoints
@@ -525,7 +523,6 @@ pub fn build_state(
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
-        projects: store!(dyn ProjectRepository, mem::MemProjectRepository::default()),
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
         agents: store!(dyn AgentRepository, mem::MemAgentRepository::default()),
         tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
