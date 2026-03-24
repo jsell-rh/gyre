@@ -169,6 +169,7 @@ mod tests {
             "audit_events",
             "network_peers",
             "tenants",
+            "messages",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;

@@ -1168,6 +1168,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_after_does_not_return_workspace_events() {
+        // list_after filters to_type='agent', so workspace events must not appear.
+        let (_tmp, storage) = tmp_storage();
+        let agent_id = Id::new("agent-ws-check");
+
+        // Store a workspace event in the same workspace
+        storage
+            .store(&make_workspace_event(
+                "ws-evt-check",
+                "ws-check",
+                MessageKind::AgentCreated,
+                500,
+            ))
+            .await
+            .unwrap();
+        // Store a directed message for the agent
+        storage
+            .store(&make_directed(
+                "dir-check",
+                "agent-ws-check",
+                "ws-check",
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let results = storage.list_after(&agent_id, 0, None, 100).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("dir-check"));
+    }
+
+    #[tokio::test]
     async fn list_by_workspace_excludes_directed_messages() {
         let (_tmp, storage) = tmp_storage();
         let ws_id = Id::new("ws-directed-excl");
