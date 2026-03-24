@@ -38,7 +38,8 @@
   import { onMount, setContext } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
 
-  let currentView = $state('dashboard');
+  const savedWorkspace = localStorage.getItem('gyre_workspace_id');
+  let currentView = $state(savedWorkspace ? 'explorer' : 'inbox');
   let selectedRepo = $state(null);
   let selectedMr = $state(null);
   let selectedTask = $state(null);

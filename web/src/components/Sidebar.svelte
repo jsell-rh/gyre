@@ -37,7 +37,7 @@
     {
       label: 'Overview',
       items: [
-        { id: 'dashboard',   label: 'Dashboard',  icon: dashboardIcon() },
+        { id: 'dashboard',   label: 'Overview',   icon: dashboardIcon() },
         { id: 'activity',    label: 'Activity',   icon: activityIcon() },
         { id: 'workspaces',  label: 'Workspaces', icon: workspacesIcon() },
         { id: 'profile',     label: 'My Profile', icon: profileIcon() },
