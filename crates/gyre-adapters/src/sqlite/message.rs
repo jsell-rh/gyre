@@ -115,11 +115,11 @@ fn origin_to_row(origin: &MessageOrigin) -> (String, Option<String>) {
     }
 }
 
-fn dest_to_row(dest: &Destination) -> (String, Option<String>) {
+fn dest_to_row(dest: &Destination) -> Result<(String, Option<String>)> {
     match dest {
-        Destination::Agent(id) => ("agent".to_string(), Some(id.as_str().to_string())),
-        Destination::Workspace(id) => ("workspace".to_string(), Some(id.as_str().to_string())),
-        Destination::Broadcast => ("broadcast".to_string(), None),
+        Destination::Agent(id) => Ok(("agent".to_string(), Some(id.as_str().to_string()))),
+        Destination::Workspace(id) => Ok(("workspace".to_string(), Some(id.as_str().to_string()))),
+        Destination::Broadcast => Err(anyhow!("Broadcast messages must not be stored in the DB")),
     }
 }
 
@@ -130,7 +130,7 @@ fn message_to_new_row(m: &Message) -> Result<NewMessageRow> {
         .ok_or_else(|| anyhow!("cannot store Broadcast message: workspace_id is None"))?;
 
     let (from_type, from_id) = origin_to_row(&m.from);
-    let (to_type, to_id) = dest_to_row(&m.to);
+    let (to_type, to_id) = dest_to_row(&m.to)?;
     let payload = m
         .payload
         .as_ref()
@@ -509,6 +509,15 @@ mod tests {
         assert_eq!(found.kind, MessageKind::TaskAssignment);
         assert_eq!(found.workspace_id, Some(Id::new("ws-1")));
         assert!(!found.acknowledged);
+    }
+
+    #[tokio::test]
+    async fn store_duplicate_id_returns_error() {
+        let (_tmp, storage) = tmp_storage();
+        let msg = make_directed("dup-msg", "agent-1", "ws-1", 1_000);
+        storage.store(&msg).await.unwrap();
+        // Second store with same ID must return Err (UNIQUE constraint)
+        assert!(storage.store(&msg).await.is_err());
     }
 
     #[tokio::test]
