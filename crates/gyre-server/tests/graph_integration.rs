@@ -583,7 +583,10 @@ async fn test_push_triggers_graph_extraction() {
 
     let client = reqwest::Client::new();
     let auth = format!("Bearer {token}");
-    let proj = format!("proj-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]);
+    let proj = format!(
+        "proj-{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+    );
 
     // Create a project and repo.
     let project_resp: Value = client
@@ -624,7 +627,10 @@ async fn test_push_triggers_graph_extraction() {
                 .env("GIT_ASKPASS", "true")
                 .env("GIT_CONFIG_COUNT", "1")
                 .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                .env("GIT_CONFIG_VALUE_0", format!("Authorization: Bearer {token}"))
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Bearer {token}"),
+                )
                 .output()
                 .expect("git command failed")
         }
@@ -641,7 +647,11 @@ async fn test_push_triggers_graph_extraction() {
         let dir = work.path().join("repo");
 
         // Clone the empty repo.
-        let out = git(&["clone", &clone_url_owned, "repo"], work.path(), &token_owned);
+        let out = git(
+            &["clone", &clone_url_owned, "repo"],
+            work.path(),
+            &token_owned,
+        );
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let ok = out.status.success()
             || stderr.contains("empty repository")
