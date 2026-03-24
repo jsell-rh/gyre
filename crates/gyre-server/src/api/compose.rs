@@ -248,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn compose_apply_creates_agent_tree() {
         let app = app();
-        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
+        let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
@@ -317,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn compose_status_returns_agent_states() {
         let app = app();
-        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
+        let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
@@ -370,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn compose_teardown_stops_all_agents() {
         let app = app();
-        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
+        let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
@@ -444,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn compose_apply_yaml_format() {
         let app = app();
-        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
+        let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let yaml = format!(
             r#"version: "1"
