@@ -455,7 +455,9 @@ mod tests {
             jwt_claims: None,
         };
         assert!(
-            check_repo_abac(&state, "repo-corrupt", &admin_auth).await.is_ok(),
+            check_repo_abac(&state, "repo-corrupt", &admin_auth)
+                .await
+                .is_ok(),
             "admin bypass must not be blocked by corrupt ABAC policy data"
         );
 
@@ -468,7 +470,9 @@ mod tests {
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
         };
         assert!(
-            check_repo_abac(&state, "repo-corrupt", &agent_auth).await.is_err(),
+            check_repo_abac(&state, "repo-corrupt", &agent_auth)
+                .await
+                .is_err(),
             "non-admin token must be denied (fail-closed) on corrupt ABAC policy data"
         );
     }

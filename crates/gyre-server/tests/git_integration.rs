@@ -983,8 +983,12 @@ async fn push_with_url_scoped_extraheader_succeeds() {
         let dir = work.path().join("repo");
 
         // Clone using URL-scoped extraheader.
-        let clone_out =
-            git_with_url_scoped_token(&["clone", &clone_url, "repo"], work.path(), &scoped_base_c, &token_owned);
+        let clone_out = git_with_url_scoped_token(
+            &["clone", &clone_url, "repo"],
+            work.path(),
+            &scoped_base_c,
+            &token_owned,
+        );
         let clone_stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
         let ok = clone_out.status.success()
             || clone_stderr.contains("empty repository")
@@ -996,7 +1000,10 @@ async fn push_with_url_scoped_extraheader_succeeds() {
 
         std::fs::write(dir.join("readme.md"), "# url-scoped test\n").unwrap();
         git_local(&["add", "."], &dir);
-        git_local(&["commit", "-m", "feat: initial commit via url-scoped auth"], &dir);
+        git_local(
+            &["commit", "-m", "feat: initial commit via url-scoped auth"],
+            &dir,
+        );
 
         // Push using URL-scoped extraheader — this is the operator's failing scenario.
         let push_out = git_with_url_scoped_token(
@@ -1107,7 +1114,14 @@ async fn global_token_bypasses_abac_on_push() {
 
         std::fs::write(dir.join("readme.md"), "# abac bypass\n").unwrap();
         git_local(&["add", "."], &dir);
-        git_local(&["commit", "-m", "feat: commit under global token with ABAC policy set"], &dir);
+        git_local(
+            &[
+                "commit",
+                "-m",
+                "feat: commit under global token with ABAC policy set",
+            ],
+            &dir,
+        );
 
         let push_out = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
         let stderr = String::from_utf8_lossy(&push_out.stderr).to_string();
