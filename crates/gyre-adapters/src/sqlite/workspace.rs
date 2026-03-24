@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{BudgetConfig, Persona, PersonaScope, Workspace};
+use gyre_domain::{BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Workspace};
 use gyre_ports::{PersonaRepository, WorkspaceRepository};
 use std::sync::Arc;
 
@@ -200,6 +200,13 @@ struct PersonaRow {
     max_tokens: Option<i32>,
     budget: Option<String>,
     created_at: i64,
+    version: i32,
+    content_hash: String,
+    owner: Option<String>,
+    approval_status: String,
+    approved_by: Option<String>,
+    approved_at: Option<i64>,
+    updated_at: i64,
 }
 
 impl PersonaRow {
@@ -213,6 +220,8 @@ impl PersonaRow {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?;
+        let approval_status: PersonaApprovalStatus =
+            serde_json::from_str(&format!("\"{}\"", self.approval_status)).unwrap_or_default();
         Ok(Persona {
             id: Id::new(self.id),
             name: self.name,
@@ -226,6 +235,13 @@ impl PersonaRow {
             max_tokens: self.max_tokens.map(|v| v as u32),
             budget,
             created_at: self.created_at as u64,
+            version: self.version as u32,
+            content_hash: self.content_hash,
+            owner: self.owner,
+            approval_status,
+            approved_by: self.approved_by,
+            approved_at: self.approved_at.map(|v| v as u64),
+            updated_at: self.updated_at as u64,
         })
     }
 }
@@ -245,6 +261,13 @@ struct NewPersonaRow {
     max_tokens: Option<i32>,
     budget: Option<String>,
     created_at: i64,
+    version: i32,
+    content_hash: String,
+    owner: Option<String>,
+    approval_status: String,
+    approved_by: Option<String>,
+    approved_at: Option<i64>,
+    updated_at: i64,
 }
 
 #[async_trait]
@@ -254,6 +277,9 @@ impl PersonaRepository for SqliteStorage {
         let p = persona.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            let approval_status = serde_json::to_string(&p.approval_status)?
+                .trim_matches('"')
+                .to_string();
             let row = NewPersonaRow {
                 id: p.id.as_str().to_string(),
                 name: p.name.clone(),
@@ -267,6 +293,13 @@ impl PersonaRepository for SqliteStorage {
                 max_tokens: p.max_tokens.map(|v| v as i32),
                 budget: p.budget.as_ref().map(serde_json::to_string).transpose()?,
                 created_at: p.created_at as i64,
+                version: p.version as i32,
+                content_hash: p.content_hash.clone(),
+                owner: p.owner.clone(),
+                approval_status,
+                approved_by: p.approved_by.clone(),
+                approved_at: p.approved_at.map(|v| v as i64),
+                updated_at: p.updated_at as i64,
             };
             diesel::insert_into(personas::table)
                 .values(&row)
@@ -283,6 +316,13 @@ impl PersonaRepository for SqliteStorage {
                     personas::temperature.eq(row.temperature),
                     personas::max_tokens.eq(row.max_tokens),
                     personas::budget.eq(&row.budget),
+                    personas::version.eq(row.version),
+                    personas::content_hash.eq(&row.content_hash),
+                    personas::owner.eq(&row.owner),
+                    personas::approval_status.eq(&row.approval_status),
+                    personas::approved_by.eq(&row.approved_by),
+                    personas::approved_at.eq(row.approved_at),
+                    personas::updated_at.eq(row.updated_at),
                 ))
                 .execute(&mut *conn)
                 .context("insert persona")?;
@@ -301,6 +341,27 @@ impl PersonaRepository for SqliteStorage {
                 .first::<PersonaRow>(&mut *conn)
                 .optional()
                 .context("find persona by id")?;
+            result.map(PersonaRow::into_persona).transpose()
+        })
+        .await?
+    }
+
+    async fn find_by_slug_and_scope(
+        &self,
+        slug: &str,
+        scope: &PersonaScope,
+    ) -> Result<Option<Persona>> {
+        let pool = Arc::clone(&self.pool);
+        let slug = slug.to_string();
+        let scope_json = serde_json::to_string(scope)?;
+        tokio::task::spawn_blocking(move || -> Result<Option<Persona>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let result = personas::table
+                .filter(personas::slug.eq(&slug))
+                .filter(personas::scope.eq(&scope_json))
+                .first::<PersonaRow>(&mut *conn)
+                .optional()
+                .context("find persona by slug+scope")?;
             result.map(PersonaRow::into_persona).transpose()
         })
         .await?
@@ -339,6 +400,9 @@ impl PersonaRepository for SqliteStorage {
         let p = persona.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            let approval_status = serde_json::to_string(&p.approval_status)?
+                .trim_matches('"')
+                .to_string();
             diesel::update(personas::table.find(p.id.as_str()))
                 .set((
                     personas::name.eq(&p.name),
@@ -357,6 +421,13 @@ impl PersonaRepository for SqliteStorage {
                         .transpose()?
                         .as_deref()
                         .map(String::from)),
+                    personas::version.eq(p.version as i32),
+                    personas::content_hash.eq(&p.content_hash),
+                    personas::owner.eq(&p.owner),
+                    personas::approval_status.eq(&approval_status),
+                    personas::approved_by.eq(&p.approved_by),
+                    personas::approved_at.eq(p.approved_at.map(|v| v as i64)),
+                    personas::updated_at.eq(p.updated_at as i64),
                 ))
                 .execute(&mut *conn)
                 .context("update persona")?;
