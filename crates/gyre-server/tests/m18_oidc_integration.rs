@@ -8,7 +8,7 @@
 //! - Expired JWT is rejected after agent complete (token revocation)
 //! - `GET /api/v1/auth/token-info` introspects JWT agent tokens correctly
 
-use gyre_server::{build_router, build_state};
+use gyre_server::{abac_middleware, build_router, build_state};
 
 const GLOBAL_TOKEN: &str = "m18-test-global-token";
 
@@ -18,6 +18,7 @@ async fn start_server() -> (String, reqwest::Client) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     let app = build_router(state);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
