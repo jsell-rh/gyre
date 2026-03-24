@@ -314,6 +314,12 @@ export const api = {
   },
   // Spec graph (M22.3)
   specsGraph: () => request('/specs/graph'),
+  // Meta-spec registry (M32)
+  getMetaSpecs: (kind) => request(`/specs${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
+  getMetaSpecBlastRadius: (path) => request(`/meta-specs/${encodeURIComponent(path)}/blast-radius`),
+  getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
+  setWorkspaceMetaSpecSet: (id, data) =>
+    request(`/workspaces/${id}/meta-spec-set`, { method: 'PUT', body: JSON.stringify(data) }),
   // Workspaces (M22.5)
   workspaces: () => request('/workspaces'),
   workspace: (id) => request(`/workspaces/${id}`),

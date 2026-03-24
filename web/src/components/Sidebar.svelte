@@ -50,6 +50,7 @@
         { id: 'projects',      label: 'Projects',       icon: projectsIcon() },
         { id: 'specs',         label: 'Specs',          icon: specRegistryIcon() },
         { id: 'spec-graph',    label: 'Spec Graph',     icon: graphIcon() },
+        { id: 'meta-specs',    label: 'Meta-Specs',     icon: metaSpecIcon() },
         { id: 'dependencies',  label: 'Dependencies',   icon: dependenciesIcon() },
         { id: 'merge-queue',   label: 'Merge Queue',    icon: queueIcon() },
       ],
@@ -117,6 +118,7 @@
   function explorerIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><circle cx="11" cy="11" r="3"/></svg>'; }
   function dependenciesIcon() { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M9 6h6M7.5 8.5l3 7M16.5 8.5l-3 7"/></svg>'; }
   function personasIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>'; }
+  function metaSpecIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><circle cx="12" cy="16" r="0.5" fill="currentColor"/><path d="M8 12h1.5M14.5 12H16"/></svg>'; }
   function budgetIcon()       { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/><circle cx="12" cy="15" r="2"/></svg>'; }
 </script>
 

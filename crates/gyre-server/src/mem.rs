@@ -1686,5 +1686,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         wg_config: crate::WireGuardConfig::from_env(),
+        meta_spec_sets: Arc::new(Mutex::new(HashMap::new())),
     })
 }

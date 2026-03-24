@@ -23,6 +23,7 @@ pub mod jj;
 pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
+pub mod meta_specs;
 pub mod network;
 pub mod personas;
 pub mod policies;
@@ -461,6 +462,16 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/repos",
             post(workspaces::add_repo_to_workspace).get(workspaces::list_workspace_repos),
+        )
+        // Meta-spec sets (M32)
+        .route(
+            "/api/v1/workspaces/:id/meta-spec-set",
+            get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Meta-spec blast radius (M32)
+        .route(
+            "/api/v1/meta-specs/:path/blast-radius",
+            get(meta_specs::get_meta_spec_blast_radius),
         )
         // Personas (M22.1)
         .route(

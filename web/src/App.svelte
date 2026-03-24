@@ -27,6 +27,7 @@
   import BudgetDashboard from './components/BudgetDashboard.svelte';
   import DependencyGraph from './components/DependencyGraph.svelte';
   import SpecGraph from './components/SpecGraph.svelte';
+  import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import Inbox from './components/Inbox.svelte';
   import Briefing from './components/Briefing.svelte';
@@ -272,6 +273,7 @@
     'spec-approvals':   'Spec Approvals',
     specs:              'Spec Registry',
     'spec-graph':       'Spec Link Graph',
+    'meta-specs':       'Meta-Specs',
     admin:              'Admin Panel',
     settings:           'Settings',
     workspaces:         'Workspaces',
@@ -430,6 +432,8 @@
         <SpecDashboard />
       {:else if currentView === 'spec-graph'}
         <SpecGraph />
+      {:else if currentView === 'meta-specs'}
+        <MetaSpecs />
       {:else if currentView === 'workspaces'}
         <WorkspaceList onSelect={(ws) => navigate('workspace-detail', { workspace: ws })} />
       {:else if currentView === 'workspace-detail' && selectedWorkspace}
