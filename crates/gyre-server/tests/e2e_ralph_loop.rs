@@ -11,7 +11,7 @@
 //!   8. MR enqueued -> merge queue processes it
 //!   9. Verify: MR merged, commit on target branch
 
-use gyre_server::{build_router, build_state, merge_processor};
+use gyre_server::{abac_middleware, build_router, build_state, merge_processor};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -51,6 +51,7 @@ async fn full_ralph_loop_via_gyre() {
     let auth_token = "e2e-ralph-token";
 
     let state = build_state(auth_token, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);

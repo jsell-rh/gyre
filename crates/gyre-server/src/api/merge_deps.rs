@@ -105,7 +105,6 @@ fn would_create_cycle(
 
 pub async fn set_dependencies(
     State(state): State<Arc<AppState>>,
-    _dev: crate::rbac::RequireDeveloper,
     Path(id): Path<String>,
     Json(req): Json<SetDependenciesRequest>,
 ) -> Result<(StatusCode, Json<DependenciesResponse>), ApiError> {
@@ -201,7 +200,6 @@ pub async fn get_dependencies(
 
 pub async fn remove_dependency(
     State(state): State<Arc<AppState>>,
-    _dev: crate::rbac::RequireDeveloper,
     Path((id, dep_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let mr_id = Id::new(&id);
@@ -227,7 +225,6 @@ pub async fn remove_dependency(
 
 pub async fn set_atomic_group(
     State(state): State<Arc<AppState>>,
-    _dev: crate::rbac::RequireDeveloper,
     Path(id): Path<String>,
     Json(req): Json<SetAtomicGroupRequest>,
 ) -> Result<Json<AtomicGroupResponse>, ApiError> {

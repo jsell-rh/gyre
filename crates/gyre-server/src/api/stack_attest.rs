@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::{auth::AdminOnly, AppState};
+use crate::AppState;
 
 use super::error::ApiError;
 
@@ -219,7 +219,6 @@ pub async fn get_stack_policy(
 /// Admin only.
 pub async fn set_stack_policy(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
     Path(repo_id): Path<String>,
     Json(req): Json<SetStackPolicyRequest>,
 ) -> Result<Json<StackPolicyResponse>, ApiError> {

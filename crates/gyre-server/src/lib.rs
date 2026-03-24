@@ -1,4 +1,5 @@
 pub(crate) mod abac;
+pub mod abac_middleware;
 pub(crate) mod activity;
 pub mod api;
 pub mod attestation;
@@ -296,8 +297,7 @@ pub struct AppState {
 ///
 /// Rejects any request without a valid `Authorization: Bearer <token>` header
 /// with `401 Unauthorized`. The `/api/v1/version` endpoint is public.
-/// Per-handler extractors (`AuthenticatedAgent`, `AdminOnly`, etc.) still
-/// enforce finer-grained role checks on top of this.
+/// ABAC middleware runs after this and enforces finer-grained policy checks.
 async fn require_auth_middleware(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: axum::extract::Request,
@@ -362,6 +362,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use axum::routing::post;
     use tower_http::catch_panic::CatchPanicLayer;
 
+    // Ensure the ABAC resource resolver is initialized (idempotent).
+    abac_middleware::init_resolver();
+
     // Body size limit: configurable via GYRE_MAX_BODY_SIZE (bytes), default 10MB.
     let max_body_bytes: usize = std::env::var("GYRE_MAX_BODY_SIZE")
         .ok()
@@ -371,11 +374,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // CORS: configurable via GYRE_CORS_ORIGINS (comma-separated), default localhost only.
     let cors = build_cors_layer();
 
-    // Apply global API auth middleware to all /api/v1/ routes.
-    let api = api::api_router().layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        require_auth_middleware,
-    ));
+    // Apply global API auth middleware and ABAC middleware to all /api/v1/ routes.
+    // Layer ordering (axum): later .layer() calls run FIRST.
+    // So require_auth runs before abac_middleware runs before the handler.
+    let api = api::api_router()
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            abac_middleware::abac_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_middleware,
+        ));
 
     Router::new()
         .route("/health", get(health::health_handler))
