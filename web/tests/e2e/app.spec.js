@@ -63,7 +63,7 @@ test.describe('Auth flow', () => {
 
 test.describe('Dashboard home', () => {
   test('dashboard_loads_metric_cards', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard');
     await page.waitForLoadState('networkidle');
 
     // Four metric cards should be visible
@@ -83,7 +83,7 @@ test.describe('Dashboard home', () => {
   });
 
   test('seed_demo_data_button_works', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard');
     await page.waitForLoadState('networkidle');
 
     // Get initial agent count
