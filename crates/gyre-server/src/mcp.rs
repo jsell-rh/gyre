@@ -24,6 +24,8 @@ use tracing::instrument;
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
+use gyre_domain::UserRole;
+
 // ── JSON-RPC 2.0 types ────────────────────────────────────────────────────────
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -59,6 +61,21 @@ pub struct RpcError {
 // Standard JSON-RPC error codes
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
+const PERMISSION_DENIED: i32 = -32603;
+
+/// Returns true when the caller has at least the given role in the hierarchy
+/// Admin > Developer > Agent > ReadOnly.
+fn has_role_at_least(roles: &[UserRole], min_role: UserRole) -> bool {
+    let level = |r: &UserRole| match r {
+        UserRole::Admin => 4,
+        UserRole::Developer => 3,
+        UserRole::Agent => 2,
+        UserRole::ReadOnly => 1,
+        _ => 0,
+    };
+    let required = level(&min_role);
+    roles.iter().any(|r| level(r) >= required)
+}
 
 impl JsonRpcResponse {
     fn ok(id: Option<Value>, result: Value) -> Self {
@@ -746,10 +763,10 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
 
 // ── Main MCP request dispatcher ───────────────────────────────────────────────
 
-#[instrument(skip(state, req, _auth), fields(method = %req.method))]
+#[instrument(skip(state, req, auth), fields(method = %req.method))]
 pub async fn mcp_handler(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = req.id.clone();
@@ -774,6 +791,26 @@ pub async fn mcp_handler(
             let params = req.params.unwrap_or(json!({}));
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+            // Per-tool RBAC (MCP-1-B): write tools require Agent or Developer role;
+            // read-only tools allow ReadOnly.
+            let needs_write = matches!(
+                tool_name,
+                "gyre_create_task"
+                    | "gyre_update_task"
+                    | "gyre_create_mr"
+                    | "gyre_record_activity"
+                    | "gyre_agent_heartbeat"
+                    | "gyre_agent_complete"
+            );
+            if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    "insufficient permissions: this tool requires Agent or higher role",
+                ));
+            }
+
             let result = match tool_name {
                 "gyre_create_task" => handle_create_task(&state, &args).await,
                 "gyre_list_tasks" => handle_list_tasks(&state, &args).await,
@@ -1094,6 +1131,18 @@ mod tests {
         let tools = json["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"gyre_analytics_query"));
+    }
+
+    #[tokio::test]
+    async fn mcp_write_tool_requires_agent_role() {
+        // ReadOnly tokens must be rejected for write tools.
+        // The test-state global token is Admin, so we need to use a non-admin token
+        // that maps to ReadOnly. This test verifies the role-check path by directly
+        // calling has_role_at_least with ReadOnly roles.
+        assert!(!has_role_at_least(&[UserRole::ReadOnly], UserRole::Agent));
+        assert!(has_role_at_least(&[UserRole::Agent], UserRole::Agent));
+        assert!(has_role_at_least(&[UserRole::Developer], UserRole::Agent));
+        assert!(has_role_at_least(&[UserRole::Admin], UserRole::Agent));
     }
 
     #[tokio::test]
