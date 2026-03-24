@@ -365,7 +365,7 @@ impl AgentRepository for MemAgentRepository {
             .lock()
             .await
             .values()
-            .filter(|a| a.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|a| &a.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
@@ -448,7 +448,7 @@ impl TaskRepository for MemTaskRepository {
             .lock()
             .await
             .values()
-            .filter(|t| t.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|t| &t.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
@@ -543,7 +543,7 @@ impl MergeRequestRepository for MemMrRepository {
             .lock()
             .await
             .values()
-            .filter(|mr| mr.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|mr| &mr.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
