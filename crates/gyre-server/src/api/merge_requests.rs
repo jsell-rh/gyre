@@ -707,10 +707,10 @@ pub async fn get_attestation(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
-    let store = state.attestation_store.lock().await;
-    store
-        .get(&id)
-        .cloned()
+    state
+        .attestation_store
+        .find_by_mr_id(&id)
+        .await?
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("no attestation found for merge request {id}")))
 }
@@ -1158,10 +1158,7 @@ mod tests {
             author_agent_id: None,
         };
         let bundle = sign_attestation(attestation, &state.agent_signing_key);
-        {
-            let mut store = state.attestation_store.lock().await;
-            store.insert(mr_id.clone(), bundle.clone());
-        }
+        state.attestation_store.save(&mr_id, &bundle).await.unwrap();
 
         // GET the attestation via the API.
         let resp = app

@@ -325,7 +325,7 @@ pub async fn admin_kill_agent(
     });
 
     // M23: Emit container_crashed audit event if this agent had a container.
-    if let Some(rec) = state.container_audits.lock().await.get(&id).cloned() {
+    if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
         let ctx = crate::container_audit::AuditCtx {
             audit: state.audit.as_ref(),
             broadcast_tx: &state.audit_broadcast_tx,

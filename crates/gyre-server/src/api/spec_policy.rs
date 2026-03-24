@@ -9,34 +9,14 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 
 use crate::AppState;
 
 use super::error::ApiError;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Per-repo spec enforcement policy.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct SpecPolicy {
-    /// If true, MRs without a `spec_ref` field are blocked from merging.
-    pub require_spec_ref: bool,
-    /// If true, MRs whose `spec_ref` has no active approval in the ledger are blocked.
-    /// Implies `require_spec_ref` — both are checked when this is true.
-    pub require_approved_spec: bool,
-    /// If true, emit a `StaleSpecWarning` domain event when an MR's spec_ref SHA is not
-    /// the current HEAD blob SHA for that spec file. Does not block the merge.
-    #[serde(default)]
-    pub warn_stale_spec: bool,
-    /// If true, block merging when an MR's spec_ref SHA is not the current HEAD blob SHA
-    /// for that spec file. Implies `require_spec_ref`.
-    #[serde(default)]
-    pub require_current_spec: bool,
-}
+pub use gyre_domain::SpecPolicy;
 
 #[derive(Serialize)]
 pub struct SpecPolicyResponse {
@@ -76,10 +56,8 @@ pub async fn get_spec_policy(
 
     let policy = state
         .spec_policies
-        .lock()
+        .get_for_repo(&repo_id)
         .await
-        .get(&repo_id)
-        .cloned()
         .unwrap_or_default();
 
     Ok(Json(SpecPolicyResponse::from_policy(repo_id, &policy)))
@@ -100,9 +78,8 @@ pub async fn set_spec_policy(
 
     state
         .spec_policies
-        .lock()
-        .await
-        .insert(repo_id.clone(), req.clone());
+        .set_for_repo(&repo_id, req.clone())
+        .await?;
 
     Ok((
         StatusCode::OK,

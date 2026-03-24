@@ -129,15 +129,14 @@ async fn handle_dep_health_issues(
         }
 
         // Case 2: Dependency has 3+ gate failures — log escalation.
-        let gate_fail_count = {
-            let results = state.gate_results.lock().await;
-            results
-                .values()
-                .filter(|r| {
-                    r.mr_id.as_str() == dep_id.as_str() && matches!(r.status, GateStatus::Failed)
-                })
-                .count()
-        };
+        let gate_fail_count = state
+            .gate_results
+            .list_by_mr_id(dep_id.as_str())
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| matches!(r.status, GateStatus::Failed))
+            .count();
 
         if gate_fail_count >= 3 {
             warn!(
@@ -246,10 +245,8 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     {
         let policy = state
             .spec_policies
-            .lock()
+            .get_for_repo(&repo.id.to_string())
             .await
-            .get(&repo.id.to_string())
-            .cloned()
             .unwrap_or_default();
 
         if policy.require_spec_ref || policy.require_approved_spec {
@@ -405,32 +402,28 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             let _ = state.analytics.record(&ev).await;
 
             // Build and store a signed merge attestation bundle (G5).
-            let gate_results_snapshot = {
-                let lock = state.gate_results.lock().await;
-                lock.values()
-                    .filter(|r| r.mr_id.as_str() == updated_mr.id.as_str())
-                    .map(|r| crate::attestation::AttestationGateResult {
-                        gate_id: r.gate_id.to_string(),
-                        gate_type: String::new(), // gate type looked up below
-                        status: format!("{:?}", r.status),
-                        output: r.output.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let gate_results_snapshot = state
+                .gate_results
+                .list_by_mr_id(updated_mr.id.as_str())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| crate::attestation::AttestationGateResult {
+                    gate_id: r.gate_id.to_string(),
+                    gate_type: String::new(), // gate type looked up below
+                    status: format!("{:?}", r.status),
+                    output: r.output.clone(),
+                })
+                .collect::<Vec<_>>();
 
-            // Enrich gate_type from quality_gates map.
-            let gate_results_enriched = {
-                let gates_lock = state.quality_gates.lock().await;
-                gate_results_snapshot
-                    .into_iter()
-                    .map(|mut gr| {
-                        if let Some(gate) = gates_lock.get(&gr.gate_id) {
-                            gr.gate_type = format!("{:?}", gate.gate_type);
-                        }
-                        gr
-                    })
-                    .collect::<Vec<_>>()
-            };
+            // Enrich gate_type from quality_gates.
+            let mut gate_results_enriched = Vec::with_capacity(gate_results_snapshot.len());
+            for mut gr in gate_results_snapshot {
+                if let Ok(Some(gate)) = state.quality_gates.find_by_id(&gr.gate_id).await {
+                    gr.gate_type = format!("{:?}", gate.gate_type);
+                }
+                gate_results_enriched.push(gr);
+            }
 
             // Check spec approval status.
             let spec_fully_approved = if let Some(spec_ref) = updated_mr.spec_ref.as_deref() {
@@ -492,11 +485,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 }
             });
 
-            // Store in memory for API retrieval.
-            {
-                let mut store = state.attestation_store.lock().await;
-                store.insert(updated_mr.id.to_string(), bundle);
-            }
+            // Persist attestation bundle.
+            let _ = state
+                .attestation_store
+                .save(&updated_mr.id.to_string(), &bundle)
+                .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
             // Notify the MR author that their MR was merged (M22.8).
