@@ -473,16 +473,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs/:path/blast-radius",
             get(meta_specs::get_meta_spec_blast_radius),
         )
-        // Personas (M22.1)
+        // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
             post(personas::create_persona).get(personas::list_personas),
         )
+        .route("/api/v1/personas/resolve", get(personas::resolve_persona))
         .route(
             "/api/v1/personas/:id",
             get(personas::get_persona)
                 .put(personas::update_persona)
                 .delete(personas::delete_persona),
+        )
+        .route(
+            "/api/v1/personas/:id/approve",
+            post(personas::approve_persona),
         )
         // ABAC policy engine (M22.6)
         .route(

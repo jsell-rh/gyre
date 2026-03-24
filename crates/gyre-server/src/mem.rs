@@ -1280,6 +1280,20 @@ impl PersonaRepository for MemPersonaRepository {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
     }
 
+    async fn find_by_slug_and_scope(
+        &self,
+        slug: &str,
+        scope: &PersonaScope,
+    ) -> Result<Option<Persona>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|p| p.slug == slug && &p.scope == scope)
+            .cloned())
+    }
+
     async fn list(&self) -> Result<Vec<Persona>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
