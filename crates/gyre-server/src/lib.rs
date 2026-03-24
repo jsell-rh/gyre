@@ -10,6 +10,7 @@ pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
+pub mod graph_extraction;
 pub mod procfs_monitor;
 
 pub(crate) mod health;
