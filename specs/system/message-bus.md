@@ -237,10 +237,10 @@ This is consistent with the existing commit signature approach (`commit_signatur
 Clients connect to `GET /ws` and authenticate as today. After auth, the client sends a subscription message:
 
 ```json
-{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700}
+{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700000}
 ```
 
-`last_seen` is `Option<u64>` — Unix epoch seconds matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen`, capped at 1000 messages. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
+`last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen`, capped at 1000 messages. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
 
 The `Subscribe` variant is added to `gyre_common::WsMessage`. To avoid breaking old CLI versions, also add a catch-all `Unknown` variant with `#[serde(other)]` to `WsMessage` so unrecognized message types are silently ignored rather than causing deserialization errors.
 
@@ -313,7 +313,9 @@ pub trait MessageRepository: Send + Sync {
 
     /// List Directed messages for an agent newer than `after` (epoch ms), oldest first.
     /// Primary poll pattern: agent stores cursor, passes on next poll.
-    async fn list_after(&self, agent_id: &Id, after: u64) -> Result<Vec<Message>>;
+    /// `limit` caps the result set (default 100). Caller paginates by advancing `after`
+    /// to the `created_at` of the last returned message.
+    async fn list_after(&self, agent_id: &Id, after: u64, limit: usize) -> Result<Vec<Message>>;
 
     /// List all unacknowledged Directed messages for an agent (crash recovery).
     async fn list_unacked(&self, agent_id: &Id) -> Result<Vec<Message>>;
@@ -340,8 +342,9 @@ pub trait MessageRepository: Send + Sync {
         limit: Option<usize>,
     ) -> Result<Vec<Message>>;
 
-    /// Delete Event-tier messages older than the given epoch. Returns count deleted.
-    /// Only affects messages where to_type != 'agent' (Event tier).
+    /// Delete non-agent-targeted messages older than the given epoch. Returns count deleted.
+    /// Relies on invariant: Directed-tier messages always have to_type = 'agent',
+    /// so filtering on to_type != 'agent' only removes Event-tier workspace/broadcast messages.
     async fn expire_events(&self, older_than: u64) -> Result<u64>;
 
     /// Delete acked Directed messages older than the given epoch where
@@ -444,7 +447,7 @@ Response (201):
     "workspace_id": "<ws-id>",
     "kind": "task_assignment",
     "payload": {"task_id": "TASK-42", "spec_ref": "specs/foo.md"},
-    "created_at": 1711324800,
+    "created_at": 1711324800000,
     "signature": "<base64-ed25519>",
     "key_id": "<kid>"
 }
@@ -462,6 +465,8 @@ Authorization: Bearer <agent-jwt>
 Returns Directed-tier messages with `created_at > after`, ordered oldest first. The agent stores the `created_at` of the last message it processed and passes it on subsequent polls — this returns only new messages. First poll uses `?after=0` to get everything.
 
 Alternative: `?acknowledged=false` returns all unacked messages regardless of timestamp (useful for reprocessing after a crash).
+
+When neither `after` nor `acknowledged` is provided, defaults to `?after=0&limit=100` (all messages, paginated).
 
 Agent must be the authenticated caller (verified from JWT `sub` claim).
 
@@ -489,7 +494,7 @@ Returns Event-tier messages for a workspace. Requires workspace membership (veri
 GET /api/v1/activity?workspace_id=<ws-id>&since=<epoch>&limit=100
 ```
 
-Queries the in-memory `TelemetryBuffer`. Response format preserves backwards compatibility with today's `ActivityEventData`:
+Queries the in-memory `TelemetryBuffer`. The handler verifies workspace membership before returning results — an unauthenticated or unauthorized caller receives 403. Response format preserves backwards compatibility with today's `ActivityEventData`:
 
 | `ActivityEventData` field | Source in `Message` |
 |---|---|
@@ -532,13 +537,17 @@ Since this is a greenfield system with no production deployment, the unified mes
 - `ReplayCatchUp` variant for reconnection truncation signals
 - Catch-all `Unknown` variant with custom deserialize for forward compatibility
 
-**Backwards compatibility:** The old `POST/GET /api/v1/agents/:id/messages` endpoints are removed. All agent communication uses `POST /api/v1/messages` (send) and `GET /api/v1/agents/:id/messages` (poll with ack). The `FreeText` message type is not supported — use `Custom("free_text")` with structured payload instead.
+**Endpoint changes:**
+- `POST /api/v1/messages` — new unified send endpoint (replaces `POST /api/v1/agents/:id/messages`)
+- `GET /api/v1/agents/:id/messages` — **path preserved, semantics changed**: non-destructive cursor-based polling replaces drain-on-read. This is a breaking change to the response contract.
+- `PUT /api/v1/agents/:id/messages/:message_id/ack` — new explicit ack endpoint
+- The `FreeText` message type is not supported — use `Custom("free_text")` with structured payload instead.
 
 ### Edge Cases
 
 | Scenario | Behavior |
 |---|---|
-| Send to dead/completed agent | Message stored. `acknowledged` stays false. Cleaned up when `expire()` runs — Directed messages for completed agents expire after 7 days (configurable, `GYRE_DEAD_INBOX_TTL_SECS`). |
+| Send to dead/completed agent | Message stored. For completed agents, `acknowledge_all` was called at completion time, so new messages arrive into an inbox that will be cleaned by `expire_dead_inboxes` (7 days, `GYRE_DEAD_INBOX_TTL_SECS`). For orphaned agents (killed without `complete`), the stale agent detector marks them Dead and calls `acknowledge_all` with `ack_reason: "agent_orphaned"`, enabling the same cleanup. |
 | Send to self | Allowed. Useful for self-reminders/scheduling. |
 | Workspace fan-out to 100 agents | One DB write (one row with `to_type=workspace`) + one broadcast channel send. WebSocket push fans out via the broadcast channel (same performance as today). |
 | Message too large | `payload` limited to 64KB (configurable via `GYRE_MAX_MESSAGE_SIZE`). Server rejects with 413. |
