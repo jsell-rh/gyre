@@ -124,6 +124,17 @@ pub async fn create_repo(
     // Initialize the bare git repository; log on failure but don't block the response.
     if let Err(e) = state.git_ops.init_bare(&repo_path).await {
         tracing::warn!("init_bare failed for {repo_path}: {e}");
+    } else {
+        // Create an initial empty commit so HEAD is valid. Without this, `git worktree add -b`
+        // fails with "fatal: invalid reference: HEAD" on freshly-created repos.
+        let branch = repo.default_branch.clone();
+        if let Err(e) = state
+            .git_ops
+            .create_initial_commit(&repo_path, &branch)
+            .await
+        {
+            tracing::warn!("create_initial_commit failed for {repo_path}: {e}");
+        }
     }
 
     Ok((StatusCode::CREATED, Json(RepoResponse::from(repo))))
