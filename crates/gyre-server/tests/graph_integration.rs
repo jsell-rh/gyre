@@ -3,7 +3,6 @@
 //! Starts a live gyre-server on a random port and exercises all 13 graph
 //! endpoints via reqwest. Tests run in parallel — each spawns its own server.
 
-use axum;
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
     Id,
@@ -11,7 +10,6 @@ use gyre_common::{
 use gyre_server::{build_router, build_state};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use uuid;
 
 const TOKEN: &str = "graph-integration-token";
 
