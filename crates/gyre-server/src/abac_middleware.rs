@@ -82,6 +82,12 @@ pub struct ResourceResolver {
     routes: Vec<RouteResourceMapping>,
 }
 
+impl Default for ResourceResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceResolver {
     pub fn new() -> Self {
         Self {
@@ -100,7 +106,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/mirror/sync", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/provenance", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/aibom", "repo", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/commits/record", "repo", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/commits/record",
+                    "repo",
+                    Some("write"),
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/agent-commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/worktrees", "worktree", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/worktrees/:wt_id", "worktree", None),
@@ -123,7 +133,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/dependencies/:dep_id", "dependency", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/dependencies/:dep_id",
+                    "dependency",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependents", "dependency", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blast-radius", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph", "graph", None),
@@ -131,7 +145,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/modules", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/node/:node_id", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/spec/:spec_path", "graph", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/graph/concept/:concept_name", "graph", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/graph/concept/:concept_name",
+                    "graph",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/timeline", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/risks", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/diff", "graph", None),
@@ -164,15 +182,43 @@ impl ResourceResolver {
                 // ── Merge Requests ─────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/merge-requests", "merge_request", None),
                 RouteResourceMapping::api("/api/v1/merge-requests/:id", "merge_request", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/status", "merge_request", Some("write")),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/comments", "merge_request", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/reviews", "merge_request", None),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/status",
+                    "merge_request",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/comments",
+                    "merge_request",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/reviews",
+                    "merge_request",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/merge-requests/:id/diff", "merge_request", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/attestation", "merge_request", None),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/attestation",
+                    "merge_request",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/merge-requests/:id/gates", "gate", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/dependencies", "dependency", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/dependencies/:dep_id", "dependency", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/atomic-group", "merge_request", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/dependencies",
+                    "dependency",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/dependencies/:dep_id",
+                    "dependency",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/atomic-group",
+                    "merge_request",
+                    Some("write"),
+                ),
                 // ── Release ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/release/prepare", "release", Some("write")),
                 // ── Specs ──────────────────────────────────────────────────
@@ -191,7 +237,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/:path/links", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/progress", "spec", None),
                 // ── Merge Queue ────────────────────────────────────────────
-                RouteResourceMapping::api("/api/v1/merge-queue/enqueue", "merge_queue", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/merge-queue/enqueue",
+                    "merge_queue",
+                    Some("write"),
+                ),
                 RouteResourceMapping::api("/api/v1/merge-queue/graph", "merge_queue", None),
                 RouteResourceMapping::api("/api/v1/merge-queue", "merge_queue", None),
                 RouteResourceMapping::api("/api/v1/merge-queue/:id", "merge_queue", None),
@@ -217,7 +267,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/agents/:id/kill", "agent", Some("write")),
-                RouteResourceMapping::api("/api/v1/admin/agents/:id/reassign", "agent", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/admin/agents/:id/reassign",
+                    "agent",
+                    Some("write"),
+                ),
                 RouteResourceMapping::api("/api/v1/admin/snapshot", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/snapshots", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/restore", "admin", Some("write")),
@@ -230,12 +284,28 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/siem", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/siem/:id", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/compute-targets", "compute_target", None),
-                RouteResourceMapping::api("/api/v1/admin/compute-targets/:id", "compute_target", None),
-                RouteResourceMapping::api("/api/v1/admin/compute-targets/:id/tunnel", "compute_target", Some("write")),
-                RouteResourceMapping::api("/api/v1/admin/compute-targets/:id/tunnel/:tunnel_id", "compute_target", None),
+                RouteResourceMapping::api(
+                    "/api/v1/admin/compute-targets/:id",
+                    "compute_target",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/admin/compute-targets/:id/tunnel",
+                    "compute_target",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/admin/compute-targets/:id/tunnel/:tunnel_id",
+                    "compute_target",
+                    None,
+                ),
                 // ── Network ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/network/peers", "network_peer", None),
-                RouteResourceMapping::api("/api/v1/network/peers/agent/:agent_id", "network_peer", None),
+                RouteResourceMapping::api(
+                    "/api/v1/network/peers/agent/:agent_id",
+                    "network_peer",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/network/peers/:id", "network_peer", None),
                 RouteResourceMapping::api("/api/v1/network/derp-map", "network_peer", None),
                 // ── Dependencies graph ─────────────────────────────────────
@@ -255,20 +325,40 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/repos", "repo", None),
-                RouteResourceMapping::api("/api/v1/workspaces/:id/meta-spec-set", "meta_spec", None),
-                RouteResourceMapping::api("/api/v1/workspaces/:id/members", "workspace_member", None),
-                RouteResourceMapping::api("/api/v1/workspaces/:id/members/:user_id", "workspace_member", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-spec-set",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/members",
+                    "workspace_member",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/members/:user_id",
+                    "workspace_member",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/graph", "graph", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "graph", None),
                 // ── Meta-specs ─────────────────────────────────────────────
-                RouteResourceMapping::api("/api/v1/meta-specs/:path/blast-radius", "meta_spec", None),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs/:path/blast-radius",
+                    "meta_spec",
+                    None,
+                ),
                 // ── Personas ───────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/personas", "persona", None),
                 RouteResourceMapping::api("/api/v1/personas/resolve", "persona", None),
                 RouteResourceMapping::api("/api/v1/personas/:id", "persona", None),
-                RouteResourceMapping::api("/api/v1/personas/:id/approve", "persona", Some("approve")),
+                RouteResourceMapping::api(
+                    "/api/v1/personas/:id/approve",
+                    "persona",
+                    Some("approve"),
+                ),
                 // ── Policies ───────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/policies", "policy", None),
                 RouteResourceMapping::api("/api/v1/policies/evaluate", "policy", Some("evaluate")),
@@ -281,7 +371,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/users/me/tasks", "task", None),
                 RouteResourceMapping::api("/api/v1/users/me/mrs", "merge_request", None),
                 RouteResourceMapping::api("/api/v1/users/me/notifications", "notification", None),
-                RouteResourceMapping::api("/api/v1/users/me/notifications/:id/read", "notification", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/users/me/notifications/:id/read",
+                    "notification",
+                    Some("write"),
+                ),
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
@@ -294,9 +388,7 @@ impl ResourceResolver {
 
     /// Look up a route by its matched axum pattern.
     pub fn resolve<'a>(&'a self, matched_pattern: &str) -> Option<&'a RouteResourceMapping> {
-        self.routes
-            .iter()
-            .find(|r| r.pattern == matched_pattern)
+        self.routes.iter().find(|r| r.pattern == matched_pattern)
     }
 
     /// Return all registered non-exempt patterns (for `check-api-auth.sh`).
@@ -445,8 +537,8 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
         Policy {
             id: Id::new("builtin-default-deny"),
             name: "default-deny".to_string(),
-            description:
-                "Default deny — any request not matching an Allow policy is denied".to_string(),
+            description: "Default deny — any request not matching an Allow policy is denied"
+                .to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
             priority: 1,
@@ -525,13 +617,11 @@ pub async fn abac_middleware(
 
     // Resolve the route mapping. Routes not in the registry fall through
     // (check-api-auth.sh catches missing entries at CI time).
-    let (resource_type, action_override, exempt) = match RESOURCE_RESOLVER
-        .get()
-        .and_then(|r| r.resolve(&pattern))
-    {
-        Some(m) => (m.resource_type, m.action_override, m.exempt),
-        None => return next.run(req).await,
-    };
+    let (resource_type, action_override, exempt) =
+        match RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern)) {
+            Some(m) => (m.resource_type, m.action_override, m.exempt),
+            None => return next.run(req).await,
+        };
 
     // ABAC-exempt routes pass through immediately.
     if exempt {
@@ -564,11 +654,7 @@ pub async fn abac_middleware(
     };
     ctx.set("subject.type", subject_type);
 
-    let global_role = auth
-        .roles
-        .first()
-        .map(|r| r.as_str())
-        .unwrap_or("ReadOnly");
+    let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
     ctx.set("subject.global_role", global_role);
     ctx.set("subject.tenant_id", &auth.tenant_id);
 
@@ -645,8 +731,7 @@ pub mod tests {
     fn setup_state_with_policies() -> Arc<AppState> {
         let state = test_state();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
         });
         state
     }
@@ -674,8 +759,7 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
         });
         init_resolver();
 
@@ -719,8 +803,7 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
         });
         init_resolver();
 
@@ -801,9 +884,18 @@ pub mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn builtin_policy_priorities_ordered() {
         let policies = m34_builtin_policies();
-        let admin_p = policies.iter().find(|p| p.name == "admin-all-operations").unwrap();
-        let dev_p = policies.iter().find(|p| p.name == "developer-write-access").unwrap();
-        let ro_p = policies.iter().find(|p| p.name == "readonly-get-only").unwrap();
+        let admin_p = policies
+            .iter()
+            .find(|p| p.name == "admin-all-operations")
+            .unwrap();
+        let dev_p = policies
+            .iter()
+            .find(|p| p.name == "developer-write-access")
+            .unwrap();
+        let ro_p = policies
+            .iter()
+            .find(|p| p.name == "readonly-get-only")
+            .unwrap();
         let deny_p = policies.iter().find(|p| p.name == "default-deny").unwrap();
         assert!(admin_p.priority > dev_p.priority, "admin > developer");
         assert!(dev_p.priority > ro_p.priority, "developer > readonly");

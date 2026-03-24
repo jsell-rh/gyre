@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{
-    auth::AuthenticatedAgent,
-    AppState,
-};
+use crate::{auth::AuthenticatedAgent, AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {

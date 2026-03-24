@@ -171,7 +171,12 @@ mod tests {
     #[tokio::test]
     async fn no_auth_returns_401_on_agent_endpoint() {
         let resp = app_with_jwt()
-            .oneshot(Request::builder().uri("/agent").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

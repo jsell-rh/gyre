@@ -66,9 +66,7 @@ pub struct JobInfo {
 }
 
 /// GET /api/v1/admin/jobs — list background jobs with run history (Admin only).
-pub async fn admin_jobs(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<JobInfo>> {
+pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     let defs = state.job_registry.list_jobs().await;
     let mut jobs = Vec::with_capacity(defs.len());
     for def in defs {
@@ -136,8 +134,7 @@ pub async fn admin_create_snapshot(
 }
 
 /// GET /api/v1/admin/snapshots — list snapshots (Admin only).
-pub async fn admin_list_snapshots(
-) -> Result<Json<Vec<crate::snapshot::SnapshotMeta>>, ApiError> {
+pub async fn admin_list_snapshots() -> Result<Json<Vec<crate::snapshot::SnapshotMeta>>, ApiError> {
     let snapshots = crate::snapshot::list_snapshots()
         .await
         .map_err(ApiError::Internal)?;
@@ -163,9 +160,7 @@ pub async fn admin_restore_snapshot(
 }
 
 /// DELETE /api/v1/admin/snapshots/{id} — delete a snapshot (Admin only).
-pub async fn admin_delete_snapshot(
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+pub async fn admin_delete_snapshot(Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     crate::snapshot::delete_snapshot(&id)
         .await
         .map_err(|e| ApiError::NotFound(e.to_string()))?;
