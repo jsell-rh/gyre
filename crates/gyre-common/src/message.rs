@@ -592,6 +592,14 @@ mod tests {
     }
 
     #[test]
+    fn message_origin_user_roundtrip() {
+        let origin = MessageOrigin::User(Id::new("user-99"));
+        let json = serde_json::to_string(&origin).unwrap();
+        let back: MessageOrigin = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MessageOrigin::User(Id::new("user-99")));
+    }
+
+    #[test]
     fn destination_broadcast_roundtrip() {
         let dest = Destination::Broadcast;
         let json = serde_json::to_string(&dest).unwrap();
@@ -600,11 +608,41 @@ mod tests {
     }
 
     #[test]
+    fn destination_agent_roundtrip() {
+        let dest = Destination::Agent(Id::new("agent-77"));
+        let json = serde_json::to_string(&dest).unwrap();
+        let back: Destination = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Destination::Agent(Id::new("agent-77")));
+    }
+
+    #[test]
     fn destination_workspace_roundtrip() {
         let dest = Destination::Workspace(Id::new("ws-99"));
         let json = serde_json::to_string(&dest).unwrap();
         let back: Destination = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Destination::Workspace(Id::new("ws-99")));
+    }
+
+    #[test]
+    fn message_roundtrip_directed_from_agent_to_agent() {
+        let msg = Message {
+            id: Id::new("msg-dir-1"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Agent(Id::new("sender-agent")),
+            workspace_id: Some(Id::new("ws-5")),
+            to: Destination::Agent(Id::new("recv-agent")),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at: 99_000,
+            signature: Some("sig".to_string()),
+            key_id: Some("kid-1".to_string()),
+            acknowledged: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.from, MessageOrigin::Agent(Id::new("sender-agent")));
+        assert_eq!(back.to, Destination::Agent(Id::new("recv-agent")));
+        assert_eq!(back.signature, Some("sig".to_string()));
     }
 
     // ── TelemetryBuffer ─────────────────────────────────────────────────

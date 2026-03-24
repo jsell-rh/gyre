@@ -235,4 +235,56 @@ mod tests {
         assert_eq!(decoded.event_type, AgEventType::RunStarted);
         assert_eq!(decoded.event_type.as_str(), "RUN_STARTED");
     }
+
+    #[test]
+    fn ws_subscribe_roundtrip() {
+        use crate::Id;
+        let msg = WsMessage::Subscribe {
+            scopes: vec![SubscribeScope { workspace_id: Id::new("ws-42") }],
+            last_seen: Some(1_711_324_800_000),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"Subscribe\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        if let WsMessage::Subscribe { scopes, last_seen } = decoded {
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].workspace_id, Id::new("ws-42"));
+            assert_eq!(last_seen, Some(1_711_324_800_000));
+        } else {
+            panic!("expected Subscribe variant");
+        }
+    }
+
+    #[test]
+    fn ws_replay_catch_up_roundtrip() {
+        let msg = WsMessage::ReplayCatchUp { truncated: true };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"ReplayCatchUp\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, WsMessage::ReplayCatchUp { truncated: true }));
+    }
+
+    #[test]
+    fn ws_unknown_variant_ignored() {
+        // An unrecognized type tag should deserialize to Unknown without error.
+        let json = r#"{"type":"FutureUnknownVariant","extra_field":42}"#;
+        let decoded: WsMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(decoded, WsMessage::Unknown));
+    }
+
+    #[test]
+    fn ws_subscribe_null_last_seen() {
+        use crate::Id;
+        let msg = WsMessage::Subscribe {
+            scopes: vec![SubscribeScope { workspace_id: Id::new("ws-1") }],
+            last_seen: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        if let WsMessage::Subscribe { last_seen, .. } = decoded {
+            assert_eq!(last_seen, None);
+        } else {
+            panic!("expected Subscribe");
+        }
+    }
 }
