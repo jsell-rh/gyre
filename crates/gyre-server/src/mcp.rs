@@ -961,7 +961,13 @@ pub async fn mcp_handler(
                     .find_by_agent(&agent_id)
                     .await
                     .unwrap_or_default();
-                if let Some(wt) = worktrees.first() {
+                if worktrees.is_empty() {
+                    return Json(JsonRpcResponse::err(
+                        id,
+                        PERMISSION_DENIED,
+                        "PERMISSION_DENIED: agent has no active worktrees — cannot verify repo scope",
+                    ));
+                } else if let Some(wt) = worktrees.first() {
                     let requested_repo = args
                         .get("repository_id")
                         .and_then(|v| v.as_str())
