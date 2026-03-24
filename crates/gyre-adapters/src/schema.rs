@@ -517,6 +517,18 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    tenants (id) {
+        id -> Text,
+        name -> Text,
+        slug -> Text,
+        oidc_issuer -> Nullable<Text>,
+        budget -> Nullable<Text>,
+        max_workspaces -> Nullable<Integer>,
+        created_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
     agents,
@@ -556,4 +568,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     container_audit_records,
     spec_ledger_entries,
     spec_approval_events,
+    tenants,
 );

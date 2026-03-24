@@ -273,6 +273,13 @@
           </button>
         </li>
         <li>
+          <button class="nav-item" class:active={isActive('tenants')} onclick={() => nav('tenants')}
+            aria-label="Tenants" aria-current={isActive('tenants') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>
+            {#if !collapsed}<span class="nav-label">Tenants</span>{/if}
+          </button>
+        </li>
+        <li>
           <button class="nav-item" class:active={isActive('workspaces')} onclick={() => nav('workspaces')}
             aria-label="Workspaces" aria-current={isActive('workspaces') ? 'page' : undefined}>
             <span class="nav-icon" aria-hidden="true">{@html workspaceIcon()}</span>
