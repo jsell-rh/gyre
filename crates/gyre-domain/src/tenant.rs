@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct Tenant {
     pub id: Id,
     pub name: String,
-    pub slug: String,               // URL-safe identifier
+    pub slug: String,                // URL-safe identifier
     pub oidc_issuer: Option<String>, // Keycloak realm URL
     pub budget: Option<BudgetConfig>,
     pub max_workspaces: Option<u32>,
@@ -16,12 +16,7 @@ pub struct Tenant {
 }
 
 impl Tenant {
-    pub fn new(
-        id: Id,
-        name: impl Into<String>,
-        slug: impl Into<String>,
-        created_at: u64,
-    ) -> Self {
+    pub fn new(id: Id, name: impl Into<String>, slug: impl Into<String>, created_at: u64) -> Self {
         Self {
             id,
             name: name.into(),
