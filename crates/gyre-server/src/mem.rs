@@ -529,6 +529,17 @@ impl TaskRepository for MemTaskRepository {
             .cloned()
             .collect())
     }
+
+    async fn list_by_spec_path(&self, spec_path: &str) -> Result<Vec<Task>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|t| t.spec_path.as_deref() == Some(spec_path))
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Default)]

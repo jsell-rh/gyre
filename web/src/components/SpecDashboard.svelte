@@ -21,6 +21,8 @@
   let detailTab = $state('info');
   let historyLoading = $state(false);
   let history = $state([]);
+  let progressLoading = $state(false);
+  let progress = $state(null);
 
   // Approve modal
   let showApprove = $state(false);
@@ -85,6 +87,7 @@
     selected = s;
     detailTab = 'info';
     history = [];
+    progress = null;
   }
 
   function switchTab(tab) {
@@ -95,6 +98,13 @@
         .then((h) => { history = Array.isArray(h) ? h : []; })
         .catch(() => { history = []; })
         .finally(() => { historyLoading = false; });
+    }
+    if (tab === 'links' && selected && !progress) {
+      progressLoading = true;
+      api.getSpecProgress(selected.path)
+        .then((p) => { progress = p; })
+        .catch(() => { progress = null; })
+        .finally(() => { progressLoading = false; });
     }
   }
 
@@ -394,30 +404,72 @@
 
         {:else if detailTab === 'links'}
           <div class="links-section">
-            <div class="links-group">
-              <h4>Linked Tasks</h4>
-              {#if selected.linked_tasks?.length}
-                <ul class="links-list">
-                  {#each selected.linked_tasks as tid}
-                    <li class="link-item mono">{tid}</li>
-                  {/each}
-                </ul>
-              {:else}
-                <p class="no-links">No linked tasks</p>
-              {/if}
-            </div>
-            <div class="links-group">
-              <h4>Linked Merge Requests</h4>
-              {#if selected.linked_mrs?.length}
-                <ul class="links-list">
-                  {#each selected.linked_mrs as mrid}
-                    <li class="link-item mono">{mrid}</li>
-                  {/each}
-                </ul>
-              {:else}
-                <p class="no-links">No linked merge requests</p>
-              {/if}
-            </div>
+            {#if progressLoading}
+              <Skeleton height="80px" />
+            {:else if progress}
+              <div class="progress-summary">
+                <span class="progress-chip">{progress.open_tasks} open</span>
+                <span class="progress-chip done">{progress.completed_tasks} done</span>
+                <span class="progress-chip mr">{progress.merged_mrs} merged</span>
+              </div>
+              <div class="links-group">
+                <h4>Tasks ({progress.tasks.length})</h4>
+                {#if progress.tasks.length}
+                  <ul class="links-list">
+                    {#each progress.tasks as t}
+                      <li class="link-item">
+                        <Badge variant={t.status === 'done' ? 'success' : t.status === 'in_progress' ? 'warning' : 'default'}>{t.status}</Badge>
+                        <span class="link-title">{t.title}</span>
+                        <span class="mono link-id">{t.id.slice(0, 8)}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="no-links">No linked tasks</p>
+                {/if}
+              </div>
+              <div class="links-group">
+                <h4>Merge Requests ({progress.mrs.length})</h4>
+                {#if progress.mrs.length}
+                  <ul class="links-list">
+                    {#each progress.mrs as mr}
+                      <li class="link-item">
+                        <Badge variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'warning' : 'default'}>{mr.status}</Badge>
+                        <span class="link-title">{mr.title}</span>
+                        <span class="mono link-id">{mr.id.slice(0, 8)}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="no-links">No linked merge requests</p>
+                {/if}
+              </div>
+            {:else}
+              <div class="links-group">
+                <h4>Linked Tasks</h4>
+                {#if selected.linked_tasks?.length}
+                  <ul class="links-list">
+                    {#each selected.linked_tasks as tid}
+                      <li class="link-item mono">{tid}</li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="no-links">No linked tasks</p>
+                {/if}
+              </div>
+              <div class="links-group">
+                <h4>Linked Merge Requests</h4>
+                {#if selected.linked_mrs?.length}
+                  <ul class="links-list">
+                    {#each selected.linked_mrs as mrid}
+                      <li class="link-item mono">{mrid}</li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="no-links">No linked merge requests</p>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -907,6 +959,50 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     padding: var(--space-1) var(--space-2);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .link-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .link-id {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .progress-summary {
+    display: flex;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+
+  .progress-chip {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+  }
+
+  .progress-chip.done {
+    background: var(--color-success-bg, #1a2e1a);
+    border-color: var(--color-success, #3fb950);
+    color: var(--color-success, #3fb950);
+  }
+
+  .progress-chip.mr {
+    background: var(--color-primary-bg, #1a1a2e);
+    border-color: var(--color-primary, #58a6ff);
+    color: var(--color-primary, #58a6ff);
   }
 
   .no-links {

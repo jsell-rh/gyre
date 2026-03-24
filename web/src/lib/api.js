@@ -302,6 +302,7 @@ export const api = {
       body: JSON.stringify({ reason }),
     }),
   getSpecHistory: (path) => request(`/specs/${encodeURIComponent(path)}/history`),
+  getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
   // Search (M22.7)
