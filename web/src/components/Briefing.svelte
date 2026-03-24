@@ -5,6 +5,8 @@
   import EmptyState from '../lib/EmptyState.svelte';
 
   const LAST_VISIT_KEY = 'gyre_last_visit';
+  const BRIEFING_LAST_VISIT_KEY = 'gyre_briefing_last_visit';
+  const WORKSPACE_KEY = 'gyre_workspace_id';
 
   let loading = $state(true);
   let error = $state(null);
@@ -12,7 +14,12 @@
   let lastVisit = $state(null);
   let durationLabel = $state('');
 
-  // Computed data
+  // Workspace briefing (TASK-205)
+  let workspaceId = $state(null);
+  let workspaceSummary = $state(null);
+  let workspaceDeltas = $state([]);
+
+  // Computed data (fallback 4-card layout)
   let agentsCompleted = $state(0);
   let mrsMerged = $state(0);
   let specChanges = $state(0);
@@ -30,6 +37,17 @@
     return `${m} minute${m !== 1 ? 's' : ''}`;
   }
 
+  function relativeTime(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - new Date(ts).getTime();
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
   async function load() {
     const storedVisit = localStorage.getItem(LAST_VISIT_KEY);
     const visitTs = storedVisit ? parseInt(storedVisit, 10) : Date.now() - 86400000; // default: 24h ago
@@ -39,8 +57,30 @@
     // Record this visit
     localStorage.setItem(LAST_VISIT_KEY, String(Date.now()));
 
-    const sinceIso = new Date(visitTs).toISOString();
+    // Check for selected workspace (TASK-205)
+    const wsId = localStorage.getItem(WORKSPACE_KEY);
+    workspaceId = wsId || null;
 
+    if (wsId) {
+      // Use briefing-specific last_visit for since param
+      const briefingLastVisit = localStorage.getItem(BRIEFING_LAST_VISIT_KEY);
+      const sinceEpoch = briefingLastVisit ? parseInt(briefingLastVisit, 10) : Date.now() - 86400000;
+      localStorage.setItem(BRIEFING_LAST_VISIT_KEY, String(Date.now()));
+
+      try {
+        const briefing = await api.getWorkspaceBriefing(wsId, sinceEpoch);
+        workspaceSummary = briefing?.summary ?? null;
+        workspaceDeltas = briefing?.deltas ?? [];
+        error = null;
+      } catch (e) {
+        error = e.message;
+      } finally {
+        loading = false;
+      }
+      return;
+    }
+
+    // No workspace selected — fallback to 4-card layout
     try {
       const [activityRes, agentsRes, pendingRes, driftedRes] = await Promise.allSettled([
         api.activity(100),
@@ -106,8 +146,44 @@
     </div>
   {:else if error}
     <div class="briefing-error" role="alert">Error loading briefing: {error}</div>
+  {:else if workspaceId}
+    <!-- Workspace narrative briefing (TASK-205) -->
+    {#if workspaceSummary}
+      <div class="narrative workspace-narrative" data-testid="workspace-summary">
+        {workspaceSummary}
+      </div>
+    {/if}
+
+    {#if workspaceDeltas.length === 0}
+      <EmptyState
+        title="No architectural changes"
+        description="No changes recorded since your last visit."
+      />
+    {:else}
+      <div class="deltas-section">
+        <h2 class="deltas-heading">Architectural Deltas</h2>
+        <ul class="deltas-list">
+          {#each workspaceDeltas as delta}
+            <li class="delta-row">
+              <span class="delta-sha" title={delta.commit_sha}>
+                {delta.commit_sha ? delta.commit_sha.slice(0, 7) : '—'}
+              </span>
+              <span class="delta-time">{relativeTime(delta.timestamp)}</span>
+              {#if delta.spec_ref}
+                <span class="delta-spec" title={delta.spec_ref}>{delta.spec_ref}</span>
+              {/if}
+              {#if delta.agent_id}
+                <span class="delta-agent" title={delta.agent_id}>
+                  {delta.agent_id.slice(0, 8)}
+                </span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
   {:else}
-    <!-- Narrative summary -->
+    <!-- Fallback: no workspace selected — narrative summary -->
     <div class="narrative">
       In the last {durationLabel},
       <strong>{agentsCompleted}</strong> agent{agentsCompleted !== 1 ? 's' : ''} completed task{agentsCompleted !== 1 ? 's' : ''},
@@ -427,5 +503,76 @@
     background: var(--color-surface);
     border: 1px solid var(--color-danger);
     border-radius: var(--radius);
+  }
+
+  /* Workspace briefing (TASK-205) */
+  .workspace-narrative {
+    border-left-color: var(--color-success, #22c55e);
+  }
+
+  .deltas-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .deltas-heading {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .deltas-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .delta-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .delta-row:last-child {
+    border-bottom: none;
+  }
+
+  .delta-sha {
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+    flex-shrink: 0;
+    min-width: 5ch;
+  }
+
+  .delta-time {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    min-width: 6ch;
+  }
+
+  .delta-spec {
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  .delta-agent {
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
   }
 </style>

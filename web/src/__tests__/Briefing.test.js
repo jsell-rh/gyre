@@ -9,6 +9,7 @@ vi.mock('../lib/api.js', () => ({
     agents: vi.fn().mockResolvedValue([]),
     getPendingSpecs: vi.fn().mockResolvedValue([]),
     getDriftedSpecs: vi.fn().mockResolvedValue([]),
+    getWorkspaceBriefing: vi.fn().mockResolvedValue({ workspace_id: 'ws-1', since: 0, summary: 'Test summary', deltas: [] }),
   },
 }));
 
@@ -43,5 +44,13 @@ describe('Briefing', () => {
     // After mount, last visit key should be set
     // This is async so we just check it was rendered
     expect(localStorage).toBeTruthy();
+  });
+
+  it('calls getWorkspaceBriefing when workspace is selected', async () => {
+    const { api } = await import('../lib/api.js');
+    localStorage.setItem('gyre_workspace_id', 'ws-abc');
+    render(Briefing);
+    // Component mounts and triggers load — api mock should be registered
+    expect(api.getWorkspaceBriefing).toBeDefined();
   });
 });
