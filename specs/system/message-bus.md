@@ -165,7 +165,7 @@ pub enum MessageKind {
 - Telemetry tier requires `Destination::Workspace(id)`. Telemetry + Broadcast is rejected with 400 — there is no valid `TelemetryBuffer` key for `workspace_id: None`. Telemetry + Agent is rejected — telemetry is observability, not communication.
 - Event tier works with any destination.
 
-**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all Event-tier kinds defined in the enum above (from `AgentCreated` through `AgentError`). The send handler checks: if `kind.server_only() && origin != Server`, reject with 403. This is structural — new server-only kinds added to the enum automatically get the restriction by updating `server_only()`, rather than maintaining a separate allowlist. Agents may send Directed-tier kinds, Telemetry-tier kinds, and `Custom(name)` at Event or Directed tier.
+**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `AgentError`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403. New server-only kinds get the restriction by adding them to the match arm in `server_only()`.
 
 **`Custom(String)` serialization:** Serde's `#[serde(other)]` attribute only works on unit variants, not tuple variants like `Custom(String)`. Therefore, `MessageKind` requires a **custom `Deserialize` implementation** — the same pattern already used by `AgEventType` in `gyre-common/src/protocol.rs` (lines 40-53). Serialization: known variants emit their snake_case name (e.g., `"task_assignment"`); `Custom(s)` emits the raw string. Deserialization: match against known names first; unknown strings become `Custom(s)`. The `kind` field on the `Message` struct is a plain string on the wire: `"kind": "task_assignment"`.
 
@@ -301,7 +301,7 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 |---|---|---|
 | **Directed** | At-least-once (persisted until ack, redelivered on poll) | DB — no TTL, expires only on ack or agent completion |
 | **Event** | Best-effort push + queryable history | DB — configurable TTL (default 7 days, `GYRE_EVENT_TTL_SECS`) |
-| **Telemetry** | Best-effort push only | In-memory ring buffer (configurable, default 10,000 entries per workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — workspace-level isolation is structural. LRU eviction across workspaces when total exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100). |
+| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. LRU eviction is global across workspaces (default cap 100, `GYRE_TELEMETRY_MAX_WORKSPACES`). **Accepted risk:** a noisy tenant can evict other tenants' buffers. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
 
 **Directed-tier queue depth:** Max 1000 unacked messages per agent (configurable, `GYRE_AGENT_INBOX_MAX`). When the limit is reached, new messages to that agent are rejected with 429 and the sender receives an error. Messages are NOT silently dropped — this preserves the at-least-once guarantee. The agent or an admin must ack or the agent must be completed/killed to free the inbox.
 
@@ -336,7 +336,8 @@ pub trait MessageRepository: Send + Sync {
     /// List Directed messages for an agent after a cursor position, oldest first.
     /// Cursor is composite `(created_at, id)` to handle same-millisecond writes.
     /// Query: `WHERE (created_at, id) > (after_ts, after_id) ORDER BY created_at, id LIMIT limit`.
-    /// First poll: `after_ts=0, after_id=None`. Subsequent: use last message's values.
+    /// First poll: `after_ts=0, after_id=None` → query degrades to `WHERE created_at > 0`.
+    /// Subsequent: use last message's (created_at, id) → `WHERE (created_at, id) > (ts, id)`.
     async fn list_after(
         &self,
         agent_id: &Id,
@@ -358,9 +359,11 @@ pub trait MessageRepository: Send + Sync {
     async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> Result<u64>;
 
     /// List messages in a workspace, optionally filtered by kind.
-    /// Cursor-based pagination: composite `(before_ts, before_id)` — returns messages
-    /// with `(created_at, id) < (before_ts, before_id)`, ordered newest first.
-    /// Same composite cursor pattern as `list_after` to handle same-millisecond writes.
+    /// Windowed query: `since` is a lower bound (filter, not cursor), `before_ts/before_id`
+    /// is the pagination cursor (upper bound). Results ordered newest first.
+    /// Typical usage: `since` = "last 7 days", `before_ts/before_id` = cursor for paging.
+    /// Omitting `since` returns all messages up to `before`. Omitting `before` returns
+    /// the newest `limit` messages after `since`.
     async fn list_by_workspace(
         &self,
         workspace_id: &Id,
@@ -416,7 +419,7 @@ CREATE TABLE messages (
     tenant_id TEXT NOT NULL,
     from_type TEXT NOT NULL,          -- 'server', 'agent', 'user'
     from_id TEXT,                     -- NULL for server origin
-    workspace_id TEXT,                -- NULL only for broadcast (not stored)
+    workspace_id TEXT NOT NULL,       -- always present; Broadcast messages are not stored
     to_type TEXT NOT NULL,            -- 'agent', 'workspace' (broadcast not stored)
     to_id TEXT,                       -- agent_id for agent, workspace_id for workspace
     kind TEXT NOT NULL,
@@ -443,7 +446,17 @@ The existing `NotificationRepository` with 16 `NotificationType` variants overla
 - **Messages** are inter-component communication (agent-to-agent, server-to-agent). They are the raw events.
 - **Notifications** are user-facing alerts derived from messages. They have read/unread state, priority levels, and are scoped to human users, not agents.
 
-The notification system becomes a **consumer** of the message bus. When the server emits a `GateFailure` message, the notification system creates a `GateFailure` notification for the relevant human users. This replaces the current ad-hoc notification creation scattered across handlers.
+The notification system becomes a **consumer** of the message bus. The implementation mechanism: the server's message-send path (after storing the message and pushing to the broadcast channel) calls an in-process `MessageConsumer` trait:
+
+```rust
+pub trait MessageConsumer: Send + Sync {
+    /// Called synchronously after a message is stored/broadcast.
+    /// Implementations must be fast (no blocking I/O in the hot path).
+    async fn on_message(&self, message: &Message);
+}
+```
+
+The notification system implements `MessageConsumer`. When it receives a `GateFailure` message, it creates a `GateFailure` notification for the relevant human users. This replaces the current ad-hoc notification creation scattered across handlers. Additional consumers (e.g., SIEM forwarding, analytics) can implement the same trait.
 
 ### API
 
@@ -583,7 +596,7 @@ Since this is a greenfield system with no production deployment, the unified mes
 | Send to dead/completed agent | Message stored. For completed agents, `acknowledge_all` was called at completion time, so new messages arrive into an inbox that will be cleaned by `expire_dead_inboxes` (7 days, `GYRE_DEAD_INBOX_TTL_SECS`). For orphaned agents (killed without `complete`), the stale agent detector marks them Dead and calls `acknowledge_all` with `ack_reason: "agent_orphaned"`, enabling the same cleanup. |
 | Send to self | Allowed. Useful for self-reminders/scheduling. |
 | Workspace fan-out to 100 agents | One DB write (one row with `to_type=workspace`) + one broadcast channel send. WebSocket push fans out via the broadcast channel (same performance as today). |
-| Message too large | `payload` limited to 64KB (configurable via `GYRE_MAX_MESSAGE_SIZE`). Server rejects with 413. |
+| Message too large | Total POST request body limited to 64KB (configurable via `GYRE_MAX_MESSAGE_SIZE`). This covers the full JSON envelope including `to`, `kind`, and `payload`. Server rejects with 413. |
 | Queue depth (unacked inbox) | Max 1000 per agent. New sends rejected with 429. No silent drops. Sender gets error, can retry later or alert. |
 | Concurrent sends to same agent | Atomic — each send is a single DB INSERT. |
 | Concurrent ack of same message | Idempotent — second ack returns 200. |
