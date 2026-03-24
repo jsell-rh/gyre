@@ -10,7 +10,7 @@
 //! GET  /api/v1/specs/:path/history — approval history
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -34,6 +34,9 @@ pub struct SpecLedgerResponse {
     pub path: String,
     pub title: String,
     pub owner: String,
+    /// Optional spec kind, e.g. "meta:persona", "meta:principle", "meta:standard", "meta:process".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub current_sha: String,
     pub approval_mode: String,
     pub approval_status: String,
@@ -50,6 +53,7 @@ impl From<SpecLedgerEntry> for SpecLedgerResponse {
             path: e.path,
             title: e.title,
             owner: e.owner,
+            kind: e.kind,
             current_sha: e.current_sha,
             approval_mode: e.approval_mode,
             approval_status: e.approval_status.to_string(),
@@ -119,9 +123,29 @@ pub struct RevokeSpecApprovalRequest {
 // GET /api/v1/specs — list all specs
 // ---------------------------------------------------------------------------
 
-pub async fn list_specs(State(state): State<Arc<AppState>>) -> Json<Vec<SpecLedgerResponse>> {
+#[derive(serde::Deserialize)]
+pub struct ListSpecsQuery {
+    /// Filter by spec kind, e.g. "meta:persona"
+    pub kind: Option<String>,
+}
+
+pub async fn list_specs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListSpecsQuery>,
+) -> Json<Vec<SpecLedgerResponse>> {
     let ledger = state.spec_ledger.lock().await;
-    let mut specs: Vec<SpecLedgerResponse> = ledger.values().cloned().map(Into::into).collect();
+    let mut specs: Vec<SpecLedgerResponse> = ledger
+        .values()
+        .filter(|e| {
+            if let Some(kind_filter) = &params.kind {
+                e.kind.as_deref() == Some(kind_filter.as_str())
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .map(Into::into)
+        .collect();
     specs.sort_by(|a, b| a.path.cmp(&b.path));
     Json(specs)
 }
@@ -584,6 +608,7 @@ mod tests {
                         path: "system/design-principles.md".to_string(),
                         title: "Design Principles".to_string(),
                         owner: "user:jsell".to_string(),
+                        kind: None,
                         current_sha: "a".repeat(40),
                         approval_mode: "human_only".to_string(),
                         approval_status: ApprovalStatus::Pending,
@@ -777,6 +802,7 @@ mod tests {
                     path: "system/pending.md".to_string(),
                     title: "Pending".to_string(),
                     owner: "user:jsell".to_string(),
+                    kind: None,
                     current_sha: "a".repeat(40),
                     approval_mode: "human_only".to_string(),
                     approval_status: ApprovalStatus::Pending,
@@ -793,6 +819,7 @@ mod tests {
                     path: "system/approved.md".to_string(),
                     title: "Approved".to_string(),
                     owner: "user:jsell".to_string(),
+                    kind: None,
                     current_sha: "b".repeat(40),
                     approval_mode: "human_only".to_string(),
                     approval_status: ApprovalStatus::Approved,
@@ -855,6 +882,7 @@ mod tests {
                 path: path.to_string(),
                 title: path.to_string(),
                 owner: "user:jsell".to_string(),
+                kind: None,
                 current_sha: "a".repeat(40),
                 approval_mode: "human_only".to_string(),
                 approval_status: status,

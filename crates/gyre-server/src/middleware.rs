@@ -181,6 +181,7 @@ mod tests {
             notifications: base.notifications.clone(),
             graph_store: base.graph_store.clone(),
             wg_config: base.wg_config.clone(),
+            meta_spec_sets: base.meta_spec_sets.clone(),
         });
         crate::build_router(state)
     }
