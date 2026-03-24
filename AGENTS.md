@@ -43,13 +43,15 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 
 ## Documentation Index
 
+**Before writing any code, read the docs relevant to your task.** This file is the entry point only — endpoint signatures, auth requirements, env vars, and protocol details all live in the docs/ files below.
+
 | What you need | Where to look |
 |---|---|
-| **All API endpoints** (REST, git HTTP, WebSocket, MCP, A2A) | [docs/api-reference.md](docs/api-reference.md) |
-| **Running the server**, env vars, auth | [docs/server-config.md](docs/server-config.md) |
-| **Agent spawn/complete**, container env, gates, spec lifecycle | [docs/agent-protocol.md](docs/agent-protocol.md) |
-| **Building, testing**, branching, commit conventions, pre-commit hooks | [docs/development.md](docs/development.md) |
-| **Dashboard UI** -- all views, navigation, keyboard shortcuts | [docs/ui.md](docs/ui.md) |
+| **All API endpoints** (REST, git HTTP, WebSocket, MCP, A2A) — auth, roles, request/response shapes | [docs/api-reference.md](docs/api-reference.md) |
+| **Running the server**, env vars, OIDC, database, WireGuard config | [docs/server-config.md](docs/server-config.md) |
+| **Agent spawn/complete**, container env vars, gate protocol, spec lifecycle automation | [docs/agent-protocol.md](docs/agent-protocol.md) |
+| **Building, testing**, branching, commit conventions, pre-commit hooks, architecture decisions | [docs/development.md](docs/development.md) |
+| **Dashboard UI** -- all views, navigation, keyboard shortcuts, sidebar structure | [docs/ui.md](docs/ui.md) |
 | **CLI usage** -- init, clone, push, tasks, MRs, diagnostics | [docs/cli.md](docs/cli.md) |
 | **Product specs** (vision, architecture, milestones) | [specs/index.md](specs/index.md) |
 
