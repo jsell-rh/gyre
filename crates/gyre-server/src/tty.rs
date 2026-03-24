@@ -156,8 +156,12 @@ async fn validate_token(token: &str, state: &Arc<AppState>) -> bool {
     }
     // API-key or JWT auth is not attempted here — WS first-message auth only
     // supports the two token forms used by agents and the dev global token.
-    let agent_tokens = state.agent_tokens.lock().await;
-    agent_tokens.values().any(|t| t.as_str() == token)
+    state
+        .kv_store
+        .kv_list("agent_tokens")
+        .await
+        .map(|pairs| pairs.iter().any(|(_, t)| t.as_str() == token))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

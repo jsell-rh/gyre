@@ -419,8 +419,12 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
 
         // 2. Per-agent tokens issued at spawn (UUID legacy or JWT).
         {
-            let agent_tokens = state.agent_tokens.lock().await;
-            if let Some(agent_id) = agent_tokens
+            let token_pairs = state
+                .kv_store
+                .kv_list("agent_tokens")
+                .await
+                .unwrap_or_default();
+            if let Some(agent_id) = token_pairs
                 .iter()
                 .find(|(_, t)| t.as_str() == token)
                 .map(|(id, _)| id.clone())
@@ -1019,10 +1023,10 @@ mod tests {
     async fn agent_token_accepted() {
         let state = test_state();
         state
-            .agent_tokens
-            .lock()
+            .kv_store
+            .kv_set("agent_tokens", "agent-42", "agent-secret".to_string())
             .await
-            .insert("agent-42".to_string(), "agent-secret".to_string());
+            .unwrap();
 
         let app = Router::new()
             .route("/protected", get(authenticated_handler))
@@ -1272,10 +1276,10 @@ mod tests {
     async fn backward_compat_agent_token_with_jwt_enabled() {
         let state = make_test_state_with_jwt();
         state
-            .agent_tokens
-            .lock()
+            .kv_store
+            .kv_set("agent_tokens", "agt-1", "agt-secret-xyz".to_string())
             .await
-            .insert("agt-1".to_string(), "agt-secret-xyz".to_string());
+            .unwrap();
 
         let app = Router::new()
             .route("/protected", get(authenticated_handler))

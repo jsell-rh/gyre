@@ -14,6 +14,7 @@ pub mod analytics;
 pub mod audit;
 pub mod budget;
 pub mod dependency;
+pub mod kv_store;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod network_peer;

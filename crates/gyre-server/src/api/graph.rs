@@ -572,10 +572,14 @@ pub async fn get_workspace_graph(
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_workspace(&state, &id).await?;
 
-    let repo_ids: Vec<String> = {
-        let ws_repos = state.workspace_repos.lock().await;
-        ws_repos.get(&id).cloned().unwrap_or_default()
-    };
+    let repo_ids: Vec<String> = state
+        .kv_store
+        .kv_get("workspace_repos", &id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
 
     let mut all_nodes = Vec::new();
     let mut all_edges = Vec::new();
@@ -614,10 +618,14 @@ pub async fn get_workspace_briefing(
 
     let since = q.since.unwrap_or(0);
 
-    let repo_ids: Vec<String> = {
-        let ws_repos = state.workspace_repos.lock().await;
-        ws_repos.get(&id).cloned().unwrap_or_default()
-    };
+    let repo_ids: Vec<String> = state
+        .kv_store
+        .kv_get("workspace_repos", &id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
 
     let mut all_deltas = Vec::new();
     for rid in &repo_ids {

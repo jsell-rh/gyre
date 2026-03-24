@@ -141,11 +141,12 @@ pub async fn register_stack(
 
     let fingerprint = stack.fingerprint();
 
+    let json = serde_json::to_string(&stack).map_err(|e| ApiError::Internal(e.into()))?;
     state
-        .agent_stacks
-        .lock()
+        .kv_store
+        .kv_set("agent_stacks", &agent_id, json)
         .await
-        .insert(agent_id.clone(), stack.clone());
+        .map_err(ApiError::Internal)?;
 
     Ok((
         StatusCode::CREATED,
@@ -170,11 +171,11 @@ pub async fn get_stack(
         .ok_or_else(|| ApiError::NotFound(format!("agent {agent_id} not found")))?;
 
     let stack = state
-        .agent_stacks
-        .lock()
+        .kv_store
+        .kv_get("agent_stacks", &agent_id)
         .await
-        .get(&agent_id)
-        .cloned()
+        .map_err(ApiError::Internal)?
+        .and_then(|s| serde_json::from_str::<AgentStack>(&s).ok())
         .ok_or_else(|| ApiError::NotFound(format!("no stack registered for agent {agent_id}")))?;
 
     let fingerprint = stack.fingerprint();
@@ -202,11 +203,11 @@ pub async fn get_stack_policy(
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
     let required_fingerprint = state
-        .repo_stack_policies
-        .lock()
+        .kv_store
+        .kv_get("repo_stack_policies", &repo_id)
         .await
-        .get(&repo_id)
-        .cloned();
+        .ok()
+        .flatten();
 
     Ok(Json(StackPolicyResponse {
         repo_id,
@@ -228,13 +229,19 @@ pub async fn set_stack_policy(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
-    let mut policies = state.repo_stack_policies.lock().await;
     match &req.required_fingerprint {
         Some(fp) => {
-            policies.insert(repo_id.clone(), fp.clone());
+            state
+                .kv_store
+                .kv_set("repo_stack_policies", &repo_id, fp.clone())
+                .await
+                .map_err(ApiError::Internal)?;
         }
         None => {
-            policies.remove(&repo_id);
+            let _ = state
+                .kv_store
+                .kv_remove("repo_stack_policies", &repo_id)
+                .await;
         }
     }
 
