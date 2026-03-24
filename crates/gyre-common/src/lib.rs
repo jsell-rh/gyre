@@ -10,4 +10,4 @@ pub use id::Id;
 pub use message::{
     Destination, Message, MessageKind, MessageOrigin, MessageTier, TelemetryBuffer,
 };
-pub use protocol::{ActivityEventData, AgEventType, WsMessage};
+pub use protocol::{ActivityEventData, AgEventType, SubscribeScope, WsMessage};

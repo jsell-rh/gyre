@@ -40,7 +40,7 @@ pub struct Message {
 }
 
 /// Identifies who sent a message. Serde: externally tagged, snake_case.
-/// Wire: `{"server": null}`, `{"agent": "<id>"}`, `{"user": "<id>"}`.
+/// Wire: `"server"` (unit variant serializes as string), `{"agent": "<id>"}`, `{"user": "<id>"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageOrigin {
@@ -313,6 +313,8 @@ pub struct TelemetryBuffer {
 
 impl TelemetryBuffer {
     pub fn new(max_per_workspace: usize, max_workspaces: usize) -> Self {
+        assert!(max_per_workspace > 0, "max_per_workspace must be > 0");
+        assert!(max_workspaces > 0, "max_workspaces must be > 0");
         Self {
             buffers: DashMap::new(),
             max_per_workspace,
