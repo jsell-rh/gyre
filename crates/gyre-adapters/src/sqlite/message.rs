@@ -151,7 +151,8 @@ fn message_to_new_row(m: &Message) -> Result<NewMessageRow> {
         created_at: m.created_at as i64,
         signature: m.signature.clone(),
         key_id: m.key_id.clone(),
-        acknowledged: m.acknowledged as i32,
+        // Always store as unacknowledged — ack state is set only via acknowledge() calls.
+        acknowledged: 0,
         ack_reason: None,
     })
 }
@@ -1051,6 +1052,92 @@ mod tests {
             .unwrap();
         assert_eq!(found.from, MessageOrigin::User(Id::new("user-99")));
         assert_eq!(found.to, Destination::Workspace(Id::new("ws-user")));
+    }
+
+    #[tokio::test]
+    async fn store_pre_acknowledged_message_is_stored_as_unacked() {
+        // store() must always reset acknowledged to 0 regardless of caller's value.
+        let (_tmp, storage) = tmp_storage();
+        let mut msg = make_directed("pre-acked", "agent-x", "ws-x", 1_000);
+        msg.acknowledged = true; // caller accidentally sets acknowledged=true
+        storage.store(&msg).await.unwrap();
+        let found = storage
+            .find_by_id(&Id::new("pre-acked"))
+            .await
+            .unwrap()
+            .unwrap();
+        // Must be stored as unacknowledged
+        assert!(!found.acknowledged);
+        // Must be visible in unacked list
+        let unacked = storage
+            .list_unacked(&Id::new("agent-x"), 100)
+            .await
+            .unwrap();
+        assert_eq!(unacked.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expire_acked_inboxes_preserves_explicit_ack_reason() {
+        let (_tmp, storage) = tmp_storage();
+        let agent_id = Id::new("agent-explicit");
+
+        storage
+            .store(&make_directed(
+                "explicit-ack",
+                "agent-explicit",
+                "ws-e",
+                100,
+            ))
+            .await
+            .unwrap();
+
+        // Acknowledge with "explicit" reason (via individual ack)
+        storage
+            .acknowledge(&Id::new("explicit-ack"), &agent_id)
+            .await
+            .unwrap();
+
+        // expire_acked_inboxes only removes agent_completed and agent_orphaned,
+        // NOT explicitly acked messages
+        let deleted = storage.expire_acked_inboxes(10_000).await.unwrap();
+        assert_eq!(deleted, 0); // explicit ack_reason is NOT cleaned by this method
+        assert!(storage
+            .find_by_id(&Id::new("explicit-ack"))
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn expire_for_agents_preserves_recent_messages() {
+        let (_tmp, storage) = tmp_storage();
+
+        // Old message — should be deleted
+        storage
+            .store(&make_directed("old-for-agent", "dead-agent-x", "ws-x", 500))
+            .await
+            .unwrap();
+        // Recent message — should survive
+        storage
+            .store(&make_directed(
+                "new-for-agent",
+                "dead-agent-x",
+                "ws-x",
+                99_000,
+            ))
+            .await
+            .unwrap();
+
+        let deleted = storage
+            .expire_for_agents(&[Id::new("dead-agent-x")], 50_000)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1); // only the old one
+        assert!(storage
+            .find_by_id(&Id::new("new-for-agent"))
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

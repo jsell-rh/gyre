@@ -151,7 +151,8 @@ fn message_to_new_row(m: &Message) -> Result<NewMessageRow> {
         created_at: m.created_at as i64,
         signature: m.signature.clone(),
         key_id: m.key_id.clone(),
-        acknowledged: m.acknowledged as i32,
+        // Always store as unacknowledged — ack state is set only via acknowledge() calls.
+        acknowledged: 0,
         ack_reason: None,
     })
 }
