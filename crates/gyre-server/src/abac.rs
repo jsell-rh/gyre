@@ -77,6 +77,14 @@ pub async fn check_repo_abac(
     repo_id: &str,
     auth: &AuthenticatedAgent,
 ) -> Result<(), String> {
+    // Global token and API keys carry no JWT claims → admin bypass.
+    // This check must run BEFORE policy parsing so that corrupt policy data
+    // in the KV store does not block the global admin token.
+    let claims = match &auth.jwt_claims {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
     // Security invariant (M29.5B-A): if the store returns data that cannot
     // be parsed, DENY access (fail-closed) rather than silently treating it
     // as "no policies" which would bypass ABAC enforcement.
@@ -103,12 +111,6 @@ pub async fn check_repo_abac(
     if repo_policies.is_empty() {
         return Ok(()); // No policies = unrestricted.
     }
-
-    // Global token and API keys carry no JWT claims → admin bypass.
-    let claims = match &auth.jwt_claims {
-        Some(c) => c,
-        None => return Ok(()),
-    };
 
     // Evaluate each policy; pass if any matches.
     for policy in &repo_policies {
@@ -426,6 +428,49 @@ mod tests {
         };
         assert!(check_repo_abac(&state, "repo-A", &auth).await.is_ok());
         assert!(check_repo_abac(&state, "repo-B", &auth).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn corrupt_abac_data_does_not_block_admin_bypass() {
+        // The admin bypass (jwt_claims = None) must run BEFORE policy parsing.
+        // If corrupt JSON is stored, a non-admin token gets 403 (fail-closed),
+        // but the global token must still bypass.
+        let state = test_state();
+        state
+            .kv_store
+            .kv_set(
+                "abac_policies",
+                "repo-corrupt",
+                "NOT VALID JSON {{{".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Admin token (jwt_claims = None) — must succeed despite corrupt data.
+        let admin_auth = AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: None,
+            roles: vec![gyre_domain::UserRole::Admin],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+        };
+        assert!(
+            check_repo_abac(&state, "repo-corrupt", &admin_auth).await.is_ok(),
+            "admin bypass must not be blocked by corrupt ABAC policy data"
+        );
+
+        // Non-admin token (jwt_claims = Some(...)) — must fail-closed.
+        let agent_auth = AuthenticatedAgent {
+            agent_id: "agent-1".to_string(),
+            user_id: None,
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
+        };
+        assert!(
+            check_repo_abac(&state, "repo-corrupt", &agent_auth).await.is_err(),
+            "non-admin token must be denied (fail-closed) on corrupt ABAC policy data"
+        );
     }
 
     // --- HTTP handler tests --------------------------------------------------
