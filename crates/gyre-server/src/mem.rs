@@ -7,8 +7,8 @@ use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
     DependencyEdge, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
-    Persona, PersonaScope, Project, Repository, Review, ReviewComment, ReviewDecision, Task,
-    TaskStatus, User, Workspace,
+    Persona, PersonaScope, Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
+    Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
@@ -16,8 +16,8 @@ use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
     MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository, PersonaRepository,
-    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
+    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
+    TenantRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -273,54 +273,6 @@ impl WorktreeRepository for MemWorktreeRepository {
 }
 
 #[derive(Default)]
-pub struct MemProjectRepository {
-    store: Arc<Mutex<HashMap<String, Project>>>,
-}
-
-#[async_trait]
-impl ProjectRepository for MemProjectRepository {
-    async fn create(&self, project: &Project) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(project.id.to_string(), project.clone());
-        Ok(())
-    }
-
-    async fn find_by_id(&self, id: &Id) -> Result<Option<Project>> {
-        Ok(self.store.lock().await.get(id.as_str()).cloned())
-    }
-
-    async fn list(&self) -> Result<Vec<Project>> {
-        Ok(self.store.lock().await.values().cloned().collect())
-    }
-
-    async fn update(&self, project: &Project) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(project.id.to_string(), project.clone());
-        Ok(())
-    }
-
-    async fn delete(&self, id: &Id) -> Result<()> {
-        self.store.lock().await.remove(id.as_str());
-        Ok(())
-    }
-
-    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Project>> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .values()
-            .filter(|p| p.workspace_id.as_ref() == Some(workspace_id))
-            .cloned()
-            .collect())
-    }
-}
-
-#[derive(Default)]
 pub struct MemRepoRepository {
     store: Arc<Mutex<HashMap<String, Repository>>>,
 }
@@ -343,17 +295,6 @@ impl RepoRepository for MemRepoRepository {
         Ok(self.store.lock().await.values().cloned().collect())
     }
 
-    async fn list_by_project(&self, project_id: &Id) -> Result<Vec<Repository>> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .values()
-            .filter(|r| r.project_id.as_str() == project_id.as_str())
-            .cloned()
-            .collect())
-    }
-
     async fn update(&self, repo: &Repository) -> Result<()> {
         self.store
             .lock()
@@ -373,7 +314,7 @@ impl RepoRepository for MemRepoRepository {
             .lock()
             .await
             .values()
-            .filter(|r| r.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|r| &r.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
@@ -1221,6 +1162,53 @@ impl SpawnLogRepository for MemSpawnLogRepository {
 
     async fn is_token_revoked(&self, token_hash: &str) -> Result<bool> {
         Ok(self.revoked.lock().await.contains(token_hash))
+    }
+}
+
+#[derive(Default)]
+pub struct MemTenantRepository {
+    store: Arc<Mutex<HashMap<String, Tenant>>>,
+}
+
+#[async_trait]
+impl TenantRepository for MemTenantRepository {
+    async fn create(&self, tenant: &Tenant) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant.id.to_string(), tenant.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Tenant>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_slug(&self, slug: &str) -> Result<Option<Tenant>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|t| t.slug == slug)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<Tenant>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn update(&self, tenant: &Tenant) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant.id.to_string(), tenant.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
     }
 }
 
@@ -2167,7 +2155,6 @@ pub fn test_state() -> Arc<crate::AppState> {
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
-        projects: Arc::new(MemProjectRepository::default()),
         repos: Arc::new(MemRepoRepository::default()),
         agents: Arc::new(MemAgentRepository::default()),
         tasks: Arc::new(MemTaskRepository::default()),
@@ -2229,6 +2216,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        tenants: Arc::new(MemTenantRepository::default()),
         workspaces: Arc::new(MemWorkspaceRepository::default()),
         personas: Arc::new(MemPersonaRepository::default()),
         policies: Arc::new(MemPolicyRepository::default()),

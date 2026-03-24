@@ -1,5 +1,11 @@
 # Manager Agent: Orchestrating Development via Ralph Loops
 
+> **Superseded.** The Manager Agent concept has been split into two specs:
+> - **Orchestration**: [`specs/system/platform-model.md`](../system/platform-model.md) (Two-Level Orchestration -- workspace orchestrator + repo orchestrator)
+> - **Implementation loop**: [`specs/system/ralph-loop.md`](../system/ralph-loop.md) (Ralph loop as agent/session primitive)
+>
+> This file is kept for historical context only.
+
 ## Role
 
 The Manager Agent is the top-level orchestrator. It does not write code. It decomposes work, spawns sub-agents, defines their Ralph loops, and runs its own meta Ralph loop over the entire system. It is the reconciliation controller for the development process.

@@ -27,7 +27,6 @@ pub mod meta_specs;
 pub mod network;
 pub mod personas;
 pub mod policies;
-pub mod projects;
 pub mod provenance;
 pub mod push_gates;
 pub mod release;
@@ -40,6 +39,7 @@ pub mod specs;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
+pub mod tenants;
 pub mod users;
 pub mod version;
 pub mod workload;
@@ -73,17 +73,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/version", get(version::version_handler))
         .route("/api/v1/activity", get(activity::activity_handler))
-        // Projects
-        .route(
-            "/api/v1/projects",
-            post(projects::create_project).get(projects::list_projects),
-        )
-        .route(
-            "/api/v1/projects/:id",
-            get(projects::get_project)
-                .put(projects::update_project)
-                .delete(projects::delete_project),
-        )
         // Repos
         .route(
             "/api/v1/repos",
@@ -452,6 +441,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
         .route("/api/v1/search/reindex", post(search::reindex_handler))
+        // Tenants (M34)
+        .route(
+            "/api/v1/tenants",
+            post(tenants::create_tenant).get(tenants::list_tenants),
+        )
+        .route(
+            "/api/v1/tenants/:id",
+            get(tenants::get_tenant)
+                .put(tenants::update_tenant)
+                .delete(tenants::delete_tenant),
+        )
         // Workspaces (M22.1)
         .route(
             "/api/v1/workspaces",

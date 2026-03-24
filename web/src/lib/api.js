@@ -48,12 +48,10 @@ export const api = {
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
   task: (id) => request(`/tasks/${id}`),
-  projects: ({ workspaceId } = {}) => {
+  repos: ({ workspaceId } = {}) => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
-    return request(`/projects${qs}`);
+    return request(`/repos${qs}`);
   },
-  project: (id) => request(`/projects/${id}`),
-  repos: (projectId) => request(`/repos?project_id=${projectId}`),
   allRepos: () => request('/repos'),
   repoBranches: (id) => request(`/repos/${id}/branches`),
   repoCommits: (id, branch, limit = 50) =>
@@ -173,8 +171,6 @@ export const api = {
   adminDeleteSnapshot: (id) =>
     request(`/admin/snapshots/${id}`, { method: 'DELETE' }),
   // CRUD create methods
-  createProject: (data) =>
-    request('/projects', { method: 'POST', body: JSON.stringify(data) }),
   createRepo: (data) =>
     request('/repos', { method: 'POST', body: JSON.stringify(data) }),
   createMirrorRepo: (data) =>
@@ -328,6 +324,15 @@ export const api = {
     const qs = params.toString();
     return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
   },
+  // Tenants (M34)
+  tenants: () => request('/tenants'),
+  tenant: (id) => request(`/tenants/${id}`),
+  createTenant: (data) =>
+    request('/tenants', { method: 'POST', body: JSON.stringify(data) }),
+  updateTenant: (id, data) =>
+    request(`/tenants/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteTenant: (id) =>
+    request(`/tenants/${id}`, { method: 'DELETE' }),
   // Workspaces (M22.5)
   workspaces: () => request('/workspaces'),
   workspace: (id) => request(`/workspaces/${id}`),

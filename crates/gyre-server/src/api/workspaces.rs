@@ -181,7 +181,7 @@ pub async fn add_repo_to_workspace(
         .find_by_id(&Id::new(&req.repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", req.repo_id)))?;
-    repo.workspace_id = Some(Id::new(&ws_id));
+    repo.workspace_id = Id::new(&ws_id);
     state.repos.update(&repo).await?;
     let mut repo_ids: Vec<String> = state
         .kv_store

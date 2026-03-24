@@ -18,9 +18,12 @@ What Gyre does - the product.
 |---|---|---|
 | **Vision** | [`system/vision.md`](system/vision.md) | **Root spec:** Gyre amplifies human judgment across the SDLC. Seven principles: judgment not generation, right context, specs as primary artifact, structure is discovered, feedback loop, challenge every ceremony, human differentiation compounds |
 | **Platform Model** | [`system/platform-model.md`](system/platform-model.md) | **Foundational spec:** tenant/workspace/repo hierarchy, persona model, orchestration, MCP coordination, budgets, rollback, secrets, bootstrap |
+| **Ralph Loop** | [`system/ralph-loop.md`](system/ralph-loop.md) | **Core implementation primitive:** agent/session model, message inbox, fresh context per session, gates + agent review as terminal conditions, provenance integration |
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
 | ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
+| Hierarchy Enforcement | [`system/hierarchy-enforcement.md`](system/hierarchy-enforcement.md) | Making the ownership hierarchy load-bearing: Tenant entity, non-optional workspace_id, ABAC middleware integration, tenant filtering, legacy cleanup |
+| Unified Message Bus | [`system/message-bus.md`](system/message-bus.md) | One signed envelope for all inter-component communication: three-tier model (directed/event/telemetry), server-attested signing, workspace-scoped routing, ack-based delivery |
 | Design Principles | [`system/design-principles.md`](system/design-principles.md) | Core invariants that govern all decisions |
 | Source Control | [`system/source-control.md`](system/source-control.md) | Built-in git forge, MRs, merge queue, jj evaluation |
 | Forge Advantages | [`system/forge-advantages.md`](system/forge-advantages.md) | 8 capabilities only possible with a forge-native agent platform |
@@ -52,12 +55,13 @@ How Gyre gets built - process and standards for the agent team.
 | Spec | Path | Summary |
 |---|---|---|
 | Architecture & Standards | [`development/architecture.md`](development/architecture.md) | Rust, Svelte, DDD, hexagonal, storage, API |
+| API Design Conventions | [`development/api-conventions.md`](development/api-conventions.md) | URL structure, naming rules, parameter conventions, auth contract, deprecation protocol, mechanical enforcement |
 | Database & Migrations | [`development/database-migrations.md`](development/database-migrations.md) | Diesel ORM, paired up/down migrations, multi-tenant row isolation, startup behavior |
-| Ralph Loops | [`development/ralph-loops.md`](development/ralph-loops.md) | Core loop definition, meta loops, coordination |
+| Ralph Loops (superseded) | [`development/ralph-loops.md`](development/ralph-loops.md) | Superseded by [`system/ralph-loop.md`](system/ralph-loop.md) |
 | Agent Experience (Day One) | [`development/agent-experience.md`](development/agent-experience.md) | Testing, observability, repo as system of record, cache hits, entropy management |
 | Speed & Backpressure | [`development/speed-backpressure.md`](development/speed-backpressure.md) | The wheel, pre-commit hooks, quality gates |
 | CI, Docs & Release | [`development/ci-docs-release.md`](development/ci-docs-release.md) | GitHub Actions, Starlight docs, semver, conventional commits |
-| Manager Agent Orchestration | [`development/manager-agent.md`](development/manager-agent.md) | Manager Ralph loop, sub-agent dispatch, lifecycle rules |
+| Manager Agent (superseded) | [`development/manager-agent.md`](development/manager-agent.md) | Superseded -- split into [`system/platform-model.md`](system/platform-model.md) + [`system/ralph-loop.md`](system/ralph-loop.md) |
 | Agent Development Workflow | [`development/agent-workflow.md`](development/agent-workflow.md) | Immediate feedback, worktrees, PRs, fix the environment |
 | Dogfooding | [`development/dogfooding.md`](development/dogfooding.md) | Building Gyre with agent-boss |
 | Development Philosophy | [`development/philosophy.md`](development/philosophy.md) | Speed, failure domains, humans steer / agents execute |
@@ -115,6 +119,8 @@ How Gyre gets built - process and standards for the agent team.
 | M30: Knowledge Graph | [`milestones/m30-knowledge-graph.md`](milestones/m30-knowledge-graph.md) | Live knowledge graph extracted from source code: `GraphNode`/`GraphEdge` domain types, `RustExtractor` (syn-based AST), 13 graph API endpoints, push-triggered automatic extraction (M30b) |
 | M31: UI Journeys | [`milestones/m31-ui-journeys.md`](milestones/m31-ui-journeys.md) | Intent-centric dashboard: Inbox (action queue), Briefing (narrative digest), System Explorer Canvas (MoldableView SVG graph), navigation restructure, keyboard shortcuts `i`/`b` |
 | M32: Meta-Spec Reconciliation | [`milestones/m32-meta-spec-reconciliation.md`](milestones/m32-meta-spec-reconciliation.md) | Spec `kind` field (meta:persona/principle/standard/process), workspace meta-spec-set bindings, blast-radius endpoint, `meta_spec_set_sha` in spawn provenance, MetaSpecs UI |
+| M34: Hierarchy Enforcement | [`milestones/m34-hierarchy-enforcement.md`](milestones/m34-hierarchy-enforcement.md) | Load-bearing ownership hierarchy: Tenant entity, non-optional workspace_id, ABAC middleware, tenant isolation, auth gap fixes, URL restructure |
+| M35: Unified Message Bus | (see [`system/message-bus.md`](system/message-bus.md)) | Signed message envelope replacing REST inbox + domain events + activity store. Depends on M34 Slice 3. |
 
 ## Open Questions
 
@@ -123,8 +129,8 @@ How Gyre gets built - process and standards for the agent team.
 | SPIFFE integration details | **Resolved** - 3-layer stack: SPIFFE (workload attestation) + Gyre as OIDC provider (agent permissions) + Sigstore/Fulcio (keyless commit signing). Federated via standard protocols. |
 | jj (Jujutsu) vs. Git | **Resolved** - jj adds value for agent workflows (atomic changes, auto-rebase, undo) |
 | Agent collaboration model (hierarchy + ?) | **Resolved** - hierarchy (spawn tree) + typed peer messages (A2A) + cross-agent code awareness (M13.4) |
-| Coordination primitives (blackboard vs. event stream vs. persistent work chains) | **Resolved** - event stream (domain events via WebSocket) + persistent work chains (task/Ralph ref tree) |
-| Persistent Ralph loop steps (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): refs/ralph/{task-id}/{step} survives agent crash |
+| Coordination primitives (blackboard vs. event stream vs. persistent work chains) | **Resolved** - event stream (domain events via WebSocket) + persistent work chains (task ref tree) |
+| Persistent loop state (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): `refs/tasks/{task-id}` survives agent crash. Agent message inbox persists state between sessions. See [`system/ralph-loop.md`](system/ralph-loop.md). |
 | Decision library for learned interrupt resolutions | Open |
 | Cost tracking model | **Resolved** - cost entries table, per-agent aggregation, dashboard cost view (M6.1) |
 | CI as separate concept vs. emergent property | **Resolved** - emergent: pre-accept gates (M13.1) + merge queue gates (M12.1) = CI without a separate concept |

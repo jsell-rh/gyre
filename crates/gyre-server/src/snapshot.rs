@@ -26,7 +26,6 @@ pub struct SnapshotMeta {
 #[derive(Serialize, Deserialize)]
 struct StateSnapshot {
     created_at: u64,
-    projects: Vec<gyre_domain::Project>,
     agents: Vec<gyre_domain::Agent>,
     tasks: Vec<gyre_domain::Task>,
 }
@@ -48,13 +47,11 @@ pub async fn create_snapshot(state: &AppState) -> anyhow::Result<SnapshotMeta> {
     let filename = format!("{snapshot_id}.json");
     let path = dir.join(&filename);
 
-    let projects = state.projects.list().await?;
     let agents = state.agents.list().await?;
     let tasks = state.tasks.list().await?;
 
     let snap = StateSnapshot {
         created_at,
-        projects,
         agents,
         tasks,
     };
@@ -142,20 +139,6 @@ pub async fn restore_snapshot(state: &AppState, snapshot_id: &str) -> anyhow::Re
 
     let json = tokio::fs::read_to_string(&path).await?;
     let snap: StateSnapshot = serde_json::from_str(&json)?;
-
-    // Restore projects
-    for project in snap.projects {
-        if state
-            .projects
-            .find_by_id(&project.id)
-            .await
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            let _ = state.projects.create(&project).await;
-        }
-    }
 
     // Restore agents
     for agent in snap.agents {
