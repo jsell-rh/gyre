@@ -50,6 +50,9 @@ pub struct SpawnAgentResponse {
     /// Container ID when the agent was spawned via a container compute target (M19.1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_id: Option<String>,
+    /// SHA256 of the workspace's meta-spec set at spawn time, for provenance (M32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta_spec_set_sha: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -708,6 +711,29 @@ pub async fn spawn_agent(
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(&state, &repo.project_id.to_string()).await;
 
+    // M32: Capture meta-spec set SHA for provenance — find the workspace that owns this repo.
+    let meta_spec_set_sha = {
+        let repo_id_str = repo.id.to_string();
+        let workspace_repos = state.workspace_repos.lock().await;
+        let meta_spec_sets = state.meta_spec_sets.lock().await;
+        let workspace_id = workspace_repos
+            .iter()
+            .find(|(_, repos)| repos.iter().any(|r| r == &repo_id_str))
+            .map(|(ws_id, _)| ws_id.clone());
+        drop(workspace_repos);
+        if let Some(ws_id) = workspace_id {
+            meta_spec_sets.get(&ws_id).and_then(|set| {
+                serde_json::to_string(set).ok().map(|json_str| {
+                    use sha2::{Digest, Sha256};
+                    let hash = Sha256::digest(json_str.as_bytes());
+                    format!("{hash:x}")
+                })
+            })
+        } else {
+            None
+        }
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(SpawnAgentResponse {
@@ -719,6 +745,7 @@ pub async fn spawn_agent(
             compute_target_id: req.compute_target_id,
             jj_change_id,
             container_id: spawned_container_id,
+            meta_spec_set_sha,
         }),
     ))
 }

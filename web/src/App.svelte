@@ -27,9 +27,11 @@
   import BudgetDashboard from './components/BudgetDashboard.svelte';
   import DependencyGraph from './components/DependencyGraph.svelte';
   import SpecGraph from './components/SpecGraph.svelte';
+  import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import Inbox from './components/Inbox.svelte';
   import Briefing from './components/Briefing.svelte';
+  import ExplorerView from './components/ExplorerView.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
@@ -271,6 +273,7 @@
     'spec-approvals':   'Spec Approvals',
     specs:              'Spec Registry',
     'spec-graph':       'Spec Link Graph',
+    'meta-specs':       'Meta-Specs',
     admin:              'Admin Panel',
     settings:           'Settings',
     workspaces:         'Workspaces',
@@ -279,6 +282,7 @@
     budget:             'Budget Dashboard',
     dependencies:       'Dependency Graph',
     profile:            'My Profile',
+    explorer:           'System Explorer',
   };
 
   let breadcrumbs = $derived(() => {
@@ -428,6 +432,8 @@
         <SpecDashboard />
       {:else if currentView === 'spec-graph'}
         <SpecGraph />
+      {:else if currentView === 'meta-specs'}
+        <MetaSpecs />
       {:else if currentView === 'workspaces'}
         <WorkspaceList onSelect={(ws) => navigate('workspace-detail', { workspace: ws })} />
       {:else if currentView === 'workspace-detail' && selectedWorkspace}
@@ -443,6 +449,8 @@
         <DependencyGraph />
       {:else if currentView === 'profile'}
         <UserProfile />
+      {:else if currentView === 'explorer'}
+        <ExplorerView />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}
