@@ -64,6 +64,8 @@ impl AgentRow {
             spawned_by: self.spawned_by,
             disconnected_behavior: Default::default(),
             workspace_id: self.workspace_id.map(Id::new),
+            iteration: 0,
+            loop_config: None,
         })
     }
 }

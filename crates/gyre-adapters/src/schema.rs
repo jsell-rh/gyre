@@ -131,7 +131,6 @@ diesel::table! {
         branch -> Text,
         timestamp -> BigInt,
         task_id -> Nullable<Text>,
-        ralph_step -> Nullable<Text>,
         spawned_by_user_id -> Nullable<Text>,
         parent_agent_id -> Nullable<Text>,
         model_context -> Nullable<Text>,
