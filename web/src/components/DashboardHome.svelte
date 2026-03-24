@@ -20,20 +20,16 @@
 
   async function fetchAll() {
     loading = true;
-    try {
-      const [ag, ts, mq, ac] = await Promise.all([
-        fetch('/api/v1/agents').then(r => r.ok ? r.json() : []),
-        fetch('/api/v1/tasks').then(r => r.ok ? r.json() : []),
-        fetch('/api/v1/merge-queue').then(r => r.ok ? r.json() : []),
-        fetch('/api/v1/activity?limit=10').then(r => r.ok ? r.json() : []),
-      ]);
-      agents   = ag?.agents   ?? ag ?? [];
-      tasks    = ts?.tasks    ?? ts ?? [];
-      queue    = mq?.items    ?? mq ?? [];
-      activity = ac?.events   ?? ac ?? [];
-    } catch {
-      // fallback: leave as empty
-    }
+    const [agR, tsR, mqR, acR] = await Promise.allSettled([
+      api.agents(),
+      api.tasks(),
+      api.mergeQueue(),
+      api.activity(10),
+    ]);
+    if (agR.status === 'fulfilled') { const r = agR.value; agents = Array.isArray(r?.agents) ? r.agents : Array.isArray(r) ? r : []; }
+    if (tsR.status === 'fulfilled') { const r = tsR.value; tasks = Array.isArray(r?.tasks) ? r.tasks : Array.isArray(r) ? r : []; }
+    if (mqR.status === 'fulfilled') { const r = mqR.value; queue = Array.isArray(r?.items) ? r.items : Array.isArray(r) ? r : []; }
+    if (acR.status === 'fulfilled') { const r = acR.value; activity = Array.isArray(r?.events) ? r.events : Array.isArray(r) ? r : []; }
     loading = false;
   }
 
