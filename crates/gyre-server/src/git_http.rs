@@ -216,11 +216,24 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
+    info!(
+        agent_id = %auth.agent_id,
+        has_jwt_claims = auth.jwt_claims.is_some(),
+        project = %project,
+        repo = %repo,
+        "git-receive-pack: push attempt"
+    );
     let resolved = match resolve_repo(&state, &project, &repo).await {
         Ok(r) => r,
         Err(r) => return r,
     };
     if resolved.is_mirror {
+        warn!(
+            agent_id = %auth.agent_id,
+            project = %project,
+            repo = %repo,
+            "git-receive-pack 403: repository is a read-only mirror"
+        );
         return (
             StatusCode::FORBIDDEN,
             "push rejected: repository is a read-only mirror".to_string(),
@@ -233,6 +246,13 @@ pub async fn git_receive_pack(
 
     // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
     if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        warn!(
+            agent_id = %auth.agent_id,
+            %repo_id,
+            %reason,
+            has_jwt_claims = auth.jwt_claims.is_some(),
+            "git-receive-pack 403: ABAC denied"
+        );
         return (StatusCode::FORBIDDEN, reason).into_response();
     }
 
