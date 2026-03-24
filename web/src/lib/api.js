@@ -373,5 +373,6 @@ export const api = {
   repoGraphTypes: (id) => request(`/repos/${id}/graph/types`),
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
+  getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
 };
