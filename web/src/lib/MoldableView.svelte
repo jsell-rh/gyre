@@ -5,6 +5,7 @@
   let {
     nodes = [],
     edges = [],
+    repoId = '',
     onSelectNode = undefined,
   } = $props();
 
@@ -92,7 +93,7 @@
   <!-- View content -->
   <div class="view-content">
     {#if activeView === 'graph'}
-      <ExplorerCanvas {nodes} {edges} {onSelectNode} />
+      <ExplorerCanvas {nodes} {edges} {repoId} {onSelectNode} />
 
     {:else if activeView === 'list'}
       <div class="list-view">
