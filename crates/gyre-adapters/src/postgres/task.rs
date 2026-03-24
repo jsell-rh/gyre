@@ -68,6 +68,7 @@ struct TaskRow {
     #[allow(dead_code)]
     tenant_id: String,
     workspace_id: Option<String>,
+    spec_path: Option<String>,
 }
 
 impl TaskRow {
@@ -87,6 +88,7 @@ impl TaskRow {
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
             workspace_id: self.workspace_id.map(Id::new),
+            spec_path: self.spec_path,
         })
     }
 }
@@ -108,6 +110,7 @@ struct NewTaskRow<'a> {
     updated_at: i64,
     tenant_id: &'a str,
     workspace_id: Option<&'a str>,
+    spec_path: Option<&'a str>,
 }
 
 #[async_trait]
@@ -134,6 +137,7 @@ impl TaskRepository for PgStorage {
                 updated_at: t.updated_at as i64,
                 tenant_id: &tenant,
                 workspace_id: t.workspace_id.as_ref().map(|id| id.as_str()),
+                spec_path: t.spec_path.as_deref(),
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -151,6 +155,7 @@ impl TaskRepository for PgStorage {
                     tasks::pr_link.eq(row.pr_link),
                     tasks::updated_at.eq(row.updated_at),
                     tasks::workspace_id.eq(row.workspace_id),
+                    tasks::spec_path.eq(row.spec_path),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -266,6 +271,7 @@ impl TaskRepository for PgStorage {
                 tasks::pr_link.eq(t.pr_link.as_deref()),
                 tasks::updated_at.eq(t.updated_at as i64),
                 tasks::workspace_id.eq(t.workspace_id.as_ref().map(|id| id.as_str())),
+                tasks::spec_path.eq(t.spec_path.as_deref()),
             ))
             .execute(&mut *conn)
             .context("update task")?;
@@ -303,6 +309,23 @@ impl TaskRepository for PgStorage {
                 .order(tasks::created_at.asc())
                 .load::<TaskRow>(&mut *conn)
                 .context("list tasks by workspace")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
+        })
+        .await?
+    }
+
+    async fn list_by_spec_path(&self, spec_path: &str) -> Result<Vec<Task>> {
+        let pool = Arc::clone(&self.pool);
+        let sp = spec_path.to_string();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
+                .filter(tasks::spec_path.eq(&sp))
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks by spec_path")?;
             rows.into_iter().map(TaskRow::into_task).collect()
         })
         .await?

@@ -62,6 +62,7 @@ diesel::table! {
         updated_at -> BigInt,
         tenant_id -> Text,
         workspace_id -> Nullable<Text>,
+        spec_path -> Nullable<Text>,
     }
 }
 

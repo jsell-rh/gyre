@@ -307,6 +307,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(specs::spec_approval_history),
         )
         .route("/api/v1/specs/:path/links", get(specs::get_spec_links))
+        .route(
+            "/api/v1/specs/:path/progress",
+            get(specs::get_spec_progress),
+        )
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
         .route(
