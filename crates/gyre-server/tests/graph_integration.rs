@@ -59,6 +59,21 @@ impl Ctx {
             .await
             .unwrap()
     }
+
+    async fn post_json_with_token(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        token: &str,
+    ) -> reqwest::Response {
+        self.client
+            .post(self.url(path))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
 }
 
 // ── Fixture helpers ───────────────────────────────────────────────────────────
@@ -497,4 +512,49 @@ async fn test_graph_repo_not_found() {
     let ctx = Ctx::new().await;
     let resp = ctx.get("/api/v1/repos/no-such-repo/graph").await;
     assert_eq!(resp.status(), 404);
+}
+
+/// POST /api/v1/repos/{id}/graph/link — ReadOnly-role (agent) token gets 403.
+///
+/// Agent UUID tokens have `Agent` role, which is below `Developer` in the
+/// role hierarchy.  `link_node_to_spec` must reject them with 403 Forbidden.
+#[tokio::test]
+async fn test_link_node_to_spec_requires_developer_role() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-rbac").await;
+
+    // Register an agent to get a per-agent UUID token (Agent role, not Developer).
+    let agent_resp = ctx
+        .post_json(
+            "/api/v1/agents",
+            json!({
+                "name": format!("rbac-test-agent-{}", uuid::Uuid::new_v4()),
+                "status": "Active"
+            }),
+        )
+        .await;
+    assert!(
+        agent_resp.status().is_success(),
+        "agent registration failed: {}",
+        agent_resp.status()
+    );
+    let agent_body: Value = agent_resp.json().await.unwrap();
+    let agent_token = agent_body["auth_token"].as_str().unwrap();
+
+    // Attempt link_node_to_spec with Agent-role token — must be 403.
+    let resp = ctx
+        .post_json_with_token(
+            &format!("/api/v1/repos/{repo_id}/graph/link"),
+            json!({
+                "node_id": "some-node-id",
+                "spec_path": "specs/system/search.md"
+            }),
+            agent_token,
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "link_node_to_spec must require Developer or Admin role"
+    );
 }
