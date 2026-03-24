@@ -340,6 +340,9 @@ impl MessageRepository for PgStorage {
 
             let mut query = messages::table
                 .filter(messages::workspace_id.eq(ws_id.as_str()))
+                // list_by_workspace returns Event-tier workspace messages only;
+                // Directed (agent-inbox) messages are accessed via list_after/list_unacked.
+                .filter(messages::to_type.ne("agent"))
                 .order((messages::created_at.desc(), messages::id.desc()))
                 .limit(lim)
                 .into_boxed();
@@ -401,6 +404,7 @@ impl MessageRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let count = diesel::delete(
                 messages::table
+                    .filter(messages::to_type.eq("agent"))
                     .filter(
                         messages::ack_reason
                             .eq("agent_completed")

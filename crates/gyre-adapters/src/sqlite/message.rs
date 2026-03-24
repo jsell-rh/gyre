@@ -340,6 +340,9 @@ impl MessageRepository for SqliteStorage {
 
             let mut query = messages::table
                 .filter(messages::workspace_id.eq(ws_id.as_str()))
+                // list_by_workspace returns Event-tier workspace messages only;
+                // Directed (agent-inbox) messages are accessed via list_after/list_unacked.
+                .filter(messages::to_type.ne("agent"))
                 .order((messages::created_at.desc(), messages::id.desc()))
                 .limit(lim)
                 .into_boxed();
@@ -401,6 +404,7 @@ impl MessageRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let count = diesel::delete(
                 messages::table
+                    .filter(messages::to_type.eq("agent"))
                     .filter(
                         messages::ack_reason
                             .eq("agent_completed")
@@ -994,6 +998,161 @@ mod tests {
 
         let deleted = storage.expire_acked_inboxes(10_000).await.unwrap();
         assert_eq!(deleted, 2);
+    }
+
+    #[tokio::test]
+    async fn list_by_workspace_excludes_directed_messages() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-directed-excl");
+
+        // Store a workspace event (should appear)
+        storage
+            .store(&make_workspace_event(
+                "ws-evt",
+                "ws-directed-excl",
+                MessageKind::AgentCreated,
+                1000,
+            ))
+            .await
+            .unwrap();
+        // Store an agent-directed message in same workspace (should NOT appear)
+        storage
+            .store(&make_directed(
+                "dir-msg",
+                "some-agent",
+                "ws-directed-excl",
+                2000,
+            ))
+            .await
+            .unwrap();
+
+        let results = storage
+            .list_by_workspace(&ws_id, None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("ws-evt"));
+    }
+
+    #[tokio::test]
+    async fn list_after_limit_truncates() {
+        let (_tmp, storage) = tmp_storage();
+        let agent_id = Id::new("agent-limit");
+
+        for i in 1u64..=5 {
+            storage
+                .store(&make_directed(
+                    &format!("lim-{i}"),
+                    "agent-limit",
+                    "ws-lim",
+                    i * 100,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Limit 2 — should return oldest 2
+        let results = storage.list_after(&agent_id, 0, None, 2).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, Id::new("lim-1"));
+        assert_eq!(results[1].id, Id::new("lim-2"));
+    }
+
+    #[tokio::test]
+    async fn list_after_empty_inbox_returns_empty() {
+        let (_tmp, storage) = tmp_storage();
+        let agent_id = Id::new("agent-empty");
+        let results = storage.list_after(&agent_id, 0, None, 100).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_by_workspace_before_ts_only_no_before_id() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-before-ts-only");
+
+        for i in 1u64..=4 {
+            storage
+                .store(&make_workspace_event(
+                    &format!("bto-{i}"),
+                    "ws-before-ts-only",
+                    MessageKind::AgentCreated,
+                    i * 1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // before_ts=3000, no before_id → created_at < 3000 (strict lt)
+        let results = storage
+            .list_by_workspace(&ws_id, None, None, Some(3000), None, None)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2); // bto-1 (1000) and bto-2 (2000)
+    }
+
+    #[tokio::test]
+    async fn list_by_workspace_windowed_since_and_before() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-windowed");
+
+        for i in 1u64..=6 {
+            storage
+                .store(&make_workspace_event(
+                    &format!("win-{i}"),
+                    "ws-windowed",
+                    MessageKind::AgentCreated,
+                    i * 1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // since=2000 (inclusive), before_ts=5000 (exclusive) → win-2, win-3, win-4 (newest first)
+        let results = storage
+            .list_by_workspace(&ws_id, None, Some(2000), Some(5000), None, None)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 3); // 2000, 3000, 4000
+        assert_eq!(results[0].id, Id::new("win-4"));
+        assert_eq!(results[2].id, Id::new("win-2"));
+    }
+
+    #[tokio::test]
+    async fn expire_for_agents_empty_ids_returns_zero() {
+        let (_tmp, storage) = tmp_storage();
+        let count = storage.expire_for_agents(&[], 10_000).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn expire_acked_inboxes_preserves_recent_messages() {
+        let (_tmp, storage) = tmp_storage();
+        let agent_id = Id::new("agent-recent");
+
+        // Old message — should be deleted
+        storage
+            .store(&make_directed("old-ack", "agent-recent", "ws-r", 100))
+            .await
+            .unwrap();
+        // Recent message — should survive
+        storage
+            .store(&make_directed("new-ack", "agent-recent", "ws-r", 99_000))
+            .await
+            .unwrap();
+
+        storage
+            .acknowledge_all(&agent_id, "agent_completed")
+            .await
+            .unwrap();
+
+        let deleted = storage.expire_acked_inboxes(50_000).await.unwrap();
+        assert_eq!(deleted, 1); // only old-ack
+        assert!(storage
+            .find_by_id(&Id::new("new-ack"))
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
