@@ -600,6 +600,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn count_unacked_cross_agent_isolation() {
+        let (_tmp, storage) = tmp_storage();
+        let agent_a = Id::new("agent-a");
+        let agent_b = Id::new("agent-b");
+
+        // Store 3 messages for agent-a, 2 for agent-b
+        for i in 1u64..=3 {
+            storage
+                .store(&make_directed(
+                    &format!("a-{i}"),
+                    "agent-a",
+                    "ws-iso",
+                    i * 100,
+                ))
+                .await
+                .unwrap();
+        }
+        for i in 1u64..=2 {
+            storage
+                .store(&make_directed(
+                    &format!("b-{i}"),
+                    "agent-b",
+                    "ws-iso",
+                    i * 100,
+                ))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(storage.count_unacked(&agent_a).await.unwrap(), 3);
+        assert_eq!(storage.count_unacked(&agent_b).await.unwrap(), 2);
+
+        // Ack one of agent-a's messages; agent-b's count should be unaffected
+        storage
+            .acknowledge(&Id::new("a-1"), &agent_a)
+            .await
+            .unwrap();
+        assert_eq!(storage.count_unacked(&agent_a).await.unwrap(), 2);
+        assert_eq!(storage.count_unacked(&agent_b).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn store_and_retrieve_custom_kind() {
+        let (_tmp, storage) = tmp_storage();
+        let msg = Message {
+            id: Id::new("custom-kind-msg"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-custom")),
+            to: Destination::Workspace(Id::new("ws-custom")),
+            kind: MessageKind::Custom("my_custom_event".to_string()),
+            payload: Some(serde_json::json!({"action": "restart"})),
+            created_at: 42_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        storage.store(&msg).await.unwrap();
+        let found = storage
+            .find_by_id(&Id::new("custom-kind-msg"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found.kind,
+            MessageKind::Custom("my_custom_event".to_string())
+        );
+        assert_eq!(found.payload.unwrap()["action"], "restart");
+    }
+
+    #[tokio::test]
     async fn list_unacked_returns_unacked_only() {
         let (_tmp, storage) = tmp_storage();
         let agent_id = Id::new("agent-unacked");
