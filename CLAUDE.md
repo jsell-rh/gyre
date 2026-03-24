@@ -178,6 +178,17 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
+| `GET` | `/api/v1/repos/{id}/graph` | Full knowledge graph for a repo — `{repo_id, nodes, edges}`; `GraphNode` fields: `id`, `repo_id`, `node_type` (`Package`/`Module`/`Type`/`Interface`/`Function`/`Endpoint`/`Table`), `name`, `qualified_name`, `file_path`, `line_start`/`line_end`, `visibility`, `doc_comment`, `spec_path`, `spec_confidence` (`None`/`Low`/`Medium`/`High`), `last_modified_sha`, `last_modified_by`, `complexity`, `churn_count_30d` (TASK-174/TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/types` | Type nodes (structs, enums) with their edges (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/modules` | Module nodes with containment edges (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/node/{node_id}` | Single node + all connected edges — `{node, edges}`; 404 if node not in this repo (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/spec/{spec_path}` | Nodes whose `spec_path` matches the given spec (URL-encoded path) with their edges (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/concept/{name}` | Concept view — nodes whose `name` or `qualified_name` contains `{name}` (case-insensitive substring) with edges between matching nodes (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/timeline` | Architectural deltas — `[{id, repo_id, commit_sha, timestamp, spec_ref?, agent_id?, delta_json}]`; filter with `?since=<epoch>&until=<epoch>` (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/risks` | Risk metrics per node — `[{node_id, name, qualified_name, churn_rate, fan_out, fan_in, complexity?, spec_covered}]` (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/diff` | Graph diff between commits — `{from, to, message, deltas}`; `?from=<ref>&to=<ref>` (defaults: `HEAD~1`/`HEAD`); stub returns all deltas pending full extraction pipeline (TASK-175) |
+| `POST` | `/api/v1/repos/{id}/graph/link` | Manually link a node to a spec path: `{node_id, spec_path, confidence?}` (`confidence`: `high`/`medium`/`low`/`none`; default `high`); **Developer+ required** (TASK-175, TASK-185) |
+| `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (full impl pending extraction pipeline) (TASK-175) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
@@ -232,6 +243,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member; **Admin only** (H-20, M22.8) |
 | `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create (**Admin only**, H-21) / list workspace-scoped teams (M22.8) |
 | `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; **Admin only** (H-18); `add_member`/`remove_member` idempotent (M22.8) |
+| `GET` | `/api/v1/workspaces/{id}/graph` | Cross-repo aggregated knowledge graph for a workspace — all nodes and edges across every repo in the workspace (TASK-175) |
+| `GET` | `/api/v1/workspaces/{id}/briefing` | Narrative summary of recent architectural changes — `{workspace_id, since, summary, deltas}`; filter with `?since=<epoch>` (TASK-175) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
