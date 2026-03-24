@@ -302,6 +302,7 @@ impl<'de> Deserialize<'de> for MessageKind {
 /// the workspace with the most entries is evicted first (largest-first), per spec
 /// §Telemetry Store. This prevents a tenant from flushing the buffer by creating many
 /// empty workspaces.
+#[derive(Debug)]
 pub struct TelemetryBuffer {
     /// Per-workspace ring buffers. Key: workspace_id.
     buffers: DashMap<Id, VecDeque<Message>>,
