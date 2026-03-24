@@ -109,7 +109,7 @@ The server writes refs into reserved namespaces on each lifecycle event:
 | Event | Ref written | Purpose |
 |---|---|---|
 | `spawn` | `refs/agents/{agent-id}/head` | Points to the HEAD commit at spawn; survives branch force-pushes |
-| `spawn` | `refs/ralph/{task-id}/implement` | Marks the implement step of the Ralph loop for this task |
+| `spawn` | `refs/tasks/{task-id}` | Marks the branch for this task's implementation |
 | `complete` | `refs/agents/{agent-id}/snapshots/{n}` | Immutable snapshot of the branch tip at completion (n increments per call) |
 | `merge` | `refs/notes/attestations` | Signed `MergeAttestation` JSON attached as git note to the merge commit SHA; inspect via `git notes --ref=refs/notes/attestations show <sha>` (G5) |
 

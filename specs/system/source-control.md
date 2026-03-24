@@ -37,9 +37,9 @@ In git, conflicts are an error state that blocks all work until resolved. In jj,
 
 The forge's speculative merge feature (try-merge all in-flight branches) maps naturally to jj's model. jj can represent a speculative merge as a change depending on multiple parents without creating a branch or merge commit. If the speculation fails (conflict), it's just another conflicted change that can be discarded.
 
-### 7. Ralph Loop Checkpoints
+### 7. Session Checkpoints
 
-Each Ralph loop step can be a jj operation boundary. If the agent needs to roll back to "before self-review," that's a `jj undo` to a specific operation - not manually figuring out which git commits to reset. The custom ref namespace `refs/ralph/{task-id}/step-{n}` maps to jj operations naturally.
+Each Ralph loop session can be a jj operation boundary. If the agent needs to roll back to the previous session's state, that's a `jj undo` to a specific operation -- not manually figuring out which git commits to reset. The ref `refs/tasks/{task-id}` marks the task's branch, and `refs/agents/{agent-id}/snapshots/{n}` records each session's completion point.
 
 ### The Separation
 

@@ -18,6 +18,7 @@ What Gyre does - the product.
 |---|---|---|
 | **Vision** | [`system/vision.md`](system/vision.md) | **Root spec:** Gyre amplifies human judgment across the SDLC. Seven principles: judgment not generation, right context, specs as primary artifact, structure is discovered, feedback loop, challenge every ceremony, human differentiation compounds |
 | **Platform Model** | [`system/platform-model.md`](system/platform-model.md) | **Foundational spec:** tenant/workspace/repo hierarchy, persona model, orchestration, MCP coordination, budgets, rollback, secrets, bootstrap |
+| **Ralph Loop** | [`system/ralph-loop.md`](system/ralph-loop.md) | **Core implementation primitive:** agent/session model, message inbox, fresh context per session, gates + agent review as terminal conditions, provenance integration |
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
 | ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
@@ -53,11 +54,11 @@ How Gyre gets built - process and standards for the agent team.
 |---|---|---|
 | Architecture & Standards | [`development/architecture.md`](development/architecture.md) | Rust, Svelte, DDD, hexagonal, storage, API |
 | Database & Migrations | [`development/database-migrations.md`](development/database-migrations.md) | Diesel ORM, paired up/down migrations, multi-tenant row isolation, startup behavior |
-| Ralph Loops | [`development/ralph-loops.md`](development/ralph-loops.md) | Core loop definition, meta loops, coordination |
+| Ralph Loops (superseded) | [`development/ralph-loops.md`](development/ralph-loops.md) | Superseded by [`system/ralph-loop.md`](system/ralph-loop.md) |
 | Agent Experience (Day One) | [`development/agent-experience.md`](development/agent-experience.md) | Testing, observability, repo as system of record, cache hits, entropy management |
 | Speed & Backpressure | [`development/speed-backpressure.md`](development/speed-backpressure.md) | The wheel, pre-commit hooks, quality gates |
 | CI, Docs & Release | [`development/ci-docs-release.md`](development/ci-docs-release.md) | GitHub Actions, Starlight docs, semver, conventional commits |
-| Manager Agent Orchestration | [`development/manager-agent.md`](development/manager-agent.md) | Manager Ralph loop, sub-agent dispatch, lifecycle rules |
+| Manager Agent (superseded) | [`development/manager-agent.md`](development/manager-agent.md) | Superseded -- split into [`system/platform-model.md`](system/platform-model.md) + [`system/ralph-loop.md`](system/ralph-loop.md) |
 | Agent Development Workflow | [`development/agent-workflow.md`](development/agent-workflow.md) | Immediate feedback, worktrees, PRs, fix the environment |
 | Dogfooding | [`development/dogfooding.md`](development/dogfooding.md) | Building Gyre with agent-boss |
 | Development Philosophy | [`development/philosophy.md`](development/philosophy.md) | Speed, failure domains, humans steer / agents execute |
@@ -123,8 +124,8 @@ How Gyre gets built - process and standards for the agent team.
 | SPIFFE integration details | **Resolved** - 3-layer stack: SPIFFE (workload attestation) + Gyre as OIDC provider (agent permissions) + Sigstore/Fulcio (keyless commit signing). Federated via standard protocols. |
 | jj (Jujutsu) vs. Git | **Resolved** - jj adds value for agent workflows (atomic changes, auto-rebase, undo) |
 | Agent collaboration model (hierarchy + ?) | **Resolved** - hierarchy (spawn tree) + typed peer messages (A2A) + cross-agent code awareness (M13.4) |
-| Coordination primitives (blackboard vs. event stream vs. persistent work chains) | **Resolved** - event stream (domain events via WebSocket) + persistent work chains (task/Ralph ref tree) |
-| Persistent Ralph loop steps (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): refs/ralph/{task-id}/{step} survives agent crash |
+| Coordination primitives (blackboard vs. event stream vs. persistent work chains) | **Resolved** - event stream (domain events via WebSocket) + persistent work chains (task ref tree) |
+| Persistent loop state (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): `refs/tasks/{task-id}` survives agent crash. Agent message inbox persists state between sessions. See [`system/ralph-loop.md`](system/ralph-loop.md). |
 | Decision library for learned interrupt resolutions | Open |
 | Cost tracking model | **Resolved** - cost entries table, per-agent aggregation, dashboard cost view (M6.1) |
 | CI as separate concept vs. emergent property | **Resolved** - emergent: pre-accept gates (M13.1) + merge queue gates (M12.1) = CI without a separate concept |
