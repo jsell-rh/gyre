@@ -839,7 +839,7 @@ async fn handle_resource_read(state: &AppState, uri: &str) -> Value {
                             "id": a.id.to_string(),
                             "name": a.name,
                             "status": format!("{:?}", a.status).to_lowercase(),
-                            "workspace_id": a.workspace_id.as_ref().map(|id| id.to_string()),
+                            "workspace_id": a.workspace_id.to_string(),
                         })
                     })
                     .collect();

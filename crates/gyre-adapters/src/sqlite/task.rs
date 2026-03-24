@@ -67,8 +67,9 @@ struct TaskRow {
     updated_at: i64,
     #[allow(dead_code)]
     tenant_id: String,
-    workspace_id: Option<String>,
+    workspace_id: String,
     spec_path: Option<String>,
+    repo_id: String,
 }
 
 impl TaskRow {
@@ -87,7 +88,8 @@ impl TaskRow {
             pr_link: self.pr_link,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
-            workspace_id: self.workspace_id.map(Id::new),
+            workspace_id: Id::new(self.workspace_id),
+            repo_id: Id::new(self.repo_id),
             spec_path: self.spec_path,
         })
     }
@@ -109,8 +111,9 @@ struct NewTaskRow<'a> {
     created_at: i64,
     updated_at: i64,
     tenant_id: &'a str,
-    workspace_id: Option<&'a str>,
+    workspace_id: &'a str,
     spec_path: Option<&'a str>,
+    repo_id: &'a str,
 }
 
 #[async_trait]
@@ -136,8 +139,9 @@ impl TaskRepository for SqliteStorage {
                 created_at: t.created_at as i64,
                 updated_at: t.updated_at as i64,
                 tenant_id: &tenant,
-                workspace_id: t.workspace_id.as_ref().map(|id| id.as_str()),
+                workspace_id: t.workspace_id.as_str(),
                 spec_path: t.spec_path.as_deref(),
+                repo_id: t.repo_id.as_str(),
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -156,6 +160,7 @@ impl TaskRepository for SqliteStorage {
                     tasks::updated_at.eq(row.updated_at),
                     tasks::workspace_id.eq(row.workspace_id),
                     tasks::spec_path.eq(row.spec_path),
+                    tasks::repo_id.eq(row.repo_id),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -270,8 +275,9 @@ impl TaskRepository for SqliteStorage {
                 tasks::branch.eq(t.branch.as_deref()),
                 tasks::pr_link.eq(t.pr_link.as_deref()),
                 tasks::updated_at.eq(t.updated_at as i64),
-                tasks::workspace_id.eq(t.workspace_id.as_ref().map(|id| id.as_str())),
+                tasks::workspace_id.eq(t.workspace_id.as_str()),
                 tasks::spec_path.eq(t.spec_path.as_deref()),
+                tasks::repo_id.eq(t.repo_id.as_str()),
             ))
             .execute(&mut *conn)
             .context("update task")?;

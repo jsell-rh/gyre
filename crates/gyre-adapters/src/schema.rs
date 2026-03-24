@@ -29,7 +29,7 @@ diesel::table! {
         last_heartbeat -> Nullable<BigInt>,
         tenant_id -> Text,
         spawned_by -> Nullable<Text>,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
     }
 }
 
@@ -48,8 +48,9 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        repo_id -> Text,
     }
 }
 
@@ -72,7 +73,7 @@ diesel::table! {
         tenant_id -> Text,
         depends_on -> Text,
         atomic_group -> Nullable<Text>,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
     }
 }
 

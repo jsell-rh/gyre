@@ -43,7 +43,8 @@ pub struct MergeRequest {
     pub atomic_group: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    pub workspace_id: Option<Id>,
+    /// Workspace that governs this MR (ABAC boundary). Non-optional per M34 hierarchy enforcement.
+    pub workspace_id: Id,
 }
 
 impl MergeRequest {
@@ -71,7 +72,7 @@ impl MergeRequest {
             atomic_group: None,
             created_at,
             updated_at: created_at,
-            workspace_id: None,
+            workspace_id: Id::new("default"),
         }
     }
 

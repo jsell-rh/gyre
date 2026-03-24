@@ -50,7 +50,7 @@ struct MergeRequestRow {
     tenant_id: String,
     depends_on: String,
     atomic_group: Option<String>,
-    workspace_id: Option<String>,
+    workspace_id: String,
 }
 
 impl MergeRequestRow {
@@ -86,7 +86,7 @@ impl MergeRequestRow {
             atomic_group: self.atomic_group,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
-            workspace_id: self.workspace_id.map(Id::new),
+            workspace_id: Id::new(self.workspace_id),
         })
     }
 }
@@ -111,7 +111,7 @@ struct NewMergeRequestRow<'a> {
     tenant_id: &'a str,
     depends_on: &'a str,
     atomic_group: Option<&'a str>,
-    workspace_id: Option<&'a str>,
+    workspace_id: &'a str,
 }
 
 #[async_trait]
@@ -143,7 +143,7 @@ impl MergeRequestRepository for SqliteStorage {
                 tenant_id: "default",
                 depends_on: &depends_on_json,
                 atomic_group: m.atomic_group.as_deref(),
-                workspace_id: m.workspace_id.as_ref().map(|id| id.as_str()),
+                workspace_id: m.workspace_id.as_str(),
             };
             diesel::insert_into(merge_requests::table)
                 .values(&row)
