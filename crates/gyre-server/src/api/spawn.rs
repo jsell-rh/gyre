@@ -139,7 +139,7 @@ pub async fn spawn_agent(
         agent.disconnected_behavior = behavior;
     }
     agent.assign_task(Id::new(&req.task_id));
-    agent.workspace_id = Some(repo.workspace_id.clone());
+    agent.workspace_id = repo.workspace_id.clone();
     agent
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
