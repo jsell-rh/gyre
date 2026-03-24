@@ -481,7 +481,7 @@ agents:
     #[tokio::test]
     async fn compose_apply_validates_missing_repo() {
         let app = app();
-        let (app, project_id, _) = create_project_and_repo(app).await;
+        let (app, _ws_id, _) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
@@ -514,7 +514,7 @@ agents:
     #[tokio::test]
     async fn compose_apply_validates_cycle() {
         let app = app();
-        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
+        let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
