@@ -48,12 +48,10 @@ export const api = {
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
   task: (id) => request(`/tasks/${id}`),
-  projects: ({ workspaceId } = {}) => {
+  repos: ({ workspaceId } = {}) => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
-    return request(`/projects${qs}`);
+    return request(`/repos${qs}`);
   },
-  project: (id) => request(`/projects/${id}`),
-  repos: (projectId) => request(`/repos?project_id=${projectId}`),
   allRepos: () => request('/repos'),
   repoBranches: (id) => request(`/repos/${id}/branches`),
   repoCommits: (id, branch, limit = 50) =>
@@ -173,8 +171,6 @@ export const api = {
   adminDeleteSnapshot: (id) =>
     request(`/admin/snapshots/${id}`, { method: 'DELETE' }),
   // CRUD create methods
-  createProject: (data) =>
-    request('/projects', { method: 'POST', body: JSON.stringify(data) }),
   createRepo: (data) =>
     request('/repos', { method: 'POST', body: JSON.stringify(data) }),
   createMirrorRepo: (data) =>
