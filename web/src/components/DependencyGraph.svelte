@@ -179,7 +179,7 @@
                     {#each blastRadius.affected as repo}
                       <div class="affected-item">
                         <span class="mono-sm">{repo.name ?? repo.id}</span>
-                        {#if repo.dep_type}<Badge variant="default" label={repo.dep_type} />{/if}
+                        {#if repo.dep_type}<Badge variant="default" value={repo.dep_type} />{/if}
                       </div>
                     {/each}
                   </div>

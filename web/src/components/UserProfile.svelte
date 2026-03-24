@@ -46,11 +46,21 @@
           locale: me.locale ?? '',
         };
       }
-      if (agR.status === 'fulfilled') agents = agR.value?.agents ?? agR.value ?? [];
-      if (tkR.status === 'fulfilled') tasks = tkR.value?.tasks ?? tkR.value ?? [];
-      if (mrR.status === 'fulfilled') mrs = mrR.value?.merge_requests ?? mrR.value ?? [];
+      if (agR.status === 'fulfilled') {
+        const raw = agR.value;
+        agents = Array.isArray(raw?.agents) ? raw.agents : Array.isArray(raw) ? raw : [];
+      }
+      if (tkR.status === 'fulfilled') {
+        const raw = tkR.value;
+        tasks = Array.isArray(raw?.tasks) ? raw.tasks : Array.isArray(raw) ? raw : [];
+      }
+      if (mrR.status === 'fulfilled') {
+        const raw = mrR.value;
+        mrs = Array.isArray(raw?.merge_requests) ? raw.merge_requests : Array.isArray(raw) ? raw : [];
+      }
       if (ntR.status === 'fulfilled') {
-        notifications = ntR.value?.notifications ?? ntR.value ?? [];
+        const raw = ntR.value;
+        notifications = Array.isArray(raw?.notifications) ? raw.notifications : Array.isArray(raw) ? raw : [];
         unread = notifications.filter(n => !n.read).length;
       }
     } catch (e) {
@@ -126,7 +136,7 @@
         <p class="username">@{me.username}</p>
       {/if}
       {#if me?.global_role}
-        <Badge variant="info" label={me.global_role} />
+        <Badge variant="info" value={me.global_role} />
       {/if}
     </div>
     {#if !editing}
@@ -194,7 +204,7 @@
             {#each agents as a}
               <tr>
                 <td>{a.name}</td>
-                <td><Badge variant={statusColor(a.status)} label={a.status} /></td>
+                <td><Badge variant={statusColor(a.status)} value={a.status} /></td>
                 <td class="muted">{rel(a.created_at)}</td>
               </tr>
             {/each}
@@ -212,8 +222,8 @@
             {#each tasks as t}
               <tr>
                 <td>{t.title}</td>
-                <td><Badge variant={statusColor(t.status)} label={t.status} /></td>
-                <td><Badge variant={priorityColor(t.priority)} label={t.priority ?? 'medium'} /></td>
+                <td><Badge variant={statusColor(t.status)} value={t.status} /></td>
+                <td><Badge variant={priorityColor(t.priority)} value={t.priority ?? 'medium'} /></td>
               </tr>
             {/each}
           </tbody>
@@ -230,7 +240,7 @@
             {#each mrs as mr}
               <tr>
                 <td>{mr.title}</td>
-                <td><Badge variant={statusColor(mr.status)} label={mr.status} /></td>
+                <td><Badge variant={statusColor(mr.status)} value={mr.status} /></td>
                 <td class="muted">{rel(mr.created_at)}</td>
               </tr>
             {/each}
@@ -246,7 +256,7 @@
           {#each notifications as notif}
             <div class="notif-item" class:unread={!notif.read}>
               <div class="notif-top">
-                <Badge variant={notifColor(notif.notification_type)} label={notif.notification_type ?? 'info'} />
+                <Badge variant={notifColor(notif.notification_type)} value={notif.notification_type ?? 'info'} />
                 <span class="notif-time muted">{rel(notif.created_at)}</span>
                 {#if !notif.read}
                   <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label="Mark as read">✓</button>
