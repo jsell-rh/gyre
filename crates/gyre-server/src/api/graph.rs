@@ -655,6 +655,7 @@ pub async fn get_workspace_briefing(
 /// Manually link a graph node to a spec path (human confirmation of suggested links).
 pub async fn link_node_to_spec(
     State(state): State<Arc<AppState>>,
+    _dev: crate::rbac::RequireDeveloper,
     Path(id): Path<String>,
     Json(req): Json<LinkNodeRequest>,
 ) -> Result<(StatusCode, Json<LinkNodeResponse>), ApiError> {
