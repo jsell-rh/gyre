@@ -29,7 +29,7 @@
         src = craneLib.cleanCargoSource ./.;
 
         # Native build inputs required for git2, openssl, etc.
-        nativeBuildInputs = with pkgs; [ pkg-config ];
+        nativeBuildInputs = with pkgs; [ pkg-config mold clang ];
         buildInputs = with pkgs; [ openssl ];
 
         commonArgs = {
@@ -87,6 +87,8 @@
             git
             pkg-config
             openssl
+            mold      # fast linker — used via .cargo/config.toml to prevent OOM
+            clang     # required as linker driver for -fuse-ld=mold
           ];
 
           shellHook = ''
