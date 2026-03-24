@@ -116,15 +116,15 @@ MR enters merge queue
 
 ### Gate Failure Feedback
 
-When a gate fails, the forge must get feedback to the right agent as fast as possible. Speed matters - a gate failure is a Ralph loop event, not a separate workflow.
+When a gate fails, the forge must get feedback to the right agent as fast as possible. Speed matters -- a gate failure is a Ralph loop event, not a separate workflow. See [ralph-loop.md](ralph-loop.md) for the canonical loop definition.
 
-#### Immediate: Typed Message to Author Agent
+#### Agent Inbox Delivery
 
-The forge sends a `GateFailure` message to the MR's author agent via WebSocket:
+The forge delivers a `GateResult` message to the author agent's **inbox**:
 
 ```json
 {
-  "type": "GateFailure",
+  "type": "GateResult",
   "mr_id": "MR-042",
   "gate_name": "security-review",
   "gate_type": "AgentReview",
@@ -136,11 +136,11 @@ The forge sends a `GateFailure` message to the MR's author agent via WebSocket:
 }
 ```
 
-If the author agent's session is still alive, it can react in the same Ralph loop cycle: read the feedback, fix the issue, re-push, gates re-run. Zero human intervention.
+In the Ralph loop model, the agent's session has typically ended by the time gates run. The message is delivered to the agent's inbox and read by the next session, which addresses the feedback, re-pushes, and gates re-run. For single-shot (non-loop) agents with a live session, the message is also broadcast via WebSocket for immediate reaction.
 
 #### Deferred: Task Creation
 
-If the author agent's session has ended (lifetime expired, context exhausted) OR the gate has failed 3+ times on the same MR, the forge creates a task:
+If the author agent has converged, been stopped, or the gate has failed 3+ times on the same MR, the forge creates a task:
 
 ```
 title: "Gate failure: {gate_name} on MR #{mr_id} (attempt {n})"

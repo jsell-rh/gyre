@@ -61,16 +61,33 @@
   function inboxIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>'; }
   function briefingIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>'; }
   function explorerIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><circle cx="11" cy="11" r="3"/></svg>'; }
+  function dashboardIcon()    { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>'; }
+  function activityIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>'; }
   function workspaceIcon()    { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><path d="M12 12v4"/><path d="M8 12h8"/></svg>'; }
+  function profileIcon()      { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>'; }
+  function projectsIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>'; }
+  function specRegistryIcon() { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/><path d="M13 13h4"/><path d="M13 17h4"/></svg>'; }
+  function graphIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h10M17 7l-10 4M17 17L7 13"/></svg>'; }
+  function metaSpecIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><circle cx="12" cy="16" r="0.5" fill="currentColor"/><path d="M8 12h1.5M14.5 12H16"/></svg>'; }
+  function dependenciesIcon() { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M9 6h6M7.5 8.5l3 7M16.5 8.5l-3 7"/></svg>'; }
+  function queueIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>'; }
+  function agentsIcon()       { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/><circle cx="12" cy="16" r="1" fill="currentColor"/></svg>'; }
+  function tasksIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>'; }
+  function personasIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>'; }
+  function composeIcon()      { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>'; }
   function budgetIcon()       { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/><circle cx="12" cy="15" r="2"/></svg>'; }
+  function analyticsIcon()    { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>'; }
+  function costsIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 100 7h5a3.5 3.5 0 110 7H6"/></svg>'; }
+  function auditIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>'; }
+  function specIcon()         { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>'; }
+  function mcpIcon()          { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>'; }
+  function adminIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'; }
+  function settingsIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>'; }
   function membersIcon()      { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>'; }
   function reposIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>'; }
   function branchIcon()       { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>'; }
   function mrIcon()           { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 009 9"/></svg>'; }
   function gatesIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>'; }
-  function graphIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h10M17 7l-10 4M17 17L7 13"/></svg>'; }
-  function adminIcon()        { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'; }
-  function settingsIcon()     { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>'; }
   function chevronIcon(down) {
     return down
       ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M6 9l6 6 6-6"/></svg>'
@@ -235,50 +252,232 @@
       </div>
     {/if}
 
-    <!-- Admin accordion (Admin users only) -->
-    {#if isAdmin}
-      <div class="nav-section admin-section">
-        <button
-          class="admin-toggle"
-          class:expanded={adminExpanded}
-          onclick={() => { adminExpanded = !adminExpanded; }}
-          aria-expanded={adminExpanded}
-          aria-label="Admin"
-        >
-          <span class="nav-icon" aria-hidden="true">{@html adminIcon()}</span>
-          {#if !collapsed}
-            <span class="nav-label">Admin</span>
-            <span class="admin-chevron" aria-hidden="true">{@html chevronIcon(adminExpanded)}</span>
-          {/if}
-        </button>
-        {#if adminExpanded && !collapsed}
-          <ul role="list" class="admin-items" aria-label="Admin">
+    <!-- Overview section -->
+    <div class="nav-section">
+      {#if !collapsed}
+        <div class="section-label" aria-hidden="true">Overview</div>
+      {/if}
+      <ul role="list" aria-label={collapsed ? 'Overview' : undefined}>
+        <li>
+          <button class="nav-item" class:active={isActive('dashboard')} onclick={() => nav('dashboard')}
+            aria-label="Dashboard" aria-current={isActive('dashboard') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html dashboardIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Dashboard</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('activity')} onclick={() => nav('activity')}
+            aria-label="Activity" aria-current={isActive('activity') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html activityIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Activity</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('workspaces')} onclick={() => nav('workspaces')}
+            aria-label="Workspaces" aria-current={isActive('workspaces') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html workspaceIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Workspaces</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('profile')} onclick={() => nav('profile')}
+            aria-label="My Profile" aria-current={isActive('profile') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html profileIcon()}</span>
+            {#if !collapsed}<span class="nav-label">My Profile</span>{/if}
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Source Control section -->
+    <div class="nav-section">
+      {#if !collapsed}
+        <div class="section-label" aria-hidden="true">Source Control</div>
+      {/if}
+      <ul role="list" aria-label={collapsed ? 'Source Control' : undefined}>
+        <li>
+          <button class="nav-item" class:active={isActive('projects')} onclick={() => nav('projects')}
+            aria-label="Projects" aria-current={isActive('projects') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html projectsIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Projects</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('specs')} onclick={() => nav('specs')}
+            aria-label="Specs" aria-current={isActive('specs') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html specRegistryIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Specs</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('spec-graph')} onclick={() => nav('spec-graph')}
+            aria-label="Spec Graph" aria-current={isActive('spec-graph') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html graphIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Spec Graph</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('meta-specs')} onclick={() => nav('meta-specs')}
+            aria-label="Meta-Specs" aria-current={isActive('meta-specs') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html metaSpecIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Meta-Specs</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('dependencies')} onclick={() => nav('dependencies')}
+            aria-label="Dependencies" aria-current={isActive('dependencies') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html dependenciesIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Dependencies</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('merge-queue')} onclick={() => nav('merge-queue')}
+            aria-label="Merge Queue" aria-current={isActive('merge-queue') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html queueIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Merge Queue</span>{/if}
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Agents section -->
+    <div class="nav-section">
+      {#if !collapsed}
+        <div class="section-label" aria-hidden="true">Agents</div>
+      {/if}
+      <ul role="list" aria-label={collapsed ? 'Agents' : undefined}>
+        <li>
+          <button class="nav-item" class:active={isActive('agents')} onclick={() => nav('agents')}
+            aria-label="Agents" aria-current={isActive('agents') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html agentsIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Agents</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('tasks')} onclick={() => nav('tasks')}
+            aria-label="Tasks" aria-current={isActive('tasks') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html tasksIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Tasks</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('personas')} onclick={() => nav('personas')}
+            aria-label="Personas" aria-current={isActive('personas') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html personasIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Personas</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('compose')} onclick={() => nav('compose')}
+            aria-label="Compose" aria-current={isActive('compose') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html composeIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Compose</span>{/if}
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Operations section -->
+    <div class="nav-section">
+      {#if !collapsed}
+        <div class="section-label" aria-hidden="true">Operations</div>
+      {/if}
+      <ul role="list" aria-label={collapsed ? 'Operations' : undefined}>
+        <li>
+          <button class="nav-item" class:active={isActive('budget')} onclick={() => nav('budget')}
+            aria-label="Budget" aria-current={isActive('budget') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html budgetIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Budget</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('analytics')} onclick={() => nav('analytics')}
+            aria-label="Analytics" aria-current={isActive('analytics') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html analyticsIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Analytics</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('costs')} onclick={() => nav('costs')}
+            aria-label="Costs" aria-current={isActive('costs') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html costsIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Costs</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('audit')} onclick={() => nav('audit')}
+            aria-label="Audit" aria-current={isActive('audit') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html auditIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Audit</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('spec-approvals')} onclick={() => nav('spec-approvals')}
+            aria-label="Spec Approvals" aria-current={isActive('spec-approvals') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html specIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Spec Approvals</span>{/if}
+          </button>
+        </li>
+        <li>
+          <button class="nav-item" class:active={isActive('mcp-catalog')} onclick={() => nav('mcp-catalog')}
+            aria-label="MCP Tools" aria-current={isActive('mcp-catalog') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html mcpIcon()}</span>
+            {#if !collapsed}<span class="nav-label">MCP Tools</span>{/if}
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Admin section -->
+    <div class="nav-section admin-section">
+      <button
+        class="admin-toggle"
+        class:expanded={adminExpanded}
+        onclick={() => { adminExpanded = !adminExpanded; }}
+        aria-expanded={adminExpanded}
+        aria-label="Admin"
+      >
+        <span class="nav-icon" aria-hidden="true">{@html adminIcon()}</span>
+        {#if !collapsed}
+          <span class="nav-label">Admin</span>
+          <span class="admin-chevron" aria-hidden="true">{@html chevronIcon(adminExpanded)}</span>
+        {/if}
+      </button>
+      {#if adminExpanded && !collapsed}
+        <ul role="list" class="admin-items" aria-label="Admin">
+          {#if isAdmin}
             <li>
               <button class="nav-item nav-item-sub" class:active={isActive('admin')} onclick={() => nav('admin')}
                 aria-label="Admin Panel" aria-current={isActive('admin') ? 'page' : undefined}>
                 <span class="nav-label">Admin Panel</span>
               </button>
             </li>
-            <li>
-              <button class="nav-item nav-item-sub" class:active={isActive('settings')} onclick={() => nav('settings')}
-                aria-label="Settings" aria-current={isActive('settings') ? 'page' : undefined}>
-                <span class="nav-label">Settings</span>
-              </button>
-            </li>
-          </ul>
-        {/if}
-        {#if adminExpanded && collapsed}
-          <!-- In collapsed mode, show admin and settings icons -->
-          <ul role="list" aria-label="Admin">
+          {/if}
+          <li>
+            <button class="nav-item nav-item-sub" class:active={isActive('settings')} onclick={() => nav('settings')}
+              aria-label="Settings" aria-current={isActive('settings') ? 'page' : undefined}>
+              <span class="nav-label">Settings</span>
+            </button>
+          </li>
+        </ul>
+      {/if}
+      {#if adminExpanded && collapsed}
+        <ul role="list" aria-label="Admin">
+          {#if isAdmin}
             <li>
               <button class="nav-item" class:active={isActive('admin')} onclick={() => nav('admin')} aria-label="Admin Panel">
-                <span class="nav-icon" aria-hidden="true">{@html settingsIcon()}</span>
+                <span class="nav-icon" aria-hidden="true">{@html adminIcon()}</span>
               </button>
             </li>
-          </ul>
-        {/if}
-      </div>
-    {/if}
+          {/if}
+          <li>
+            <button class="nav-item" class:active={isActive('settings')} onclick={() => nav('settings')} aria-label="Settings">
+              <span class="nav-icon" aria-hidden="true">{@html settingsIcon()}</span>
+            </button>
+          </li>
+        </ul>
+      {/if}
+    </div>
 
   </div>
 
