@@ -714,7 +714,7 @@
             {#if selectedNode.spec_path}
               <div class="panel-row">
                 <span class="panel-label">Spec</span>
-                <span class="panel-val mono spec-link">{selectedNode.spec_path}</span>
+                <button class="spec-link-btn" onclick={() => navigate?.('specs')} title="Navigate to spec">{selectedNode.spec_path}</button>
               </div>
             {/if}
 
@@ -1158,6 +1158,23 @@
 
   .spec-link {
     color: var(--color-primary);
+  }
+
+  .spec-link-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    word-break: break-all;
+    text-decoration: underline;
+  }
+
+  .spec-link-btn:hover {
+    color: var(--color-text);
   }
 
   .panel-doc {
