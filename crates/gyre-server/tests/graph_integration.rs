@@ -558,3 +558,184 @@ async fn test_link_node_to_spec_requires_developer_role() {
         "link_node_to_spec must require Developer or Admin role"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Push-triggered extraction test (M30b)
+// ---------------------------------------------------------------------------
+
+/// After pushing a Rust file to a repo's default branch, graph nodes are
+/// automatically extracted and stored in the knowledge graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_triggers_graph_extraction() {
+    use gyre_server::merge_processor;
+    use tempfile::TempDir;
+
+    let token = "graph-extraction-push-token";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let api = format!("{base_url}/api/v1");
+
+    let state = gyre_server::build_state(token, &base_url, None);
+    merge_processor::spawn_merge_processor(state.clone());
+    let app = gyre_server::build_router(Arc::clone(&state));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {token}");
+    let proj = format!(
+        "proj-{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+    );
+
+    // Create a project and repo.
+    let project_resp: Value = client
+        .post(format!("{api}/projects"))
+        .header("Authorization", &auth)
+        .json(&json!({ "name": &proj, "description": "graph extraction test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let project_id = project_resp["id"].as_str().unwrap().to_string();
+
+    let repo_resp: Value = client
+        .post(format!("{api}/repos"))
+        .header("Authorization", &auth)
+        .json(&json!({ "project_id": &project_id, "name": "rust-repo" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let repo_id = repo_resp["id"].as_str().unwrap().to_string();
+    // Git URLs use project_id (UUID), not project name.
+    let clone_url = format!("{base_url}/git/{project_id}/rust-repo.git");
+    let token_owned = token.to_string();
+    let clone_url_owned = clone_url.clone();
+
+    // Clone, add Rust source files, commit and push to main.
+    tokio::task::spawn_blocking(move || {
+        fn git(args: &[&str], dir: &std::path::Path, token: &str) -> std::process::Output {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "true")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Bearer {token}"),
+                )
+                .output()
+                .expect("git command failed")
+        }
+        fn git_local(args: &[&str], dir: &std::path::Path) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git command failed");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+
+        // Clone the empty repo.
+        let out = git(
+            &["clone", &clone_url_owned, "repo"],
+            work.path(),
+            &token_owned,
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let ok = out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "agent@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Graph Agent"], &dir);
+
+        // Write a minimal Cargo.toml + Rust source with structs and traits.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"rust-repo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "// spec: specs/system/realized-model.md\n\
+             /// A domain entity.\n\
+             pub struct Entity { pub id: String }\n\
+             pub trait Repository { fn find(&self, id: &str) -> Option<Entity>; }\n\
+             pub fn create() -> Entity { Entity { id: \"1\".into() } }\n",
+        )
+        .unwrap();
+
+        git_local(&["add", "."], &dir);
+        git_local(
+            &["commit", "-m", "feat: add rust source for graph extraction"],
+            &dir,
+        );
+
+        let push = git(&["push", "origin", "HEAD:main"], &dir, &token_owned);
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        assert!(push.status.success(), "push failed: {stderr}");
+    })
+    .await
+    .unwrap();
+
+    // Allow time for the background extraction task to complete.
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    // Verify graph nodes were extracted.
+    let body: Value = client
+        .get(format!("{api}/repos/{repo_id}/graph"))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let nodes = body["nodes"].as_array().unwrap();
+    assert!(
+        !nodes.is_empty(),
+        "expected graph nodes after push, got empty graph"
+    );
+
+    // Should have at least a Package node (from Cargo.toml) and a Module node.
+    let has_package = nodes.iter().any(|n| n["node_type"] == "package");
+    let has_module = nodes.iter().any(|n| n["node_type"] == "module");
+    assert!(has_package, "expected a Package node from Cargo.toml");
+    assert!(has_module, "expected a Module node from lib.rs");
+
+    // Should have a Type node (Entity struct).
+    let has_entity = nodes
+        .iter()
+        .any(|n| n["node_type"] == "type" && n["name"] == "Entity");
+    assert!(has_entity, "expected Type node for Entity struct");
+
+    // Architectural delta should be recorded.
+    let timeline: Value = client
+        .get(format!("{api}/repos/{repo_id}/graph/timeline"))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let deltas = timeline.as_array().unwrap();
+    assert!(
+        !deltas.is_empty(),
+        "expected at least one architectural delta after push"
+    );
+}
