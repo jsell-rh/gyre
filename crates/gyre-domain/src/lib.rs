@@ -44,7 +44,7 @@ pub mod workspace_membership;
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus, DisconnectedBehavior};
 pub use agent_card::AgentCard;
-pub use agent_tracking::{AgentCommit, AgentWorktree, RalphStep};
+pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
 pub use attestation::{AttestationBundle, AttestationGateResult, MergeAttestation};
 pub use audit::{AuditEvent, AuditEventType};
