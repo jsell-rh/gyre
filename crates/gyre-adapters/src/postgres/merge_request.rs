@@ -175,10 +175,12 @@ impl MergeRequestRepository for PgStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = merge_requests::table
-                .find(id.as_str())
+                .filter(merge_requests::tenant_id.eq(&tenant))
+                .filter(merge_requests::id.eq(id.as_str()))
                 .first::<MergeRequestRow>(&mut *conn)
                 .optional()
                 .context("find merge_request by id")?;
@@ -189,9 +191,11 @@ impl MergeRequestRepository for PgStorage {
 
     async fn list(&self) -> Result<Vec<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = merge_requests::table
+                .filter(merge_requests::tenant_id.eq(&tenant))
                 .order(merge_requests::created_at.asc())
                 .load::<MergeRequestRow>(&mut *conn)
                 .context("list merge_requests")?;
@@ -203,9 +207,11 @@ impl MergeRequestRepository for PgStorage {
     async fn list_by_status(&self, status: &MrStatus) -> Result<Vec<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
         let status_str = status_to_str(status).to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = merge_requests::table
+                .filter(merge_requests::tenant_id.eq(&tenant))
                 .filter(merge_requests::status.eq(&status_str))
                 .order(merge_requests::created_at.asc())
                 .load::<MergeRequestRow>(&mut *conn)
@@ -218,9 +224,11 @@ impl MergeRequestRepository for PgStorage {
     async fn list_by_repo(&self, repository_id: &Id) -> Result<Vec<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = repository_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = merge_requests::table
+                .filter(merge_requests::tenant_id.eq(&tenant))
                 .filter(merge_requests::repository_id.eq(repo_id.as_str()))
                 .order(merge_requests::created_at.asc())
                 .load::<MergeRequestRow>(&mut *conn)

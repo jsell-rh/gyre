@@ -276,9 +276,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Release automation (Admin only)
         .route("/api/v1/release/prepare", post(release::release_prepare))
         // Spec approval ledger (agent-gates spec)
-        .route("/api/v1/specs/approve", post(gates::approve_spec))
+        // NOTE: POST /api/v1/specs/approve and POST /api/v1/specs/revoke removed in M34 Slice 5
+        //       (superseded by POST /api/v1/specs/:path/approve and POST /api/v1/specs/:path/revoke)
         .route("/api/v1/specs/approvals", get(gates::list_spec_approvals))
-        .route("/api/v1/specs/revoke", post(gates::revoke_spec_approval))
         // Spec registry (M21.1) — manifest-driven ledger
         .route("/api/v1/specs", get(specs::list_specs))
         .route("/api/v1/specs/pending", get(specs::list_pending_specs))
@@ -361,6 +361,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/bcp/drill", post(admin::admin_bcp_drill))
         // Seed data
         .route("/api/v1/admin/seed", post(admin::admin_seed))
+        // Search reindex (moved from /api/v1/search/reindex in M34 Slice 5)
+        .route("/api/v1/admin/search/reindex", post(search::reindex_handler))
         // Data Export
         .route("/api/v1/admin/export", get(admin::admin_export))
         // Retention Policies
@@ -440,7 +442,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/budget/summary", get(budget::budget_summary))
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
-        .route("/api/v1/search/reindex", post(search::reindex_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",

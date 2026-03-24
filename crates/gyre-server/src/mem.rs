@@ -15,9 +15,9 @@ use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
-    MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2129,6 +2129,31 @@ impl gyre_ports::SpecApprovalEventRepository for MemSpecApprovalEventRepository 
     }
 }
 
+#[derive(Default)]
+pub struct MemMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl MetaSpecSetRepository for MemMetaSpecSetRepository {
+    async fn get(&self, workspace_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(workspace_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, workspace_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, workspace_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(workspace_id.as_str());
+        Ok(())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -2207,6 +2232,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         wg_config: crate::WireGuardConfig::from_env(),
-        meta_spec_sets: Arc::new(Mutex::new(HashMap::new())),
+        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
     })
 }

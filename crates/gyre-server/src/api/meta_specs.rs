@@ -97,14 +97,14 @@ pub async fn get_meta_spec_set(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
 
-    let sets = state.meta_spec_sets.lock().await;
-    let set = sets
-        .get(&workspace_id)
-        .cloned()
-        .unwrap_or_else(|| MetaSpecSet {
+    let set = match state.meta_spec_sets.get(&Id::new(&workspace_id)).await? {
+        Some(json) => serde_json::from_str::<MetaSpecSet>(&json)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("corrupt meta_spec_set: {e}")))?,
+        None => MetaSpecSet {
             workspace_id: workspace_id.clone(),
             ..Default::default()
-        });
+        },
+    };
     Ok(Json(set))
 }
 
@@ -132,10 +132,12 @@ pub async fn put_meta_spec_set(
         process: req.process,
     };
 
-    {
-        let mut sets = state.meta_spec_sets.lock().await;
-        sets.insert(workspace_id, set.clone());
-    }
+    let json = serde_json::to_string(&set)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize meta_spec_set: {e}")))?;
+    state
+        .meta_spec_sets
+        .upsert(&Id::new(&workspace_id), &json)
+        .await?;
 
     Ok((StatusCode::OK, Json(set)))
 }
@@ -148,43 +150,49 @@ pub async fn get_meta_spec_blast_radius(
     State(state): State<Arc<AppState>>,
     Path(spec_path): Path<String>,
 ) -> Json<BlastRadiusResponse> {
-    // Collect matching workspace IDs while holding the lock, then drop it before async calls.
-    let matching_workspace_ids: Vec<String> = {
-        let sets = state.meta_spec_sets.lock().await;
-        sets.iter()
-            .filter(|(_, set)| {
-                set.personas.values().any(|e| e.path == spec_path)
-                    || set.principles.iter().any(|e| e.path == spec_path)
-                    || set.standards.iter().any(|e| e.path == spec_path)
-                    || set.process.iter().any(|e| e.path == spec_path)
-            })
-            .map(|(ws_id, _)| ws_id.clone())
-            .collect()
-    };
-
     let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
     let mut affected_repos: Vec<AffectedRepo> = Vec::new();
 
-    for workspace_id in &matching_workspace_ids {
-        affected_workspaces.push(AffectedWorkspace {
-            id: workspace_id.clone(),
-        });
-
-        // Collect repos bound to this workspace via kv_store.
-        let repo_ids: Vec<String> = state
-            .kv_store
-            .kv_get("workspace_repos", workspace_id)
+    // List all workspaces and check each one for a meta-spec-set referencing spec_path.
+    let workspaces = state.workspaces.list().await.unwrap_or_default();
+    for workspace in &workspaces {
+        let ws_id = workspace.id.as_str();
+        let set_opt = state
+            .meta_spec_sets
+            .get(&workspace.id)
             .await
             .ok()
             .flatten()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_default();
-        for repo_id in &repo_ids {
-            affected_repos.push(AffectedRepo {
-                id: repo_id.clone(),
-                workspace_id: workspace_id.clone(),
-                reason: "workspace_binding".to_string(),
-            });
+            .and_then(|json| serde_json::from_str::<MetaSpecSet>(&json).ok());
+
+        if let Some(set) = set_opt {
+            let references_spec = set.personas.values().any(|e| e.path == spec_path)
+                || set.principles.iter().any(|e| e.path == spec_path)
+                || set.standards.iter().any(|e| e.path == spec_path)
+                || set.process.iter().any(|e| e.path == spec_path);
+
+            if references_spec {
+                affected_workspaces.push(AffectedWorkspace {
+                    id: ws_id.to_string(),
+                });
+
+                // Collect repos bound to this workspace via kv_store.
+                let repo_ids: Vec<String> = state
+                    .kv_store
+                    .kv_get("workspace_repos", ws_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                    .unwrap_or_default();
+                for repo_id in &repo_ids {
+                    affected_repos.push(AffectedRepo {
+                        id: repo_id.clone(),
+                        workspace_id: ws_id.to_string(),
+                        reason: "workspace_binding".to_string(),
+                    });
+                }
+            }
         }
     }
 
