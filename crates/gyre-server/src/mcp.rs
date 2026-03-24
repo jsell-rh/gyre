@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 // ── JSON-RPC 2.0 types ────────────────────────────────────────────────────────
 
@@ -746,9 +746,10 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
 
 // ── Main MCP request dispatcher ───────────────────────────────────────────────
 
-#[instrument(skip(state, req), fields(method = %req.method))]
+#[instrument(skip(state, req, _auth), fields(method = %req.method))]
 pub async fn mcp_handler(
     State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = req.id.clone();
@@ -795,7 +796,10 @@ pub async fn mcp_handler(
 
 /// GET /mcp/sse — SSE stream for server→client notifications.
 /// Returns an open SSE connection; events are emitted as activity broadcasts arrive.
-pub async fn mcp_sse_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn mcp_sse_handler(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+) -> impl IntoResponse {
     let rx = state.broadcast_tx.subscribe();
     let event_stream = stream::unfold(rx, |mut rx| async move {
         loop {
@@ -841,6 +845,7 @@ mod tests {
                     .method("POST")
                     .uri("/mcp")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
