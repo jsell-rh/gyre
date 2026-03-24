@@ -187,7 +187,7 @@ Each `MessageKind` has a defined payload schema. The server validates payloads o
 | `MrStatusChanged` | `mr_id: Id, status: String` | both |
 | `MrMerged` | `mr_id: Id, merge_commit_sha: Option<String>` | `mr_id` |
 | `PushRejected` | `repo_id: Id, branch: String, agent_id: Id, reason: String` | all |
-| `PushAccepted` | `repo_id: Id, branch: String, agent_id: Id, commit_count: u64, task_id: Option<Id>, ralph_step: Option<String>` | `repo_id`, `branch`, `agent_id` |
+| `PushAccepted` | `repo_id: Id, branch: String, agent_id: Id, commit_count: u64, task_id: Option<Id>, ralph_step: Option<String>` | `repo_id`, `branch`, `agent_id`. Note: `commit_count` is `u64` on the wire; migration maps from `usize` in `DomainEvent::PushAccepted`. |
 | `SpecChanged` | `repo_id: Id, spec_path: String, change_kind: String, task_id: Id` | all |
 | `GateFailure` | `mr_id: Id, gate_name: String, gate_type: String, status: String, output: String, spec_ref: Option<String>, gate_agent_id: Id` | `mr_id`, `gate_name` |
 | `StaleSpecWarning` | `mr_id: Id, repo_id: Id, spec_path: String, spec_sha: String, current_sha: String` | all |
@@ -200,6 +200,8 @@ Each `MessageKind` has a defined payload schema. The server validates payloads o
 | `ToolCallStart` | `agent_id: Id, tool_name: String` | both |
 | `ToolCallEnd` | `agent_id: Id, tool_name: String, duration_ms: u64` | all |
 | `RunStarted` | `agent_id: Id, task_id: Option<Id>` | `agent_id` |
+| `TextMessageContent` | `agent_id: Id, content: String, role: Option<String>` | `agent_id`, `content` |
+| `StateChanged` | `agent_id: Id, old_state: Option<String>, new_state: String` | `agent_id`, `new_state` |
 | `RunFinished` | `agent_id: Id, task_id: Option<Id>` | `agent_id` |
 | `QueueUpdated` | (none) | — |
 | `DataSeeded` | (none) | — |
@@ -317,13 +319,15 @@ pub trait MessageRepository: Send + Sync {
     async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> Result<u64>;
 
     /// List messages in a workspace, optionally filtered by kind.
-    /// Cursor-based pagination: pass `after` (a message ID) to get the next page.
+    /// Cursor-based pagination: `before` is a `created_at` value — returns messages
+    /// with `created_at < before`, ordered by `created_at DESC`. This aligns with
+    /// the `idx_messages_workspace` index for efficient range scans.
     async fn list_by_workspace(
         &self,
         workspace_id: &Id,
         kind: Option<&str>,
         since: Option<u64>,
-        after: Option<&Id>,
+        before: Option<u64>,
         limit: Option<usize>,
     ) -> Result<Vec<Message>>;
 
@@ -353,6 +357,8 @@ Telemetry is pushed through the existing `broadcast::channel` for WebSocket deli
 
 #### Workspace Fan-Out Persistence
 
+**Tenant isolation:** `MessageRepository` methods do not take an explicit `tenant_id` parameter. Tenant isolation is enforced structurally: workspace IDs are globally unique and every workspace belongs to exactly one tenant (enforced by `hierarchy-enforcement.md`). Querying by `workspace_id` implicitly isolates by tenant. The `tenant_id` column and index exist for admin cross-tenant queries and the `check-tenant-filter.sh` lint.
+
 When a message targets `Destination::Workspace(id)`, it is stored as **one row** with `to_type = 'workspace'` and `to_id = workspace_id`. It is NOT exploded into per-agent rows. The `list_by_workspace` query finds these messages via the `idx_messages_workspace` index. The `list_unacked` query (which filters on `to_type = 'agent'`) does not return workspace-scoped messages — this is intentional. Workspace events are queryable history, not per-agent inbox items.
 
 #### DB Schema
@@ -380,6 +386,7 @@ CREATE INDEX idx_messages_inbox ON messages (to_type, to_id, acknowledged)
 CREATE INDEX idx_messages_workspace ON messages (workspace_id, created_at DESC);
 CREATE INDEX idx_messages_kind ON messages (workspace_id, kind, created_at DESC);
 CREATE INDEX idx_messages_expiry ON messages (created_at) WHERE to_type != 'agent';
+CREATE INDEX idx_messages_tenant ON messages (tenant_id);
 ```
 
 ### Relationship to Notifications
@@ -455,7 +462,7 @@ Idempotent. Returns 200 whether the message was already acked or not.
 #### Querying (workspace-scoped)
 
 ```
-GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch>&limit=50&after=<message-id>
+GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch>&before=<epoch>&limit=50
 Authorization: Bearer <token>
 ```
 
