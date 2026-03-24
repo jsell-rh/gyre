@@ -320,6 +320,13 @@ export const api = {
   getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
   setWorkspaceMetaSpecSet: (id, data) =>
     request(`/workspaces/${id}/meta-spec-set`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Workspace briefing (TASK-205)
+  getWorkspaceBriefing: (id, since) => {
+    const params = new URLSearchParams();
+    if (since) params.set('since', String(since));
+    const qs = params.toString();
+    return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
+  },
   // Workspaces (M22.5)
   workspaces: () => request('/workspaces'),
   workspace: (id) => request(`/workspaces/${id}`),
