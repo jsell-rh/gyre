@@ -258,10 +258,12 @@ The server filters outgoing messages:
 For agents that don't maintain a WebSocket (e.g., short-lived container agents):
 
 ```
-GET /api/v1/agents/:id/messages?acknowledged=false
+GET /api/v1/agents/:id/messages?after=<epoch_ms>
 ```
 
-Returns unacknowledged Directed-tier messages for the agent. Does NOT drain — messages persist until acknowledged:
+Returns Directed-tier messages newer than `after`, ordered oldest first. The agent stores the `created_at` of the last message it processed as its cursor. First poll uses `?after=0`. Messages persist — polling is non-destructive.
+
+Explicit ack is still available for workflows that need it:
 
 ```
 PUT /api/v1/agents/:id/messages/:message_id/ack
@@ -309,7 +311,11 @@ pub trait MessageRepository: Send + Sync {
     /// Find a message by ID.
     async fn find_by_id(&self, id: &Id) -> Result<Option<Message>>;
 
-    /// List unacknowledged Directed messages for an agent.
+    /// List Directed messages for an agent newer than `after` (epoch ms), oldest first.
+    /// Primary poll pattern: agent stores cursor, passes on next poll.
+    async fn list_after(&self, agent_id: &Id, after: u64) -> Result<Vec<Message>>;
+
+    /// List all unacknowledged Directed messages for an agent (crash recovery).
     async fn list_unacked(&self, agent_id: &Id) -> Result<Vec<Message>>;
 
     /// Count unacknowledged Directed messages for an agent (for limit enforcement).
@@ -449,11 +455,15 @@ The `from` field is derived server-side from the JWT. The sender does not and ca
 #### Receiving (poll)
 
 ```
-GET /api/v1/agents/:id/messages?acknowledged=false
+GET /api/v1/agents/:id/messages?after=<epoch_ms>
 Authorization: Bearer <agent-jwt>
 ```
 
-Returns unacknowledged Directed-tier messages. Agent must be the authenticated caller.
+Returns Directed-tier messages with `created_at > after`, ordered oldest first. The agent stores the `created_at` of the last message it processed and passes it on subsequent polls — this returns only new messages. First poll uses `?after=0` to get everything.
+
+Alternative: `?acknowledged=false` returns all unacked messages regardless of timestamp (useful for reprocessing after a crash).
+
+Agent must be the authenticated caller (verified from JWT `sub` claim).
 
 #### Acknowledging
 
