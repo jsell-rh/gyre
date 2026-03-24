@@ -96,6 +96,9 @@ pub struct SpecEntry {
     pub path: String,
     pub title: String,
     pub owner: String,
+    /// Optional kind for meta-specs: "meta:persona", "meta:principle", "meta:standard", "meta:process".
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub approval: Option<ApprovalConfig>,
     #[serde(default)]
@@ -214,6 +217,9 @@ pub struct SpecLedgerEntry {
     pub path: String,
     pub title: String,
     pub owner: String,
+    /// Optional kind for meta-specs: "meta:persona", "meta:principle", "meta:standard", "meta:process".
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Git blob SHA of the spec file at HEAD.
     pub current_sha: String,
     /// Approval mode from the manifest.
@@ -366,9 +372,10 @@ pub async fn sync_spec_ledger(
                         info!(spec_path = %entry.path, "spec-registry: approval invalidated (content changed)");
                     }
                 }
-                // Update mutable fields from manifest (title/owner may change).
+                // Update mutable fields from manifest (title/owner/kind may change).
                 existing.title = entry.title.clone();
                 existing.owner = entry.owner.clone();
+                existing.kind = entry.kind.clone();
                 existing.approval_mode = approval_mode;
                 // Un-deprecate if it reappears in manifest.
                 if existing.approval_status == ApprovalStatus::Deprecated {
@@ -384,6 +391,7 @@ pub async fn sync_spec_ledger(
                         path: entry.path.clone(),
                         title: entry.title.clone(),
                         owner: entry.owner.clone(),
+                        kind: entry.kind.clone(),
                         current_sha: blob_sha,
                         approval_mode,
                         approval_status: ApprovalStatus::Pending,
@@ -687,6 +695,7 @@ specs:
                     path: "system/design-principles.md".to_string(),
                     title: "Design Principles".to_string(),
                     owner: "user:jsell".to_string(),
+                    kind: None,
                     current_sha: "abc123".to_string(),
                     approval_mode: "human_only".to_string(),
                     approval_status: ApprovalStatus::Pending,
@@ -719,6 +728,7 @@ specs:
                     path: "system/design-principles.md".to_string(),
                     title: "Design Principles".to_string(),
                     owner: "user:jsell".to_string(),
+                    kind: None,
                     current_sha: "oldsha".to_string(),
                     approval_mode: "human_only".to_string(),
                     approval_status: ApprovalStatus::Approved,
@@ -760,6 +770,7 @@ specs:
                     path: "system/old-spec.md".to_string(),
                     title: "Old Spec".to_string(),
                     owner: "user:jsell".to_string(),
+                    kind: None,
                     current_sha: "sha".to_string(),
                     approval_mode: "human_only".to_string(),
                     approval_status: ApprovalStatus::Approved,

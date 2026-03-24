@@ -27,7 +27,11 @@
   import BudgetDashboard from './components/BudgetDashboard.svelte';
   import DependencyGraph from './components/DependencyGraph.svelte';
   import SpecGraph from './components/SpecGraph.svelte';
+  import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import Inbox from './components/Inbox.svelte';
+  import Briefing from './components/Briefing.svelte';
+  import ExplorerView from './components/ExplorerView.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
@@ -222,7 +226,19 @@
       }
     }
     window.addEventListener('popstate', handlePopstate);
-    return () => window.removeEventListener('popstate', handlePopstate);
+
+    function handleJourneyKeys(e) {
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === 'i') { e.preventDefault(); navigate('inbox'); }
+        if (e.key === 'b') { e.preventDefault(); navigate('briefing'); }
+      }
+    }
+    window.addEventListener('keydown', handleJourneyKeys);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopstate);
+      window.removeEventListener('keydown', handleJourneyKeys);
+    };
   });
 
   function onWorkspaceChange(e) {
@@ -238,6 +254,8 @@
   }
 
   const viewTitles = {
+    inbox:              'Inbox',
+    briefing:           'Briefing',
     dashboard:          'Dashboard',
     activity:           'Activity Feed',
     agents:             'Agents',
@@ -255,6 +273,7 @@
     'spec-approvals':   'Spec Approvals',
     specs:              'Spec Registry',
     'spec-graph':       'Spec Link Graph',
+    'meta-specs':       'Meta-Specs',
     admin:              'Admin Panel',
     settings:           'Settings',
     workspaces:         'Workspaces',
@@ -263,6 +282,7 @@
     budget:             'Budget Dashboard',
     dependencies:       'Dependency Graph',
     profile:            'My Profile',
+    explorer:           'System Explorer',
   };
 
   let breadcrumbs = $derived(() => {
@@ -363,7 +383,11 @@
     </header>
 
     <main class="content" id="main-content" tabindex="-1">
-      {#if currentView === 'dashboard'}
+      {#if currentView === 'inbox'}
+        <Inbox />
+      {:else if currentView === 'briefing'}
+        <Briefing />
+      {:else if currentView === 'dashboard'}
         <DashboardHome {wsStore} onnavigate={(v) => navigate(v)} />
       {:else if currentView === 'activity'}
         <ActivityFeed {wsStore} />
@@ -408,6 +432,8 @@
         <SpecDashboard />
       {:else if currentView === 'spec-graph'}
         <SpecGraph />
+      {:else if currentView === 'meta-specs'}
+        <MetaSpecs />
       {:else if currentView === 'workspaces'}
         <WorkspaceList onSelect={(ws) => navigate('workspace-detail', { workspace: ws })} />
       {:else if currentView === 'workspace-detail' && selectedWorkspace}
@@ -423,6 +449,8 @@
         <DependencyGraph />
       {:else if currentView === 'profile'}
         <UserProfile />
+      {:else if currentView === 'explorer'}
+        <ExplorerView />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}

@@ -150,7 +150,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, signature?}` — `sha` must be 40-char hex; **approver identity derived server-side from auth token** (client must not supply `approver_id`) (CISO M12.3-A, M12.3) |
 | `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
 | `POST` | `/api/v1/specs/revoke` | Revoke a spec approval: `{approval_id, reason}` — caller must be original approver or Admin (returns 403 otherwise); revoker identity derived server-side (client must not supply `revoked_by`) (CISO M12.3-A, M12.3) |
-| `GET` | `/api/v1/specs` | List all specs with ledger state — reads `specs/manifest.yaml` + ledger; each entry includes `path`, `title`, `owner`, `sha`, `approval_status`, `drift_status` (M21.1) |
+| `GET` | `/api/v1/specs` | List all specs with ledger state — reads `specs/manifest.yaml` + ledger; each entry includes `path`, `title`, `owner`, `sha`, `approval_status`, `drift_status`, `kind?` (M21.1); `?kind=<kind>` filters by spec kind (`meta:persona`, `meta:principle`, `meta:standard`, `meta:process`) (M32) |
 | `GET` | `/api/v1/specs/pending` | Specs awaiting approval — ledger entries with `approval_status: Pending` (M21.1) |
 | `GET` | `/api/v1/specs/drifted` | Specs with open drift-review tasks — `drift_status: Drifted` (M21.1) |
 | `GET` | `/api/v1/specs/index` | Auto-generated markdown index of all specs in manifest (M21.1) |
@@ -178,6 +178,17 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
+| `GET` | `/api/v1/repos/{id}/graph` | Full knowledge graph for a repo — `{repo_id, nodes, edges}`; `GraphNode` fields: `id`, `repo_id`, `node_type` (`Package`/`Module`/`Type`/`Interface`/`Function`/`Endpoint`/`Table`), `name`, `qualified_name`, `file_path`, `line_start`/`line_end`, `visibility`, `doc_comment`, `spec_path`, `spec_confidence` (`None`/`Low`/`Medium`/`High`), `last_modified_sha`, `last_modified_by`, `complexity`, `churn_count_30d` (TASK-174/TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/types` | Type nodes (structs, enums) with their edges (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/modules` | Module nodes with containment edges (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/node/{node_id}` | Single node + all connected edges — `{node, edges}`; 404 if node not in this repo (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/spec/{spec_path}` | Nodes whose `spec_path` matches the given spec (URL-encoded path) with their edges (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/concept/{name}` | Concept view — nodes whose `name` or `qualified_name` contains `{name}` (case-insensitive substring) with edges between matching nodes (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/timeline` | Architectural deltas — `[{id, repo_id, commit_sha, timestamp, spec_ref?, agent_id?, delta_json}]`; filter with `?since=<epoch>&until=<epoch>` (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/risks` | Risk metrics per node — `[{node_id, name, qualified_name, churn_rate, fan_out, fan_in, complexity?, spec_covered}]` (TASK-175) |
+| `GET` | `/api/v1/repos/{id}/graph/diff` | Graph diff between commits — `{from, to, message, deltas}`; `?from=<ref>&to=<ref>` (defaults: `HEAD~1`/`HEAD`); stub returns all deltas pending full extraction pipeline (TASK-175) |
+| `POST` | `/api/v1/repos/{id}/graph/link` | Manually link a node to a spec path: `{node_id, spec_path, confidence?}` (`confidence`: `high`/`medium`/`low`/`none`; default `high`); **Developer+ required** (TASK-175, TASK-185) |
+| `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (full impl pending extraction pipeline) (TASK-175) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
@@ -219,7 +230,7 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
 | `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for Gyre-hosted repos (M22.4) |
+| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); **pushes to the default branch also trigger automatic Rust knowledge graph extraction** — `git archive` → `RustExtractor` → persists nodes/edges + records `ArchitecturalDelta` in the background (M30b); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for Gyre-hosted repos (M22.4) |
 | `GET` | `/api/v1/auth/token-info` | Token introspection — returns token kind (`agent_jwt`, `uuid_token`, `api_key`, `global`) and decoded JWT claims including `task_id`, `spawned_by`, `exp` (M18) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
 | `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
@@ -232,6 +243,11 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 | `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member; **Admin only** (H-20, M22.8) |
 | `POST/GET` | `/api/v1/workspaces/{id}/teams` | Create (**Admin only**, H-21) / list workspace-scoped teams (M22.8) |
 | `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; **Admin only** (H-18); `add_member`/`remove_member` idempotent (M22.8) |
+| `GET` | `/api/v1/workspaces/{id}/graph` | Cross-repo aggregated knowledge graph for a workspace — all nodes and edges across every repo in the workspace (TASK-175) |
+| `GET` | `/api/v1/workspaces/{id}/briefing` | Narrative summary of recent architectural changes — `{workspace_id, since, summary, deltas}`; filter with `?since=<epoch>` (TASK-175) |
+| `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
+| `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
+| `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
@@ -579,7 +595,8 @@ Agents are created in dependency order (parents before children). Parent links a
   "clone_url": "http://localhost:3000/git/project/repo.git",
   "branch": "feat/my-feature",
   "jj_change_id": "<jj-change-id-or-null>",   // present when jj is initialized in worktree (best-effort)
-  "container_id": "<docker-container-id-or-null>"   // present when agent was launched in a container via GYRE_DEFAULT_COMPUTE_TARGET=container or a container compute_target_id (M19.1)
+  "container_id": "<docker-container-id-or-null>",   // present when agent was launched in a container via GYRE_DEFAULT_COMPUTE_TARGET=container or a container compute_target_id (M19.1)
+  "meta_spec_set_sha": "<sha256-or-null>"   // SHA256 of the workspace's bound meta-spec set at spawn time; null when workspace has no meta-spec-set configured; used for commit provenance (M32)
 }
 ```
 
@@ -702,7 +719,7 @@ The task description records the spec path and repo ID. The `SpecChanged` domain
 
 The Svelte SPA at `GET /*` includes a dashboard with agent management UI:
 
-**Navigation is path-based** — navigate directly to `/<view>` in the URL bar or click the sidebar. Valid view paths: `dashboard`, `activity`, `agents`, `tasks`, `projects`, `merge-queue`, `mcp-catalog`, `compose`, `analytics`, `costs`, `audit`, `spec-approvals`, `specs`, `admin`, `settings`, `workspaces`, `personas`, `budget`, `dependencies`, `spec-graph`, `profile`. Browser back/forward buttons work correctly via `history.pushState`/`popstate`. Legacy `#<view>` hash URLs are still supported on initial load for backwards compatibility. Example: `http://localhost:3000/agents`
+**Navigation is path-based** — navigate directly to `/<view>` in the URL bar or click the sidebar. Valid view paths: `dashboard`, `activity`, `agents`, `tasks`, `projects`, `merge-queue`, `mcp-catalog`, `compose`, `analytics`, `costs`, `audit`, `spec-approvals`, `specs`, `admin`, `settings`, `workspaces`, `personas`, `budget`, `dependencies`, `spec-graph`, `profile`, `inbox`, `briefing`, `explorer`, `meta-specs`. Keyboard shortcuts (M31): `i` → Inbox, `b` → Briefing. Browser back/forward buttons work correctly via `history.pushState`/`popstate`. Legacy `#<view>` hash URLs are still supported on initial load for backwards compatibility. Example: `http://localhost:3000/agents`
 
 **Entity deep-link URLs (M28)** — in addition to sidebar view paths, entity-scoped URLs restore a specific record on direct navigation or page reload: `/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`. On mount, the app fetches the entity by ID and loads the correct detail view. Back/forward still works via `popstate`.
 
@@ -744,6 +761,10 @@ Access at `http://localhost:3000` after starting the server. Admin Panel require
 - **User Profile** (M22.5, sidebar: "My Profile" under Overview): profile edit form (display_name, avatar_url, timezone, locale, preferences); four tabs: My Agents, My Tasks, My MRs, Notifications (unread badge, mark-read); calls `GET/PUT /api/v1/users/me` and `GET /api/v1/users/me/{agents,tasks,mrs,notifications}`.
 - **Global Workspace Selector** (M28, topbar): dropdown fetches all workspaces via `GET /api/v1/workspaces`; selection persists to `localStorage` (`gyre_selected_workspace_id`); passes `workspaceId` to AgentList, TaskBoard, and ProjectList for filtering. "All Workspaces" clears the filter. A **workspace scope chip** showing the selected workspace name also appears in the topbar (M22.5); clicking it navigates to the workspace detail view.
 - **Auth Token UI** (M9.3 + M20): auth status dot in topbar (green = authenticated, red = error). Click opens Token modal to view/change the API token stored in `localStorage`; saving reconnects the WebSocket. All REST and MCP calls inject `Authorization: Bearer {token}`. Defaults to `gyre-dev-token` when no token is stored. M20: modal fetches `GET /api/v1/auth/token-info` on open and displays token kind (human-readable: `global` = "Global admin token", `agent_jwt` = "Agent JWT (EdDSA, scoped)", `uuid_token` = "Per-agent UUID token (legacy)", `api_key` = "API key"), agent ID, task ID, scope, and expiry timestamp.
+- **Inbox** (M31, sidebar: "Inbox" under Overview, shortcut `i`): unified action queue aggregating items that need attention — pending MR reviews, pending spec approvals, gate failures. Badge count on sidebar icon shows unread items. Mark-as-seen state persisted to `localStorage`; auto-refreshes every 60s. No new API endpoints — consumes existing MR, spec, and gate APIs.
+- **Briefing** (M31, sidebar: "Briefing" under Overview, shortcut `b`): narrative digest since last visit. 4-card grid: active agents, spec health, since-last-visit stats, gate failures. Summarizes recent changes for quick situational awareness. No new API endpoints — consumes existing activity, agent, and spec APIs. (Note: distinct from `GET /api/v1/workspaces/{id}/briefing` which returns structured JSON.)
+- **System Explorer Canvas** (TASK-177, sidebar: "System Explorer" under Source Control, route `/explorer`): `MoldableView` switcher with three modes — **Graph** (SVG pan+zoom canvas via `ExplorerCanvas.svelte`; 9 node type shapes with distinct colors: package/module/type/interface/function/endpoint/component/table/constant; click a node to open detail panel with file path, spec linkage, visibility, doc comment, complexity, churn metrics), **List** (sortable/filterable table of all nodes), **Timeline** (stub for Phase 4 architectural timeline scrubber). Repo selector at top; fetches `GET /api/v1/repos/{id}/graph`.
+- **Meta-Specs** (M32, sidebar: "Meta-Specs" under Overview, route `/meta-specs`): card grid of specs with `kind` badges (`meta:persona`, `meta:principle`, `meta:standard`, `meta:process`), approval status, and blast-radius modal showing affected workspaces and repos. Calls `GET /api/v1/specs?kind=<kind>` and `GET /api/v1/meta-specs/{path}/blast-radius`.
 
 ---
 

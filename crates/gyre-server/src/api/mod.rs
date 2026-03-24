@@ -18,10 +18,12 @@ pub mod discover;
 pub mod error;
 pub mod federation;
 pub mod gates;
+pub mod graph;
 pub mod jj;
 pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
+pub mod meta_specs;
 pub mod network;
 pub mod personas;
 pub mod policies;
@@ -461,6 +463,16 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/repos",
             post(workspaces::add_repo_to_workspace).get(workspaces::list_workspace_repos),
         )
+        // Meta-spec sets (M32)
+        .route(
+            "/api/v1/workspaces/:id/meta-spec-set",
+            get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Meta-spec blast radius (M32)
+        .route(
+            "/api/v1/meta-specs/:path/blast-radius",
+            get(meta_specs::get_meta_spec_blast_radius),
+        )
         // Personas (M22.1)
         .route(
             "/api/v1/personas",
@@ -534,6 +546,47 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/scim/v2/Schemas", get(scim::scim_schemas))
         .route("/scim/v2/ResourceTypes", get(scim::scim_resource_types))
+        // ── Knowledge graph (realized-model.md §7) ────────────────────────
+        .route("/api/v1/repos/:id/graph", get(graph::get_repo_graph))
+        .route("/api/v1/repos/:id/graph/types", get(graph::get_graph_types))
+        .route(
+            "/api/v1/repos/:id/graph/modules",
+            get(graph::get_graph_modules),
+        )
+        .route(
+            "/api/v1/repos/:id/graph/node/:node_id",
+            get(graph::get_graph_node),
+        )
+        .route(
+            "/api/v1/repos/:id/graph/spec/:spec_path",
+            get(graph::get_graph_by_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/graph/concept/:concept_name",
+            get(graph::get_graph_concept),
+        )
+        .route(
+            "/api/v1/repos/:id/graph/timeline",
+            get(graph::get_graph_timeline),
+        )
+        .route("/api/v1/repos/:id/graph/risks", get(graph::get_graph_risks))
+        .route("/api/v1/repos/:id/graph/diff", get(graph::get_graph_diff))
+        .route(
+            "/api/v1/repos/:id/graph/link",
+            post(graph::link_node_to_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/graph/predict",
+            get(graph::get_graph_predictions),
+        )
+        .route(
+            "/api/v1/workspaces/:id/graph",
+            get(graph::get_workspace_graph),
+        )
+        .route(
+            "/api/v1/workspaces/:id/briefing",
+            get(graph::get_workspace_briefing),
+        )
 }
 
 pub(crate) fn now_secs() -> u64 {

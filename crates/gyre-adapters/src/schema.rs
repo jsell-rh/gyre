@@ -403,6 +403,28 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    kv_store (namespace, key) {
+        namespace -> Text,
+        key -> Text,
+        value_json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    budget_usages (entity_key) {
+        entity_key -> Text,
+        entity_type -> Text,
+        entity_id -> Text,
+        tokens_used_today -> BigInt,
+        cost_today -> Double,
+        active_agents -> Integer,
+        period_start -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     projects,
     repositories,
@@ -433,4 +455,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     spec_approvals,
     dependency_edges,
     budget_configs,
+    kv_store,
+    budget_usages,
 );

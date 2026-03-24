@@ -306,12 +306,22 @@ pub async fn git_receive_pack(
     // Post-receive: record agent-commit mappings + broadcast PushAccepted event.
     // M14.2: Compute attestation level for commit provenance.
     let attestation_level = {
-        let stacks = state.agent_stacks.lock().await;
-        let has_stack = stacks.contains_key(auth.agent_id.as_str());
-        drop(stacks);
+        let has_stack = state
+            .kv_store
+            .kv_get("agent_stacks", auth.agent_id.as_str())
+            .await
+            .ok()
+            .flatten()
+            .is_some();
         if has_stack {
-            let policies = state.repo_stack_policies.lock().await;
-            if policies.contains_key(repo_id.as_str()) {
+            let has_policy = state
+                .kv_store
+                .kv_get("repo_stack_policies", repo_id.as_str())
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if has_policy {
                 "server-verified"
             } else {
                 "self-reported"
@@ -385,6 +395,16 @@ pub async fn git_receive_pack(
                 &repo_id_clone,
                 &repo_path_clone,
                 &update.new_sha,
+            )
+            .await;
+            // Knowledge graph: extract Rust symbols and architecture (M30b).
+            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            crate::graph_extraction::extract_and_store_graph(
+                &repo_path_clone,
+                &repo_id_clone,
+                &update.new_sha,
+                state_clone.graph_store.as_ref(),
+                &git_bin,
             )
             .await;
         }
@@ -715,14 +735,23 @@ async fn check_pre_accept_gates(
     }
 
     // M14.2: Resolve agent stack fingerprint and repo policy once for all ref updates.
-    let stack_fingerprint = {
-        let stacks = state.agent_stacks.lock().await;
-        stacks.get(agent_id).map(|s| s.fingerprint())
-    };
-    let required_fingerprint = {
-        let policies = state.repo_stack_policies.lock().await;
-        policies.get(repo_id).cloned()
-    };
+    let stack_fingerprint = state
+        .kv_store
+        .kv_get("agent_stacks", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            serde_json::from_str::<crate::api::stack_attest::AgentStack>(&s)
+                .ok()
+                .map(|st| st.fingerprint())
+        });
+    let required_fingerprint = state
+        .kv_store
+        .kv_get("repo_stack_policies", repo_id)
+        .await
+        .ok()
+        .flatten();
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -1503,10 +1532,10 @@ mod tests {
     async fn agent_token_accepted_for_info_refs() {
         let (app, state, _tmp, project, _path) = git_app_with_repo().await;
         state
-            .agent_tokens
-            .lock()
+            .kv_store
+            .kv_set("agent_tokens", "agent-7", "my-agent-token".to_string())
             .await
-            .insert("agent-7".to_string(), "my-agent-token".to_string());
+            .unwrap();
 
         let resp = app
             .oneshot(

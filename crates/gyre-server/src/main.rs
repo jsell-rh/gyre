@@ -1,6 +1,6 @@
 use anyhow::Result;
 use gyre_server::{
-    audit_simulator, build_router, build_state, merge_processor, procfs_monitor,
+    audit_simulator, build_router, build_state, jobs, merge_processor, procfs_monitor,
     register_default_compute_target, siem, spawn_budget_daily_reset, spawn_stale_agent_detector,
     spawn_stale_peer_detector, telemetry, JwtConfig,
 };
@@ -40,6 +40,9 @@ async fn main() -> Result<()> {
 
     // M25: Auto-register default container compute target if Docker/Podman is available.
     register_default_compute_target(&state).await;
+
+    // Register jobs into the admin job registry so GET/POST /admin/jobs work.
+    jobs::start_job_registry(state.clone()).await;
 
     // Background tasks.
     spawn_stale_agent_detector(state.clone());

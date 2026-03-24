@@ -10,6 +10,7 @@ pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
+pub mod graph_extraction;
 pub mod procfs_monitor;
 
 pub(crate) mod health;
@@ -45,20 +46,19 @@ pub(crate) mod ws;
 use axum::{routing::get, Router};
 use domain_events::DomainEvent;
 use gyre_common::ActivityEventData;
-use gyre_domain::AgentCard;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    CostRepository, DependencyRepository, GitOpsPort, JjOpsPort, MergeQueueRepository,
-    MergeRequestRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
-    PolicyRepository, PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository,
-    ReviewRepository, SpawnLogRepository, TaskRepository, TeamRepository, UserRepository,
+    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, GitOpsPort,
+    GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
+    NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
+    PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository, ReviewRepository,
+    SpawnLogRepository, TaskRepository, TeamRepository, UserRepository,
     WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
-use messages::AgentMessage;
 use retention::RetentionStore;
 use siem::SiemStore;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
@@ -173,10 +173,11 @@ pub struct AppState {
     pub broadcast_tx: broadcast::Sender<ActivityEventData>,
     /// Domain event bus: broadcasts structured domain events to all WS clients.
     pub event_tx: broadcast::Sender<DomainEvent>,
-    /// Per-agent message inboxes: agent_id -> queued messages.
-    pub agent_messages: Arc<Mutex<HashMap<String, VecDeque<AgentMessage>>>>,
-    /// Auth tokens issued on agent registration: agent_id -> token.
-    pub agent_tokens: Arc<Mutex<HashMap<String, String>>>,
+    /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
+    /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
+    /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
+    /// abac_policies — all keyed by (namespace, key).
+    pub kv_store: Arc<dyn KvJsonStore>,
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
@@ -194,8 +195,6 @@ pub struct AppState {
     pub metrics: Arc<metrics::Metrics>,
     /// Server start time as Unix epoch seconds (for uptime calculation).
     pub started_at_secs: u64,
-    /// A2A Agent Cards: agent_id -> AgentCard for discovery.
-    pub agent_cards: Arc<Mutex<HashMap<String, AgentCard>>>,
     /// Compose sessions: compose_id -> list of agent_ids.
     pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Data retention policies.
@@ -212,8 +211,6 @@ pub struct AppState {
     pub siem_store: SiemStore,
     /// Broadcast channel for live audit event SSE stream.
     pub audit_broadcast_tx: broadcast::Sender<String>,
-    /// Admin-configured compute targets: id -> ComputeTargetConfig.
-    pub compute_targets: Arc<Mutex<HashMap<String, api::compute::ComputeTargetConfig>>>,
     /// WireGuard network peer registry.
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Cross-repo dependency graph (M22.4).
@@ -239,10 +236,6 @@ pub struct AppState {
         Arc<Mutex<HashMap<(String, String), speculative_merge::SpeculativeResult>>>,
     /// Spawn log: persisted to DB for diagnostic recovery (M13.7).
     pub spawn_log: Arc<dyn SpawnLogRepository>,
-    /// Agent stack fingerprints: agent_id -> AgentStack (M14.1).
-    pub agent_stacks: Arc<Mutex<HashMap<String, api::stack_attest::AgentStack>>>,
-    /// Repo stack attestation policies: repo_id -> required fingerprint (M14.2).
-    pub repo_stack_policies: Arc<Mutex<HashMap<String, String>>>,
     /// Base SQLite storage instance (the "default" tenant).
     pub db_storage: Option<Arc<gyre_adapters::SqliteStorage>>,
     /// Spec approval ledger: approval_id -> SpecApproval (agent-gates).
@@ -260,11 +253,6 @@ pub struct AppState {
     pub commit_signatures: commit_signatures::CommitSignatureStore,
     /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
     pub sigstore_mode: commit_signatures::SigstoreMode,
-    /// Per-repo ABAC policies: repo_id -> list of AbacPolicy (G6).
-    pub abac_policies: Arc<Mutex<HashMap<String, Vec<abac::AbacPolicy>>>>,
-    /// Workload attestation records: agent_id -> WorkloadAttestation (G10).
-    pub workload_attestations:
-        Arc<Mutex<HashMap<String, workload_attestation::WorkloadAttestation>>>,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
     /// Container audit records: agent_id -> ContainerAuditRecord (M19.3).
@@ -276,17 +264,15 @@ pub struct AppState {
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
-    pub budget_configs: Arc<Mutex<HashMap<String, gyre_domain::BudgetConfig>>>,
+    pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
-    pub budget_usages: Arc<Mutex<HashMap<String, gyre_domain::BudgetUsage>>>,
+    pub budget_usages: Arc<dyn BudgetUsageRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Workspace repository (M22.1).
     pub workspaces: Arc<dyn WorkspaceRepository>,
     /// Persona repository (M22.1).
     pub personas: Arc<dyn PersonaRepository>,
-    /// Workspace-repo membership: workspace_id -> list of repo_ids (M22.1).
-    pub workspace_repos: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Full declarative ABAC policy engine (M22.6).
     pub policies: Arc<dyn PolicyRepository>,
     /// Workspace membership repository (M22.8).
@@ -297,6 +283,10 @@ pub struct AppState {
     pub notifications: Arc<dyn NotificationRepository>,
     /// WireGuard coordination plane configuration (M26.1).
     pub wg_config: WireGuardConfig,
+    /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
+    pub graph_store: Arc<dyn GraphPort>,
+    /// Workspace meta-spec sets: workspace_id -> MetaSpecSet (M32).
+    pub meta_spec_sets: Arc<Mutex<HashMap<String, api::meta_specs::MetaSpecSet>>>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -327,11 +317,11 @@ async fn require_auth_middleware(
         Some(t) if auth::tokens_equal(t, &state.auth_token) => next.run(req).await,
         Some(t) => {
             // Check per-agent tokens using constant-time compare.
-            let agent_tokens = state.agent_tokens.lock().await;
-            let valid = agent_tokens
-                .values()
-                .any(|v| auth::tokens_equal(v.as_str(), t));
-            drop(agent_tokens);
+            let valid = if let Ok(pairs) = state.kv_store.kv_list("agent_tokens").await {
+                pairs.iter().any(|(_, v)| auth::tokens_equal(v.as_str(), t))
+            } else {
+                false
+            };
             if valid {
                 return next.run(req).await;
             }
@@ -555,8 +545,7 @@ pub fn build_state(
         activity_store: activity::ActivityStore::new(),
         broadcast_tx,
         event_tx,
-        agent_messages: Arc::new(Mutex::new(HashMap::new())),
-        agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
         agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
         // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
@@ -569,7 +558,6 @@ pub fn build_state(
         http_client: reqwest::Client::new(),
         metrics,
         started_at_secs,
-        agent_cards: Arc::new(Mutex::new(HashMap::new())),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
@@ -581,7 +569,6 @@ pub fn build_state(
         audit: store!(dyn AuditRepository, mem::MemAuditRepository::default()),
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
-        compute_targets: Arc::new(Mutex::new(HashMap::new())),
         network_peers: store!(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
@@ -600,8 +587,6 @@ pub fn build_state(
             dyn SpawnLogRepository,
             mem::MemSpawnLogRepository::default()
         ),
-        agent_stacks: Arc::new(Mutex::new(HashMap::new())),
-        repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
         db_storage,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
@@ -618,24 +603,32 @@ pub fn build_state(
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
-        abac_policies: Arc::new(Mutex::new(HashMap::new())),
-        workload_attestations: Arc::new(Mutex::new(HashMap::new())),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: container_audit::new_store(),
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
-        budget_configs: Arc::new(Mutex::new(HashMap::new())),
-        budget_usages: Arc::new(Mutex::new(HashMap::new())),
+        budget_configs: store!(
+            dyn BudgetRepository,
+            mem::MemBudgetConfigRepository::default()
+        ),
+        budget_usages: store!(
+            dyn BudgetUsageRepository,
+            mem::MemBudgetUsageRepository::default()
+        ),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
-        workspaces: Arc::new(mem::MemWorkspaceRepository::default()),
-        personas: Arc::new(mem::MemPersonaRepository::default()),
-        workspace_repos: Arc::new(Mutex::new(HashMap::new())),
-        policies: Arc::new(mem::MemPolicyRepository::default()),
+        workspaces: store!(
+            dyn WorkspaceRepository,
+            mem::MemWorkspaceRepository::default()
+        ),
+        personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
+        policies: store!(dyn PolicyRepository, mem::MemPolicyRepository::default()),
         workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: Arc::new(mem::MemNotificationRepository::default()),
         wg_config: WireGuardConfig::from_env(),
+        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
+        meta_spec_sets: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -678,10 +671,8 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
         return;
     }
 
-    let mut store = state.compute_targets.lock().await;
-
     // Idempotent: skip if any target with this name already exists.
-    if store.values().any(|t| t.name == DEFAULT_NAME) {
+    if let Ok(Some(_)) = state.kv_store.kv_get("compute_targets", DEFAULT_NAME).await {
         tracing::debug!("default compute target '{DEFAULT_NAME}' already registered");
         return;
     }
@@ -697,12 +688,17 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
         }),
     };
 
-    store.insert(DEFAULT_NAME.to_string(), ct);
-    tracing::info!(
-        name = DEFAULT_NAME,
-        image = DEFAULT_IMAGE,
-        "registered default container compute target (M25)"
-    );
+    if let Ok(json) = serde_json::to_string(&ct) {
+        let _ = state
+            .kv_store
+            .kv_set("compute_targets", DEFAULT_NAME, json)
+            .await;
+        tracing::info!(
+            name = DEFAULT_NAME,
+            image = DEFAULT_IMAGE,
+            "registered default container compute target (M25)"
+        );
+    }
 }
 
 /// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).

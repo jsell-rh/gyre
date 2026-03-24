@@ -125,8 +125,11 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M27: Credential Opacity | Done | `cred-proxy` sidecar holds all API keys (`GYRE_CRED_*`), never exposes raw values to agent process; SSRF allowlist for proxy destinations; GCP SA JSON → GCE metadata emulator; Anthropic calls routed via `ANTHROPIC_BASE_URL`; JWT TTL reduced to 300s |
 | M28: UI Cohesion | Done | Global workspace selector (topbar, localStorage), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
 | M29: Workspace Integration | Done | Diesel tables for 9 platform entities, `workspace_id` filtering on agents/tasks/projects/repos/MRs API params, UI workspace selector wires all list views |
+| M30: Knowledge Graph Extraction | Done | **M30b** Push-triggered automatic Rust knowledge graph extraction: on every push to the default branch, `RustExtractor` runs in background (git archive → AST parse → persist nodes/edges → record `ArchitecturalDelta`); graph APIs return live data after push |
+| M31: UI Journeys | Done | Inbox view (unified action queue: pending reviews, spec approvals, gate failures; badge count; mark-as-seen; 60s auto-refresh), Briefing view (narrative 4-card digest since last visit), keyboard shortcuts `i`/`b`, navigation restructure; 23 new vitest tests |
+| M32: Meta-Spec Reconciliation | Done | `kind` field on `SpecEntry`/`SpecLedgerEntry` (`meta:persona`, `meta:principle`, `meta:standard`, `meta:process`); `?kind=` filter on `GET /api/v1/specs`; `GET/PUT /api/v1/workspaces/{id}/meta-spec-set` for workspace-scoped meta-spec bindings; `GET /api/v1/meta-specs/{path}/blast-radius` for impact analysis; `meta_spec_set_sha` in spawn response; MetaSpecs UI with kind badges + blast-radius modal |
 
-935 Rust + 95 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+955 Rust + 118 vitest component + 28 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 

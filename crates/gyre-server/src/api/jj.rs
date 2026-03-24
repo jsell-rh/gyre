@@ -486,17 +486,19 @@ mod tests {
         // Set ABAC policy requiring scope=repo:special.
         // Agent JWTs have scope=agent — they won't satisfy this policy.
         {
-            let mut policies = state.abac_policies.lock().await;
             let mut required = HashMap::new();
             required.insert("scope".to_string(), "repo:special".to_string());
-            policies.insert(
-                "repo-jj-abac".to_string(),
-                vec![AbacPolicy {
-                    resource_type: "repo".to_string(),
-                    resource_id: None,
-                    required_claims: required,
-                }],
-            );
+            let policies = vec![AbacPolicy {
+                resource_type: "repo".to_string(),
+                resource_id: None,
+                required_claims: required,
+            }];
+            let json = serde_json::to_string(&policies).unwrap();
+            state
+                .kv_store
+                .kv_set("abac_policies", "repo-jj-abac", json)
+                .await
+                .unwrap();
         }
 
         // Mint an agent JWT (scope=agent ≠ repo:special → ABAC will deny).
@@ -506,10 +508,11 @@ mod tests {
             .expect("mint JWT");
 
         // Register the JWT so the auth middleware accepts it.
-        {
-            let mut tokens = state.agent_tokens.lock().await;
-            tokens.insert("agent-blocked".to_string(), jwt.clone());
-        }
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-blocked", jwt.clone())
+            .await
+            .unwrap();
 
         let app = crate::build_router(state);
 
