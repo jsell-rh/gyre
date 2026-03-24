@@ -28,29 +28,9 @@ fn forbidden() -> Response {
         .into_response()
 }
 
-/// Requires Admin or Developer role.
-#[allow(dead_code)]
-pub struct RequireDeveloper(pub AuthenticatedAgent);
-
-#[axum::async_trait]
-impl FromRequestParts<Arc<AppState>> for RequireDeveloper {
-    type Rejection = Response;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let auth = AuthenticatedAgent::from_request_parts(parts, state).await?;
-        let ok = auth.agent_id == "system"
-            || auth.roles.contains(&UserRole::Admin)
-            || auth.roles.contains(&UserRole::Developer);
-        if ok {
-            Ok(RequireDeveloper(auth))
-        } else {
-            Err(forbidden())
-        }
-    }
-}
+// RequireDeveloper extractor removed (M34 Slice 4). ABAC middleware is the
+// sole authorization layer. Callers that need developer-level access are now
+// enforced via the developer-write-access built-in ABAC policy.
 
 /// Requires Admin, Developer, or Agent role.
 #[allow(dead_code)]
@@ -106,10 +86,6 @@ mod tests {
 
     use super::*;
 
-    async fn dev_handler(_: RequireDeveloper) -> StatusCode {
-        StatusCode::OK
-    }
-
     async fn agent_handler(_: RequireAgent) -> StatusCode {
         StatusCode::OK
     }
@@ -117,31 +93,8 @@ mod tests {
     fn app_with_jwt() -> Router {
         let state = make_test_state_with_jwt();
         Router::new()
-            .route("/dev", get(dev_handler))
             .route("/agent", get(agent_handler))
             .with_state(state)
-    }
-
-    fn admin_jwt() -> String {
-        sign_test_jwt(
-            &serde_json::json!({
-                "sub": "admin-sub",
-                "preferred_username": "admin-user",
-                "realm_access": { "roles": ["admin"] }
-            }),
-            3600,
-        )
-    }
-
-    fn developer_jwt() -> String {
-        sign_test_jwt(
-            &serde_json::json!({
-                "sub": "dev-sub",
-                "preferred_username": "dev-user",
-                "realm_access": { "roles": ["developer"] }
-            }),
-            3600,
-        )
     }
 
     fn agent_jwt() -> String {
@@ -164,66 +117,6 @@ mod tests {
             }),
             3600,
         )
-    }
-
-    #[tokio::test]
-    async fn admin_can_access_developer_endpoint() {
-        let resp = app_with_jwt()
-            .oneshot(
-                Request::builder()
-                    .uri("/dev")
-                    .header("Authorization", format!("Bearer {}", admin_jwt()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn developer_can_access_developer_endpoint() {
-        let resp = app_with_jwt()
-            .oneshot(
-                Request::builder()
-                    .uri("/dev")
-                    .header("Authorization", format!("Bearer {}", developer_jwt()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn agent_cannot_access_developer_endpoint() {
-        let resp = app_with_jwt()
-            .oneshot(
-                Request::builder()
-                    .uri("/dev")
-                    .header("Authorization", format!("Bearer {}", agent_jwt()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn readonly_cannot_access_developer_endpoint() {
-        let resp = app_with_jwt()
-            .oneshot(
-                Request::builder()
-                    .uri("/dev")
-                    .header("Authorization", format!("Bearer {}", readonly_jwt()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -257,15 +150,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_token_can_access_developer_endpoint() {
+    async fn global_token_can_access_agent_endpoint() {
         let state = test_state();
         let app = Router::new()
-            .route("/dev", get(dev_handler))
+            .route("/agent", get(agent_handler))
             .with_state(state);
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/dev")
+                    .uri("/agent")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -276,9 +169,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_auth_returns_401_on_developer_endpoint() {
+    async fn no_auth_returns_401_on_agent_endpoint() {
         let resp = app_with_jwt()
-            .oneshot(Request::builder().uri("/dev").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/agent").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

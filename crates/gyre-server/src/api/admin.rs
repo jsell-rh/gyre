@@ -1,6 +1,6 @@
 //! Admin-only endpoints for gyre-server.
 //!
-//! All endpoints require Admin role (enforced via [`crate::auth::AdminOnly`]).
+//! All endpoints require Admin role (enforced via ABAC middleware).
 
 use axum::{
     extract::{Path, Query, State},
@@ -12,7 +12,7 @@ use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{auth::AdminOnly, retention::RetentionPolicy, AppState};
+use crate::{retention::RetentionPolicy, AppState};
 
 use super::error::ApiError;
 use super::now_secs;
@@ -32,7 +32,6 @@ pub struct SystemHealthResponse {
 
 /// GET /api/v1/admin/health — system health summary (Admin only).
 pub async fn admin_health(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     let uptime_secs = now_secs().saturating_sub(state.started_at_secs);
@@ -68,7 +67,6 @@ pub struct JobInfo {
 
 /// GET /api/v1/admin/jobs — list background jobs with run history (Admin only).
 pub async fn admin_jobs(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<JobInfo>> {
     let defs = state.job_registry.list_jobs().await;
@@ -112,7 +110,6 @@ pub async fn admin_jobs(
 
 /// POST /api/v1/admin/jobs/{name}/run — manually trigger a job (Admin only).
 pub async fn admin_run_job(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -130,7 +127,6 @@ pub async fn admin_run_job(
 
 /// POST /api/v1/admin/snapshot — create a snapshot (Admin only).
 pub async fn admin_create_snapshot(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<crate::snapshot::SnapshotMeta>, ApiError> {
     let meta = crate::snapshot::create_snapshot(&state)
@@ -141,7 +137,6 @@ pub async fn admin_create_snapshot(
 
 /// GET /api/v1/admin/snapshots — list snapshots (Admin only).
 pub async fn admin_list_snapshots(
-    _admin: AdminOnly,
 ) -> Result<Json<Vec<crate::snapshot::SnapshotMeta>>, ApiError> {
     let snapshots = crate::snapshot::list_snapshots()
         .await
@@ -156,7 +151,6 @@ pub struct RestoreRequest {
 
 /// POST /api/v1/admin/restore — restore from snapshot (Admin only).
 pub async fn admin_restore_snapshot(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(req): Json<RestoreRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -170,7 +164,6 @@ pub async fn admin_restore_snapshot(
 
 /// DELETE /api/v1/admin/snapshots/{id} — delete a snapshot (Admin only).
 pub async fn admin_delete_snapshot(
-    _admin: AdminOnly,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     crate::snapshot::delete_snapshot(&id)
@@ -183,7 +176,6 @@ pub async fn admin_delete_snapshot(
 
 /// GET /api/v1/admin/export — export all data as JSON (Admin only).
 pub async fn admin_export(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (agents, tasks, merge_requests, activity_events) = tokio::try_join!(
@@ -210,7 +202,6 @@ pub async fn admin_export(
 
 /// GET /api/v1/admin/retention — list retention policies (Admin only).
 pub async fn admin_list_retention(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<RetentionPolicy>> {
     Json(state.retention_store.list())
@@ -218,7 +209,6 @@ pub async fn admin_list_retention(
 
 /// PUT /api/v1/admin/retention — update retention policies (Admin only).
 pub async fn admin_update_retention(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(policies): Json<Vec<RetentionPolicy>>,
 ) -> StatusCode {
@@ -238,7 +228,6 @@ pub struct AuditQuery {
 
 /// GET /api/v1/admin/audit — searchable activity log (Admin only).
 pub async fn admin_audit(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Query(q): Query<AuditQuery>,
 ) -> Json<serde_json::Value> {
@@ -264,7 +253,6 @@ pub async fn admin_audit(
 
 /// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
 pub async fn admin_kill_agent(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -344,7 +332,6 @@ pub struct ReassignRequest {
 
 /// POST /api/v1/admin/agents/{id}/reassign — reassign agent tasks (Admin only).
 pub async fn admin_reassign_agent(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<ReassignRequest>,
@@ -398,7 +385,6 @@ pub struct SeedResponse {
 
 /// POST /api/v1/admin/seed — populate demo data (Admin only, idempotent).
 pub async fn admin_seed(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SeedResponse>, ApiError> {
     use gyre_domain::{
@@ -630,7 +616,7 @@ pub struct BcpTargetsResponse {
 }
 
 /// GET /api/v1/admin/bcp/targets — BCP recovery objectives from environment (Admin only).
-pub async fn admin_bcp_targets(_admin: AdminOnly) -> Json<BcpTargetsResponse> {
+pub async fn admin_bcp_targets() -> Json<BcpTargetsResponse> {
     let rto = std::env::var("GYRE_RTO_SECONDS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -654,7 +640,6 @@ pub struct BcpDrillResponse {
 
 /// POST /api/v1/admin/bcp/drill — create+verify a snapshot, return drill result (Admin only).
 pub async fn admin_bcp_drill(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BcpDrillResponse>, ApiError> {
     let start = std::time::Instant::now();
@@ -728,8 +713,13 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    // NOTE: auth enforcement (401/403) is now handled by ABAC middleware, not handler-level
+    // extractors. These handler-unit tests verify handler logic only; integration tests cover
+    // ABAC enforcement.
     #[tokio::test]
-    async fn admin_health_requires_auth() {
+    async fn admin_health_no_auth_handler_allows() {
+        // Without middleware, handler has no auth extractor and returns 200.
+        // ABAC middleware (require_auth + abac) enforces 401/403 in the full stack.
         let resp = app_no_jwt()
             .oneshot(
                 Request::builder()
@@ -739,7 +729,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -777,7 +767,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_health_developer_gets_403() {
+    async fn admin_health_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware (not tested here) enforces 403.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -788,7 +779,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -813,7 +804,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_jobs_developer_gets_403() {
+    async fn admin_jobs_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -824,7 +816,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1055,7 +1047,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_kill_requires_admin() {
+    async fn admin_kill_agent_not_found() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
+        // Agent "some-id" doesn't exist → 404 from handler.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1067,7 +1061,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     // ── Export tests ──────────────────────────────────────────────────────────
@@ -1095,7 +1089,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_export_requires_admin() {
+    async fn admin_export_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1106,7 +1101,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ── Retention tests ───────────────────────────────────────────────────────
@@ -1163,7 +1158,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_retention_requires_admin() {
+    async fn admin_retention_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1174,7 +1170,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ── Snapshot tests ────────────────────────────────────────────────────────
@@ -1374,7 +1370,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_seed_requires_admin() {
+    async fn admin_seed_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1386,6 +1383,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

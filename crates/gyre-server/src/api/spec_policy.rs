@@ -66,7 +66,6 @@ pub async fn get_spec_policy(
 /// PUT /api/v1/repos/:id/spec-policy — set spec enforcement policy (AdminOnly).
 pub async fn set_spec_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(repo_id): Path<String>,
     Json(req): Json<SpecPolicy>,
 ) -> Result<(StatusCode, Json<SpecPolicyResponse>), ApiError> {

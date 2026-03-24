@@ -20,7 +20,6 @@ use crate::{
 };
 
 use super::{error::ApiError, new_id, now_secs};
-use crate::auth::AdminOnly;
 
 // ── Request type ──────────────────────────────────────────────────────────────
 
@@ -48,7 +47,6 @@ pub struct ReleasePrepareRequest {
 /// provenance store, and optionally opens a release MR.
 pub async fn release_prepare(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
     Json(req): Json<ReleasePrepareRequest>,
 ) -> Result<Json<ReleasePrepareResponse>, ApiError> {
     // Validate optional ref inputs to prevent git argument injection.
