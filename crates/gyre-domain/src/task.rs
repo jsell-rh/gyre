@@ -39,7 +39,10 @@ pub struct Task {
     pub pr_link: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    pub workspace_id: Option<Id>,
+    /// Workspace that governs this task (ABAC boundary). Non-optional per M34 hierarchy enforcement.
+    pub workspace_id: Id,
+    /// Repo that owns the spec this task implements. Non-optional per M34 hierarchy enforcement.
+    pub repo_id: Id,
     /// Spec path this task was created to implement/review (e.g. "specs/system/agent-gates.md").
     pub spec_path: Option<String>,
 }
@@ -59,7 +62,8 @@ impl Task {
             pr_link: None,
             created_at,
             updated_at: created_at,
-            workspace_id: None,
+            workspace_id: Id::new("default"),
+            repo_id: Id::new(""),
             spec_path: None,
         }
     }
