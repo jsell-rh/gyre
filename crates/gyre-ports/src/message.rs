@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use gyre_common::{Id, message::Message};
+use gyre_common::{message::Message, Id};
 
 /// Port trait for message persistence (Directed and Event tier).
 /// Telemetry-tier messages do NOT go through this trait — they use TelemetryBuffer.

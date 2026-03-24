@@ -240,7 +240,9 @@ mod tests {
     fn ws_subscribe_roundtrip() {
         use crate::Id;
         let msg = WsMessage::Subscribe {
-            scopes: vec![SubscribeScope { workspace_id: Id::new("ws-42") }],
+            scopes: vec![SubscribeScope {
+                workspace_id: Id::new("ws-42"),
+            }],
             last_seen: Some(1_711_324_800_000),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -261,7 +263,10 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"ReplayCatchUp\""));
         let decoded: WsMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(decoded, WsMessage::ReplayCatchUp { truncated: true }));
+        assert!(matches!(
+            decoded,
+            WsMessage::ReplayCatchUp { truncated: true }
+        ));
     }
 
     #[test]
@@ -276,7 +281,9 @@ mod tests {
     fn ws_subscribe_null_last_seen() {
         use crate::Id;
         let msg = WsMessage::Subscribe {
-            scopes: vec![SubscribeScope { workspace_id: Id::new("ws-1") }],
+            scopes: vec![SubscribeScope {
+                workspace_id: Id::new("ws-1"),
+            }],
             last_seen: None,
         };
         let json = serde_json::to_string(&msg).unwrap();

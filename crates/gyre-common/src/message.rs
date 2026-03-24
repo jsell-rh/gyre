@@ -352,7 +352,10 @@ impl TelemetryBuffer {
                 .iter()
                 .map(|entry| (entry.key().clone(), entry.value().len()))
                 .collect();
-            let max_key = entries.into_iter().max_by_key(|(_, len)| *len).map(|(key, _)| key);
+            let max_key = entries
+                .into_iter()
+                .max_by_key(|(_, len)| *len)
+                .map(|(key, _)| key);
             if let Some(key) = max_key {
                 self.buffers.remove(&key);
             }

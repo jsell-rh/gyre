@@ -7,7 +7,5 @@ pub mod protocol;
 pub use error::GyreError;
 pub use graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility};
 pub use id::Id;
-pub use message::{
-    Destination, Message, MessageKind, MessageOrigin, MessageTier, TelemetryBuffer,
-};
+pub use message::{Destination, Message, MessageKind, MessageOrigin, MessageTier, TelemetryBuffer};
 pub use protocol::{ActivityEventData, AgEventType, SubscribeScope, WsMessage};
