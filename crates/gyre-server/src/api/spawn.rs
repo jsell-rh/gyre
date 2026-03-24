@@ -5,8 +5,8 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentStatus, AgentWorktree, AnalyticsEvent, DisconnectedBehavior, MergeRequest,
-    TaskStatus,
+    Agent, AgentStatus, AgentWorktree, AnalyticsEvent, DisconnectedBehavior, LoopConfig,
+    MergeRequest, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -35,6 +35,9 @@ pub struct SpawnAgentRequest {
     pub compute_target_id: Option<String>,
     /// How the agent behaves when the server becomes unreachable (BCP graceful degradation).
     pub disconnected_behavior: Option<DisconnectedBehavior>,
+    /// When present, the server manages the Ralph loop session cycle automatically.
+    /// When absent, the agent runs a single session (backward-compatible).
+    pub loop_config: Option<LoopConfig>,
 }
 
 #[derive(Serialize)]
@@ -220,9 +223,9 @@ pub async fn spawn_agent(
     // Write custom ref namespaces (best-effort)
     if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
         let agent_ref = format!("refs/agents/{}/head", agent.id);
-        let ralph_ref = format!("refs/ralph/{}/implement", task.id);
+        let task_ref = format!("refs/tasks/{}", task.id);
         git_refs::write_ref(&repo.path, &agent_ref, &sha).await;
-        git_refs::write_ref(&repo.path, &ralph_ref, &sha).await;
+        git_refs::write_ref(&repo.path, &task_ref, &sha).await;
     }
 
     // Record worktree in DB linked to agent and task

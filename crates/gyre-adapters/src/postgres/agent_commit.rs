@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{AgentCommit, RalphStep};
+use gyre_domain::AgentCommit;
 use gyre_ports::AgentCommitRepository;
 use std::sync::Arc;
 
@@ -20,7 +20,6 @@ struct AgentCommitRow {
     branch: String,
     timestamp: i64,
     task_id: Option<String>,
-    ralph_step: Option<String>,
     spawned_by_user_id: Option<String>,
     parent_agent_id: Option<String>,
     model_context: Option<String>,
@@ -29,7 +28,6 @@ struct AgentCommitRow {
 
 impl From<AgentCommitRow> for AgentCommit {
     fn from(r: AgentCommitRow) -> Self {
-        let ralph_step = r.ralph_step.as_deref().and_then(RalphStep::from_str);
         AgentCommit {
             id: Id::new(r.id),
             agent_id: Id::new(r.agent_id),
@@ -38,7 +36,6 @@ impl From<AgentCommitRow> for AgentCommit {
             branch: r.branch,
             timestamp: r.timestamp as u64,
             task_id: r.task_id,
-            ralph_step,
             spawned_by_user_id: r.spawned_by_user_id,
             parent_agent_id: r.parent_agent_id,
             model_context: r.model_context,
@@ -57,7 +54,6 @@ struct AgentCommitRecord<'a> {
     branch: &'a str,
     timestamp: i64,
     task_id: Option<&'a str>,
-    ralph_step: Option<&'a str>,
     spawned_by_user_id: Option<&'a str>,
     parent_agent_id: Option<&'a str>,
     model_context: Option<&'a str>,
@@ -74,7 +70,6 @@ impl<'a> From<&'a AgentCommit> for AgentCommitRecord<'a> {
             branch: &m.branch,
             timestamp: m.timestamp as i64,
             task_id: m.task_id.as_deref(),
-            ralph_step: m.ralph_step.as_ref().map(|s| s.as_str()),
             spawned_by_user_id: m.spawned_by_user_id.as_deref(),
             parent_agent_id: m.parent_agent_id.as_deref(),
             model_context: m.model_context.as_deref(),
@@ -155,23 +150,6 @@ impl AgentCommitRepository for PgStorage {
                 .order(agent_commits::timestamp.desc())
                 .load::<AgentCommitRow>(&mut *conn)
                 .context("find agent_commits by task")?;
-            Ok(rows.into_iter().map(AgentCommit::from).collect())
-        })
-        .await?
-    }
-
-    async fn find_by_ralph_step(&self, repo_id: &Id, ralph_step: &str) -> Result<Vec<AgentCommit>> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = repo_id.clone();
-        let ralph_step = ralph_step.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
-            let mut conn = pool.get().context("get db connection")?;
-            let rows = agent_commits::table
-                .filter(agent_commits::repository_id.eq(repo_id.as_str()))
-                .filter(agent_commits::ralph_step.eq(ralph_step.as_str()))
-                .order(agent_commits::timestamp.desc())
-                .load::<AgentCommitRow>(&mut *conn)
-                .context("find agent_commits by ralph_step")?;
             Ok(rows.into_iter().map(AgentCommit::from).collect())
         })
         .await?

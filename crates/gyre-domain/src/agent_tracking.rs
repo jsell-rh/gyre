@@ -1,44 +1,5 @@
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-
-/// Represents a step in the Ralph autonomous development loop.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RalphStep {
-    Spec,
-    Implement,
-    Review,
-    Merge,
-}
-
-impl fmt::Display for RalphStep {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl RalphStep {
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "spec" => Some(RalphStep::Spec),
-            "implement" => Some(RalphStep::Implement),
-            "review" => Some(RalphStep::Review),
-            "merge" => Some(RalphStep::Merge),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RalphStep::Spec => "spec",
-            RalphStep::Implement => "implement",
-            RalphStep::Review => "review",
-            RalphStep::Merge => "merge",
-        }
-    }
-}
 
 /// Records which agent authored a specific git commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,8 +12,6 @@ pub struct AgentCommit {
     pub timestamp: u64,
     /// Task this commit is associated with.
     pub task_id: Option<String>,
-    /// Which step of the Ralph loop produced this commit.
-    pub ralph_step: Option<RalphStep>,
     /// User who spawned the agent that made this commit.
     pub spawned_by_user_id: Option<String>,
     /// Parent agent that spawned this agent.
@@ -81,7 +40,6 @@ impl AgentCommit {
             branch: branch.into(),
             timestamp,
             task_id: None,
-            ralph_step: None,
             spawned_by_user_id: None,
             parent_agent_id: None,
             model_context: None,
@@ -93,13 +51,11 @@ impl AgentCommit {
     pub fn with_provenance(
         mut self,
         task_id: Option<String>,
-        ralph_step: Option<RalphStep>,
         spawned_by_user_id: Option<String>,
         parent_agent_id: Option<String>,
         model_context: Option<String>,
     ) -> Self {
         self.task_id = task_id;
-        self.ralph_step = ralph_step;
         self.spawned_by_user_id = spawned_by_user_id;
         self.parent_agent_id = parent_agent_id;
         self.model_context = model_context;
@@ -110,6 +66,65 @@ impl AgentCommit {
     pub fn with_attestation_level(mut self, level: impl Into<String>) -> Self {
         self.attestation_level = Some(level.into());
         self
+    }
+}
+
+/// One ephemeral execution of an agent (one context window, one fresh start).
+///
+/// A Ralph loop is one agent running multiple sessions until convergence.
+/// Sessions track execution metadata; the provenance chain tracks code attribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: Id,
+    pub agent_id: Id,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    /// Total cost in USD for this session.
+    pub cost: Option<f64>,
+    /// Total tokens used across input + output.
+    pub tokens_used: Option<u64>,
+    /// IDs of inbox messages read during this session.
+    pub messages_read: Vec<String>,
+}
+
+impl Session {
+    pub fn new(id: Id, agent_id: Id, started_at: u64) -> Self {
+        Self {
+            id,
+            agent_id,
+            started_at,
+            ended_at: None,
+            cost: None,
+            tokens_used: None,
+            messages_read: Vec::new(),
+        }
+    }
+}
+
+/// Configuration for the Ralph loop terminal conditions.
+///
+/// When present on a spawn request, the server manages the session cycle automatically.
+/// When absent, the agent runs a single session (backward-compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopConfig {
+    /// Enable agent review after gates pass (default: true).
+    pub agent_review: bool,
+    /// Persona ID to use for the reviewer agent.
+    pub reviewer_persona_id: Option<String>,
+    /// Maximum number of sessions before escalating to orchestrator.
+    pub max_iterations: u32,
+    /// Maximum number of reviewer rejections before escalating.
+    pub max_review_rejections: u32,
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            agent_review: true,
+            reviewer_persona_id: None,
+            max_iterations: 50,
+            max_review_rejections: 5,
+        }
     }
 }
 
@@ -165,7 +180,6 @@ mod tests {
         assert_eq!(ac.branch, "main");
         assert_eq!(ac.agent_id, Id::new("agent1"));
         assert!(ac.task_id.is_none());
-        assert!(ac.ralph_step.is_none());
     }
 
     #[test]
@@ -178,23 +192,8 @@ mod tests {
             "feat/x",
             2000,
         )
-        .with_provenance(
-            Some("TASK-001".to_string()),
-            Some(RalphStep::Implement),
-            None,
-            None,
-            None,
-        );
+        .with_provenance(Some("TASK-001".to_string()), None, None, None);
         assert_eq!(ac.task_id.as_deref(), Some("TASK-001"));
-        assert_eq!(ac.ralph_step, Some(RalphStep::Implement));
-    }
-
-    #[test]
-    fn test_ralph_step_display() {
-        assert_eq!(RalphStep::Spec.to_string(), "spec");
-        assert_eq!(RalphStep::Implement.to_string(), "implement");
-        assert_eq!(RalphStep::Review.to_string(), "review");
-        assert_eq!(RalphStep::Merge.to_string(), "merge");
     }
 
     #[test]
@@ -225,5 +224,22 @@ mod tests {
             3000,
         );
         assert!(wt.task_id.is_none());
+    }
+
+    #[test]
+    fn test_session_new() {
+        let s = Session::new(Id::new("s1"), Id::new("agent1"), 1000);
+        assert_eq!(s.agent_id, Id::new("agent1"));
+        assert_eq!(s.started_at, 1000);
+        assert!(s.ended_at.is_none());
+        assert!(s.messages_read.is_empty());
+    }
+
+    #[test]
+    fn test_loop_config_default() {
+        let lc = LoopConfig::default();
+        assert!(lc.agent_review);
+        assert_eq!(lc.max_iterations, 50);
+        assert_eq!(lc.max_review_rejections, 5);
     }
 }
