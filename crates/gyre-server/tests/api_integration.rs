@@ -205,7 +205,10 @@ async fn invalid_token_returns_401() {
 async fn post_without_token_returns_401() {
     let ctx = Ctx::new().await;
     let resp = ctx
-        .post_no_auth("/api/v1/repos", json!({"workspace_id": "ws-1", "name": "x"}))
+        .post_no_auth(
+            "/api/v1/repos",
+            json!({"workspace_id": "ws-1", "name": "x"}),
+        )
         .await;
     assert_eq!(resp.status(), 401);
 }
