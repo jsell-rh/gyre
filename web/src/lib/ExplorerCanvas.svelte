@@ -1,12 +1,17 @@
 <script>
+  import { getContext } from 'svelte';
+  import { api } from './api.js';
   import Badge from './Badge.svelte';
   import EmptyState from './EmptyState.svelte';
 
   let {
     nodes = [],
     edges = [],
+    repoId = '',
     onSelectNode = undefined,
   } = $props();
+
+  const navigate = getContext('navigate');
 
   // Pan/zoom state
   let svgEl = $state(null);
@@ -17,11 +22,44 @@
   // Selected node
   let selectedNode = $state(null);
 
+  // Context menu state
+  let contextMenu = $state(null); // { x, y, node }
+
+  // Find Usages highlight state
+  let highlightedNodeIds = $state(new Set());
+
+  // Drill-in state: when set, only show this node + immediate neighbors
+  let drillNode = $state(null);
+
+  // Derived: visible nodes/edges (drill-in or full graph)
+  let visibleNodes = $derived(() => {
+    if (!drillNode) return nodes;
+    const neighborIds = new Set([drillNode.id]);
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      if (src === drillNode.id) neighborIds.add(tgt);
+      if (tgt === drillNode.id) neighborIds.add(src);
+    }
+    return nodes.filter(n => neighborIds.has(n.id));
+  });
+
+  let visibleEdges = $derived(() => {
+    if (!drillNode) return edges;
+    const visibleIds = new Set(visibleNodes().map(n => n.id));
+    return edges.filter(e => {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      return visibleIds.has(src) && visibleIds.has(tgt);
+    });
+  });
+
   // Layout: position nodes
   let nodePositions = $derived(() => {
-    if (!nodes.length) return {};
+    const ns = visibleNodes();
+    if (!ns.length) return {};
     const byType = {};
-    for (const n of nodes) {
+    for (const n of ns) {
       const t = n.node_type ?? 'Unknown';
       byType[t] = (byType[t] ?? []);
       byType[t].push(n);
@@ -149,6 +187,87 @@
     selectedNode = null;
   }
 
+  // Right-click context menu
+  function onContextMenu(e) {
+    e.preventDefault();
+    const nodeEl = e.target.closest('.graph-node');
+    if (!nodeEl) {
+      contextMenu = null;
+      return;
+    }
+    // Find which node was right-clicked by matching data-node-id attribute
+    const nodeId = nodeEl.dataset.nodeId;
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) { contextMenu = null; return; }
+    contextMenu = { x: e.clientX, y: e.clientY, node };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  function onKeydown(e) {
+    if (e.key === 'Escape') {
+      contextMenu = null;
+    }
+  }
+
+  // Context menu actions
+  function ctxViewDetails(node) {
+    closeContextMenu();
+    selectNode(node);
+  }
+
+  async function ctxFindUsages(node) {
+    closeContextMenu();
+    if (!repoId) return;
+    try {
+      const result = await api.repoGraphNode(repoId, node.id);
+      // result has .node and .edges; collect connected node IDs
+      const connectedIds = new Set([node.id]);
+      for (const e of (result.edges ?? [])) {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        if (src) connectedIds.add(src);
+        if (tgt) connectedIds.add(tgt);
+      }
+      highlightedNodeIds = connectedIds;
+    } catch {
+      // silently ignore fetch errors
+    }
+  }
+
+  function ctxGoToSpec(node) {
+    closeContextMenu();
+    if (node.spec_path && navigate) {
+      navigate('specs');
+    }
+  }
+
+  function ctxCopyName(node) {
+    closeContextMenu();
+    navigator.clipboard?.writeText(node.qualified_name ?? node.name ?? '');
+  }
+
+  // Double-click drill-in
+  function onDblClick(e) {
+    const nodeEl = e.target.closest('.graph-node');
+    if (!nodeEl) return;
+    const nodeId = nodeEl.dataset.nodeId;
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    drillNode = node;
+    highlightedNodeIds = new Set();
+    // Reset viewbox after drill-in
+    setTimeout(resetView, 0);
+  }
+
+  function exitDrillIn() {
+    drillNode = null;
+    highlightedNodeIds = new Set();
+    setTimeout(resetView, 0);
+  }
+
   // Node shape renderers
   function rectPath(cx, cy, w, h) {
     const x = cx - w / 2, y = cy - h / 2;
@@ -177,7 +296,11 @@
   }
 </script>
 
-<div class="canvas-wrap">
+<svelte:window onkeydown={onKeydown} />
+
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="canvas-wrap" onclick={closeContextMenu}>
   {#if !nodes.length}
     <EmptyState
       title="No graph data"
@@ -191,7 +314,16 @@
         </svg>
         Reset
       </button>
-      <span class="node-count">{nodes.length} nodes · {edges.length} edges</span>
+      {#if drillNode}
+        <button class="tool-btn drill-back" onclick={exitDrillIn}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+            <path d="M19 12H5M12 5l-7 7 7 7"/>
+          </svg>
+          Full Graph
+        </button>
+        <span class="drill-label">Drill-in: <strong>{drillNode.name}</strong></span>
+      {/if}
+      <span class="node-count">{visibleNodes().length} nodes · {visibleEdges().length} edges</span>
       <div class="legend">
         {#each [['Package','#7c5ff5'],['Module','#4a9eff'],['Type','#22c55e'],['Interface','#f59e0b'],['Function','#14b8a6'],['Endpoint','#ef4444'],['Component','#a78bfa'],['Table','#9ca3af'],['Constant','#fbbf24']] as [label, color]}
           <span class="legend-item">
@@ -211,12 +343,14 @@
         class:panning={isPanning}
         viewBox="{viewBox.x} {viewBox.y} {viewBox.w} {viewBox.h}"
         role="application"
-        aria-label="Architecture graph canvas — pan with drag, zoom with scroll"
+        aria-label="Architecture graph canvas — pan with drag, zoom with scroll, right-click for options, double-click to drill in"
         onmousedown={onMouseDown}
         onmousemove={onMouseMove}
         onmouseup={onMouseUp}
         onmouseleave={onMouseUp}
         onwheel={onWheel}
+        oncontextmenu={onContextMenu}
+        ondblclick={onDblClick}
       >
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
@@ -228,7 +362,7 @@
         </defs>
 
         <!-- Edges -->
-        {#each edges as edge}
+        {#each visibleEdges() as edge}
           {@const from = getPos(edge.source_id ?? edge.from_node_id ?? edge.from)}
           {@const to = getPos(edge.target_id ?? edge.to_node_id ?? edge.to)}
           <line
@@ -240,14 +374,19 @@
         {/each}
 
         <!-- Nodes -->
-        {#each nodes as node}
+        {#each visibleNodes() as node}
           {@const pos = getPos(node.id)}
           {@const colors = nodeColor(node.node_type)}
           {@const shape = nodeShape(node.node_type)}
           {@const isSelected = selectedNode?.id === node.id}
+          {@const isHighlighted = highlightedNodeIds.size > 0 && highlightedNodeIds.has(node.id)}
+          {@const isDimmed = highlightedNodeIds.size > 0 && !highlightedNodeIds.has(node.id)}
           <g
             class="graph-node"
             class:selected={isSelected}
+            class:highlighted={isHighlighted}
+            class:dimmed={isDimmed}
+            data-node-id={node.id}
             transform="translate({pos.x},{pos.y})"
             role="button"
             tabindex="0"
@@ -260,24 +399,24 @@
               <path
                 d={diamondPath(0, 0, 22)}
                 fill={colors.fill}
-                stroke={isSelected ? '#fff' : colors.stroke}
-                stroke-width={isSelected ? 2 : 1.5}
+                stroke={isSelected ? '#fff' : isHighlighted ? '#facc15' : colors.stroke}
+                stroke-width={isSelected || isHighlighted ? 2 : 1.5}
                 opacity="0.9"
               />
             {:else if shape === 'ellipse'}
               <ellipse
                 rx="28" ry="14"
                 fill={colors.fill}
-                stroke={isSelected ? '#fff' : colors.stroke}
-                stroke-width={isSelected ? 2 : 1.5}
+                stroke={isSelected ? '#fff' : isHighlighted ? '#facc15' : colors.stroke}
+                stroke-width={isSelected || isHighlighted ? 2 : 1.5}
                 opacity="0.9"
               />
             {:else if shape === 'hexagon'}
               <path
                 d={hexPath(0, 0, 22)}
                 fill={colors.fill}
-                stroke={isSelected ? '#fff' : colors.stroke}
-                stroke-width={isSelected ? 2 : 1.5}
+                stroke={isSelected ? '#fff' : isHighlighted ? '#facc15' : colors.stroke}
+                stroke-width={isSelected || isHighlighted ? 2 : 1.5}
                 opacity="0.9"
               />
             {:else}
@@ -285,8 +424,8 @@
               <path
                 d={rectPath(0, 0, 64, 28)}
                 fill={colors.fill}
-                stroke={isSelected ? '#fff' : colors.stroke}
-                stroke-width={isSelected ? 2 : 1.5}
+                stroke={isSelected ? '#fff' : isHighlighted ? '#facc15' : colors.stroke}
+                stroke-width={isSelected || isHighlighted ? 2 : 1.5}
                 opacity="0.9"
               />
             {/if}
@@ -397,6 +536,52 @@
   {/if}
 </div>
 
+<!-- Context menu (rendered outside SVG, positioned at cursor) -->
+{#if contextMenu}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="ctx-menu"
+    style="left:{contextMenu.x}px; top:{contextMenu.y}px"
+    onclick={(e) => e.stopPropagation()}
+    role="menu"
+    tabindex="-1"
+    aria-label="Node context menu"
+  >
+    <button class="ctx-item" role="menuitem" onclick={() => ctxViewDetails(contextMenu.node)}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true">
+        <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+      </svg>
+      View Details
+    </button>
+    <button class="ctx-item" role="menuitem" onclick={() => ctxFindUsages(contextMenu.node)}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true">
+        <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/>
+      </svg>
+      Find Usages
+    </button>
+    <button
+      class="ctx-item"
+      class:disabled={!contextMenu.node.spec_path}
+      role="menuitem"
+      onclick={() => ctxGoToSpec(contextMenu.node)}
+      disabled={!contextMenu.node.spec_path}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
+      </svg>
+      Go to Spec
+    </button>
+    <div class="ctx-separator"></div>
+    <button class="ctx-item" role="menuitem" onclick={() => ctxCopyName(contextMenu.node)}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+      </svg>
+      Copy Name
+    </button>
+  </div>
+{/if}
+
 <style>
   .canvas-wrap {
     display: flex;
@@ -434,6 +619,21 @@
   .tool-btn:hover {
     border-color: var(--color-primary);
     color: var(--color-text);
+  }
+
+  .drill-back {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .drill-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .drill-label strong {
+    color: var(--color-text);
+    font-family: var(--font-mono);
   }
 
   .node-count {
@@ -504,6 +704,62 @@
   .graph-node.selected path,
   .graph-node.selected ellipse {
     filter: brightness(1.4);
+  }
+
+  .graph-node.highlighted path,
+  .graph-node.highlighted ellipse {
+    filter: brightness(1.5) drop-shadow(0 0 6px #facc15);
+  }
+
+  .graph-node.dimmed {
+    opacity: 0.3;
+  }
+
+  /* Context menu */
+  .ctx-menu {
+    position: fixed;
+    z-index: 1000;
+    background: var(--color-surface-elevated, #1e293b);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius, 4px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    min-width: 160px;
+    padding: 4px 0;
+    font-size: var(--text-sm, 13px);
+    font-family: var(--font-body);
+  }
+
+  .ctx-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 14px;
+    background: transparent;
+    border: none;
+    color: var(--color-text, #f1f5f9);
+    cursor: pointer;
+    text-align: left;
+    font-size: var(--text-sm, 13px);
+    font-family: var(--font-body);
+    transition: background var(--transition-fast, 0.1s);
+  }
+
+  .ctx-item:hover:not(.disabled) {
+    background: var(--color-surface, #0f172a);
+    color: var(--color-primary, #ee0000);
+  }
+
+  .ctx-item.disabled,
+  .ctx-item:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .ctx-separator {
+    height: 1px;
+    background: var(--color-border, #1e293b);
+    margin: 4px 0;
   }
 
   /* Detail panel */
