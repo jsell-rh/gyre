@@ -21,7 +21,6 @@ GET  /api/v1/workspaces/:workspace_id/repos
 GET  /api/v1/workspaces/:workspace_id/tasks
 GET  /api/v1/workspaces/:workspace_id/agents
 GET  /api/v1/workspaces/:workspace_id/merge-requests
-GET  /api/v1/workspaces/:workspace_id/repos/:repo_id/merge-requests
 ```
 
 These are the **primary access patterns**. Clients list entities within a governance boundary.
@@ -51,7 +50,7 @@ POST /api/v1/admin/search/reindex
 GET  /api/v1/admin/audit
 ```
 
-All `/admin/` endpoints require the `AdminOnly` extractor. No exceptions.
+All `/admin/` endpoints are restricted to Admin role via the `admin-all-operations` ABAC policy. No exceptions.
 
 ### 1.4 Rule Summary
 
@@ -60,7 +59,7 @@ All `/admin/` endpoints require the `AdminOnly` extractor. No exceptions.
 | `/api/v1/workspaces/:ws_id/<entities>` | List/create within a workspace | ABAC: caller must be workspace member |
 | `/api/v1/<entities>/:id` | Read/update/delete by ID | ABAC: caller must have access to entity's workspace |
 | `/api/v1/<entities>/:id/<sub-resource>` | Sub-resources of an entity | ABAC: same as parent |
-| `/api/v1/admin/<anything>` | Cross-cutting admin operations | AdminOnly extractor required |
+| `/api/v1/admin/<anything>` | Cross-cutting admin operations | ABAC `admin-all-operations` policy |
 
 ---
 
@@ -131,7 +130,7 @@ With the appropriate HTTP status code. No error codes, no nested error objects.
 - **Filtering:** `?status=active&workspace_id=<uuid>` — exact match filters
 - **Pagination:** `?limit=50&offset=0` — limit/offset model
 - **Sorting:** `?sort=created_at&order=desc` — explicit field + direction
-- **Temporal:** `?since=<epoch>&until=<epoch>` — Unix epoch seconds, not ISO strings
+- **Temporal:** `?since=<epoch>&until=<epoch>` — Unix epoch seconds by default. Endpoints that require sub-second precision (e.g., message bus cursors) may use epoch milliseconds — document the unit in the endpoint spec.
 
 ### 3.4 Status Codes
 
@@ -151,19 +150,20 @@ With the appropriate HTTP status code. No error codes, no nested error objects.
 
 ## 4. Sub-Resource Depth
 
-**Maximum nesting depth: 2 levels** from the API version prefix.
+**Maximum nesting depth: 2 resource levels** from the API version prefix. A "resource level" is a collection + optional ID pair.
 
 ```
-OK:   /api/v1/repos/:id/gates/:gate_id
-OK:   /api/v1/workspaces/:workspace_id/repos
+OK:   /api/v1/repos/:id/gates/:gate_id                           (2 levels: repos, gates)
+OK:   /api/v1/workspaces/:workspace_id/repos                     (2 levels: workspaces, repos)
+OK:   /api/v1/workspaces/:workspace_id/repos/:repo_id            (2 levels: workspaces, repos)
 
-BAD:  /api/v1/workspaces/:ws_id/repos/:repo_id/gates/:gate_id/results
+BAD:  /api/v1/workspaces/:ws_id/repos/:repo_id/gates/:gate_id   (3 levels)
 ```
 
-If you need deeper access, use the flat convenience route for the intermediate entity, then access its sub-resources:
+If you need deeper access, use the flat convenience route for the intermediate entity:
 
 ```
-GET /api/v1/repos/:id/gates/:gate_id       (not nested under workspace)
+GET /api/v1/repos/:id/gates/:gate_id       (access repo sub-resources directly)
 ```
 
 ---
@@ -188,11 +188,9 @@ Every endpoint handler must declare its authorization requirements via one of:
 | Mechanism | When |
 |---|---|
 | No auth (public) | Health checks, OIDC discovery, version |
-| Global auth middleware only | Endpoints transitioning to ABAC (must have a tracking issue) |
-| ABAC middleware evaluation | Standard — subject/resource/action evaluated against policies |
-| `AdminOnly` extractor | Admin endpoints (defense-in-depth alongside ABAC) |
+| ABAC middleware evaluation | All authenticated endpoints — subject/resource/action evaluated against built-in + custom policies |
 
-**No handler that modifies state may rely solely on global auth middleware.** This is enforced by `scripts/check-api-auth.sh`.
+ABAC is the sole authorization layer (`hierarchy-enforcement.md` §4). There are no per-handler RBAC extractors. Every route (GET/POST/PUT/DELETE) must have a `RouteResourceMapping` entry in the ABAC `ResourceResolver` — workspace-membership enforcement requires resource resolution on reads too. This is enforced by `scripts/check-api-auth.sh`.
 
 ---
 
@@ -200,14 +198,13 @@ Every endpoint handler must declare its authorization requirements via one of:
 
 ### `scripts/check-api-auth.sh`
 
-Scans all handler function signatures registered in `api_router()`. Fails if any `POST`, `PUT`, or `DELETE` handler lacks an authorization extractor (`AdminOnly`, `RequireDeveloper`, `RequireAgent`, `RequireReadOnly`, or `AuthenticatedAgent` with inline ABAC check).
+Verifies all endpoints have ABAC resource resolution configured. Scans `api_router()` for all route registrations and checks each against the `ResourceResolver` registry — any route that lacks a `RouteResourceMapping` entry (and is not in the ABAC-exempt list) fails with remediation instructions. This includes GET routes, because workspace-membership enforcement requires knowing the resource's workspace on reads too.
 
 ### `scripts/check-api-conventions.sh`
 
 Scans route registrations for:
 - Abbreviated path parameters (`:wt_id`, `:dep_id`)
-- Admin-namespace endpoints missing `AdminOnly`
 - Singular resource names where plural is required
-- Nesting depth > 2
+- Nesting depth > 2 resource levels
 
 Both scripts run in CI and as pre-commit hooks.

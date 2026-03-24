@@ -78,7 +78,11 @@ pub enum Destination {
 }
 ```
 
-**`workspace_id` is `Option<Id>`:** Most messages have a workspace scope. `Broadcast` messages do not — they span all workspaces (admin dashboards, `DataSeeded`). The DB column is `NOT NULL` because Broadcast messages are never persisted (in-memory only). **Adapter implementation note:** The Diesel model struct for DB persistence should use `workspace_id: String` (non-optional). The `Message` domain struct uses `Option<Id>`. The adapter's `store()` method rejects messages with `workspace_id: None` — this is enforced by construction since only Directed and Event tier messages are stored, and the send handler validates that these always have a workspace. Non-Broadcast messages with `workspace_id: None` are rejected with 400 at the API layer.
+**`workspace_id` is `Option<Id>`:** Most messages have a workspace scope. `Broadcast` messages do not — they span all workspaces (admin dashboards, `DataSeeded`). The DB column is `NOT NULL` because Broadcast messages are never persisted.
+
+**Note on `check-hierarchy.sh`:** That script only checks `gyre-domain/src/` structs. `Message` lives in `gyre-common` and is not subject to the hierarchy lint. The `Option<Id>` is intentional for the in-memory Broadcast path. The Diesel model struct uses `workspace_id: String` (non-optional) — the adapter maps `Option<Id>` to the non-null column. `store()` returns `Err` on `workspace_id: None` (unreachable by construction since Broadcast messages are never stored, but returns an error rather than panicking for safety).
+
+**Server-originated telemetry/events:** When the server constructs messages internally (not via the API), it is responsible for setting `workspace_id` correctly. The `send_message()` helper function validates: if `destination != Broadcast && workspace_id.is_none()`, it returns `Err` and logs at `error` level. The adapter's `store()` method also returns `Err` on `workspace_id: None` — never panics. Broadcast messages (`DataSeeded`, `QueueUpdated`) bypass `store()` entirely — they are pushed to the broadcast channel only.
 
 **Origin and tenant resolution from auth context:**
 
@@ -165,7 +169,9 @@ pub enum MessageKind {
 - Telemetry tier requires `Destination::Workspace(id)`. Telemetry + Broadcast is rejected with 400 — there is no valid `TelemetryBuffer` key for `workspace_id: None`. Telemetry + Agent is rejected — telemetry is observability, not communication.
 - Event tier works with any destination.
 
-**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `AgentError`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403. New server-only kinds get the restriction by adding them to the match arm in `server_only()`.
+**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `AgentError`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
+
+**Broadcast-only kinds:** `DataSeeded` and `QueueUpdated` use `Destination::Broadcast` with `workspace_id: None`. They are server-only AND storage-exempt — they flow through the in-memory broadcast channel only, never hitting `MessageRepository::store()`. The send path must short-circuit before attempting storage for these kinds.
 
 **`Custom(String)` serialization:** Serde's `#[serde(other)]` attribute only works on unit variants, not tuple variants like `Custom(String)`. Therefore, `MessageKind` requires a **custom `Deserialize` implementation** — the same pattern already used by `AgEventType` in `gyre-common/src/protocol.rs` (lines 40-53). Serialization: known variants emit their snake_case name (e.g., `"task_assignment"`); `Custom(s)` emits the raw string. Deserialization: match against known names first; unknown strings become `Custom(s)`. The `kind` field on the `Message` struct is a plain string on the wire: `"kind": "task_assignment"`.
 
@@ -301,7 +307,7 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 |---|---|---|
 | **Directed** | At-least-once (persisted until ack, redelivered on poll) | DB — no TTL, expires only on ack or agent completion |
 | **Event** | Best-effort push + queryable history | DB — configurable TTL (default 7 days, `GYRE_EVENT_TTL_SECS`) |
-| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. When workspace count exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100), the workspace with the most entries is evicted first (largest-first). **Mitigation:** largest-first eviction prevents a tenant from flushing the buffer by creating many empty workspaces, preventing a single tenant from flushing the entire buffer by creating many empty workspaces. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
+| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. When workspace count exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100), the workspace with the most entries is evicted first (largest-first). **Mitigation:** largest-first eviction prevents a tenant from flushing the buffer by creating many empty workspaces. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
 
 **Directed-tier queue depth:** Max 1000 unacked messages per agent (configurable, `GYRE_AGENT_INBOX_MAX`). When the limit is reached, new messages to that agent are rejected with 429 and the sender receives an error. Messages are NOT silently dropped — this preserves the at-least-once guarantee. The agent or an admin must ack or the agent must be completed/killed to free the inbox.
 
@@ -412,7 +418,7 @@ Telemetry is pushed through the existing `broadcast::channel` for WebSocket deli
 
 #### Workspace Fan-Out Persistence
 
-**Tenant isolation:** `MessageRepository` methods do not take an explicit `tenant_id` parameter. Tenant isolation is enforced structurally: workspace IDs are globally unique and every workspace belongs to exactly one tenant (enforced by `hierarchy-enforcement.md`). Querying by `workspace_id` implicitly isolates by tenant. The `tenant_id` column and index exist for admin cross-tenant queries and the `check-tenant-filter.sh` lint.
+**Tenant isolation:** `MessageRepository` methods do not take an explicit `tenant_id` parameter. Tenant isolation is enforced structurally: workspace IDs are globally unique and every workspace belongs to exactly one tenant (enforced by `hierarchy-enforcement.md`). Querying by `workspace_id` implicitly isolates by tenant. The `tenant_id` column and index exist for admin cross-tenant queries. **Lint exemption:** `check-tenant-filter.sh` must exempt `MessageRepository` adapter methods from the `tenant_id.eq(` pattern check — add `message.rs` to the script's skip list. Rationale: query methods use `workspace_id` for isolation (globally unique, tenant-bound). Expiry methods (`expire_events`, `expire_acked_inboxes`, `expire_for_agents`) are intentionally cross-tenant — they delete old data by timestamp regardless of tenant, which is correct for housekeeping.
 
 When a message targets `Destination::Workspace(id)`, it is stored as **one row** with `to_type = 'workspace'` and `to_id = workspace_id`. Note: `to_id` duplicates `workspace_id` for workspace destinations — this is intentional denormalization that keeps routing columns (`to_type`, `to_id`) orthogonal from the scoping column (`workspace_id`). It is NOT exploded into per-agent rows. The `list_by_workspace` query finds these messages via the `idx_messages_workspace` index. The `list_unacked` query (which filters on `to_type = 'agent'`) does not return workspace-scoped messages — this is intentional. Workspace events are queryable history, not per-agent inbox items.
 
@@ -467,7 +473,7 @@ This decouples the send path from consumer latency — the hot path does one `mp
 #### Sending
 
 ```
-POST /api/v1/messages
+POST /api/v1/workspaces/:workspace_id/messages
 Authorization: Bearer <agent-jwt>
 
 {
@@ -503,7 +509,7 @@ Response (201):
 }
 ```
 
-The `from` field is derived server-side from the JWT. The sender does not and cannot specify it.
+The `from` field is derived server-side from the JWT. The sender does not and cannot specify it. The `workspace_id` is taken from the URL path parameter. If the body contains `"to": {"workspace": "<ws-id>"}` and the workspace ID differs from the URL, the server rejects with 400. For `"to": {"agent": "<id>"}`, the server verifies the target agent belongs to the URL workspace.
 
 #### Receiving (poll)
 
@@ -536,15 +542,21 @@ GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch_ms>&before_ts
 Authorization: Bearer <token>
 ```
 
-Returns Event-tier messages for a workspace. Requires workspace membership (verified via `WorkspaceMembershipRepository`). Composite cursor pagination: use `?before_ts=<epoch_ms>&before_id=<msg-id>` from the last result to get the next page (newest first). Omit both for the first page.
+All temporal parameters on message bus endpoints use **epoch milliseconds** (per `api-conventions.md` §3.3 millisecond opt-in). Parameter names differ from the convention's `?since=&until=` because the message bus uses composite cursors (`after_ts`+`after_id`, `before_ts`+`before_id`) and a replay timestamp (`last_seen`). This is documented here as the per-endpoint exception to the naming and unit conventions.
+
+```
+Authorization: Bearer <token>
+```
+
+Returns Event-tier messages for a workspace as a bare JSON array (per `api-conventions.md` §3.1). Requires workspace membership (verified via `WorkspaceMembershipRepository`). Composite cursor pagination: use `?before_ts=<epoch_ms>&before_id=<msg-id>` from the last result to get the next page (newest first). Omit both for the first page.
 
 #### Telemetry (existing endpoint, new backing store)
 
 ```
-GET /api/v1/activity?workspace_id=<ws-id>&since=<epoch>&limit=100
+GET /api/v1/workspaces/:workspace_id/activity?since=<epoch_ms>&limit=100
 ```
 
-Queries the in-memory `TelemetryBuffer`. The handler verifies workspace membership before returning results — an unauthenticated or unauthorized caller receives 403. Response format preserves backwards compatibility with today's `ActivityEventData`:
+Queries the in-memory `TelemetryBuffer`. The `since` parameter on this endpoint uses **epoch milliseconds** (matching the message bus, not the legacy seconds convention). The handler verifies workspace membership before returning results — an unauthenticated or unauthorized caller receives 403. Response format preserves backwards compatibility with today's `ActivityEventData`:
 
 | `ActivityEventData` field | Source in `Message` |
 |---|---|
@@ -570,6 +582,16 @@ The MCP SSE endpoint (`GET /mcp/sse`) subscribes to the message bus filtered by 
 
 The MCP `gyre_record_activity` tool becomes a thin wrapper that creates a Telemetry-tier `Message` with the appropriate `MessageKind` and `Destination::Workspace(caller's workspace)`.
 
+**MCP tools for the message bus** (additions to `platform-model.md` §4 tool table):
+
+| Tool | Scope | Purpose |
+|---|---|---|
+| `message.send` | workspace | Send a Directed or Custom message to an agent in the same workspace |
+| `message.poll` | agent | Poll own inbox for new Directed messages (wraps `GET .../messages?after_ts=`) |
+| `message.ack` | agent | Acknowledge a received message (wraps `PUT .../messages/:id/ack`) |
+
+These are thin wrappers around the REST endpoints. Per `platform-model.md` §4, all agent-to-server interaction is via MCP tools — agents should use these tools rather than calling the REST API directly. The REST endpoints exist for dashboard UI and CLI access.
+
 ### Implementation Notes
 
 Since this is a greenfield system with no production deployment, the unified message bus replaces the existing channels directly — no phased migration or feature flags are needed.
@@ -588,7 +610,7 @@ Since this is a greenfield system with no production deployment, the unified mes
 - Catch-all `Unknown` variant with custom deserialize for forward compatibility
 
 **Endpoint changes:**
-- `POST /api/v1/messages` — new unified send endpoint (replaces `POST /api/v1/agents/:id/messages`)
+- `POST /api/v1/workspaces/:workspace_id/messages` — new unified send endpoint (replaces `POST /api/v1/agents/:id/messages`)
 - `GET /api/v1/agents/:id/messages` — **path preserved, semantics changed**: non-destructive cursor-based polling replaces drain-on-read. This is a breaking change to the response contract.
 - `PUT /api/v1/agents/:id/messages/:message_id/ack` — new explicit ack endpoint
 - The `FreeText` message type is not supported — use `Custom("free_text")` with structured payload instead.
