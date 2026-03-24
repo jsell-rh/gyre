@@ -55,6 +55,8 @@ pub struct Message {
 
     // Delivery state — only semantically meaningful for Directed tier with
     // Destination::Agent. Always false for Event/Telemetry/Workspace messages.
+    // Excluded from API responses and WebSocket pushes (#[serde(skip_serializing)]).
+    // Only visible in the DB and in the GET inbox response (where it's useful).
     pub acknowledged: bool,
 }
 
@@ -159,6 +161,8 @@ pub enum MessageKind {
 
 **Tier + Destination constraint:** Directed tier is only valid with `Destination::Agent(id)`. Directed + Workspace is rejected with 400 — ack-based delivery is meaningless for fan-out messages where no single agent owns the message. Event and Telemetry tiers work with any destination.
 
+**Kind + Origin constraint:** Server-originated Event-tier kinds (`AgentCreated`, `TaskCreated`, `MrStatusChanged`, `GateFailure`, `PushRejected`, etc.) can only be emitted by `MessageOrigin::Server`. An agent attempting to send `"kind": "gate_failure"` receives 403. Agents may send Directed-tier kinds (`TaskAssignment`, `ReviewRequest`, `StatusUpdate`, `Escalation`) and Telemetry-tier kinds. Agents may also send `Custom(name)` at Event or Directed tier. This prevents agents from forging system events.
+
 **`Custom(String)` serialization:** Serde's `#[serde(other)]` attribute only works on unit variants, not tuple variants like `Custom(String)`. Therefore, `MessageKind` requires a **custom `Deserialize` implementation** — the same pattern already used by `AgEventType` in `gyre-common/src/protocol.rs` (lines 40-53). Serialization: known variants emit their snake_case name (e.g., `"task_assignment"`); `Custom(s)` emits the raw string. Deserialization: match against known names first; unknown strings become `Custom(s)`. The `kind` field on the `Message` struct is a plain string on the wire: `"kind": "task_assignment"`.
 
 **Tier behavior:**
@@ -222,7 +226,21 @@ sign_input = id + '\0' + from_type + '\0' + from_id + '\0' + workspace_id + '\0'
              created_at_str
 ```
 
-**Null field encoding:** When a field is absent (`from_id` for `Server` origin, `to_id` for `Workspace`/`Broadcast`, `workspace_id` for `Broadcast`), the empty string is used. Example for a server-originated workspace event: `from_type = "server"`, `from_id = ""`, `workspace_id = "<ws-uuid>"`.
+**Null field encoding:** When a field is absent, the empty string is used.
+
+**Canonical forms for signing:**
+
+| Field | `Server` origin | `Agent(id)` origin | `User(id)` origin |
+|---|---|---|---|
+| `from_type` | `"server"` | `"agent"` | `"user"` |
+| `from_id` | `""` | agent UUID | user UUID |
+
+| Field | `Agent(id)` dest | `Workspace(id)` dest | `Broadcast` dest |
+|---|---|---|---|
+| `to_type` | `"agent"` | `"workspace"` | `"broadcast"` |
+| `to_id` | agent UUID | workspace UUID | `""` |
+
+`workspace_id`: the workspace UUID, or `""` for Broadcast.
 
 This is consistent with the existing commit signature approach (`commit_signatures.rs`) which signs raw byte content. The payload is hashed (SHA-256) rather than included directly, keeping the sign input bounded regardless of payload size.
 
@@ -258,10 +276,10 @@ The server filters outgoing messages:
 For agents that don't maintain a WebSocket (e.g., short-lived container agents):
 
 ```
-GET /api/v1/agents/:id/messages?after=<epoch_ms>
+GET /api/v1/agents/:id/messages?after_ts=0&after_id=&limit=100
 ```
 
-Returns Directed-tier messages newer than `after`, ordered oldest first. The agent stores the `created_at` of the last message it processed as its cursor. First poll uses `?after=0`. Messages persist — polling is non-destructive.
+Returns Directed-tier messages after the composite cursor `(after_ts, after_id)`, ordered oldest first. The agent stores the `created_at` and `id` of the last message as its cursor. First poll uses `after_ts=0&after_id=`. Messages persist — polling is non-destructive.
 
 Explicit ack is still available for workflows that need it:
 
@@ -279,7 +297,7 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 |---|---|---|
 | **Directed** | At-least-once (persisted until ack, redelivered on poll) | DB — no TTL, expires only on ack or agent completion |
 | **Event** | Best-effort push + queryable history | DB — configurable TTL (default 7 days, `GYRE_EVENT_TTL_SECS`) |
-| **Telemetry** | Best-effort push only | In-memory ring buffer (configurable, default 10,000 entries per workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). LRU eviction across workspaces when total exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100). Telemetry is best-effort — no tenant isolation guarantee at this layer. |
+| **Telemetry** | Best-effort push only | In-memory ring buffer (configurable, default 10,000 entries per workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — workspace-level isolation is structural. LRU eviction across workspaces when total exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100). |
 
 **Directed-tier queue depth:** Max 1000 unacked messages per agent (configurable, `GYRE_AGENT_INBOX_MAX`). When the limit is reached, new messages to that agent are rejected with 429 and the sender receives an error. Messages are NOT silently dropped — this preserves the at-least-once guarantee. The agent or an admin must ack or the agent must be completed/killed to free the inbox.
 
@@ -311,14 +329,20 @@ pub trait MessageRepository: Send + Sync {
     /// Find a message by ID.
     async fn find_by_id(&self, id: &Id) -> Result<Option<Message>>;
 
-    /// List Directed messages for an agent newer than `after` (epoch ms), oldest first.
-    /// Primary poll pattern: agent stores cursor, passes on next poll.
-    /// `limit` caps the result set (default 100). Caller paginates by advancing `after`
-    /// to the `created_at` of the last returned message.
-    async fn list_after(&self, agent_id: &Id, after: u64, limit: usize) -> Result<Vec<Message>>;
+    /// List Directed messages for an agent after a cursor position, oldest first.
+    /// Cursor is composite `(created_at, id)` to handle same-millisecond writes.
+    /// Query: `WHERE (created_at, id) > (after_ts, after_id) ORDER BY created_at, id LIMIT limit`.
+    /// First poll: `after_ts=0, after_id=""`. Subsequent: use last message's values.
+    async fn list_after(
+        &self,
+        agent_id: &Id,
+        after_ts: u64,
+        after_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>>;
 
-    /// List all unacknowledged Directed messages for an agent (crash recovery).
-    async fn list_unacked(&self, agent_id: &Id) -> Result<Vec<Message>>;
+    /// List unacknowledged Directed messages for an agent (crash recovery), oldest first.
+    async fn list_unacked(&self, agent_id: &Id, limit: usize) -> Result<Vec<Message>>;
 
     /// Count unacknowledged Directed messages for an agent (for limit enforcement).
     async fn count_unacked(&self, agent_id: &Id) -> Result<u64>;
@@ -347,10 +371,14 @@ pub trait MessageRepository: Send + Sync {
     /// so filtering on to_type != 'agent' only removes Event-tier workspace/broadcast messages.
     async fn expire_events(&self, older_than: u64) -> Result<u64>;
 
-    /// Delete acked Directed messages older than the given epoch where
-    /// ack_reason = 'agent_completed'. Covers GYRE_DEAD_INBOX_TTL_SECS cleanup.
-    /// Does NOT require agent state lookup — uses the ack_reason column set by
-    /// acknowledge_all() when an agent completes.
+    /// Delete Directed messages for dead agents older than the given epoch.
+    /// Matches messages where:
+    ///   (ack_reason IN ('agent_completed', 'agent_orphaned'))  -- completed/orphaned agents
+    ///   OR (to_type = 'agent' AND acknowledged = 0 AND created_at < older_than
+    ///       AND NOT EXISTS active agent with that to_id)        -- unclaimed messages
+    /// The second clause catches messages sent after agent completion that were
+    /// never acked and have no ack_reason. Requires a join/subquery against
+    /// the agents table to verify the agent is no longer active.
     async fn expire_dead_inboxes(&self, older_than: u64) -> Result<u64>;
 }
 ```
@@ -458,15 +486,15 @@ The `from` field is derived server-side from the JWT. The sender does not and ca
 #### Receiving (poll)
 
 ```
-GET /api/v1/agents/:id/messages?after=<epoch_ms>
+GET /api/v1/agents/:id/messages?after_ts=0&after_id=&limit=100
 Authorization: Bearer <agent-jwt>
 ```
 
-Returns Directed-tier messages with `created_at > after`, ordered oldest first. The agent stores the `created_at` of the last message it processed and passes it on subsequent polls — this returns only new messages. First poll uses `?after=0` to get everything.
+Returns Directed-tier messages after the composite cursor `(after_ts, after_id)`, ordered oldest first. The agent stores the `created_at` and `id` of the last message it processed and passes them on subsequent polls. First poll uses `?after_ts=0&after_id=` to get everything.
 
-Alternative: `?acknowledged=false` returns all unacked messages regardless of timestamp (useful for reprocessing after a crash).
+Alternative: `?acknowledged=false&limit=100` returns all unacked messages regardless of cursor (useful for crash recovery).
 
-When neither `after` nor `acknowledged` is provided, defaults to `?after=0&limit=100` (all messages, paginated).
+When no query params are provided, defaults to `?after_ts=0&after_id=&limit=100`.
 
 Agent must be the authenticated caller (verified from JWT `sub` claim).
 
