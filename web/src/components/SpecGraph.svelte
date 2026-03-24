@@ -210,7 +210,7 @@
             </div>
             <div class="panel-field">
               <span class="field-label">Status</span>
-              <Badge variant={statusVariant(selected.approval_status)} label={selected.approval_status ?? 'pending'} />
+              <Badge variant={statusVariant(selected.approval_status)} value={selected.approval_status ?? 'pending'} />
             </div>
             {#if selected.title}
               <div class="panel-field">
