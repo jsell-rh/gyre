@@ -38,15 +38,19 @@ jobs:
           prefix-key: v0-clippy
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
-  arch-lint:
-    name: Architecture lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: bash scripts/check-arch.sh
-      - name: Em-dash check
-        run: |
-          find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true
+  arch-lint:                                                                                                                                  
+    name: Architecture lint                                                                                                                     
+    runs-on: ubuntu-latest                                                                                                                      
+    steps:                                                                                                                                      
+      - uses: actions/checkout@v4                                                                                                               
+      - run: bash scripts/check-arch.sh                                                                                                         
+      - name: API auth coverage lint                                                                                                            
+        run: bash scripts/check-api-auth.sh                                                                                                     
+      - name: Tenant filter lint                                                                                                                
+        run: bash scripts/check-tenant-filter.sh                                                                                                
+      - name: Em-dash check                                                                                                                     
+        run: |                                                                                                                                  
+          find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  
 
   test:
     name: Test
