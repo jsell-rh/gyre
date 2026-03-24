@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::VecDeque;
 
 /// The unified message envelope — all inter-component communication flows through this type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub id: Id,
     pub tenant_id: Id,
@@ -75,7 +75,7 @@ pub enum MessageTier {
 /// Wire format: a plain snake_case string — e.g., "agent_created", "task_assignment".
 /// Custom kinds use the raw string: Custom("my_event") → "my_event".
 /// Unknown strings deserialize to Custom(s) via custom Deserialize.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MessageKind {
     // ── Tier 1: Directed (signed + persisted + ack-based) ──────────────
     TaskAssignment,
@@ -294,36 +294,69 @@ impl<'de> Deserialize<'de> for MessageKind {
 
 /// In-memory ring buffer for Telemetry-tier messages.
 /// Keyed by workspace_id. Replaces the existing ActivityStore.
+///
+/// Per-workspace capacity: when a workspace's buffer exceeds `max_per_workspace`,
+/// the oldest entry is evicted (FIFO ring buffer).
+///
+/// Per-server workspace capacity: when total distinct workspaces exceed `max_workspaces`,
+/// the workspace with the most entries is evicted first (largest-first), per spec
+/// §Telemetry Store. This prevents a tenant from flushing the buffer by creating many
+/// empty workspaces.
 pub struct TelemetryBuffer {
     /// Per-workspace ring buffers. Key: workspace_id.
     buffers: DashMap<Id, VecDeque<Message>>,
-    /// Maximum entries per workspace before eviction (default 10,000).
+    /// Maximum entries per workspace before oldest-entry eviction (default 10,000).
     max_per_workspace: usize,
+    /// Maximum number of distinct workspaces before largest-workspace eviction (default 100).
+    max_workspaces: usize,
 }
 
 impl TelemetryBuffer {
-    pub fn new(max_per_workspace: usize) -> Self {
+    pub fn new(max_per_workspace: usize, max_workspaces: usize) -> Self {
         Self {
             buffers: DashMap::new(),
             max_per_workspace,
+            max_workspaces,
         }
     }
 
-    /// Push a telemetry message into the workspace buffer.
-    /// Evicts the oldest entry when max_per_workspace is exceeded.
+    /// Push a Telemetry-tier message into the workspace buffer.
+    /// Non-Telemetry messages are silently ignored.
+    /// Evicts the oldest entry per workspace when `max_per_workspace` is exceeded.
+    /// Evicts the largest workspace when `max_workspaces` is exceeded (largest-first).
     pub fn push(&self, message: Message) {
+        // Only Telemetry-tier messages belong in this buffer.
+        if message.kind.tier() != MessageTier::Telemetry {
+            return;
+        }
         let workspace_id = match &message.workspace_id {
             Some(id) => id.clone(),
             None => return, // Telemetry requires a workspace scope
         };
-        let mut buf = self.buffers.entry(workspace_id).or_default();
-        buf.push_back(message);
-        if buf.len() > self.max_per_workspace {
-            buf.pop_front();
+
+        {
+            let mut buf = self.buffers.entry(workspace_id).or_default();
+            buf.push_back(message);
+            if buf.len() > self.max_per_workspace {
+                buf.pop_front();
+            }
+        } // release DashMap shard lock before workspace-count check
+
+        // Enforce workspace count limit: evict the workspace with the most entries.
+        if self.buffers.len() > self.max_workspaces {
+            let entries: Vec<(Id, usize)> = self
+                .buffers
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().len()))
+                .collect();
+            let max_key = entries.into_iter().max_by_key(|(_, len)| *len).map(|(key, _)| key);
+            if let Some(key) = max_key {
+                self.buffers.remove(&key);
+            }
         }
     }
 
-    /// Returns messages with created_at > since_ms, up to limit entries, oldest first.
+    /// Returns messages with created_at > since_ms, up to `limit` entries, oldest first.
     pub fn list_since(&self, workspace_id: &Id, since_ms: u64, limit: usize) -> Vec<Message> {
         match self.buffers.get(workspace_id) {
             None => vec![],
@@ -339,7 +372,7 @@ impl TelemetryBuffer {
 
 impl Default for TelemetryBuffer {
     fn default() -> Self {
-        Self::new(10_000)
+        Self::new(10_000, 100)
     }
 }
 
@@ -347,6 +380,22 @@ impl Default for TelemetryBuffer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn make_telemetry(workspace_id: Option<Id>) -> Message {
+        Message {
+            id: Id::new("msg-1"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Server,
+            workspace_id,
+            to: Destination::Broadcast,
+            kind: MessageKind::ToolCallStart,
+            payload: None,
+            created_at: 1_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
 
     fn make_message(kind: MessageKind, workspace_id: Option<Id>) -> Message {
         Message {
@@ -471,6 +520,7 @@ mod tests {
         assert!(MessageKind::DataSeeded.server_only());
         assert!(MessageKind::BudgetExhausted.server_only());
         assert!(MessageKind::AgentError.server_only());
+        assert!(MessageKind::QueueUpdated.server_only());
     }
 
     #[test]
@@ -559,15 +609,17 @@ mod tests {
 
     #[test]
     fn telemetry_buffer_push_and_list() {
-        let buf = TelemetryBuffer::new(100);
+        let buf = TelemetryBuffer::new(100, 1000);
         let ws = Id::new("ws-1");
 
-        let mut msg = make_message(MessageKind::ToolCallStart, Some(ws.clone()));
+        let mut msg = make_telemetry(Some(ws.clone()));
+        msg.kind = MessageKind::ToolCallStart;
         msg.id = Id::new("m1");
         msg.created_at = 1000;
         buf.push(msg);
 
-        let mut msg2 = make_message(MessageKind::ToolCallEnd, Some(ws.clone()));
+        let mut msg2 = make_telemetry(Some(ws.clone()));
+        msg2.kind = MessageKind::ToolCallEnd;
         msg2.id = Id::new("m2");
         msg2.created_at = 2000;
         buf.push(msg2);
@@ -581,12 +633,12 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_buffer_eviction() {
-        let buf = TelemetryBuffer::new(3);
+    fn telemetry_buffer_per_workspace_eviction() {
+        let buf = TelemetryBuffer::new(3, 1000);
         let ws = Id::new("ws-evict");
 
         for i in 0..5u64 {
-            let mut msg = make_message(MessageKind::ToolCallStart, Some(ws.clone()));
+            let mut msg = make_telemetry(Some(ws.clone()));
             msg.id = Id::new(format!("m{}", i));
             msg.created_at = i * 100;
             buf.push(msg);
@@ -602,11 +654,12 @@ mod tests {
 
     #[test]
     fn telemetry_buffer_workspace_isolation() {
-        let buf = TelemetryBuffer::new(100);
+        let buf = TelemetryBuffer::new(100, 1000);
         let ws_a = Id::new("ws-a");
         let ws_b = Id::new("ws-b");
 
-        let mut msg = make_message(MessageKind::RunStarted, Some(ws_a.clone()));
+        let mut msg = make_telemetry(Some(ws_a.clone()));
+        msg.kind = MessageKind::RunStarted;
         msg.id = Id::new("msg-a");
         buf.push(msg);
 
@@ -620,13 +673,63 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_buffer_ignores_broadcast_messages() {
-        let buf = TelemetryBuffer::new(100);
-        let msg = make_message(MessageKind::DataSeeded, None); // workspace_id: None
+    fn telemetry_buffer_rejects_non_telemetry_tier() {
+        let buf = TelemetryBuffer::new(100, 1000);
+        let ws = Id::new("ws-1");
+
+        // Event-tier message — should be silently ignored
+        let msg = make_message(MessageKind::AgentCreated, Some(ws.clone()));
         buf.push(msg);
 
-        // Nothing was stored (no workspace key)
+        // Directed-tier message — should be silently ignored
+        let msg = make_message(MessageKind::TaskAssignment, Some(ws.clone()));
+        buf.push(msg);
+
+        assert_eq!(buf.list_since(&ws, 0, 100).len(), 0);
+    }
+
+    #[test]
+    fn telemetry_buffer_rejects_no_workspace() {
+        let buf = TelemetryBuffer::new(100, 1000);
+        let msg = make_telemetry(None); // workspace_id: None
+        buf.push(msg);
+
         let ws = Id::new("any");
         assert_eq!(buf.list_since(&ws, 0, 100).len(), 0);
+    }
+
+    #[test]
+    fn telemetry_buffer_workspace_count_eviction() {
+        // max 2 workspaces
+        let buf = TelemetryBuffer::new(1000, 2);
+        let ws_a = Id::new("ws-a");
+        let ws_b = Id::new("ws-b");
+        let ws_c = Id::new("ws-c");
+
+        // Fill ws_a with 5 messages (most entries); created_at starts at 1 so since_ms=0 filter includes all
+        for i in 0..5u64 {
+            let mut msg = make_telemetry(Some(ws_a.clone()));
+            msg.id = Id::new(format!("a{}", i));
+            msg.created_at = i + 1;
+            buf.push(msg);
+        }
+        // Fill ws_b with 2 messages
+        for i in 0..2u64 {
+            let mut msg = make_telemetry(Some(ws_b.clone()));
+            msg.id = Id::new(format!("b{}", i));
+            msg.created_at = i + 1;
+            buf.push(msg);
+        }
+        // Adding ws_c pushes us to 3 workspaces — should evict the largest (ws_a, 5 entries)
+        let mut msg = make_telemetry(Some(ws_c.clone()));
+        msg.id = Id::new("c0");
+        msg.created_at = 1;
+        buf.push(msg);
+
+        // ws_a should be evicted (it was the largest)
+        assert_eq!(buf.list_since(&ws_a, 0, 100).len(), 0);
+        // ws_b and ws_c should still be present
+        assert_eq!(buf.list_since(&ws_b, 0, 100).len(), 2);
+        assert_eq!(buf.list_since(&ws_c, 0, 100).len(), 1);
     }
 }
