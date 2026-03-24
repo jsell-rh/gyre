@@ -137,6 +137,86 @@ describe('ExplorerCanvas', () => {
     expect(container.innerHTML).toContain('Interface');
     expect(container.innerHTML).toContain('Endpoint');
   });
+
+  it('shows Spec Linkage toggle button', () => {
+    const { getByText } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    expect(getByText('Spec Linkage')).toBeTruthy();
+  });
+
+  it('does not show spec legend by default', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    expect(container.querySelector('.spec-legend')).toBeNull();
+  });
+
+  it('shows spec legend when showSpecLinkage=true', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    expect(container.querySelector('.spec-legend')).toBeTruthy();
+  });
+
+  it('shows spec legend with confidence labels when overlay is on', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    expect(container.innerHTML).toContain('High confidence');
+    expect(container.innerHTML).toContain('Unspecced');
+  });
+
+  it('shows spec coverage counts in legend', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    // 2 of 3 nodes have spec_path
+    expect(container.innerHTML).toContain('2 specced');
+    expect(container.innerHTML).toContain('1 unspecced');
+  });
+
+  it('renders spec rings on nodes when overlay is active', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    const rings = container.querySelectorAll('.spec-ring');
+    expect(rings.length).toBe(3);
+  });
+
+  it('does not render spec rings when overlay is off', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: false },
+    });
+    const rings = container.querySelectorAll('.spec-ring');
+    expect(rings.length).toBe(0);
+  });
+
+  it('shows Unspecced only pill when spec linkage is on', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    expect(container.innerHTML).toContain('Unspecced only');
+  });
+
+  it('does not show Unspecced only pill when spec linkage is off', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: false },
+    });
+    expect(container.innerHTML).not.toContain('Unspecced only');
+  });
+
+  it('shows spec_path as clickable button in detail panel', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    // Click the first node (which has spec_path)
+    const firstNode = container.querySelector('.graph-node');
+    firstNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    const specBtn = container.querySelector('.spec-link-btn');
+    expect(specBtn).toBeTruthy();
+  });
 });
 
 describe('MoldableView', () => {
