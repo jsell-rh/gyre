@@ -414,7 +414,7 @@ Telemetry is pushed through the existing `broadcast::channel` for WebSocket deli
 
 **Tenant isolation:** `MessageRepository` methods do not take an explicit `tenant_id` parameter. Tenant isolation is enforced structurally: workspace IDs are globally unique and every workspace belongs to exactly one tenant (enforced by `hierarchy-enforcement.md`). Querying by `workspace_id` implicitly isolates by tenant. The `tenant_id` column and index exist for admin cross-tenant queries and the `check-tenant-filter.sh` lint.
 
-When a message targets `Destination::Workspace(id)`, it is stored as **one row** with `to_type = 'workspace'` and `to_id = workspace_id`. It is NOT exploded into per-agent rows. The `list_by_workspace` query finds these messages via the `idx_messages_workspace` index. The `list_unacked` query (which filters on `to_type = 'agent'`) does not return workspace-scoped messages — this is intentional. Workspace events are queryable history, not per-agent inbox items.
+When a message targets `Destination::Workspace(id)`, it is stored as **one row** with `to_type = 'workspace'` and `to_id = workspace_id`. Note: `to_id` duplicates `workspace_id` for workspace destinations — this is intentional denormalization that keeps routing columns (`to_type`, `to_id`) orthogonal from the scoping column (`workspace_id`). It is NOT exploded into per-agent rows. The `list_by_workspace` query finds these messages via the `idx_messages_workspace` index. The `list_unacked` query (which filters on `to_type = 'agent'`) does not return workspace-scoped messages — this is intentional. Workspace events are queryable history, not per-agent inbox items.
 
 #### DB Schema
 
@@ -514,7 +514,7 @@ Authorization: Bearer <agent-jwt>
 
 Returns Directed-tier messages after the composite cursor `(after_ts, after_id)`, ordered oldest first. The agent stores the `created_at` and `id` of the last message it processed and passes them on subsequent polls. First poll uses `?after_ts=0&after_id=` to get everything.
 
-Alternative: `?acknowledged=false&limit=100` returns all unacked messages regardless of cursor (useful for crash recovery).
+Alternative: `?acknowledged=false&limit=100` returns all unacked messages regardless of cursor (useful for crash recovery). This delegates to `list_unacked` on the port trait, not `list_after`.
 
 When no query params are provided, defaults to `?after_ts=0&after_id=&limit=100`.
 
