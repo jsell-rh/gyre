@@ -71,7 +71,6 @@ fn has_role_at_least(roles: &[UserRole], min_role: UserRole) -> bool {
         UserRole::Developer => 3,
         UserRole::Agent => 2,
         UserRole::ReadOnly => 1,
-        _ => 0,
     };
     let required = level(&min_role);
     roles.iter().any(|r| level(r) >= required)
