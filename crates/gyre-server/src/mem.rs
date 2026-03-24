@@ -529,6 +529,17 @@ impl TaskRepository for MemTaskRepository {
             .cloned()
             .collect())
     }
+
+    async fn list_by_spec_path(&self, spec_path: &str) -> Result<Vec<Task>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|t| t.spec_path.as_deref() == Some(spec_path))
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Default)]
@@ -1278,6 +1289,20 @@ impl PersonaRepository for MemPersonaRepository {
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<Persona>> {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_slug_and_scope(
+        &self,
+        slug: &str,
+        scope: &PersonaScope,
+    ) -> Result<Option<Persona>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|p| p.slug == slug && &p.scope == scope)
+            .cloned())
     }
 
     async fn list(&self) -> Result<Vec<Persona>> {

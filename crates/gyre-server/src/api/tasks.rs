@@ -63,6 +63,8 @@ pub struct TaskResponse {
     pub pr_link: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_path: Option<String>,
 }
 
 impl From<Task> for TaskResponse {
@@ -80,6 +82,7 @@ impl From<Task> for TaskResponse {
             pr_link: t.pr_link,
             created_at: t.created_at,
             updated_at: t.updated_at,
+            spec_path: t.spec_path,
         }
     }
 }

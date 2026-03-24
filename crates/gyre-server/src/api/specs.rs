@@ -5,6 +5,7 @@
 //! GET  /api/v1/specs/drifted       — specs with open drift-review tasks
 //! GET  /api/v1/specs/index         — auto-generated markdown index
 //! GET  /api/v1/specs/:path         — single spec (URL-encoded path)
+//! GET  /api/v1/specs/:path/progress — tasks and MRs linked to a spec
 //! POST /api/v1/specs/:path/approve — approve a spec version
 //! POST /api/v1/specs/:path/revoke  — revoke an approval
 //! GET  /api/v1/specs/:path/history — approval history
@@ -133,6 +134,37 @@ pub async fn list_specs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListSpecsQuery>,
 ) -> Json<Vec<SpecLedgerResponse>> {
+    use std::collections::HashMap;
+
+    // Build spec_path → task_ids map from all tasks that have spec_path set.
+    let mut task_map: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(all_tasks) = state.tasks.list().await {
+        for task in all_tasks {
+            if let Some(sp) = &task.spec_path {
+                task_map
+                    .entry(sp.clone())
+                    .or_default()
+                    .push(task.id.to_string());
+            }
+        }
+    }
+
+    // Build spec_path → mr_ids map from all MRs that have spec_ref set.
+    let mut mr_map: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(all_mrs) = state.merge_requests.list().await {
+        for mr in all_mrs {
+            if let Some(spec_ref) = &mr.spec_ref {
+                // spec_ref format: "path@sha" — extract path prefix.
+                let spec_path = if let Some((path, _)) = spec_ref.rsplit_once('@') {
+                    path.to_string()
+                } else {
+                    spec_ref.clone()
+                };
+                mr_map.entry(spec_path).or_default().push(mr.id.to_string());
+            }
+        }
+    }
+
     let mut specs: Vec<SpecLedgerResponse> = state
         .spec_ledger
         .list_all()
@@ -146,7 +178,11 @@ pub async fn list_specs(
                 true
             }
         })
-        .map(Into::into)
+        .map(|mut e| {
+            e.linked_tasks = task_map.get(&e.path).cloned().unwrap_or_default();
+            e.linked_mrs = mr_map.get(&e.path).cloned().unwrap_or_default();
+            e.into()
+        })
         .collect();
     specs.sort_by(|a, b| a.path.cmp(&b.path));
     Json(specs)
@@ -259,12 +295,41 @@ pub async fn get_spec(
 ) -> Result<Json<SpecLedgerResponse>, ApiError> {
     // axum already URL-decodes path segments.
     let spec_path = encoded_path;
-    state
+
+    let mut entry = state
         .spec_ledger
         .find_by_path(&spec_path)
         .await?
-        .map(|e| Json(e.into()))
-        .ok_or_else(|| ApiError::NotFound(format!("spec '{spec_path}' not in registry")))
+        .ok_or_else(|| ApiError::NotFound(format!("spec '{spec_path}' not in registry")))?;
+
+    // Populate linked_tasks from tasks with matching spec_path.
+    entry.linked_tasks = state
+        .tasks
+        .list_by_spec_path(&spec_path)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.id.to_string())
+        .collect();
+
+    // Populate linked_mrs from MRs with spec_ref matching "spec_path@...".
+    let prefix = format!("{spec_path}@");
+    entry.linked_mrs = state
+        .merge_requests
+        .list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|mr| {
+            mr.spec_ref
+                .as_deref()
+                .map(|s| s.starts_with(&prefix) || s == spec_path.as_str())
+                .unwrap_or(false)
+        })
+        .map(|mr| mr.id.to_string())
+        .collect();
+
+    Ok(Json(entry.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +649,127 @@ pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGrap
         .collect();
 
     Json(SpecGraphResponse { nodes, edges })
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/specs/:path/progress — tasks and MRs linked to a spec
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct SpecProgressTaskItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+}
+
+#[derive(Serialize)]
+pub struct SpecProgressMrItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub spec_ref: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SpecProgressResponse {
+    pub spec_path: String,
+    pub tasks: Vec<SpecProgressTaskItem>,
+    pub mrs: Vec<SpecProgressMrItem>,
+    pub open_tasks: usize,
+    pub completed_tasks: usize,
+    pub merged_mrs: usize,
+}
+
+pub async fn get_spec_progress(
+    State(state): State<Arc<AppState>>,
+    Path(encoded_path): Path<String>,
+) -> Result<Json<SpecProgressResponse>, ApiError> {
+    let spec_path = encoded_path;
+
+    // Verify the spec exists in the registry.
+    if state.spec_ledger.find_by_path(&spec_path).await?.is_none() {
+        return Err(ApiError::NotFound(format!(
+            "spec '{spec_path}' not in registry"
+        )));
+    }
+
+    // Query tasks linked to this spec path.
+    let linked_tasks = state.tasks.list_by_spec_path(&spec_path).await?;
+
+    // Query all MRs and filter by spec_ref prefix match ("path@sha").
+    let prefix = format!("{spec_path}@");
+    let all_mrs = state.merge_requests.list().await?;
+    let linked_mrs: Vec<_> = all_mrs
+        .into_iter()
+        .filter(|mr| {
+            mr.spec_ref
+                .as_deref()
+                .map(|s| s.starts_with(&prefix) || s == spec_path.as_str())
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let open_tasks = linked_tasks
+        .iter()
+        .filter(|t| !matches!(t.status, gyre_domain::TaskStatus::Done))
+        .count();
+    let completed_tasks = linked_tasks
+        .iter()
+        .filter(|t| matches!(t.status, gyre_domain::TaskStatus::Done))
+        .count();
+    let merged_mrs = linked_mrs
+        .iter()
+        .filter(|mr| matches!(mr.status, gyre_domain::MrStatus::Merged))
+        .count();
+
+    let task_items: Vec<SpecProgressTaskItem> = linked_tasks
+        .iter()
+        .map(|t| SpecProgressTaskItem {
+            id: t.id.to_string(),
+            title: t.title.clone(),
+            status: match &t.status {
+                gyre_domain::TaskStatus::Backlog => "backlog",
+                gyre_domain::TaskStatus::InProgress => "in_progress",
+                gyre_domain::TaskStatus::Review => "review",
+                gyre_domain::TaskStatus::Done => "done",
+                gyre_domain::TaskStatus::Blocked => "blocked",
+            }
+            .to_string(),
+            priority: match &t.priority {
+                gyre_domain::TaskPriority::Low => "low",
+                gyre_domain::TaskPriority::Medium => "medium",
+                gyre_domain::TaskPriority::High => "high",
+                gyre_domain::TaskPriority::Critical => "critical",
+            }
+            .to_string(),
+        })
+        .collect();
+
+    let mr_items: Vec<SpecProgressMrItem> = linked_mrs
+        .iter()
+        .map(|mr| SpecProgressMrItem {
+            id: mr.id.to_string(),
+            title: mr.title.clone(),
+            status: match &mr.status {
+                gyre_domain::MrStatus::Open => "open",
+                gyre_domain::MrStatus::Approved => "approved",
+                gyre_domain::MrStatus::Merged => "merged",
+                gyre_domain::MrStatus::Closed => "closed",
+            }
+            .to_string(),
+            spec_ref: mr.spec_ref.clone(),
+        })
+        .collect();
+
+    Ok(Json(SpecProgressResponse {
+        spec_path,
+        tasks: task_items,
+        mrs: mr_items,
+        open_tasks,
+        completed_tasks,
+        merged_mrs,
+    }))
 }
 
 // ---------------------------------------------------------------------------

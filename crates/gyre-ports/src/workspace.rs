@@ -17,6 +17,11 @@ pub trait WorkspaceRepository: Send + Sync {
 pub trait PersonaRepository: Send + Sync {
     async fn create(&self, persona: &Persona) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<Persona>>;
+    async fn find_by_slug_and_scope(
+        &self,
+        slug: &str,
+        scope: &PersonaScope,
+    ) -> Result<Option<Persona>>;
     async fn list(&self) -> Result<Vec<Persona>>;
     async fn list_by_scope(&self, scope: &PersonaScope) -> Result<Vec<Persona>>;
     async fn update(&self, persona: &Persona) -> Result<()>;

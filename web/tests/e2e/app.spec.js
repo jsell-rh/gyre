@@ -10,10 +10,36 @@ import { test, expect } from './fixtures/seeded.js';
 const TOKEN = 'e2e-test-token';
 
 // ---------------------------------------------------------------------------
-// Helper: click a sidebar nav item by label text
+// Helper: navigate to a view by label — uses direct URL after nav restructure
 // ---------------------------------------------------------------------------
+const LABEL_TO_ROUTE = {
+  'Projects': '/projects',
+  'Tasks': '/tasks',
+  'Agents': '/agents',
+  'MCP Tools': '/mcp-catalog',
+  'Settings': '/settings',
+  'Merge Queue': '/merge-queue',
+  'Analytics': '/analytics',
+  'Costs': '/costs',
+  'Workspaces': '/workspaces',
+  'Personas': '/personas',
+  'Budget': '/budget',
+  'Dependencies': '/dependencies',
+  'Spec Graph': '/spec-graph',
+  'My Profile': '/profile',
+  'Inbox': '/inbox',
+  'Briefing': '/briefing',
+  'Explorer': '/explorer',
+};
+
 async function navigateTo(page, label) {
-  await page.getByRole('button', { name: label, exact: true }).first().click();
+  const route = LABEL_TO_ROUTE[label];
+  if (route) {
+    await page.goto(route);
+    await page.waitForLoadState('networkidle');
+  } else {
+    await page.getByRole('button', { name: label, exact: true }).first().click();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +89,7 @@ test.describe('Auth flow', () => {
 
 test.describe('Dashboard home', () => {
   test('dashboard_loads_metric_cards', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard');
     await page.waitForLoadState('networkidle');
 
     // Four metric cards should be visible
@@ -83,7 +109,7 @@ test.describe('Dashboard home', () => {
   });
 
   test('seed_demo_data_button_works', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard');
     await page.waitForLoadState('networkidle');
 
     // Get initial agent count

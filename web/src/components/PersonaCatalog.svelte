@@ -81,6 +81,16 @@
     }
   }
 
+  async function approvePersona(id) {
+    try {
+      const updated = await api.approvePersona(id);
+      personas = personas.map(p => p.id === id ? updated : p);
+      showToast('Persona approved', { type: 'success' });
+    } catch (e) {
+      showToast('Failed to approve persona: ' + e.message, { type: 'error' });
+    }
+  }
+
   // API returns scope as {kind:"Tenant"|"Workspace"|"Repo", id:"..."} — handle both object and string
   function scopeVariant(scope) {
     const s = typeof scope === 'object' ? (scope?.kind ?? '').toLowerCase() : (scope ?? '').toLowerCase();
@@ -92,6 +102,12 @@
   function scopeLabel(scope) {
     if (typeof scope === 'object') return scope?.kind ?? 'workspace';
     return scope ?? 'workspace';
+  }
+
+  function approvalVariant(status) {
+    if (status === 'Approved') return 'success';
+    if (status === 'Deprecated') return 'default';
+    return 'warning';
   }
 </script>
 
@@ -125,7 +141,10 @@
             </div>
             <div class="card-meta">
               <div class="persona-name">{persona.name}</div>
-              <Badge variant={scopeVariant(persona.scope)} value={scopeLabel(persona.scope)} />
+              <div class="badge-row">
+                <Badge variant={scopeVariant(persona.scope)} value={scopeLabel(persona.scope)} />
+                <Badge variant={approvalVariant(persona.approval_status)} value={persona.approval_status ?? 'Pending'} />
+              </div>
             </div>
           </div>
           {#if persona.description}
@@ -138,7 +157,13 @@
               {/each}
             </div>
           {/if}
+          {#if persona.content_hash}
+            <div class="hash-chip" title="Content hash (SHA-256)">{persona.content_hash.slice(0, 8)}</div>
+          {/if}
           <div class="card-actions">
+            {#if persona.approval_status !== 'Approved'}
+              <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)}>Approve</button>
+            {/if}
             <button class="btn-danger-sm" onclick={() => deletePersona(persona.id)}>Delete</button>
           </div>
         </div>
@@ -288,9 +313,28 @@
     gap: var(--space-1);
   }
 
+  .badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+  }
+
+  .hash-chip {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1px 6px;
+    width: fit-content;
+  }
+
   .card-actions {
     display: flex;
     justify-content: flex-end;
+    gap: var(--space-1);
     margin-top: auto;
   }
 
@@ -329,6 +373,17 @@
     cursor: pointer;
   }
   .btn-danger-sm:hover { background: rgba(255, 80, 80, 0.08); }
+
+  .btn-approve-sm {
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-success, #3fb950);
+    border-radius: var(--radius);
+    color: var(--color-success, #3fb950);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .btn-approve-sm:hover { background: rgba(63, 185, 80, 0.08); }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
