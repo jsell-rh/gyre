@@ -123,7 +123,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
-    _admin: crate::auth::AdminOnly,
+    _auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -182,7 +182,7 @@ pub async fn get_persona(
 }
 
 pub async fn update_persona(
-    _admin: crate::auth::AdminOnly,
+    _auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdatePersonaRequest>,
@@ -224,7 +224,7 @@ pub async fn update_persona(
 }
 
 pub async fn delete_persona(
-    _admin: crate::auth::AdminOnly,
+    _auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -237,9 +237,9 @@ pub async fn delete_persona(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /api/v1/personas/:id/approve — Admin only; sets approval_status=Approved.
+/// POST /api/v1/personas/:id/approve — Admin only (enforced by ABAC middleware); sets approval_status=Approved.
 pub async fn approve_persona(
-    admin: crate::auth::AdminOnly,
+    auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<PersonaResponse>, ApiError> {
@@ -250,7 +250,7 @@ pub async fn approve_persona(
         .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
     let now = now_secs();
     persona.approval_status = PersonaApprovalStatus::Approved;
-    persona.approved_by = Some(admin.agent_id.clone());
+    persona.approved_by = Some(auth.agent_id.clone());
     persona.approved_at = Some(now);
     persona.updated_at = now;
     state.personas.update(&persona).await?;

@@ -16,7 +16,7 @@
 //!
 //! Requires `git` on PATH.
 
-use gyre_server::{build_router, build_state, merge_processor};
+use gyre_server::{abac_middleware, build_router, build_state, merge_processor};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -67,6 +67,7 @@ async fn start_server(auth_token: &str) -> (u16, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(auth_token, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);

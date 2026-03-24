@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::auth::AdminOnly;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -116,7 +115,6 @@ pub async fn get_meta_spec_set(
 pub async fn put_meta_spec_set(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
-    _admin: AdminOnly,
     Json(req): Json<UpdateMetaSpecSetRequest>,
 ) -> Result<(StatusCode, Json<MetaSpecSet>), ApiError> {
     // Verify workspace exists.

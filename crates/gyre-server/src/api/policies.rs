@@ -72,7 +72,6 @@ pub struct ConditionRequest {
 
 pub async fn create_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     auth: AuthenticatedAgent,
     Json(req): Json<CreatePolicyRequest>,
 ) -> Result<(StatusCode, Json<Policy>), ApiError> {
@@ -134,7 +133,6 @@ pub struct UpdatePolicyRequest {
 
 pub async fn update_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(id): Path<String>,
     Json(req): Json<UpdatePolicyRequest>,
 ) -> Result<Json<Policy>, ApiError> {
@@ -182,7 +180,6 @@ pub async fn update_policy(
 
 pub async fn delete_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     state

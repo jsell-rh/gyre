@@ -56,7 +56,6 @@ impl From<Tenant> for TenantResponse {
 }
 
 pub async fn create_tenant(
-    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<(StatusCode, Json<TenantResponse>), ApiError> {
@@ -70,7 +69,6 @@ pub async fn create_tenant(
 }
 
 pub async fn list_tenants(
-    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<TenantResponse>>, ApiError> {
     let tenants = state.tenants.list().await?;
@@ -80,7 +78,6 @@ pub async fn list_tenants(
 }
 
 pub async fn get_tenant(
-    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<TenantResponse>, ApiError> {
@@ -93,7 +90,6 @@ pub async fn get_tenant(
 }
 
 pub async fn update_tenant(
-    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateTenantRequest>,
@@ -120,7 +116,6 @@ pub async fn update_tenant(
 }
 
 pub async fn delete_tenant(
-    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {

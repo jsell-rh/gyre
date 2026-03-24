@@ -164,10 +164,9 @@ pub struct SetAbacPoliciesRequest {
     pub policies: Vec<AbacPolicy>,
 }
 
-/// PUT /api/v1/repos/:id/abac-policy — set ABAC policies (AdminOnly).
+/// PUT /api/v1/repos/:id/abac-policy — set ABAC policies (admin-only via ABAC middleware).
 pub async fn set_abac_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(repo_id): Path<String>,
     Json(req): Json<SetAbacPoliciesRequest>,
 ) -> Result<(StatusCode, Json<AbacPolicyResponse>), ApiError> {
