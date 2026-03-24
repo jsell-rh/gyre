@@ -126,6 +126,7 @@
       <MoldableView
         nodes={graph.nodes ?? []}
         edges={graph.edges ?? []}
+        repoId={selectedRepoId}
         onSelectNode={onSelectNode}
       />
     {/if}
