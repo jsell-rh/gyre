@@ -46,10 +46,8 @@ jobs:
       - run: bash scripts/check-arch.sh                                                                                                         
       - name: API auth coverage lint                                                                                                            
         run: bash scripts/check-api-auth.sh                                                                                                     
-        continue-on-error: true   # Advisory until M34 Slice 4 fixes all violations                                                             
       - name: Tenant filter lint                                                                                                                
         run: bash scripts/check-tenant-filter.sh                                                                                                
-        continue-on-error: true   # Advisory until M34 Slice 4 fixes all violations                                                             
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  
