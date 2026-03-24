@@ -353,5 +353,5 @@ export const api = {
   myMrs: () => request('/users/me/mrs'),
   myNotifications: () => request('/users/me/notifications'),
   markNotificationRead: (id) =>
-    request(`/users/me/notifications/${id}/read`, { method: 'POST' }),
+    request(`/users/me/notifications/${id}/read`, { method: 'PUT' }),
 };

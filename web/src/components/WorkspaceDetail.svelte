@@ -193,7 +193,7 @@
             {#each members as m}
               <tr>
                 <td>{m.display_name ?? m.user_id ?? m.id}</td>
-                <td><Badge variant={roleColor(m.role)} label={m.role ?? 'member'} /></td>
+                <td><Badge variant={roleColor(m.role)} value={m.role ?? 'member'} /></td>
                 <td class="muted">{m.joined_at ? new Date(m.joined_at).toLocaleDateString() : '—'}</td>
               </tr>
             {/each}
