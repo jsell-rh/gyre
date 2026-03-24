@@ -98,6 +98,9 @@ toml = "0.8"
 # Directory walking
 walkdir = "2"
 
+# Concurrent hash map for in-memory stores (TelemetryBuffer)
+dashmap = "6"
+
 # Internal crates
 gyre-common = { path = "crates/gyre-common" }
 gyre-ports = { path = "crates/gyre-ports" }
