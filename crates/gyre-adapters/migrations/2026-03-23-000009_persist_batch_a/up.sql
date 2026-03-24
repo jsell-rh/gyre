@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS spec_ledger_entries (
     path TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
     owner TEXT NOT NULL,
+    kind TEXT,
     current_sha TEXT NOT NULL,
     approval_mode TEXT NOT NULL,
     approval_status TEXT NOT NULL,

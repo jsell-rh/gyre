@@ -482,6 +482,7 @@ diesel::table! {
         path -> Text,
         title -> Text,
         owner -> Text,
+        kind -> Nullable<Text>,
         current_sha -> Text,
         approval_mode -> Text,
         approval_status -> Text,

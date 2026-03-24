@@ -27,6 +27,8 @@ pub struct SpecLedgerEntry {
     pub path: String,
     pub title: String,
     pub owner: String,
+    /// Optional spec kind, e.g. "meta:persona", "meta:principle", "meta:standard", "meta:process".
+    pub kind: Option<String>,
     /// Git blob SHA of the spec file at HEAD.
     pub current_sha: String,
     /// Approval mode from the manifest.

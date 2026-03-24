@@ -60,7 +60,13 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
     // Mark as Running.
     let _ = state
         .gate_results
-        .update_status(result_id.as_str(), GateStatus::Running, Some(started_at), None, None)
+        .update_status(
+            result_id.as_str(),
+            GateStatus::Running,
+            Some(started_at),
+            None,
+            None,
+        )
         .await;
 
     let (status, output) = match &gate.gate_type {
@@ -123,7 +129,13 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
 
     let _ = state
         .gate_results
-        .update_status(result_id.as_str(), status, None, Some(finished_at), Some(output))
+        .update_status(
+            result_id.as_str(),
+            status,
+            None,
+            Some(finished_at),
+            Some(output),
+        )
         .await;
 }
 

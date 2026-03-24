@@ -474,9 +474,8 @@ pub async fn spawn_agent(
                                             audit: state_mon.audit.as_ref(),
                                             broadcast_tx: &state_mon.audit_broadcast_tx,
                                         };
-                                        let container_id_for_evt = audit_rec
-                                            .map(|r| r.container_id)
-                                            .unwrap_or_default();
+                                        let container_id_for_evt =
+                                            audit_rec.map(|r| r.container_id).unwrap_or_default();
                                         crate::container_audit::emit_stopped(
                                             &ctx,
                                             &agent_id_str,

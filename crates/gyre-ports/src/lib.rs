@@ -44,14 +44,14 @@ pub mod workspace_membership;
 
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
-pub use attestation_repo::AttestationRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use analytics::{AnalyticsRepository, CostRepository};
+pub use attestation_repo::AttestationRepository;
 pub use audit::AuditRepository;
-pub use container_audit_repo::ContainerAuditRepository;
 pub use budget::BudgetRepository;
 pub use budget_usage::BudgetUsageRepository;
 pub use compute::{ComputeTarget, ProcessHandle, SpawnConfig};
+pub use container_audit_repo::ContainerAuditRepository;
 pub use dependency::DependencyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;

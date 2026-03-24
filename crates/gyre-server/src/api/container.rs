@@ -23,7 +23,9 @@ pub async fn get_agent_container(
         .find_by_agent_id(&agent_id)
         .await?
         .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("no container audit record for agent {agent_id}")))
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("no container audit record for agent {agent_id}"))
+        })
 }
 
 // ---------------------------------------------------------------------------

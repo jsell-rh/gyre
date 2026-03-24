@@ -326,7 +326,8 @@ pub async fn list_spec_approvals(
     } else {
         state.spec_approvals.list_all().await?
     };
-    let mut result: Vec<SpecApprovalResponse> = all.into_iter().map(SpecApprovalResponse::from).collect();
+    let mut result: Vec<SpecApprovalResponse> =
+        all.into_iter().map(SpecApprovalResponse::from).collect();
     result.sort_by_key(|a| a.approved_at);
     Ok(Json(result))
 }
@@ -370,12 +371,7 @@ pub async fn revoke_spec_approval(
     let now = now_secs();
     state
         .spec_approvals
-        .revoke(
-            &Id::new(&req.approval_id),
-            &caller_id,
-            &req.reason,
-            now,
-        )
+        .revoke(&Id::new(&req.approval_id), &caller_id, &req.reason, now)
         .await?;
 
     // Return updated approval.

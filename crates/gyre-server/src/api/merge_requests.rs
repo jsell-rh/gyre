@@ -1158,11 +1158,7 @@ mod tests {
             author_agent_id: None,
         };
         let bundle = sign_attestation(attestation, &state.agent_signing_key);
-        state
-            .attestation_store
-            .save(&mr_id, &bundle)
-            .await
-            .unwrap();
+        state.attestation_store.save(&mr_id, &bundle).await.unwrap();
 
         // GET the attestation via the API.
         let resp = app

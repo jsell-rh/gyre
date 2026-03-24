@@ -46,10 +46,7 @@ pub async fn capture_spawn_audit(
 /// Runs `{runtime} inspect` to retrieve the exit code and finish time.
 /// If inspect fails (container already removed) timestamps fall back to the
 /// current time so the record remains useful for audit purposes.
-pub async fn capture_exit_audit(
-    repo: &dyn gyre_ports::ContainerAuditRepository,
-    agent_id: &str,
-) {
+pub async fn capture_exit_audit(repo: &dyn gyre_ports::ContainerAuditRepository, agent_id: &str) {
     let (container_id, runtime) = match repo.find_by_agent_id(agent_id).await {
         Ok(Some(r)) => (r.container_id, r.runtime),
         _ => return,

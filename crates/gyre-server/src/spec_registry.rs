@@ -286,9 +286,7 @@ pub async fn sync_spec_ledger(
         let approval_mode = entry.effective_approval_mode().to_string();
         let auto_invalidate = entry.effective_auto_invalidate(&manifest.defaults);
 
-        let updated_entry = if let Ok(Some(mut existing)) =
-            ledger.find_by_path(&entry.path).await
-        {
+        let updated_entry = if let Ok(Some(mut existing)) = ledger.find_by_path(&entry.path).await {
             // Already in ledger — check if SHA changed.
             if existing.current_sha != blob_sha && !blob_sha.is_empty() {
                 info!(
@@ -369,7 +367,8 @@ pub async fn sync_spec_ledger(
         for link in &new_links {
             match link.link_type {
                 SpecLinkType::Supersedes => {
-                    if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await {
+                    if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await
+                    {
                         if target_entry.approval_status != ApprovalStatus::Deprecated {
                             info!(
                                 source = %link.source_path,
@@ -384,7 +383,8 @@ pub async fn sync_spec_ledger(
                 }
                 SpecLinkType::Extends => {
                     if let Some(pinned_sha) = &link.target_sha {
-                        if let Ok(Some(target_entry)) = ledger.find_by_path(&link.target_path).await {
+                        if let Ok(Some(target_entry)) = ledger.find_by_path(&link.target_path).await
+                        {
                             let current_sha = &target_entry.current_sha;
                             if !current_sha.is_empty() && current_sha != pinned_sha {
                                 info!(
@@ -392,7 +392,9 @@ pub async fn sync_spec_ledger(
                                     target = %link.target_path,
                                     "spec-registry: extends target SHA changed — marking extending spec drifted"
                                 );
-                                if let Ok(Some(mut source_entry)) = ledger.find_by_path(&link.source_path).await {
+                                if let Ok(Some(mut source_entry)) =
+                                    ledger.find_by_path(&link.source_path).await
+                                {
                                     source_entry.drift_status = "drifted".to_string();
                                     source_entry.updated_at = now;
                                     let _ = ledger.save(&source_entry).await;

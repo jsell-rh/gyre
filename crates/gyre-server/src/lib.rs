@@ -50,13 +50,13 @@ use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
     ContainerAuditRepository, CostRepository, DependencyRepository, GateResultRepository,
-    GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository,
-    MergeRequestRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
-    PolicyRepository, PreAcceptGate, ProcessHandle, ProjectRepository, PushGateRepository,
-    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository,
-    TaskRepository, TeamRepository, UserRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
+    NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
+    PreAcceptGate, ProcessHandle, ProjectRepository, PushGateRepository, QualityGateRepository,
+    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
+    TeamRepository, UserRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -581,19 +581,37 @@ pub fn build_state(
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
-        quality_gates: store!(dyn QualityGateRepository, mem::MemQualityGateRepository::default()),
-        gate_results: store!(dyn GateResultRepository, mem::MemGateResultRepository::default()),
+        quality_gates: store!(
+            dyn QualityGateRepository,
+            mem::MemQualityGateRepository::default()
+        ),
+        gate_results: store!(
+            dyn GateResultRepository,
+            mem::MemGateResultRepository::default()
+        ),
         push_gate_registry: Arc::new(pre_accept::builtin_gates()),
-        repo_push_gates: store!(dyn PushGateRepository, mem::MemPushGateRepository::default()),
+        repo_push_gates: store!(
+            dyn PushGateRepository,
+            mem::MemPushGateRepository::default()
+        ),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: store!(
             dyn SpawnLogRepository,
             mem::MemSpawnLogRepository::default()
         ),
         db_storage,
-        spec_approvals: store!(dyn SpecApprovalRepository, mem::MemSpecApprovalRepository::default()),
-        spec_policies: store!(dyn SpecPolicyRepository, mem::MemSpecPolicyRepository::default()),
-        attestation_store: store!(dyn AttestationRepository, mem::MemAttestationRepository::default()),
+        spec_approvals: store!(
+            dyn SpecApprovalRepository,
+            mem::MemSpecApprovalRepository::default()
+        ),
+        spec_policies: store!(
+            dyn SpecPolicyRepository,
+            mem::MemSpecPolicyRepository::default()
+        ),
+        attestation_store: store!(
+            dyn AttestationRepository,
+            mem::MemAttestationRepository::default()
+        ),
         trusted_issuers: std::env::var("GYRE_TRUSTED_ISSUERS")
             .ok()
             .map(|v| {
@@ -607,9 +625,18 @@ pub fn build_state(
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
-        container_audits: store!(dyn ContainerAuditRepository, mem::MemContainerAuditRepository::default()),
-        spec_ledger: store!(dyn SpecLedgerRepository, mem::MemSpecLedgerRepository::default()),
-        spec_approval_history: store!(dyn SpecApprovalEventRepository, mem::MemSpecApprovalEventRepository::default()),
+        container_audits: store!(
+            dyn ContainerAuditRepository,
+            mem::MemContainerAuditRepository::default()
+        ),
+        spec_ledger: store!(
+            dyn SpecLedgerRepository,
+            mem::MemSpecLedgerRepository::default()
+        ),
+        spec_approval_history: store!(
+            dyn SpecApprovalEventRepository,
+            mem::MemSpecApprovalEventRepository::default()
+        ),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: store!(
             dyn BudgetRepository,

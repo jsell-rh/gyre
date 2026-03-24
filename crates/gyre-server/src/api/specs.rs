@@ -333,7 +333,9 @@ pub async fn approve_spec(
                 }
                 SpecLinkType::ConflictsWith => {
                     // Conflicting spec must not be approved.
-                    if let Some(conflicting) = state.spec_ledger.find_by_path(&link.target_path).await? {
+                    if let Some(conflicting) =
+                        state.spec_ledger.find_by_path(&link.target_path).await?
+                    {
                         if conflicting.approval_status == ApprovalStatus::Approved {
                             return Err(ApiError::InvalidInput(format!(
                                 "cannot approve '{}': conflicts with '{}' which is already approved — resolve the conflict first",
@@ -811,12 +813,18 @@ mod tests {
         let state = test_state();
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/pending.md", ApprovalStatus::Pending))
+            .save(&make_ledger_entry(
+                "system/pending.md",
+                ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/approved.md", ApprovalStatus::Approved))
+            .save(&make_ledger_entry(
+                "system/approved.md",
+                ApprovalStatus::Approved,
+            ))
             .await
             .unwrap();
         let app = crate::api::api_router().with_state(state);
@@ -897,12 +905,18 @@ mod tests {
         // child spec: implements parent
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/parent.md", ApprovalStatus::Pending))
+            .save(&make_ledger_entry(
+                "system/parent.md",
+                ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/child.md", ApprovalStatus::Pending))
+            .save(&make_ledger_entry(
+                "system/child.md",
+                ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         state.spec_links_store.lock().await.push(SpecLinkEntry {
@@ -943,12 +957,18 @@ mod tests {
 
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/parent.md", ApprovalStatus::Approved))
+            .save(&make_ledger_entry(
+                "system/parent.md",
+                ApprovalStatus::Approved,
+            ))
             .await
             .unwrap();
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/child.md", ApprovalStatus::Pending))
+            .save(&make_ledger_entry(
+                "system/child.md",
+                ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         state.spec_links_store.lock().await.push(SpecLinkEntry {
@@ -993,7 +1013,10 @@ mod tests {
 
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/old.md", ApprovalStatus::Approved))
+            .save(&make_ledger_entry(
+                "system/old.md",
+                ApprovalStatus::Approved,
+            ))
             .await
             .unwrap();
         state

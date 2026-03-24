@@ -1666,14 +1666,24 @@ pub struct MemQualityGateRepository {
 #[async_trait]
 impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
     async fn save(&self, gate: &gyre_domain::QualityGate) -> Result<()> {
-        self.gates.lock().await.insert(gate.id.to_string(), gate.clone());
+        self.gates
+            .lock()
+            .await
+            .insert(gate.id.to_string(), gate.clone());
         Ok(())
     }
     async fn find_by_id(&self, id: &str) -> Result<Option<gyre_domain::QualityGate>> {
         Ok(self.gates.lock().await.get(id).cloned())
     }
     async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
-        Ok(self.gates.lock().await.values().filter(|g| g.repo_id.to_string() == repo_id).cloned().collect())
+        Ok(self
+            .gates
+            .lock()
+            .await
+            .values()
+            .filter(|g| g.repo_id.to_string() == repo_id)
+            .cloned()
+            .collect())
     }
     async fn delete(&self, id: &str) -> Result<()> {
         self.gates.lock().await.remove(id);
@@ -1800,7 +1810,10 @@ pub struct MemGateResultRepository {
 #[async_trait]
 impl gyre_ports::GateResultRepository for MemGateResultRepository {
     async fn save(&self, result: &gyre_domain::GateResult) -> Result<()> {
-        self.results.lock().await.insert(result.id.to_string(), result.clone());
+        self.results
+            .lock()
+            .await
+            .insert(result.id.to_string(), result.clone());
         Ok(())
     }
     async fn update_status(
@@ -1813,9 +1826,15 @@ impl gyre_ports::GateResultRepository for MemGateResultRepository {
     ) -> Result<()> {
         if let Some(r) = self.results.lock().await.get_mut(id) {
             r.status = status;
-            if let Some(s) = started_at { r.started_at = Some(s); }
-            if let Some(f) = finished_at { r.finished_at = Some(f); }
-            if output.is_some() { r.output = output; }
+            if let Some(s) = started_at {
+                r.started_at = Some(s);
+            }
+            if let Some(f) = finished_at {
+                r.finished_at = Some(f);
+            }
+            if output.is_some() {
+                r.output = output;
+            }
         }
         Ok(())
     }
@@ -1823,7 +1842,14 @@ impl gyre_ports::GateResultRepository for MemGateResultRepository {
         Ok(self.results.lock().await.get(id).cloned())
     }
     async fn list_by_mr_id(&self, mr_id: &str) -> Result<Vec<gyre_domain::GateResult>> {
-        Ok(self.results.lock().await.values().filter(|r| r.mr_id.to_string() == mr_id).cloned().collect())
+        Ok(self
+            .results
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.mr_id.to_string() == mr_id)
+            .cloned()
+            .collect())
     }
 }
 
@@ -1835,7 +1861,13 @@ pub struct MemPushGateRepository {
 #[async_trait]
 impl gyre_ports::PushGateRepository for MemPushGateRepository {
     async fn get_for_repo(&self, repo_id: &str) -> Result<Vec<String>> {
-        Ok(self.store.lock().await.get(repo_id).cloned().unwrap_or_default())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(repo_id)
+            .cloned()
+            .unwrap_or_default())
     }
     async fn set_for_repo(&self, repo_id: &str, gates: Vec<String>) -> Result<()> {
         self.store.lock().await.insert(repo_id.to_string(), gates);
@@ -1851,22 +1883,45 @@ pub struct MemSpecApprovalRepository {
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
-        self.store.lock().await.insert(approval.id.to_string(), approval.clone());
+        self.store
+            .lock()
+            .await
+            .insert(approval.id.to_string(), approval.clone());
         Ok(())
     }
     async fn find_by_id(&self, id: &gyre_common::Id) -> Result<Option<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.get(&id.to_string()).cloned())
     }
     async fn list_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
-        Ok(self.store.lock().await.values().filter(|a| a.spec_path == spec_path).cloned().collect())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spec_path == spec_path)
+            .cloned()
+            .collect())
     }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
-        Ok(self.store.lock().await.values().filter(|a| a.spec_path == spec_path && a.is_active()).cloned().collect())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spec_path == spec_path && a.is_active())
+            .cloned()
+            .collect())
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
-    async fn revoke(&self, id: &gyre_common::Id, revoked_by: &str, reason: &str, now: u64) -> Result<()> {
+    async fn revoke(
+        &self,
+        id: &gyre_common::Id,
+        revoked_by: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<()> {
         if let Some(a) = self.store.lock().await.get_mut(&id.to_string()) {
             a.revoked_at = Some(now);
             a.revoked_by = Some(revoked_by.to_string());
@@ -1874,7 +1929,13 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
         }
         Ok(())
     }
-    async fn revoke_all_for_path(&self, spec_path: &str, revoked_by: &str, reason: &str, now: u64) -> Result<()> {
+    async fn revoke_all_for_path(
+        &self,
+        spec_path: &str,
+        revoked_by: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<()> {
         for a in self.store.lock().await.values_mut() {
             if a.spec_path == spec_path && a.is_active() {
                 a.revoked_at = Some(now);
@@ -1937,7 +1998,13 @@ pub struct MemSpecPolicyRepository {
 #[async_trait]
 impl gyre_ports::SpecPolicyRepository for MemSpecPolicyRepository {
     async fn get_for_repo(&self, repo_id: &str) -> Result<gyre_domain::SpecPolicy> {
-        Ok(self.store.lock().await.get(repo_id).cloned().unwrap_or_default())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(repo_id)
+            .cloned()
+            .unwrap_or_default())
     }
     async fn set_for_repo(&self, repo_id: &str, policy: gyre_domain::SpecPolicy) -> Result<()> {
         self.store.lock().await.insert(repo_id.to_string(), policy);
@@ -1956,7 +2023,10 @@ impl gyre_ports::AttestationRepository for MemAttestationRepository {
         Ok(self.store.lock().await.get(mr_id).cloned())
     }
     async fn save(&self, mr_id: &str, bundle: &gyre_domain::AttestationBundle) -> Result<()> {
-        self.store.lock().await.insert(mr_id.to_string(), bundle.clone());
+        self.store
+            .lock()
+            .await
+            .insert(mr_id.to_string(), bundle.clone());
         Ok(())
     }
 }
@@ -1968,14 +2038,25 @@ pub struct MemContainerAuditRepository {
 
 #[async_trait]
 impl gyre_ports::ContainerAuditRepository for MemContainerAuditRepository {
-    async fn find_by_agent_id(&self, agent_id: &str) -> Result<Option<gyre_domain::ContainerAuditRecord>> {
+    async fn find_by_agent_id(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<gyre_domain::ContainerAuditRecord>> {
         Ok(self.store.lock().await.get(agent_id).cloned())
     }
     async fn save(&self, record: &gyre_domain::ContainerAuditRecord) -> Result<()> {
-        self.store.lock().await.insert(record.agent_id.clone(), record.clone());
+        self.store
+            .lock()
+            .await
+            .insert(record.agent_id.clone(), record.clone());
         Ok(())
     }
-    async fn update_exit(&self, agent_id: &str, exit_code: Option<i32>, stopped_at: Option<u64>) -> Result<()> {
+    async fn update_exit(
+        &self,
+        agent_id: &str,
+        exit_code: Option<i32>,
+        stopped_at: Option<u64>,
+    ) -> Result<()> {
         if let Some(r) = self.store.lock().await.get_mut(agent_id) {
             r.exit_code = exit_code;
             r.stopped_at = stopped_at;
@@ -1998,7 +2079,10 @@ impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
         Ok(self.store.lock().await.values().cloned().collect())
     }
     async fn save(&self, entry: &gyre_domain::SpecLedgerEntry) -> Result<()> {
-        self.store.lock().await.insert(entry.path.clone(), entry.clone());
+        self.store
+            .lock()
+            .await
+            .insert(entry.path.clone(), entry.clone());
         Ok(())
     }
     async fn delete_by_path(&self, path: &str) -> Result<()> {
@@ -2019,12 +2103,25 @@ impl gyre_ports::SpecApprovalEventRepository for MemSpecApprovalEventRepository 
         Ok(())
     }
     async fn list_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApprovalEvent>> {
-        Ok(self.store.lock().await.iter().filter(|e| e.spec_path == spec_path).cloned().collect())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.spec_path == spec_path)
+            .cloned()
+            .collect())
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApprovalEvent>> {
         Ok(self.store.lock().await.clone())
     }
-    async fn revoke_event(&self, id: &str, revoked_at: u64, revoked_by: &str, reason: &str) -> Result<()> {
+    async fn revoke_event(
+        &self,
+        id: &str,
+        revoked_at: u64,
+        revoked_by: &str,
+        reason: &str,
+    ) -> Result<()> {
         for e in self.store.lock().await.iter_mut() {
             if e.id == id {
                 e.revoked_at = Some(revoked_at);
