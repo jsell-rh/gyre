@@ -33,6 +33,7 @@ pub mod spec_ledger;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
+pub mod tenant;
 pub mod user;
 pub mod workspace;
 pub mod workspace_membership;
