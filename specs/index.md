@@ -112,6 +112,9 @@ How Gyre gets built - process and standards for the agent team.
 | M27: Credential Opacity | [`milestones/m27-credential-opacity.md`](milestones/m27-credential-opacity.md) | Unix socket credential proxy (`cred-proxy` sidecar): credentials held in memory, never exposed to agent process env; supports Anthropic direct API, Vertex AI (GCP SA JSON), and git tokens _(Draft)_ |
 | M28: UI Cohesion | [`milestones/m28-ui-cohesion.md`](milestones/m28-ui-cohesion.md) | Global workspace selector (topbar, localStorage persistence), entity deep-link URLs (`/repos/:id`, `/tasks/:id`, `/merge-requests/:id`, `/workspaces/:id`), cross-entity navigation via Svelte context, SpecDashboard repo filter |
 | M29: Workspace Integration | [`milestones/m29-workspace-integration.md`](milestones/m29-workspace-integration.md) | Workspace-aware SPA: M29.4 wires `workspace_id` filter to agents/tasks/projects list calls; post-create reload preserves workspace context |
+| M30: Knowledge Graph | [`milestones/m30-knowledge-graph.md`](milestones/m30-knowledge-graph.md) | Live knowledge graph extracted from source code: `GraphNode`/`GraphEdge` domain types, `RustExtractor` (syn-based AST), 13 graph API endpoints, push-triggered automatic extraction (M30b) |
+| M31: UI Journeys | [`milestones/m31-ui-journeys.md`](milestones/m31-ui-journeys.md) | Intent-centric dashboard: Inbox (action queue), Briefing (narrative digest), System Explorer Canvas (MoldableView SVG graph), navigation restructure, keyboard shortcuts `i`/`b` |
+| M32: Meta-Spec Reconciliation | [`milestones/m32-meta-spec-reconciliation.md`](milestones/m32-meta-spec-reconciliation.md) | Spec `kind` field (meta:persona/principle/standard/process), workspace meta-spec-set bindings, blast-radius endpoint, `meta_spec_set_sha` in spawn provenance, MetaSpecs UI |
 
 ## Open Questions
 
