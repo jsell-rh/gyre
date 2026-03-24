@@ -70,12 +70,12 @@ describe('TASK-109 — api.js auth header behaviour', () => {
   it('changing the token mid-session updates subsequent requests', async () => {
     setAuthToken('token-v1');
     global.fetch = mockFetch();
-    await api.projects();
+    await api.repos();
     expect(global.fetch.mock.calls[0][1].headers['Authorization']).toBe('Bearer token-v1');
 
     setAuthToken('token-v2');
     global.fetch = mockFetch();
-    await api.projects();
+    await api.repos();
     expect(global.fetch.mock.calls[0][1].headers['Authorization']).toBe('Bearer token-v2');
   });
 });
