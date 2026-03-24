@@ -12,6 +12,8 @@
   let loading = $state(true);
   let error = $state(null);
   let seenIds = $state(new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')));
+  // Map of item.id -> { loading, success, message }
+  let actionStates = $state({});
 
   let refreshInterval;
 
@@ -19,26 +21,27 @@
 
   async function loadInbox() {
     try {
-      const [mrs, pendingSpecs, gateActivity] = await Promise.allSettled([
+      const [mrs, pendingSpecs] = await Promise.allSettled([
         api.mergeRequests({ status: 'review' }),
         api.getPendingSpecs(),
-        api.activity(10).then(r => (r || []).filter(e => e.event_type === 'GateFailure')),
       ]);
 
       const inbox = [];
 
-      if (mrs.status === 'fulfilled') {
-        for (const mr of (mrs.value || [])) {
-          inbox.push({
-            id: `mr-${mr.id}`,
-            type: 'Review',
-            title: mr.title || `MR #${mr.id}`,
-            subtitle: mr.repository_id ? `repo: ${mr.repository_id}` : '',
-            created_at: mr.created_at,
-          });
-        }
+      const mrList = mrs.status === 'fulfilled' ? (mrs.value || []) : [];
+
+      // MR review items
+      for (const mr of mrList) {
+        inbox.push({
+          id: `mr-${mr.id}`,
+          type: 'Review',
+          title: mr.title || `MR #${mr.id}`,
+          subtitle: mr.repository_id ? `repo: ${mr.repository_id}` : '',
+          created_at: mr.created_at,
+        });
       }
 
+      // Spec approval items — include sha for inline approve action
       if (pendingSpecs.status === 'fulfilled') {
         for (const spec of (pendingSpecs.value || [])) {
           inbox.push({
@@ -47,19 +50,31 @@
             title: `Approve: ${spec.path}`,
             subtitle: spec.title || '',
             created_at: spec.updated_at,
+            spec_path: spec.path,
+            spec_sha: spec.sha,
           });
         }
       }
 
-      if (gateActivity.status === 'fulfilled') {
-        for (const evt of (gateActivity.value || [])) {
-          inbox.push({
-            id: `gate-${evt.event_id || evt.id}`,
-            type: 'Gate',
-            title: `Gate failure: ${evt.description || 'unknown gate'}`,
-            subtitle: evt.agent_id ? `agent: ${evt.agent_id}` : '',
-            created_at: evt.timestamp,
-          });
+      // Gate failure items — fetched from MR gate results so we have mr_id for retry
+      if (mrList.length > 0) {
+        const gateChecks = await Promise.allSettled(
+          mrList.map(mr => api.mrGates(mr.id).then(gates => ({ mr, gates })))
+        );
+        for (const result of gateChecks) {
+          if (result.status !== 'fulfilled') continue;
+          const { mr, gates } = result.value;
+          const failedGates = (gates || []).filter(g => g.status === 'failed' || g.status === 'Failed');
+          for (const gate of failedGates) {
+            inbox.push({
+              id: `gate-${mr.id}-${gate.id || gate.gate_id}`,
+              type: 'Gate',
+              title: `Gate failure: ${gate.gate_name || gate.name || 'unknown'}`,
+              subtitle: mr.title ? `MR: ${mr.title}` : '',
+              created_at: gate.finished_at || gate.started_at || mr.created_at,
+              mr_id: mr.id,
+            });
+          }
         }
       }
 
@@ -81,6 +96,46 @@
   function markSeen(id) {
     seenIds = new Set([...seenIds, id]);
     localStorage.setItem(SEEN_KEY, JSON.stringify([...seenIds]));
+  }
+
+  async function approveSpec(item) {
+    if (!item.spec_path || !item.spec_sha) return;
+    actionStates = { ...actionStates, [item.id]: { loading: true } };
+    try {
+      await api.approveSpec(item.spec_path, item.spec_sha);
+      actionStates = { ...actionStates, [item.id]: { loading: false, success: true, message: 'Approved' } };
+      markSeen(item.id);
+      // Reload after a short delay so the approved item disappears
+      setTimeout(loadInbox, 1200);
+    } catch (e) {
+      actionStates = { ...actionStates, [item.id]: { loading: false, success: false, message: e.message || 'Approval failed' } };
+    }
+  }
+
+  async function rejectSpec(item) {
+    if (!item.spec_path) return;
+    actionStates = { ...actionStates, [item.id]: { loading: true } };
+    try {
+      await api.revokeSpec(item.spec_path, 'Rejected from inbox');
+      actionStates = { ...actionStates, [item.id]: { loading: false, success: true, message: 'Rejected' } };
+      markSeen(item.id);
+      setTimeout(loadInbox, 1200);
+    } catch (e) {
+      actionStates = { ...actionStates, [item.id]: { loading: false, success: false, message: e.message || 'Rejection failed' } };
+    }
+  }
+
+  async function retryGate(item) {
+    if (!item.mr_id) return;
+    actionStates = { ...actionStates, [item.id]: { loading: true } };
+    try {
+      await api.enqueue(item.mr_id);
+      actionStates = { ...actionStates, [item.id]: { loading: false, success: true, message: 'Re-queued' } };
+      markSeen(item.id);
+      setTimeout(loadInbox, 1200);
+    } catch (e) {
+      actionStates = { ...actionStates, [item.id]: { loading: false, success: false, message: e.message || 'Retry failed' } };
+    }
   }
 
   function relativeTime(ts) {
@@ -138,22 +193,68 @@
   {:else}
     <div class="inbox-list" role="list">
       {#each items as item (item.id)}
-        <button
+        {@const state = actionStates[item.id]}
+        <div
           class="inbox-item"
           class:seen={seenIds.has(item.id)}
-          onclick={() => markSeen(item.id)}
-          aria-pressed={seenIds.has(item.id)}
-          aria-label="Mark as seen: {item.title}"
+          role="listitem"
         >
-          <div class="item-header">
-            <Badge value={item.type} variant={badgeVariant(item.type)} />
-            <span class="item-age">{relativeTime(item.created_at)}</span>
-          </div>
-          <div class="item-title">{item.title}</div>
-          {#if item.subtitle}
-            <div class="item-subtitle">{item.subtitle}</div>
+          <button
+            class="inbox-item-body"
+            onclick={() => markSeen(item.id)}
+            aria-pressed={seenIds.has(item.id)}
+            aria-label="Mark as seen: {item.title}"
+          >
+            <div class="item-header">
+              <Badge value={item.type} variant={badgeVariant(item.type)} />
+              <span class="item-age">{relativeTime(item.created_at)}</span>
+            </div>
+            <div class="item-title">{item.title}</div>
+            {#if item.subtitle}
+              <div class="item-subtitle">{item.subtitle}</div>
+            {/if}
+          </button>
+
+          {#if state?.message}
+            <div class="action-feedback" class:success={state.success} class:failure={!state.success}>
+              {state.message}
+            </div>
           {/if}
-        </button>
+
+          {#if item.type === 'Spec' && item.spec_path && item.spec_sha && !state?.success}
+            <div class="item-actions">
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={state?.loading}
+                onclick={(e) => { e.stopPropagation(); approveSpec(item); }}
+              >
+                {state?.loading ? 'Approving…' : 'Approve'}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={state?.loading}
+                onclick={(e) => { e.stopPropagation(); rejectSpec(item); }}
+              >
+                {state?.loading ? 'Rejecting…' : 'Reject'}
+              </Button>
+            </div>
+          {/if}
+
+          {#if item.type === 'Gate' && item.mr_id && !state?.success}
+            <div class="item-actions">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={state?.loading}
+                onclick={(e) => { e.stopPropagation(); retryGate(item); }}
+              >
+                {state?.loading ? 'Retrying…' : 'Retry'}
+              </Button>
+            </div>
+          {/if}
+        </div>
       {/each}
     </div>
   {/if}
@@ -208,29 +309,36 @@
   }
 
   .inbox-item {
-    padding: var(--space-4);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg, var(--radius));
-    cursor: pointer;
     transition: border-color var(--transition-fast), opacity var(--transition-fast);
-    text-align: left;
-    width: 100%;
-    font-family: var(--font-body);
-    color: var(--color-text);
+    overflow: hidden;
   }
 
   .inbox-item:hover {
     border-color: var(--color-border-strong);
   }
 
-  .inbox-item:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 2px;
-  }
-
   .inbox-item.seen {
     opacity: 0.45;
+  }
+
+  .inbox-item-body {
+    display: block;
+    width: 100%;
+    padding: var(--space-4);
+    text-align: left;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    font-family: var(--font-body);
+    color: var(--color-text);
+  }
+
+  .inbox-item-body:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .item-header {
@@ -256,6 +364,28 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-family: var(--font-mono);
+  }
+
+  .item-actions {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg);
+  }
+
+  .action-feedback {
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-4);
+    font-weight: 500;
+  }
+
+  .action-feedback.success {
+    color: var(--color-success, #22c55e);
+  }
+
+  .action-feedback.failure {
+    color: var(--color-danger);
   }
 
   .inbox-error {

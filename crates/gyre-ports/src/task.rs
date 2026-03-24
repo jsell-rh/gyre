@@ -14,4 +14,5 @@ pub trait TaskRepository: Send + Sync {
     async fn update(&self, task: &Task) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Task>>;
+    async fn list_by_spec_path(&self, spec_path: &str) -> Result<Vec<Task>>;
 }

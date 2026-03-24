@@ -189,6 +189,9 @@
                 {#if task.pr_link}
                   <a class="pr-link" href={task.pr_link} target="_blank" rel="noreferrer">PR ↗</a>
                 {/if}
+                {#if task.spec_path}
+                  <span class="spec-chip" title={task.spec_path}>📋 spec</span>
+                {/if}
               </div>
             {:else}
               <div class="empty-col">
@@ -393,6 +396,17 @@
   }
 
   .pr-link:hover { text-decoration: underline; color: var(--color-link-hover); }
+
+  .spec-chip {
+    display: inline-block;
+    font-size: var(--text-xs);
+    background: var(--color-primary-bg, #1a1a2e);
+    border: 1px solid var(--color-primary, #58a6ff);
+    color: var(--color-primary, #58a6ff);
+    border-radius: var(--radius-full);
+    padding: 1px var(--space-2);
+    cursor: default;
+  }
 
   .empty-col {
     flex: 1;

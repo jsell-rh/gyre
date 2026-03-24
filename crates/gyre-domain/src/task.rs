@@ -40,6 +40,8 @@ pub struct Task {
     pub created_at: u64,
     pub updated_at: u64,
     pub workspace_id: Option<Id>,
+    /// Spec path this task was created to implement/review (e.g. "specs/system/agent-gates.md").
+    pub spec_path: Option<String>,
 }
 
 impl Task {
@@ -58,6 +60,7 @@ impl Task {
             created_at,
             updated_at: created_at,
             workspace_id: None,
+            spec_path: None,
         }
     }
 

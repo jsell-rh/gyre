@@ -74,5 +74,5 @@ pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
 pub use team::Team;
 pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
-pub use workspace::{Persona, PersonaScope, Workspace};
+pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, Workspace};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};

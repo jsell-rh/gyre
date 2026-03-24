@@ -1,6 +1,7 @@
 use crate::budget::BudgetConfig;
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Governance and coordination boundary. Groups related repos with shared budgets and policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +39,15 @@ impl Workspace {
     }
 }
 
+/// Approval lifecycle for a persona definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum PersonaApprovalStatus {
+    #[default]
+    Pending,
+    Approved,
+    Deprecated,
+}
+
 /// Scope of a persona — determines resolution priority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "id")]
@@ -62,6 +72,16 @@ pub struct Persona {
     pub max_tokens: Option<u32>,
     pub budget: Option<BudgetConfig>,
     pub created_at: u64,
+    /// Increments on each update.
+    pub version: u32,
+    /// SHA-256 of system_prompt + capabilities joined.
+    pub content_hash: String,
+    /// Owner identity (user or agent id).
+    pub owner: Option<String>,
+    pub approval_status: PersonaApprovalStatus,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<u64>,
+    pub updated_at: u64,
 }
 
 impl Persona {
@@ -73,12 +93,14 @@ impl Persona {
         system_prompt: impl Into<String>,
         created_at: u64,
     ) -> Self {
+        let system_prompt = system_prompt.into();
+        let content_hash = Self::hash_content(&system_prompt, &[]);
         Self {
             id,
             name: name.into(),
             slug: slug.into(),
             scope,
-            system_prompt: system_prompt.into(),
+            system_prompt,
             capabilities: vec![],
             protocols: vec![],
             model: None,
@@ -86,7 +108,24 @@ impl Persona {
             max_tokens: None,
             budget: None,
             created_at,
+            version: 1,
+            content_hash,
+            owner: None,
+            approval_status: PersonaApprovalStatus::Pending,
+            approved_by: None,
+            approved_at: None,
+            updated_at: created_at,
         }
+    }
+
+    /// Recompute and store the content hash from current system_prompt + capabilities.
+    pub fn refresh_content_hash(&mut self) {
+        self.content_hash = Self::hash_content(&self.system_prompt, &self.capabilities);
+    }
+
+    fn hash_content(system_prompt: &str, capabilities: &[String]) -> String {
+        let input = format!("{}{}", system_prompt, capabilities.join(","));
+        format!("{:x}", Sha256::digest(input.as_bytes()))
     }
 }
 
