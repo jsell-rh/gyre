@@ -1492,9 +1492,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(
-                        "/git/nonexistent-id/no-such-repo.git/info/refs?service=git-upload-pack",
-                    )
+                    .uri("/git/nonexistent-id/no-such-repo.git/info/refs?service=git-upload-pack")
                     .header("Authorization", auth_header())
                     .body(Body::empty())
                     .unwrap(),
