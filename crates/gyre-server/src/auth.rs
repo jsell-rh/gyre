@@ -808,33 +808,10 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
     })
 }
 
-// -- AdminOnly extractor ------------------------------------------------------
-
-/// Extractor that requires the caller to have Admin role (or be "system").
-pub struct AdminOnly {
-    pub agent_id: String,
-    pub user_id: Option<Id>,
-}
-
-#[axum::async_trait]
-impl FromRequestParts<Arc<AppState>> for AdminOnly {
-    type Rejection = Response;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let auth = AuthenticatedAgent::from_request_parts(parts, state).await?;
-        if auth.agent_id == "system" || auth.roles.contains(&UserRole::Admin) {
-            Ok(AdminOnly {
-                agent_id: auth.agent_id,
-                user_id: auth.user_id,
-            })
-        } else {
-            Err((StatusCode::FORBIDDEN, "Admin role required").into_response())
-        }
-    }
-}
+// AdminOnly extractor removed (M34 Slice 4). ABAC middleware is the sole
+// authorization layer. Handlers that previously used AdminOnly now use
+// AuthenticatedAgent directly; ABAC middleware enforces admin-only access
+// via the admin-all-operations built-in policy.
 
 // -- Tests --------------------------------------------------------------------
 

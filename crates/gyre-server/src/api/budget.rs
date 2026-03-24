@@ -15,7 +15,6 @@ use axum::{
 use gyre_domain::{BudgetConfig, BudgetUsage};
 use serde::{Deserialize, Serialize};
 
-use super::super::auth::AdminOnly;
 use super::now_secs;
 use crate::{api::error::ApiError, AppState};
 
@@ -107,7 +106,6 @@ pub async fn get_workspace_budget(
 
 pub async fn set_workspace_budget(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
     Path(id): Path<String>,
     Json(req): Json<SetBudgetRequest>,
 ) -> Result<Json<BudgetResponse>, ApiError> {
@@ -175,7 +173,6 @@ pub async fn set_workspace_budget(
 
 pub async fn budget_summary(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
 ) -> Result<Json<TenantBudgetSummary>, ApiError> {
     let tenant_config = state
         .budget_configs
