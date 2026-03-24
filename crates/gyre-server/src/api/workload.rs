@@ -20,10 +20,12 @@ pub async fn get_workload(
     _auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<Json<WorkloadAttestation>, ApiError> {
-    let attestations = state.workload_attestations.lock().await;
-    attestations
-        .get(&id)
-        .cloned()
+    state
+        .kv_store
+        .kv_get("workload_attestations", &id)
+        .await
+        .map_err(ApiError::Internal)?
+        .and_then(|s| serde_json::from_str::<WorkloadAttestation>(&s).ok())
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("no workload attestation for agent {id}")))
 }
@@ -60,11 +62,12 @@ mod tests {
 
         let state = test_state();
         let att = attest_agent("agent-test", Some(1234), "local", "sha256:abc");
+        let json = serde_json::to_string(&att).unwrap();
         state
-            .workload_attestations
-            .lock()
+            .kv_store
+            .kv_set("workload_attestations", "agent-test", json)
             .await
-            .insert("agent-test".to_string(), att);
+            .unwrap();
 
         let app = crate::api::api_router().with_state(state);
         let resp = app

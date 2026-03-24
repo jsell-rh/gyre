@@ -183,8 +183,21 @@ pub async fn add_repo_to_workspace(
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", req.repo_id)))?;
     repo.workspace_id = Some(Id::new(&ws_id));
     state.repos.update(&repo).await?;
-    let mut map = state.workspace_repos.lock().await;
-    map.entry(ws_id).or_default().push(req.repo_id);
+    let mut repo_ids: Vec<String> = state
+        .kv_store
+        .kv_get("workspace_repos", &ws_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    repo_ids.push(req.repo_id);
+    let json = serde_json::to_string(&repo_ids).map_err(|e| ApiError::Internal(e.into()))?;
+    state
+        .kv_store
+        .kv_set("workspace_repos", &ws_id, json)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -197,8 +210,14 @@ pub async fn list_workspace_repos(
         .find_by_id(&Id::new(&ws_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {ws_id} not found")))?;
-    let map = state.workspace_repos.lock().await;
-    let repo_ids = map.get(&ws_id).cloned().unwrap_or_default();
+    let repo_ids: Vec<String> = state
+        .kv_store
+        .kv_get("workspace_repos", &ws_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     Ok(Json(
         repo_ids
             .into_iter()

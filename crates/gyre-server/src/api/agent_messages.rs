@@ -33,11 +33,26 @@ pub async fn get_messages(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
-    let mut store = state.agent_messages.lock().await;
-    let messages: Vec<AgentMessage> = store
-        .get_mut(&id)
-        .map(|q| q.drain(..).collect())
+    // Drain: load all messages, return them, clear the queue.
+    let messages: Vec<AgentMessage> = state
+        .kv_store
+        .kv_get("agent_messages", &id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    if !messages.is_empty() {
+        let empty: Vec<AgentMessage> = vec![];
+        let _ = state
+            .kv_store
+            .kv_set(
+                "agent_messages",
+                &id,
+                serde_json::to_string(&empty).unwrap_or_default(),
+            )
+            .await;
+    }
     Ok(Json(messages))
 }
 
@@ -61,13 +76,22 @@ pub async fn send_message(
         created_at: now_secs(),
     };
 
-    state
-        .agent_messages
-        .lock()
+    // Append message to the agent's queue.
+    let mut messages: Vec<AgentMessage> = state
+        .kv_store
+        .kv_get("agent_messages", &id)
         .await
-        .entry(id)
-        .or_default()
-        .push_back(msg.clone());
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    messages.push(msg.clone());
+    let json = serde_json::to_string(&messages).map_err(|e| ApiError::Internal(e.into()))?;
+    state
+        .kv_store
+        .kv_set("agent_messages", &id, json)
+        .await
+        .map_err(ApiError::Internal)?;
 
     Ok((StatusCode::CREATED, Json(msg)))
 }

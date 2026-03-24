@@ -105,10 +105,10 @@ pub async fn create_agent(
 
     let token = uuid::Uuid::new_v4().to_string();
     state
-        .agent_tokens
-        .lock()
+        .kv_store
+        .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
         .await
-        .insert(agent.id.to_string(), token.clone());
+        .map_err(ApiError::Internal)?;
 
     Ok((
         StatusCode::CREATED,
@@ -189,9 +189,10 @@ pub async fn agent_heartbeat(
     // G10: Verify workload attestation liveness on each heartbeat.
     // Checks PID is still alive; stack hash is left empty (stack re-check
     // is only done when agent self-reports via POST /api/v1/agents/{id}/stack).
-    {
-        let mut attestations = state.workload_attestations.lock().await;
-        if let Some(att) = attestations.get_mut(&id) {
+    if let Ok(Some(json)) = state.kv_store.kv_get("workload_attestations", &id).await {
+        if let Ok(mut att) =
+            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json)
+        {
             // M19.4: If a container_id is present, verify container liveness
             // via `docker inspect --format='{{.State.Running}}'` in addition to
             // (or instead of) the PID check.
@@ -229,7 +230,7 @@ pub async fn agent_heartbeat(
             };
 
             let still_ok =
-                crate::workload_attestation::verify_attestation(att, container_alive, "");
+                crate::workload_attestation::verify_attestation(&mut att, container_alive, "");
             if !still_ok {
                 tracing::warn!(
                     agent_id = %id,
@@ -237,6 +238,13 @@ pub async fn agent_heartbeat(
                     container_id = ?att.container_id,
                     "Workload attestation liveness check failed on heartbeat"
                 );
+            }
+            // Persist updated attestation (alive + last_verified_at updated).
+            if let Ok(updated_json) = serde_json::to_string(&att) {
+                let _ = state
+                    .kv_store
+                    .kv_set("workload_attestations", &id, updated_json)
+                    .await;
             }
         }
     }

@@ -150,33 +150,43 @@ pub async fn get_meta_spec_blast_radius(
     State(state): State<Arc<AppState>>,
     Path(spec_path): Path<String>,
 ) -> Json<BlastRadiusResponse> {
-    let sets = state.meta_spec_sets.lock().await;
-    let workspace_repos = state.workspace_repos.lock().await;
+    // Collect matching workspace IDs while holding the lock, then drop it before async calls.
+    let matching_workspace_ids: Vec<String> = {
+        let sets = state.meta_spec_sets.lock().await;
+        sets.iter()
+            .filter(|(_, set)| {
+                set.personas.values().any(|e| e.path == spec_path)
+                    || set.principles.iter().any(|e| e.path == spec_path)
+                    || set.standards.iter().any(|e| e.path == spec_path)
+                    || set.process.iter().any(|e| e.path == spec_path)
+            })
+            .map(|(ws_id, _)| ws_id.clone())
+            .collect()
+    };
 
     let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
     let mut affected_repos: Vec<AffectedRepo> = Vec::new();
 
-    for (workspace_id, set) in sets.iter() {
-        let binds_this_spec = set.personas.values().any(|e| e.path == spec_path)
-            || set.principles.iter().any(|e| e.path == spec_path)
-            || set.standards.iter().any(|e| e.path == spec_path)
-            || set.process.iter().any(|e| e.path == spec_path);
+    for workspace_id in &matching_workspace_ids {
+        affected_workspaces.push(AffectedWorkspace {
+            id: workspace_id.clone(),
+        });
 
-        if binds_this_spec {
-            affected_workspaces.push(AffectedWorkspace {
-                id: workspace_id.clone(),
+        // Collect repos bound to this workspace via kv_store.
+        let repo_ids: Vec<String> = state
+            .kv_store
+            .kv_get("workspace_repos", workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default();
+        for repo_id in &repo_ids {
+            affected_repos.push(AffectedRepo {
+                id: repo_id.clone(),
+                workspace_id: workspace_id.clone(),
+                reason: "workspace_binding".to_string(),
             });
-
-            // Collect repos bound to this workspace.
-            if let Some(repo_ids) = workspace_repos.get(workspace_id) {
-                for repo_id in repo_ids {
-                    affected_repos.push(AffectedRepo {
-                        id: repo_id.clone(),
-                        workspace_id: workspace_id.clone(),
-                        reason: "workspace_binding".to_string(),
-                    });
-                }
-            }
         }
     }
 
