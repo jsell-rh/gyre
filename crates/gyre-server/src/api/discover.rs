@@ -25,12 +25,19 @@ pub async fn discover_agents(
 ) -> Result<Json<Vec<AgentCard>>, ApiError> {
     // Get all active agents
     let agents = state.agents.list_by_status(&AgentStatus::Active).await?;
-    let cards = state.agent_cards.lock().await;
 
-    let mut result: Vec<AgentCard> = agents
-        .iter()
-        .filter_map(|a| cards.get(a.id.as_str()).cloned())
-        .collect();
+    let mut result: Vec<AgentCard> = Vec::new();
+    for a in &agents {
+        if let Ok(Some(json)) = state
+            .kv_store
+            .kv_get("agent_cards", a.id.as_str())
+            .await
+        {
+            if let Ok(card) = serde_json::from_str::<AgentCard>(&json) {
+                result.push(card);
+            }
+        }
+    }
 
     // Filter by capability if requested
     if let Some(cap) = &params.capability {
@@ -58,7 +65,12 @@ pub async fn update_agent_card(
         ));
     }
 
-    state.agent_cards.lock().await.insert(id, card.clone());
+    let json = serde_json::to_string(&card).map_err(|e| ApiError::Internal(e.into()))?;
+    state
+        .kv_store
+        .kv_set("agent_cards", &id, json)
+        .await
+        .map_err(ApiError::Internal)?;
 
     Ok((StatusCode::OK, Json(card)))
 }

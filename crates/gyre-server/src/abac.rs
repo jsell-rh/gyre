@@ -77,11 +77,18 @@ pub async fn check_repo_abac(
     repo_id: &str,
     auth: &AuthenticatedAgent,
 ) -> Result<(), String> {
-    let policies_guard = state.abac_policies.lock().await;
-    let repo_policies = match policies_guard.get(repo_id) {
-        Some(p) if !p.is_empty() => p,
-        _ => return Ok(()), // No policies = unrestricted.
-    };
+    let repo_policies: Vec<AbacPolicy> = state
+        .kv_store
+        .kv_get("abac_policies", repo_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if repo_policies.is_empty() {
+        return Ok(()); // No policies = unrestricted.
+    }
 
     // Global token and API keys carry no JWT claims → admin bypass.
     let claims = match &auth.jwt_claims {
@@ -90,7 +97,7 @@ pub async fn check_repo_abac(
     };
 
     // Evaluate each policy; pass if any matches.
-    for policy in repo_policies {
+    for policy in &repo_policies {
         if evaluate_policy(policy, claims) {
             return Ok(());
         }
@@ -123,12 +130,13 @@ pub async fn get_abac_policy(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
-    let policies = state
-        .abac_policies
-        .lock()
+    let policies: Vec<AbacPolicy> = state
+        .kv_store
+        .kv_get("abac_policies", &repo_id)
         .await
-        .get(&repo_id)
-        .cloned()
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
     Ok(Json(AbacPolicyResponse { repo_id, policies }))
@@ -153,11 +161,12 @@ pub async fn set_abac_policy(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
+    let json = serde_json::to_string(&req.policies).map_err(|e| ApiError::Internal(e.into()))?;
     state
-        .abac_policies
-        .lock()
+        .kv_store
+        .kv_set("abac_policies", &repo_id, json)
         .await
-        .insert(repo_id.clone(), req.policies.clone());
+        .map_err(ApiError::Internal)?;
 
     Ok((
         StatusCode::OK,
@@ -270,16 +279,18 @@ mod tests {
     async fn no_jwt_claims_bypasses_abac() {
         let state = test_state();
         // Add a restrictive policy.
-        state.abac_policies.lock().await.insert(
-            "repo-1".to_string(),
-            vec![AbacPolicy {
-                resource_type: "repo".to_string(),
-                resource_id: None,
-                required_claims: [("scope".to_string(), "repo:X".to_string())]
-                    .into_iter()
-                    .collect(),
-            }],
-        );
+        let policy = vec![AbacPolicy {
+            resource_type: "repo".to_string(),
+            resource_id: None,
+            required_claims: [("scope".to_string(), "repo:X".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+        state
+            .kv_store
+            .kv_set("abac_policies", "repo-1", serde_json::to_string(&policy).unwrap())
+            .await
+            .unwrap();
         // Global token / API key: jwt_claims is None → bypass.
         let auth = AuthenticatedAgent {
             agent_id: "system".to_string(),
@@ -294,16 +305,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn matching_claim_grants_access() {
         let state = test_state();
-        state.abac_policies.lock().await.insert(
-            "repo-A".to_string(),
-            vec![AbacPolicy {
-                resource_type: "repo".to_string(),
-                resource_id: None,
-                required_claims: [("scope".to_string(), "repo:A".to_string())]
-                    .into_iter()
-                    .collect(),
-            }],
-        );
+        let policy_a = vec![AbacPolicy {
+            resource_type: "repo".to_string(),
+            resource_id: None,
+            required_claims: [("scope".to_string(), "repo:A".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+        state
+            .kv_store
+            .kv_set("abac_policies", "repo-A", serde_json::to_string(&policy_a).unwrap())
+            .await
+            .unwrap();
         let auth = AuthenticatedAgent {
             agent_id: "agent-1".to_string(),
             user_id: None,
@@ -317,16 +330,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn mismatching_claim_denies_access() {
         let state = test_state();
-        state.abac_policies.lock().await.insert(
-            "repo-B".to_string(),
-            vec![AbacPolicy {
-                resource_type: "repo".to_string(),
-                resource_id: None,
-                required_claims: [("scope".to_string(), "repo:B".to_string())]
-                    .into_iter()
-                    .collect(),
-            }],
-        );
+        let policy_b = vec![AbacPolicy {
+            resource_type: "repo".to_string(),
+            resource_id: None,
+            required_claims: [("scope".to_string(), "repo:B".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+        state
+            .kv_store
+            .kv_set("abac_policies", "repo-B", serde_json::to_string(&policy_b).unwrap())
+            .await
+            .unwrap();
         // Agent only has scope for repo:A, not repo:B
         let auth = AuthenticatedAgent {
             agent_id: "agent-1".to_string(),
@@ -343,27 +358,30 @@ mod tests {
         let state = test_state();
         // Set up policies for both repos.
         {
-            let mut policies = state.abac_policies.lock().await;
-            policies.insert(
-                "repo-A".to_string(),
-                vec![AbacPolicy {
-                    resource_type: "repo".to_string(),
-                    resource_id: None,
-                    required_claims: [("scope".to_string(), "repo:A".to_string())]
-                        .into_iter()
-                        .collect(),
-                }],
-            );
-            policies.insert(
-                "repo-B".to_string(),
-                vec![AbacPolicy {
-                    resource_type: "repo".to_string(),
-                    resource_id: None,
-                    required_claims: [("scope".to_string(), "repo:B".to_string())]
-                        .into_iter()
-                        .collect(),
-                }],
-            );
+            let pa = vec![AbacPolicy {
+                resource_type: "repo".to_string(),
+                resource_id: None,
+                required_claims: [("scope".to_string(), "repo:A".to_string())]
+                    .into_iter()
+                    .collect(),
+            }];
+            let pb = vec![AbacPolicy {
+                resource_type: "repo".to_string(),
+                resource_id: None,
+                required_claims: [("scope".to_string(), "repo:B".to_string())]
+                    .into_iter()
+                    .collect(),
+            }];
+            state
+                .kv_store
+                .kv_set("abac_policies", "repo-A", serde_json::to_string(&pa).unwrap())
+                .await
+                .unwrap();
+            state
+                .kv_store
+                .kv_set("abac_policies", "repo-B", serde_json::to_string(&pb).unwrap())
+                .await
+                .unwrap();
         }
         let auth = AuthenticatedAgent {
             agent_id: "agent-1".to_string(),

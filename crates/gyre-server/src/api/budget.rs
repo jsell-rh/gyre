@@ -1,9 +1,9 @@
 /// Budget governance API — GET/PUT workspace budget limits, GET tenant summary.
 ///
 /// Workspaces are keyed by project_id (the current governance boundary).
-/// Budget state is stored in-memory in AppState:
-///   - `budget_configs`: entity_key -> BudgetConfig (limits)
-///   - `budget_usages`: entity_key -> BudgetUsage  (real-time usage)
+/// Budget state is persisted via port traits:
+///   - `budget_configs` (BudgetRepository): entity_key -> BudgetConfig (limits)
+///   - `budget_usages` (BudgetUsageRepository): entity_key -> BudgetUsage (real-time usage)
 ///
 /// Entity keys: `"workspace:{project_id}"` or `"tenant:global"`.
 use std::sync::Arc;
@@ -83,12 +83,17 @@ pub async fn get_workspace_budget(
     Path(id): Path<String>,
 ) -> Result<Json<BudgetResponse>, ApiError> {
     let key = workspace_key(&id);
-    let configs = state.budget_configs.lock().await;
-    let usages = state.budget_usages.lock().await;
-    let config = configs.get(&key).cloned().unwrap_or_default();
-    let usage = usages
-        .get(&key)
-        .cloned()
+    let config = state
+        .budget_configs
+        .get_config(&key)
+        .await
+        .map_err(ApiError::Internal)?
+        .unwrap_or_default();
+    let usage = state
+        .budget_usages
+        .get_usage(&key)
+        .await
+        .map_err(ApiError::Internal)?
         .unwrap_or_else(|| new_ws_usage(&id));
     Ok(Json(BudgetResponse {
         entity_type: "workspace".into(),
@@ -114,46 +119,49 @@ pub async fn set_workspace_budget(
     };
 
     // Cascade: workspace limits cannot exceed tenant limits.
+    if let Some(tenant) = state
+        .budget_configs
+        .get_config(tenant_key())
+        .await
+        .map_err(ApiError::Internal)?
     {
-        let tenant_configs = state.budget_configs.lock().await;
-        if let Some(tenant) = tenant_configs.get(tenant_key()) {
-            if let (Some(ws), Some(t)) = (new_config.max_tokens_per_day, tenant.max_tokens_per_day)
-            {
-                if ws > t {
-                    return Err(ApiError::InvalidInput(format!(
-                        "workspace max_tokens_per_day ({ws}) exceeds tenant limit ({t})"
-                    )));
-                }
+        if let (Some(ws), Some(t)) = (new_config.max_tokens_per_day, tenant.max_tokens_per_day) {
+            if ws > t {
+                return Err(ApiError::InvalidInput(format!(
+                    "workspace max_tokens_per_day ({ws}) exceeds tenant limit ({t})"
+                )));
             }
-            if let (Some(ws), Some(t)) = (new_config.max_cost_per_day, tenant.max_cost_per_day) {
-                if ws > t {
-                    return Err(ApiError::InvalidInput(format!(
-                        "workspace max_cost_per_day ({ws:.4}) exceeds tenant limit ({t:.4})"
-                    )));
-                }
+        }
+        if let (Some(ws), Some(t)) = (new_config.max_cost_per_day, tenant.max_cost_per_day) {
+            if ws > t {
+                return Err(ApiError::InvalidInput(format!(
+                    "workspace max_cost_per_day ({ws:.4}) exceeds tenant limit ({t:.4})"
+                )));
             }
-            if let (Some(ws), Some(t)) = (
-                new_config.max_concurrent_agents,
-                tenant.max_concurrent_agents,
-            ) {
-                if ws > t {
-                    return Err(ApiError::InvalidInput(format!(
-                        "workspace max_concurrent_agents ({ws}) exceeds tenant limit ({t})"
-                    )));
-                }
+        }
+        if let (Some(ws), Some(t)) = (
+            new_config.max_concurrent_agents,
+            tenant.max_concurrent_agents,
+        ) {
+            if ws > t {
+                return Err(ApiError::InvalidInput(format!(
+                    "workspace max_concurrent_agents ({ws}) exceeds tenant limit ({t})"
+                )));
             }
         }
     }
 
     let key = workspace_key(&id);
-    {
-        let mut configs = state.budget_configs.lock().await;
-        configs.insert(key.clone(), new_config.clone());
-    }
-    let usages = state.budget_usages.lock().await;
-    let usage = usages
-        .get(&key)
-        .cloned()
+    state
+        .budget_configs
+        .set_config(&key, &new_config)
+        .await
+        .map_err(ApiError::Internal)?;
+    let usage = state
+        .budget_usages
+        .get_usage(&key)
+        .await
+        .map_err(ApiError::Internal)?
         .unwrap_or_else(|| new_ws_usage(&id));
     Ok(Json(BudgetResponse {
         entity_type: "workspace".into(),
@@ -169,26 +177,39 @@ pub async fn budget_summary(
     State(state): State<Arc<AppState>>,
     _admin: AdminOnly,
 ) -> Result<Json<TenantBudgetSummary>, ApiError> {
-    let configs = state.budget_configs.lock().await;
-    let usages = state.budget_usages.lock().await;
-
-    let tenant_config = configs.get(tenant_key()).cloned().unwrap_or_default();
-    let tenant_usage = usages
-        .get(tenant_key())
-        .cloned()
+    let tenant_config = state
+        .budget_configs
+        .get_config(tenant_key())
+        .await
+        .map_err(ApiError::Internal)?
+        .unwrap_or_default();
+    let tenant_usage = state
+        .budget_usages
+        .get_usage(tenant_key())
+        .await
+        .map_err(ApiError::Internal)?
         .unwrap_or_else(new_tenant_usage);
 
+    let all_configs = state
+        .budget_configs
+        .list_all()
+        .await
+        .map_err(ApiError::Internal)?;
+
     let mut workspaces = Vec::new();
-    for (key, config) in configs.iter() {
+    for (key, config) in all_configs {
         if let Some(ws_id) = key.strip_prefix("workspace:") {
-            let usage = usages
-                .get(key)
-                .cloned()
+            let usage = state
+                .budget_usages
+                .get_usage(&key)
+                .await
+                .ok()
+                .flatten()
                 .unwrap_or_else(|| new_ws_usage(ws_id));
             workspaces.push(BudgetResponse {
                 entity_type: "workspace".into(),
                 entity_id: ws_id.to_string(),
-                config: config.clone(),
+                config,
                 usage,
             });
         }
@@ -206,41 +227,51 @@ pub async fn budget_summary(
 /// Check if spawning another agent would exceed workspace/tenant budget limits.
 pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
     let key = workspace_key(project_id);
-    let configs = state.budget_configs.lock().await;
-    let usages = state.budget_usages.lock().await;
 
-    if let Some(config) = configs.get(&key) {
+    if let Ok(Some(config)) = state.budget_configs.get_config(&key).await {
+        let usage = state
+            .budget_usages
+            .get_usage(&key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| new_ws_usage(project_id));
+
         if let Some(max) = config.max_concurrent_agents {
-            let current = usages.get(&key).map(|u| u.active_agents).unwrap_or(0);
-            if current >= max {
+            if usage.active_agents >= max {
                 return Err(format!(
-                    "workspace budget exceeded: max_concurrent_agents={max} ({current} active)"
+                    "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
+                    usage.active_agents
                 ));
             }
         }
         if let Some(max_tokens) = config.max_tokens_per_day {
-            let used = usages.get(&key).map(|u| u.tokens_used_today).unwrap_or(0);
-            if used >= max_tokens {
+            if usage.tokens_used_today >= max_tokens {
                 return Err(format!(
-                    "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {used} today)"
+                    "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
+                    usage.tokens_used_today
                 ));
             }
         }
         if let Some(max_cost) = config.max_cost_per_day {
-            let used = usages.get(&key).map(|u| u.cost_today).unwrap_or(0.0);
-            if used >= max_cost {
+            if usage.cost_today >= max_cost {
                 return Err(format!(
-                    "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${used:.4})"
+                    "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
+                    usage.cost_today
                 ));
             }
         }
     }
 
     // Tenant-level concurrent agent check.
-    if let Some(t_config) = configs.get(tenant_key()) {
+    if let Ok(Some(t_config)) = state.budget_configs.get_config(tenant_key()).await {
         if let Some(max) = t_config.max_concurrent_agents {
-            let current = usages
-                .get(tenant_key())
+            let current = state
+                .budget_usages
+                .get_usage(tenant_key())
+                .await
+                .ok()
+                .flatten()
                 .map(|u| u.active_agents)
                 .unwrap_or(0);
             if current >= max {
@@ -257,55 +288,46 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
 /// Increment active-agent counters for a workspace and the tenant.
 pub async fn increment_active_agents(state: &AppState, project_id: &str) {
     let ws_key = workspace_key(project_id);
-    let mut usages = state.budget_usages.lock().await;
-    let ws = usages
-        .entry(ws_key)
-        .or_insert_with(|| new_ws_usage(project_id));
-    ws.active_agents = ws.active_agents.saturating_add(1);
-    let tenant = usages
-        .entry(tenant_key().to_string())
-        .or_insert_with(new_tenant_usage);
-    tenant.active_agents = tenant.active_agents.saturating_add(1);
+    let now = now_secs();
+    let _ = state
+        .budget_usages
+        .increment_active(&ws_key, "workspace", project_id, now)
+        .await;
+    let _ = state
+        .budget_usages
+        .increment_active(tenant_key(), "tenant", "global", now)
+        .await;
 }
 
 /// Decrement active-agent counters for a workspace and the tenant.
 pub async fn decrement_active_agents(state: &AppState, project_id: &str) {
     let ws_key = workspace_key(project_id);
-    let mut usages = state.budget_usages.lock().await;
-    if let Some(ws) = usages.get_mut(&ws_key) {
-        ws.active_agents = ws.active_agents.saturating_sub(1);
-    }
-    if let Some(tenant) = usages.get_mut(tenant_key()) {
-        tenant.active_agents = tenant.active_agents.saturating_sub(1);
-    }
+    let _ = state.budget_usages.decrement_active(&ws_key).await;
+    let _ = state.budget_usages.decrement_active(tenant_key()).await;
 }
 
 /// Add token/cost usage to workspace and tenant budgets.
 pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64, cost_usd: f64) {
     let ws_key = workspace_key(project_id);
-    let mut usages = state.budget_usages.lock().await;
-    let ws = usages
-        .entry(ws_key)
-        .or_insert_with(|| new_ws_usage(project_id));
-    ws.tokens_used_today = ws.tokens_used_today.saturating_add(tokens);
-    ws.cost_today += cost_usd;
-    let tenant = usages
-        .entry(tenant_key().to_string())
-        .or_insert_with(new_tenant_usage);
-    tenant.tokens_used_today = tenant.tokens_used_today.saturating_add(tokens);
-    tenant.cost_today += cost_usd;
+    let now = now_secs();
+    let _ = state
+        .budget_usages
+        .add_tokens_cost(&ws_key, "workspace", project_id, now, tokens, cost_usd)
+        .await;
+    let _ = state
+        .budget_usages
+        .add_tokens_cost(tenant_key(), "tenant", "global", now, tokens, cost_usd)
+        .await;
 }
 
 /// Reset daily counters to zero. Called at midnight UTC by background job.
 pub async fn reset_daily_counters(state: &AppState) {
     let now = now_secs();
-    let mut usages = state.budget_usages.lock().await;
-    for usage in usages.values_mut() {
-        usage.tokens_used_today = 0;
-        usage.cost_today = 0.0;
-        usage.period_start = now;
+    if let Err(e) = state.budget_usages.reset_daily_counters(now).await {
+        tracing::error!("Failed to reset budget daily counters: {e}");
+    } else {
+        tracing::info!("Budget daily counters reset at {now}");
     }
-    tracing::info!("Budget daily counters reset at {now}");
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -378,16 +400,17 @@ mod tests {
     #[tokio::test]
     async fn spawn_budget_rejection_at_limit() {
         let state = crate::mem::test_state();
-        {
-            let mut configs = state.budget_configs.lock().await;
-            configs.insert(
-                super::workspace_key("proj-x"),
-                gyre_domain::BudgetConfig {
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("proj-x"),
+                &gyre_domain::BudgetConfig {
                     max_concurrent_agents: Some(0),
                     ..Default::default()
                 },
-            );
-        }
+            )
+            .await
+            .unwrap();
         let result = super::check_spawn_budget(&state, "proj-x").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("max_concurrent_agents=0"));
@@ -397,16 +420,17 @@ mod tests {
     async fn cascade_validation_rejects_workspace_exceeding_tenant() {
         let state = crate::mem::test_state();
         // Set tenant limit.
-        {
-            let mut configs = state.budget_configs.lock().await;
-            configs.insert(
-                super::tenant_key().to_string(),
-                gyre_domain::BudgetConfig {
+        state
+            .budget_configs
+            .set_config(
+                super::tenant_key(),
+                &gyre_domain::BudgetConfig {
                     max_tokens_per_day: Some(1000),
                     ..Default::default()
                 },
-            );
-        }
+            )
+            .await
+            .unwrap();
         let app = crate::build_router(Arc::clone(&state));
         let resp = app
             .oneshot(

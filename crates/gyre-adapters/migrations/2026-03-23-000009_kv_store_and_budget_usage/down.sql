@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS kv_store;
+DROP TABLE IF EXISTS budget_usages;

@@ -11,12 +11,13 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
+use gyre_domain::BudgetUsage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    CostRepository, DependencyRepository, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, PersonaRepository, ProjectRepository, RepoRepository, ReviewRepository,
-    SpawnLogEntry, SpawnLogRepository, TaskRepository, UserRepository, WorkspaceRepository,
-    WorktreeRepository,
+    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
+    MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository, PersonaRepository,
+    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1600,6 +1601,196 @@ impl NotificationRepository for MemNotificationRepository {
     }
 }
 
+// ── MemKvStore ────────────────────────────────────────────────────────────────
+
+/// In-memory implementation of KvJsonStore for tests and development.
+#[derive(Default)]
+pub struct MemKvStore {
+    /// (namespace, key) -> value_json
+    data: Mutex<HashMap<(String, String), String>>,
+}
+
+#[async_trait]
+impl KvJsonStore for MemKvStore {
+    async fn kv_set(&self, namespace: &str, key: &str, value: String) -> Result<()> {
+        self.data
+            .lock()
+            .await
+            .insert((namespace.to_string(), key.to_string()), value);
+        Ok(())
+    }
+
+    async fn kv_get(&self, namespace: &str, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .data
+            .lock()
+            .await
+            .get(&(namespace.to_string(), key.to_string()))
+            .cloned())
+    }
+
+    async fn kv_remove(&self, namespace: &str, key: &str) -> Result<()> {
+        self.data
+            .lock()
+            .await
+            .remove(&(namespace.to_string(), key.to_string()));
+        Ok(())
+    }
+
+    async fn kv_list(&self, namespace: &str) -> Result<Vec<(String, String)>> {
+        let guard = self.data.lock().await;
+        Ok(guard
+            .iter()
+            .filter(|((ns, _), _)| ns == namespace)
+            .map(|((_, k), v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    async fn kv_clear(&self, namespace: &str) -> Result<()> {
+        let mut guard = self.data.lock().await;
+        guard.retain(|(ns, _), _| ns != namespace);
+        Ok(())
+    }
+}
+
+// ── MemBudgetUsageRepository ──────────────────────────────────────────────────
+
+/// In-memory BudgetUsageRepository for tests and development.
+#[derive(Default)]
+pub struct MemBudgetUsageRepository {
+    store: Mutex<HashMap<String, BudgetUsage>>,
+}
+
+#[allow(dead_code)]
+fn now_secs_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[async_trait]
+impl BudgetUsageRepository for MemBudgetUsageRepository {
+    async fn set_usage(&self, entity_key: &str, usage: &BudgetUsage) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(entity_key.to_string(), usage.clone());
+        Ok(())
+    }
+
+    async fn get_usage(&self, entity_key: &str) -> Result<Option<BudgetUsage>> {
+        Ok(self.store.lock().await.get(entity_key).cloned())
+    }
+
+    async fn delete_usage(&self, entity_key: &str) -> Result<()> {
+        self.store.lock().await.remove(entity_key);
+        Ok(())
+    }
+
+    async fn list_all_usage(&self) -> Result<Vec<(String, BudgetUsage)>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    async fn increment_active(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+    ) -> Result<BudgetUsage> {
+        let mut guard = self.store.lock().await;
+        let usage = guard.entry(entity_key.to_string()).or_insert_with(|| {
+            BudgetUsage {
+                entity_type: entity_type.to_string(),
+                entity_id: gyre_common::Id::new(entity_id.to_string()),
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now,
+            }
+        });
+        usage.active_agents = usage.active_agents.saturating_add(1);
+        Ok(usage.clone())
+    }
+
+    async fn decrement_active(&self, entity_key: &str) -> Result<()> {
+        let mut guard = self.store.lock().await;
+        if let Some(usage) = guard.get_mut(entity_key) {
+            usage.active_agents = usage.active_agents.saturating_sub(1);
+        }
+        Ok(())
+    }
+
+    async fn add_tokens_cost(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        tokens: u64,
+        cost_usd: f64,
+    ) -> Result<()> {
+        let mut guard = self.store.lock().await;
+        let usage = guard.entry(entity_key.to_string()).or_insert_with(|| {
+            BudgetUsage {
+                entity_type: entity_type.to_string(),
+                entity_id: gyre_common::Id::new(entity_id.to_string()),
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now,
+            }
+        });
+        usage.tokens_used_today = usage.tokens_used_today.saturating_add(tokens);
+        usage.cost_today += cost_usd;
+        Ok(())
+    }
+
+    async fn reset_daily_counters(&self, now: u64) -> Result<()> {
+        let mut guard = self.store.lock().await;
+        for usage in guard.values_mut() {
+            usage.tokens_used_today = 0;
+            usage.cost_today = 0.0;
+            usage.period_start = now;
+        }
+        Ok(())
+    }
+}
+
+/// In-memory BudgetRepository (stores BudgetConfig limits by entity key).
+#[derive(Default)]
+pub struct MemBudgetConfigRepository {
+    store: Mutex<HashMap<String, gyre_domain::BudgetConfig>>,
+}
+
+#[async_trait]
+impl BudgetRepository for MemBudgetConfigRepository {
+    async fn set_config(&self, entity_key: &str, config: &gyre_domain::BudgetConfig) -> anyhow::Result<()> {
+        self.store.lock().await.insert(entity_key.to_string(), config.clone());
+        Ok(())
+    }
+
+    async fn get_config(&self, entity_key: &str) -> anyhow::Result<Option<gyre_domain::BudgetConfig>> {
+        Ok(self.store.lock().await.get(entity_key).cloned())
+    }
+
+    async fn delete_config(&self, entity_key: &str) -> anyhow::Result<()> {
+        self.store.lock().await.remove(entity_key);
+        Ok(())
+    }
+
+    async fn list_all(&self) -> anyhow::Result<Vec<(String, gyre_domain::BudgetConfig)>> {
+        Ok(self.store.lock().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -1622,8 +1813,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         activity_store: crate::activity::ActivityStore::new(),
         broadcast_tx: broadcast::channel(16).0,
         event_tx: broadcast::channel(16).0,
-        agent_messages: Arc::new(Mutex::new(HashMap::new())),
-        agent_tokens: Arc::new(Mutex::new(HashMap::new())),
+        kv_store: Arc::new(MemKvStore::default()),
         agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
         agent_jwt_ttl_secs: 3600,
         users: Arc::new(MemUserRepository::default()),
@@ -1635,7 +1825,6 @@ pub fn test_state() -> Arc<crate::AppState> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        agent_cards: Arc::new(Mutex::new(HashMap::new())),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
@@ -1644,7 +1833,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         audit: Arc::new(MemAuditRepository::default()),
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
-        compute_targets: Arc::new(Mutex::new(HashMap::new())),
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
         dependencies: Arc::new(MemDependencyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
@@ -1657,8 +1845,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
-        agent_stacks: Arc::new(Mutex::new(HashMap::new())),
-        repo_stack_policies: Arc::new(Mutex::new(HashMap::new())),
         db_storage: None,
         spec_approvals: Arc::new(Mutex::new(HashMap::new())),
         spec_policies: Arc::new(Mutex::new(HashMap::new())),
@@ -1667,19 +1853,16 @@ pub fn test_state() -> Arc<crate::AppState> {
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
-        abac_policies: Arc::new(Mutex::new(HashMap::new())),
-        workload_attestations: Arc::new(Mutex::new(HashMap::new())),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: crate::container_audit::new_store(),
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
-        budget_configs: Arc::new(Mutex::new(HashMap::new())),
-        budget_usages: Arc::new(Mutex::new(HashMap::new())),
+        budget_configs: Arc::new(MemBudgetConfigRepository::default()),
+        budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
         workspaces: Arc::new(MemWorkspaceRepository::default()),
         personas: Arc::new(MemPersonaRepository::default()),
-        workspace_repos: Arc::new(Mutex::new(HashMap::new())),
         policies: Arc::new(MemPolicyRepository::default()),
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),

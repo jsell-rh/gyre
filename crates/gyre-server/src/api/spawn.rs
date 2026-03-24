@@ -104,8 +104,14 @@ pub async fn spawn_agent(
 
     // Validate compute target if provided
     if let Some(ref ct_id) = req.compute_target_id {
-        let store = state.compute_targets.lock().await;
-        if !store.contains_key(ct_id.as_str()) {
+        if state
+            .kv_store
+            .kv_get("compute_targets", ct_id.as_str())
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
             return Err(ApiError::NotFound(format!(
                 "compute target {ct_id} not found"
             )));
@@ -146,11 +152,10 @@ pub async fn spawn_agent(
             uuid::Uuid::new_v4().to_string()
         });
     // Store now so the container can authenticate immediately upon start.
-    state
-        .agent_tokens
-        .lock()
-        .await
-        .insert(agent.id.to_string(), token.clone());
+    let _ = state
+        .kv_store
+        .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
+        .await;
 
     // Compute worktree path: {repo_path}/worktrees/{branch_slug}
     let branch_slug = req.branch.replace('/', "-");
@@ -248,11 +253,12 @@ pub async fn spawn_agent(
     let resolved_target_config: Option<super::compute::ComputeTargetConfig> = {
         if let Some(ref ct_id) = req.compute_target_id {
             state
-                .compute_targets
-                .lock()
+                .kv_store
+                .kv_get("compute_targets", ct_id.as_str())
                 .await
-                .get(ct_id.as_str())
-                .cloned()
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
         } else {
             // Check GYRE_DEFAULT_COMPUTE_TARGET env var.
             let default_mode = std::env::var("GYRE_DEFAULT_COMPUTE_TARGET")
@@ -260,12 +266,16 @@ pub async fn spawn_agent(
             if default_mode == "container" {
                 // Find first container-type target (if any).
                 state
-                    .compute_targets
-                    .lock()
+                    .kv_store
+                    .kv_list("compute_targets")
                     .await
-                    .values()
-                    .find(|t| t.target_type == "container")
-                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find_map(|(_, v)| {
+                        serde_json::from_str::<super::compute::ComputeTargetConfig>(&v)
+                            .ok()
+                            .filter(|t| t.target_type == "container")
+                    })
             } else {
                 None
             }
@@ -672,13 +682,18 @@ pub async fn spawn_agent(
     // G10 + M19.4: Create workload attestation now that we know the PID / container ID.
     let att = {
         // Retrieve the stack hash recorded by the agent (M14.1), if any.
-        let stack_hash = {
-            let stacks = state.agent_stacks.lock().await;
-            stacks
-                .get(&agent.id.to_string())
-                .map(|s| s.fingerprint())
-                .unwrap_or_default()
-        };
+        let stack_hash = state
+            .kv_store
+            .kv_get("agent_stacks", &agent.id.to_string())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                serde_json::from_str::<super::stack_attest::AgentStack>(&s)
+                    .ok()
+                    .map(|st| st.fingerprint())
+            })
+            .unwrap_or_default();
         workload_attestation::attest_agent_with_container(
             &agent.id.to_string(),
             spawned_pid,
@@ -688,11 +703,12 @@ pub async fn spawn_agent(
             spawned_container_image.clone(),
         )
     };
-    state
-        .workload_attestations
-        .lock()
-        .await
-        .insert(agent.id.to_string(), att);
+    if let Ok(json) = serde_json::to_string(&att) {
+        let _ = state
+            .kv_store
+            .kv_set("workload_attestations", &agent.id.to_string(), json)
+            .await;
+    }
 
     // Token was pre-minted above and already stored in agent_tokens.
     // Workload attestation claims are stored in state.workload_attestations
@@ -822,7 +838,7 @@ pub async fn complete_agent(
     state.agents.update(&agent).await?;
 
     // Revoke the agent's token — completed agents must not continue to authenticate (N-1).
-    state.agent_tokens.lock().await.remove(&id);
+    let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
 
     // Create a jj bookmark for the agent's branch in their worktree (best-effort).
     // This persists the branch tip in jj's bookmark namespace for traceability.

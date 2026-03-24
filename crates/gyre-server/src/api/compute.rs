@@ -98,11 +98,12 @@ pub async fn create_compute_target(
             .unwrap_or(serde_json::Value::Object(Default::default())),
     };
 
+    let json = serde_json::to_string(&ct).map_err(|e| ApiError::Internal(e.into()))?;
     state
-        .compute_targets
-        .lock()
+        .kv_store
+        .kv_set("compute_targets", &ct.id, json)
         .await
-        .insert(ct.id.clone(), ct.clone());
+        .map_err(ApiError::Internal)?;
 
     Ok((StatusCode::CREATED, Json(ct)))
 }
@@ -111,8 +112,15 @@ pub async fn create_compute_target(
 pub async fn list_compute_targets(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<ComputeTargetConfig>> {
-    let store = state.compute_targets.lock().await;
-    let mut targets: Vec<ComputeTargetConfig> = store.values().cloned().collect();
+    let pairs = state
+        .kv_store
+        .kv_list("compute_targets")
+        .await
+        .unwrap_or_default();
+    let mut targets: Vec<ComputeTargetConfig> = pairs
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_str(&v).ok())
+        .collect();
     targets.sort_by(|a, b| a.name.cmp(&b.name));
     Json(targets)
 }
@@ -122,10 +130,12 @@ pub async fn get_compute_target(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ComputeTargetConfig>, ApiError> {
-    let store = state.compute_targets.lock().await;
-    store
-        .get(&id)
-        .cloned()
+    state
+        .kv_store
+        .kv_get("compute_targets", &id)
+        .await
+        .map_err(ApiError::Internal)?
+        .and_then(|s| serde_json::from_str(&s).ok())
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("compute target {id} not found")))
 }
@@ -135,10 +145,21 @@ pub async fn delete_compute_target(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let mut store = state.compute_targets.lock().await;
-    if store.remove(&id).is_none() {
+    if state
+        .kv_store
+        .kv_get("compute_targets", &id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return Err(ApiError::NotFound(format!("compute target {id} not found")));
     }
+    state
+        .kv_store
+        .kv_remove("compute_targets", &id)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -173,13 +194,13 @@ pub async fn open_tunnel(
     }
 
     // Look up the compute target and verify it is SSH
-    let config = {
-        let store = state.compute_targets.lock().await;
-        store
-            .get(&target_id)
-            .cloned()
-            .ok_or_else(|| ApiError::NotFound(format!("compute target {target_id} not found")))?
-    };
+    let config: ComputeTargetConfig = state
+        .kv_store
+        .kv_get("compute_targets", &target_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or_else(|| ApiError::NotFound(format!("compute target {target_id} not found")))?;
 
     if config.target_type != "ssh" {
         return Err(ApiError::InvalidInput(format!(
@@ -270,13 +291,17 @@ pub async fn list_tunnels(
     Path(target_id): Path<String>,
 ) -> Result<Json<Vec<TunnelRecord>>, ApiError> {
     // Verify target exists
+    if state
+        .kv_store
+        .kv_get("compute_targets", &target_id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
     {
-        let store = state.compute_targets.lock().await;
-        if !store.contains_key(&target_id) {
-            return Err(ApiError::NotFound(format!(
-                "compute target {target_id} not found"
-            )));
-        }
+        return Err(ApiError::NotFound(format!(
+            "compute target {target_id} not found"
+        )));
     }
 
     let tunnel_store = state.tunnel_store.lock().await;

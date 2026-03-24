@@ -174,10 +174,10 @@ async fn run_review_agent_process(
     let gate_token = format!("gyre_gate_{}", Uuid::new_v4().simple());
 
     // Register the token so the gate agent can authenticate.
-    {
-        let mut tokens = state.agent_tokens.lock().await;
-        tokens.insert(gate_agent_id.clone(), gate_token.clone());
-    }
+    let _ = state
+        .kv_store
+        .kv_set("agent_tokens", &gate_agent_id, gate_token.clone())
+        .await;
 
     // Get MR spec_ref for context.
     let spec_ref = state
@@ -407,10 +407,10 @@ async fn run_validation_agent_process(
     let gate_agent_id = format!("gate-validate-{}", Uuid::new_v4());
     let gate_token = format!("gyre_gate_{}", Uuid::new_v4().simple());
 
-    {
-        let mut tokens = state.agent_tokens.lock().await;
-        tokens.insert(gate_agent_id.clone(), gate_token.clone());
-    }
+    let _ = state
+        .kv_store
+        .kv_set("agent_tokens", &gate_agent_id, gate_token.clone())
+        .await;
 
     let spec_ref = state
         .merge_requests
@@ -509,8 +509,7 @@ async fn run_validation_agent_process(
 
 /// Remove a gate agent's token from the auth store.
 async fn revoke_gate_token(state: &Arc<AppState>, gate_agent_id: &str) {
-    let mut tokens = state.agent_tokens.lock().await;
-    tokens.remove(gate_agent_id);
+    let _ = state.kv_store.kv_remove("agent_tokens", gate_agent_id).await;
 }
 
 async fn run_command(cmd: &str) -> (GateStatus, String) {
@@ -761,8 +760,14 @@ mod tests {
 
         run_agent_validation_gate(&state, &gate, &mr_id).await;
 
-        let tokens = state.agent_tokens.lock().await;
-        let gate_tokens: Vec<_> = tokens.keys().filter(|k| k.starts_with("gate-")).collect();
+        let gate_tokens: Vec<_> = state
+            .kv_store
+            .kv_list("agent_tokens")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("gate-"))
+            .collect();
         assert!(
             gate_tokens.is_empty(),
             "gate tokens should be revoked: {gate_tokens:?}"
@@ -777,8 +782,14 @@ mod tests {
 
         run_agent_review_gate(&state, &gate, &mr_id).await;
 
-        let tokens = state.agent_tokens.lock().await;
-        let gate_tokens: Vec<_> = tokens.keys().filter(|k| k.starts_with("gate-")).collect();
+        let gate_tokens: Vec<_> = state
+            .kv_store
+            .kv_list("agent_tokens")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("gate-"))
+            .collect();
         assert!(
             gate_tokens.is_empty(),
             "gate tokens should be revoked: {gate_tokens:?}"
