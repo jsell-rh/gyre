@@ -1,12 +1,15 @@
 <script>
   import ExplorerCanvas from './ExplorerCanvas.svelte';
   import Badge from './Badge.svelte';
+  import EmptyState from './EmptyState.svelte';
 
   let {
     nodes = [],
     edges = [],
     repoId = '',
     onSelectNode = undefined,
+    conceptFilterIds = null,
+    conceptQuery = '',
   } = $props();
 
   let activeView = $state('graph'); // 'graph' | 'list' | 'timeline'
@@ -20,8 +23,25 @@
     return ['', ...Array.from(types).sort()];
   });
 
+  // Nodes/edges visible in the current concept filter
+  let displayNodes = $derived(() => {
+    if (!conceptFilterIds) return nodes;
+    return nodes.filter(n => conceptFilterIds.has(n.id));
+  });
+
+  let displayEdges = $derived(() => {
+    if (!conceptFilterIds) return edges;
+    return edges.filter(e => {
+      const sid = e.source_id ?? e.from_node_id ?? e.from;
+      const tid = e.target_id ?? e.to_node_id ?? e.to;
+      return conceptFilterIds.has(sid) && conceptFilterIds.has(tid);
+    });
+  });
+
   let filteredNodes = $derived(() => {
-    let result = nodes;
+    let result = conceptFilterIds
+      ? nodes.filter(n => conceptFilterIds.has(n.id))
+      : nodes;
     if (filterType) result = result.filter(n => n.node_type === filterType);
     return [...result].sort((a, b) => {
       if (sortBy === 'type') return (a.node_type ?? '').localeCompare(b.node_type ?? '');
@@ -93,7 +113,7 @@
   <!-- View content -->
   <div class="view-content">
     {#if activeView === 'graph'}
-      <ExplorerCanvas {nodes} {edges} {repoId} {onSelectNode} />
+      <ExplorerCanvas nodes={displayNodes()} edges={displayEdges()} {repoId} {onSelectNode} />
 
     {:else if activeView === 'list'}
       <div class="list-view">
@@ -122,41 +142,50 @@
         </div>
 
         <div class="list-table-wrap">
-          <table class="list-table">
-            <thead>
-              <tr>
-                <th>Type</th>
-                <th>Name</th>
-                <th>File</th>
-                <th>Spec</th>
-                <th>Churn</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each filteredNodes() as node}
-                <tr
-                  class="list-row"
-                  role="button"
-                  tabindex="0"
-                  aria-label="Select node {node.name}"
-                  onclick={() => onSelectNode?.(node)}
-                  onkeydown={(e) => e.key === 'Enter' && onSelectNode?.(node)}
-                >
-                  <td><Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} /></td>
-                  <td class="mono">{node.name}</td>
-                  <td class="mono muted">{node.file_path ?? ''}{node.line_start ? `:${node.line_start}` : ''}</td>
-                  <td>
-                    {#if node.spec_path}
-                      <span class="spec-tag">{node.spec_path.split('/').pop()}</span>
-                    {:else}
-                      <span class="muted-dash">—</span>
-                    {/if}
-                  </td>
-                  <td class="mono">{node.churn_count_30d ?? 0}</td>
+          {#if filteredNodes().length === 0 && conceptFilterIds}
+            <div class="list-empty-concept">
+              <EmptyState
+                title="No nodes matching '{conceptQuery}'"
+                message="Try a shorter term or check spelling."
+              />
+            </div>
+          {:else}
+            <table class="list-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Name</th>
+                  <th>File</th>
+                  <th>Spec</th>
+                  <th>Churn</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {#each filteredNodes() as node}
+                  <tr
+                    class="list-row"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Select node {node.name}"
+                    onclick={() => onSelectNode?.(node)}
+                    onkeydown={(e) => e.key === 'Enter' && onSelectNode?.(node)}
+                  >
+                    <td><Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} /></td>
+                    <td class="mono">{node.name}</td>
+                    <td class="mono muted">{node.file_path ?? ''}{node.line_start ? `:${node.line_start}` : ''}</td>
+                    <td>
+                      {#if node.spec_path}
+                        <span class="spec-tag">{node.spec_path.split('/').pop()}</span>
+                      {:else}
+                        <span class="muted-dash">—</span>
+                      {/if}
+                    </td>
+                    <td class="mono">{node.churn_count_30d ?? 0}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
         </div>
       </div>
 
@@ -295,6 +324,14 @@
   .list-table-wrap {
     flex: 1;
     overflow: auto;
+  }
+
+  .list-empty-concept {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: var(--space-8);
   }
 
   .list-table {
