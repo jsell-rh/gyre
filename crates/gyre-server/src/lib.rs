@@ -47,13 +47,16 @@ use axum::{routing::get, Router};
 use domain_events::DomainEvent;
 use gyre_common::ActivityEventData;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, GitOpsPort,
-    GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
+    AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
+    ContainerAuditRepository, CostRepository, DependencyRepository, GateResultRepository,
+    GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
     NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
-    PreAcceptGate, ProcessHandle, ProjectRepository, RepoRepository, ReviewRepository,
-    SpawnLogRepository, TaskRepository, TeamRepository, UserRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    PreAcceptGate, ProcessHandle, ProjectRepository, PushGateRepository, QualityGateRepository,
+    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
+    TeamRepository, UserRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -223,14 +226,14 @@ pub struct AppState {
     pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    /// Quality gates per repository: gate_id -> QualityGate.
-    pub quality_gates: Arc<Mutex<HashMap<String, gyre_domain::QualityGate>>>,
-    /// Gate execution results: result_id -> GateResult.
-    pub gate_results: Arc<Mutex<HashMap<String, gyre_domain::GateResult>>>,
+    /// Quality gates per repository (persisted).
+    pub quality_gates: Arc<dyn gyre_ports::QualityGateRepository>,
+    /// Gate execution results (persisted).
+    pub gate_results: Arc<dyn gyre_ports::GateResultRepository>,
     /// Pre-accept gate registry: built-in gate implementations.
     pub push_gate_registry: Arc<Vec<Box<dyn PreAcceptGate>>>,
-    /// Per-repo active push gate names: repo_id -> list of gate names.
-    pub repo_push_gates: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-repo active push gate names (persisted).
+    pub repo_push_gates: Arc<dyn gyre_ports::PushGateRepository>,
     /// Speculative merge results: (repo_id, branch) -> SpeculativeResult (M13.5).
     pub speculative_results:
         Arc<Mutex<HashMap<(String, String), speculative_merge::SpeculativeResult>>>,
@@ -238,12 +241,12 @@ pub struct AppState {
     pub spawn_log: Arc<dyn SpawnLogRepository>,
     /// Base SQLite storage instance (the "default" tenant).
     pub db_storage: Option<Arc<gyre_adapters::SqliteStorage>>,
-    /// Spec approval ledger: approval_id -> SpecApproval (agent-gates).
-    pub spec_approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
-    /// Per-repo spec enforcement policies: repo_id -> SpecPolicy (M12.3).
-    pub spec_policies: Arc<Mutex<HashMap<String, api::spec_policy::SpecPolicy>>>,
-    /// Merge attestation bundles: mr_id -> AttestationBundle (G5).
-    pub attestation_store: Arc<Mutex<HashMap<String, attestation::AttestationBundle>>>,
+    /// Spec approval ledger (persisted).
+    pub spec_approvals: Arc<dyn gyre_ports::SpecApprovalRepository>,
+    /// Per-repo spec enforcement policies (persisted).
+    pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
+    /// Merge attestation bundles (persisted).
+    pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
     /// Trusted remote Gyre base URLs for cross-instance JWT federation (G11).
     /// Populated from `GYRE_TRUSTED_ISSUERS` (comma-separated list of base URLs).
     pub trusted_issuers: Vec<String>,
@@ -255,12 +258,12 @@ pub struct AppState {
     pub sigstore_mode: commit_signatures::SigstoreMode,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
-    /// Container audit records: agent_id -> ContainerAuditRecord (M19.3).
-    pub container_audits: container_audit::ContainerAuditStore,
-    /// Spec registry ledger: spec path -> SpecLedgerEntry (M21.1).
-    pub spec_ledger: spec_registry::SpecLedger,
-    /// Spec approval history: ordered list of SpecApprovalEvent (M21.1).
-    pub spec_approval_history: spec_registry::SpecApprovalHistory,
+    /// Container audit records (persisted).
+    pub container_audits: Arc<dyn gyre_ports::ContainerAuditRepository>,
+    /// Spec registry ledger (persisted).
+    pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
+    /// Spec approval event history (persisted).
+    pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
@@ -578,19 +581,37 @@ pub fn build_state(
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
-        quality_gates: Arc::new(Mutex::new(HashMap::new())),
-        gate_results: Arc::new(Mutex::new(HashMap::new())),
+        quality_gates: store!(
+            dyn QualityGateRepository,
+            mem::MemQualityGateRepository::default()
+        ),
+        gate_results: store!(
+            dyn GateResultRepository,
+            mem::MemGateResultRepository::default()
+        ),
         push_gate_registry: Arc::new(pre_accept::builtin_gates()),
-        repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
+        repo_push_gates: store!(
+            dyn PushGateRepository,
+            mem::MemPushGateRepository::default()
+        ),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: store!(
             dyn SpawnLogRepository,
             mem::MemSpawnLogRepository::default()
         ),
         db_storage,
-        spec_approvals: Arc::new(Mutex::new(HashMap::new())),
-        spec_policies: Arc::new(Mutex::new(HashMap::new())),
-        attestation_store: Arc::new(Mutex::new(HashMap::new())),
+        spec_approvals: store!(
+            dyn SpecApprovalRepository,
+            mem::MemSpecApprovalRepository::default()
+        ),
+        spec_policies: store!(
+            dyn SpecPolicyRepository,
+            mem::MemSpecPolicyRepository::default()
+        ),
+        attestation_store: store!(
+            dyn AttestationRepository,
+            mem::MemAttestationRepository::default()
+        ),
         trusted_issuers: std::env::var("GYRE_TRUSTED_ISSUERS")
             .ok()
             .map(|v| {
@@ -604,9 +625,18 @@ pub fn build_state(
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
-        container_audits: container_audit::new_store(),
-        spec_ledger: Arc::new(Mutex::new(HashMap::new())),
-        spec_approval_history: Arc::new(Mutex::new(Vec::new())),
+        container_audits: store!(
+            dyn ContainerAuditRepository,
+            mem::MemContainerAuditRepository::default()
+        ),
+        spec_ledger: store!(
+            dyn SpecLedgerRepository,
+            mem::MemSpecLedgerRepository::default()
+        ),
+        spec_approval_history: store!(
+            dyn SpecApprovalEventRepository,
+            mem::MemSpecApprovalEventRepository::default()
+        ),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: store!(
             dyn BudgetRepository,

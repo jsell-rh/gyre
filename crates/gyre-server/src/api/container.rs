@@ -18,10 +18,14 @@ pub async fn get_agent_container(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<ContainerAuditRecord>, ApiError> {
-    let guard = state.container_audits.lock().await;
-    guard.get(&agent_id).cloned().map(Json).ok_or_else(|| {
-        ApiError::NotFound(format!("no container audit record for agent {agent_id}"))
-    })
+    state
+        .container_audits
+        .find_by_agent_id(&agent_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("no container audit record for agent {agent_id}"))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -73,11 +77,7 @@ mod tests {
             stopped_at: None,
             exit_code: None,
         };
-        state
-            .container_audits
-            .lock()
-            .await
-            .insert("agent-x".to_string(), rec);
+        state.container_audits.save(&rec).await.unwrap();
 
         let app = crate::api::api_router().with_state(state);
         let resp = app

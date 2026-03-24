@@ -407,11 +407,7 @@ pub async fn spawn_agent(
                             &runtime_str,
                         )
                         .await;
-                        state
-                            .container_audits
-                            .lock()
-                            .await
-                            .insert(agent.id.to_string(), rec);
+                        let _ = state.container_audits.save(&rec).await;
 
                         // M19.3: Emit AgentContainerSpawned domain event.
                         let _ = state.event_tx.send(DomainEvent::AgentContainerSpawned {
@@ -459,30 +455,27 @@ pub async fn spawn_agent(
                                         .remove(&agent_id_str);
                                     // M19.3: Update audit record on container exit.
                                     container_audit::capture_exit_audit(
-                                        &state_mon.container_audits,
+                                        state_mon.container_audits.as_ref(),
                                         &agent_id_str,
                                     )
                                     .await;
 
                                     // M23: Emit container_stopped audit event (best-effort).
                                     {
-                                        let exit_code = state_mon
+                                        let audit_rec = state_mon
                                             .container_audits
-                                            .lock()
+                                            .find_by_agent_id(&agent_id_str)
                                             .await
-                                            .get(&agent_id_str)
-                                            .and_then(|r| r.exit_code);
+                                            .ok()
+                                            .flatten();
+                                        let exit_code =
+                                            audit_rec.as_ref().and_then(|r| r.exit_code);
                                         let ctx = crate::container_audit::AuditCtx {
                                             audit: state_mon.audit.as_ref(),
                                             broadcast_tx: &state_mon.audit_broadcast_tx,
                                         };
-                                        let container_id_for_evt = state_mon
-                                            .container_audits
-                                            .lock()
-                                            .await
-                                            .get(&agent_id_str)
-                                            .map(|r| r.container_id.clone())
-                                            .unwrap_or_default();
+                                        let container_id_for_evt =
+                                            audit_rec.map(|r| r.container_id).unwrap_or_default();
                                         crate::container_audit::emit_stopped(
                                             &ctx,
                                             &agent_id_str,
