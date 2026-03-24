@@ -34,7 +34,6 @@
   import ExplorerView from './components/ExplorerView.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
-  import Breadcrumb from './lib/Breadcrumb.svelte';
   import Modal from './lib/Modal.svelte';
   import { onMount, setContext } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
@@ -285,21 +284,16 @@
     explorer:           'System Explorer',
   };
 
-  let breadcrumbs = $derived(() => {
-    if (currentView === 'repo-detail' && selectedRepo) {
-      return [
-        { label: 'Projects', view: 'projects' },
-        { label: selectedRepo.name ?? selectedRepo.id ?? 'Repository' },
-      ];
+  // Scope breadcrumb: Gyre › Workspace › Repo (shown in topbar)
+  let scopeCrumbs = $derived(() => {
+    const crumbs = [{ label: 'Gyre', view: 'dashboard' }];
+    if (selectedWorkspace) {
+      crumbs.push({ label: selectedWorkspace.name, view: 'workspace-detail', ctx: { workspace: selectedWorkspace } });
     }
-    if (currentView === 'mr-detail' && selectedMr) {
-      return [
-        { label: 'Projects', view: 'projects' },
-        { label: selectedRepo?.name ?? 'Repository', view: 'repo-detail' },
-        { label: `MR #${selectedMr.id ?? selectedMr.iid ?? ''}` },
-      ];
+    if ((currentView === 'repo-detail' || currentView === 'mr-detail') && selectedRepo) {
+      crumbs.push({ label: selectedRepo.name ?? 'Repository', view: 'repo-detail', ctx: { repo: selectedRepo } });
     }
-    return [];
+    return crumbs;
   });
 </script>
 
@@ -313,9 +307,18 @@
     <header class="topbar">
       <div class="topbar-left">
         <span class="topbar-title" aria-live="polite" aria-atomic="true">{viewTitles[currentView] ?? 'Gyre'}</span>
-        {#if breadcrumbs().length > 0}
-          <Breadcrumb items={breadcrumbs()} onnavigate={navigate} />
-        {/if}
+        <nav class="scope-crumb" aria-label="Scope breadcrumb">
+          {#each scopeCrumbs() as crumb, i}
+            {#if i > 0}<span class="scope-sep" aria-hidden="true">›</span>{/if}
+            {#if i < scopeCrumbs().length - 1}
+              <button class="scope-crumb-link" onclick={() => navigate(crumb.view, crumb.ctx ?? {})}>
+                {crumb.label}
+              </button>
+            {:else}
+              <span class="scope-crumb-current">{crumb.label}</span>
+            {/if}
+          {/each}
+        </nav>
       </div>
       <div class="topbar-right">
         <!-- Workspace selector -->
@@ -564,6 +567,40 @@
     align-items: center;
     gap: var(--space-3);
     flex-shrink: 0;
+  }
+
+  /* Scope breadcrumb: Gyre › Workspace › Repo */
+  .scope-crumb {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+  }
+
+  .scope-sep {
+    color: var(--color-text-muted);
+    user-select: none;
+    font-size: var(--text-xs);
+  }
+
+  .scope-crumb-link {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    padding: 0;
+    transition: color var(--transition-fast);
+  }
+
+  .scope-crumb-link:hover {
+    color: var(--color-text-secondary);
+  }
+
+  .scope-crumb-current {
+    color: var(--color-text-secondary);
+    font-weight: 500;
   }
 
   /* Workspace selector */
