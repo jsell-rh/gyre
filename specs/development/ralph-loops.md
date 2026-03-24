@@ -1,5 +1,7 @@
 # Ralph Loops
 
+> **Superseded by [`specs/system/ralph-loop.md`](../system/ralph-loop.md).** This file is kept for historical context only. The canonical definition of the Ralph loop, including the agent/session model, message inbox, and terminal conditions, lives in the system spec.
+
 ## Definition
 
 A **Ralph (Wiggum) Loop** (per OpenAI's Codex harness team): agent reviews its own changes, requests additional agent reviews, responds to feedback, and **iterates until all reviewers are satisfied**. This is the core development feedback cycle.

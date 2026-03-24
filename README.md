@@ -2,7 +2,7 @@
 
 **Gyre** `/ˈdʒaɪər/` - an autonomous software development platform enabling agentic collaboration and orchestration.
 
-Built-in git forge, merge queue, agent orchestration, and full audit trail. Agents collaborate through a structured Ralph loop: spec, implement, review, merge.
+Built-in git forge, merge queue, agent orchestration, and full audit trail. Humans design (specs), orchestrators decompose (tasks), agents implement (Ralph loops).
 
 ## Quick Start
 
