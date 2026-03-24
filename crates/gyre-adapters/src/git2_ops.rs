@@ -27,7 +27,12 @@ impl GitOpsPort for Git2OpsAdapter {
                 std::fs::create_dir_all(parent)
                     .context("failed to create parent directories for bare repo")?;
             }
-            Repository::init_bare(&path).context("failed to init bare repository")?;
+            let repo = Repository::init_bare(&path).context("failed to init bare repository")?;
+            // Allow pushes to branches checked out in linked worktrees. Without this,
+            // git push to a branch that an agent has checked out via `git worktree add`
+            // fails with "refusing to update checked out branch".
+            let mut config = repo.config()?;
+            config.set_str("receive.denyCurrentBranch", "ignore")?;
             Ok(())
         })
         .await?
