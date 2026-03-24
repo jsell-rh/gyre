@@ -709,7 +709,6 @@ pub mod tests {
     use super::*;
     use crate::mem::test_state;
     use axum::{body::Body, routing::get, Router};
-    use gyre_domain::UserRole;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
