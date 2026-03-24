@@ -26,11 +26,13 @@ pub struct Tenant {
     pub name: String,
     pub slug: String,
     pub oidc_issuer: Option<String>,
-    pub budget: Option<BudgetConfig>,
+    pub budget: BudgetConfig,          // Non-optional — tenant is the absolute budget ceiling
     pub max_workspaces: Option<u32>,
-    pub created_at: u64,
+    pub created_at: u64,              // Unix epoch seconds (consistent with all domain entities)
 }
 ```
+
+**Timestamp convention:** All `created_at` fields on domain entities (Tenant, Workspace, Repository, Task, Agent, MergeRequest) use **Unix epoch seconds**. The message bus `Message.created_at` uses **epoch milliseconds** for sub-second cursor ordering — this is a deliberate exception documented in `message-bus.md`. These two timestamp spaces should never be compared directly.
 
 ### Port Trait
 
@@ -55,7 +57,7 @@ Tenant {
     name: "Default".to_string(),
     slug: "default".to_string(),
     oidc_issuer: None,
-    budget: None,
+    budget: BudgetConfig::default(),   // No limits set — effectively unlimited
     max_workspaces: None,
     created_at: now(),
 }
@@ -73,15 +75,18 @@ Tenant CRUD endpoints (`/api/v1/tenants`) are not required for single-tenant dep
 
 ### Domain Type Changes
 
-These fields change from `Option<Id>` to `Id`:
+These fields change from `Option<Id>` to `Id` in **`gyre-domain` structs** (the hierarchy lint only scans `crates/gyre-domain/src/`). Shared wire types in `gyre-common` (e.g., `Message`) may use `Option<Id>` where the domain requires it (e.g., Broadcast messages have no workspace):
 
 | Entity | Field | Current | Target |
 |---|---|---|---|
 | Repository | `workspace_id` | `Option<Id>` | `Id` |
 | Task | `workspace_id` | `Option<Id>` | `Id` |
+| Task | `repo_id` | (not present) | `Id` — repo that owns the spec this task implements |
 | Agent | `workspace_id` | `Option<Id>` | `Id` |
 | MergeRequest | `workspace_id` | `Option<Id>` | `Id` |
 | Workspace | `tenant_id` | `Id` | `Id` (already non-optional) |
+
+**Task scoping note:** Tasks must reference a spec (`spec_ref`), and specs live in repos. Therefore tasks are **repo-scoped** — every task has a `repo_id: Id` (non-optional) pointing to the repo that owns the spec it implements. Tasks also carry `workspace_id: Id` (non-optional) for authorization — this is the governance boundary used by ABAC. The workspace_id is derivable from the repo's workspace, but stored denormalized for efficient queries. This is consistent with `platform-model.md` §1 which says "Task → Repository."
 
 ### Migration Strategy
 
@@ -95,7 +100,7 @@ These fields change from `Option<Id>` to `Id`:
 
 The domain types encode the invariant at the type level — `workspace_id: Id` means you cannot construct a Task without a workspace. The compiler enforces this.
 
-Additionally, `scripts/check-hierarchy.sh` scans domain struct definitions for `Option<Id>` on hierarchy fields and fails if any are found:
+Additionally, `scripts/check-hierarchy.sh` scans domain struct definitions for `Option<Id>` on hierarchy fields and fails if any are found. The script is gated by `GYRE_CHECK_HIERARCHY=1` env var — initially disabled, enabled in M34 Slice 3 after the non-optional migration lands (see `m34-hierarchy-enforcement.md`):
 
 ```bash
 # Fields that MUST be non-optional
@@ -125,13 +130,21 @@ The adapter layer (`SqliteStorage`) has a `tenant_id: String` field set once at 
 
 ### The Fix
 
-**Every query method on every adapter must filter by `tenant_id`.** No exceptions.
+**Every query method on every Diesel adapter must filter by `tenant_id`.** Exception: adapters that enforce tenant isolation structurally (e.g., `MessageRepository` queries by globally-unique `workspace_id`, which is tenant-bound) may be exempted from the lint with a documented rationale in `check-tenant-filter.sh`'s skip list.
 
 This includes `find_by_id()` — looking up an entity by UUID must still verify it belongs to the current tenant. This prevents horizontal privilege escalation where a user with a valid token guesses another tenant's entity UUIDs.
+
+**Per-request tenant scoping:** The current `SqliteStorage` has a `tenant_id` baked in at construction time. For multi-tenant support, the adapter layer must accept tenant context per-request rather than per-instance. Two approaches:
+- **Option A (recommended for greenfield):** Pass `tenant_id` as a parameter to every repository method. This is explicit and the compiler enforces that every call site provides a tenant.
+- **Option B:** Use `SqliteStorage::with_tenant(id)` to create a tenant-scoped view per-request (the method already exists). The ABAC middleware resolves `tenant_id` from the JWT and stores a tenant-scoped adapter in request extensions.
+
+For the single-tenant bootstrap (M34), Option A is not yet needed — the default tenant is the only tenant and the construction-time `tenant_id` suffices. Document Option A as the multi-tenant path.
 
 ### Enforcement
 
 `scripts/check-tenant-filter.sh` scans all Diesel query methods in `crates/gyre-adapters/src/sqlite/` and `crates/gyre-adapters/src/pg/` for the pattern `.filter(table::tenant_id.eq(`. Any query method that builds a Diesel query without this filter fails the check.
+
+**KvJsonStore gap:** The generic `KvJsonStore` (used for agent_tokens, compute_targets, abac_policies, etc.) uses namespace+key lookups with no `tenant_id` column. These stores are not covered by the Diesel lint script. `agent_messages` is replaced by the unified message bus (`message-bus.md`). The remaining KvJsonStore namespaces should be migrated to proper port traits with tenant-scoped adapters when multi-tenant support is prioritized — tracked as a backlog item, not part of M34.
 
 Additionally, an integration test (`tests/tenant_isolation.rs`) creates two tenants, populates entities in both, and verifies that listing/finding through one tenant's storage never returns the other tenant's entities.
 
@@ -220,7 +233,7 @@ struct RouteResourceMapping {
 
 For routes with an entity ID (`:id`), the middleware does a single lookup to get the entity's `workspace_id`. This lookup is cached in the request extensions so the handler doesn't repeat it.
 
-For routes without an entity ID (collection endpoints), the middleware uses the workspace ID from the URL path or falls back to tenant-level scoping.
+For routes without an entity ID (collection/create endpoints), the middleware resolves workspace context from the URL path (e.g., `POST /api/v1/workspaces/:workspace_id/tasks`). Per `api-conventions.md` §1.1, create endpoints use the workspace-scoped route form — there are no flat `POST /api/v1/tasks` create routes. Admin-only endpoints (no workspace context) fall back to tenant-level scoping.
 
 #### Action Resolution
 
@@ -245,7 +258,7 @@ With subject, resource, and action resolved, the middleware calls the existing `
 4. Returns Allow or Deny on first match
 5. Logs the decision to the audit trail
 
-On Deny: returns `403 {"error": "insufficient permissions", "policy": "<policy-name>"}`.
+On Deny: returns `403 {"error": "insufficient permissions"}`. The matched policy name is logged server-side at `warn` level for debugging but is NOT included in the response (per `api-conventions.md` §3.2 — no nested error objects, and policy names are internal implementation details).
 On Allow: request proceeds to handler.
 
 #### Performance
@@ -255,28 +268,24 @@ On Allow: request proceeds to handler.
 - **Entity lookup:** Single DB query per request (for ID-based routes). Cached in request extensions for handler reuse.
 - **Target: <1ms** additional latency per request (policy evaluation is in-memory matching).
 
-### Migration Path: RBAC to ABAC
+### Built-In Policies
 
-The transition is incremental:
+ABAC ships with built-in policies seeded at startup (cannot be deleted):
 
-1. **Phase 1: Built-in policies.** Deploy built-in ABAC policies that replicate the current RBAC behavior:
+| Policy | Effect | Purpose |
+|---|---|---|
+| `system-full-access` | Allow | Global `GYRE_AUTH_TOKEN` gets full access |
+| `admin-all-operations` | Allow | Admin role allows all actions |
+| `developer-write-access` | Allow | Developer role allows read + write |
+| `agent-scoped-access` | Allow | Agent role allows read + write in scoped repo |
+| `readonly-get-only` | Allow | ReadOnly role allows only read |
+| `tenant-isolation` | Deny | Cross-tenant access denied |
+| `workspace-membership-required` | Deny | Non-members denied access to workspace resources |
+| `default-deny` | Deny | Everything not explicitly allowed is denied (lowest priority) |
 
-    | Policy | Replaces |
-    |---|---|
-    | `system-full-access` | Global token bypass |
-    | `admin-all-operations` | `AdminOnly` extractor |
-    | `developer-write-access` | `RequireDeveloper` extractor |
-    | `agent-scoped-access` | `RequireAgent` extractor |
-    | `readonly-get-only` | `RequireReadOnly` extractor |
-    | `tenant-isolation` | (currently missing — new) |
-    | `workspace-membership-required` | (currently missing — new) |
-    | `default-deny` | (currently missing — new) |
+These replace the current RBAC extractors (`AdminOnly`, `RequireDeveloper`, etc.). Since this is greenfield, ABAC is the authorization layer from the start — there is no RBAC-to-ABAC migration. The old extractors are removed entirely.
 
-2. **Phase 2: ABAC middleware.** Deploy the middleware with built-in policies. RBAC extractors remain as defense-in-depth. Verify via integration tests that behavior is identical.
-
-3. **Phase 3: Remove RBAC extractors.** Once ABAC middleware is proven, remove the per-handler extractors. ABAC is the single authorization layer.
-
-4. **Phase 4: Runtime policies.** Admins can now create custom policies via the existing `/api/v1/policies` API that layer on top of built-in ones.
+Admins can create custom policies via `POST /api/v1/policies` that layer on top of built-in ones.
 
 ### Endpoints That Bypass ABAC
 
@@ -327,7 +336,7 @@ This is naturally expressed as ABAC policies, not hardcoded logic.
 
 ## 6. Git URL Alignment
 
-When M33 (Remove Project) lands, git URLs change. Align them with the hierarchy:
+When M33 (Remove Project) lands, git URLs change. The target format uses workspace slug + repo name for human-readable remotes:
 
 ```
 /git/:workspace_slug/:repo_name/info/refs
@@ -335,15 +344,13 @@ When M33 (Remove Project) lands, git URLs change. Align them with the hierarchy:
 /git/:workspace_slug/:repo_name/git-receive-pack
 ```
 
-This gives human-readable git remotes:
-
 ```bash
 git clone http://localhost:3000/git/platform/gyre-server
 ```
 
-The server resolves `workspace_slug` + `repo_name` to the repo entity. ABAC validates the caller has access to the workspace.
+**Prerequisites:** Workspace `slug` must be unique within a tenant (enforced by a unique constraint on `(tenant_id, slug)` added in the Slice 2 migration). The server resolves `workspace_slug` + `repo_name` to the repo entity, validating uniqueness. ABAC validates the caller has access to the workspace.
 
-If workspace slugs are not yet unique-enforced, fall back to `/:repo_id/:repo_name` as M33 planned, and add workspace-slug URLs as a follow-up.
+**Replaces:** The current `/git/:project/:repo/*` routes (or `/git/:repo_id/:repo/*` after M33). Old URLs are not supported — this is a greenfield change.
 
 ---
 
@@ -353,7 +360,7 @@ If workspace slugs are not yet unique-enforced, fall back to `/:repo_id/:repo_na
 
 | Script | What it checks | Run by |
 |---|---|---|
-| `scripts/check-api-auth.sh` | Every POST/PUT/DELETE handler has an auth extractor or ABAC annotation | Pre-commit, CI |
+| `scripts/check-api-auth.sh` | Every route (GET/POST/PUT/DELETE) has a `RouteResourceMapping` in the ABAC `ResourceResolver` — workspace isolation requires resource resolution on reads too | Pre-commit, CI |
 | `scripts/check-tenant-filter.sh` | Every Diesel query method in adapters filters by `tenant_id` | Pre-commit, CI |
 | `scripts/check-hierarchy.sh` | Domain structs don't use `Option<Id>` for hierarchy fields | Pre-commit, CI |
 
@@ -370,9 +377,10 @@ If workspace slugs are not yet unique-enforced, fall back to `/:repo_id/:repo_na
 
 ## Relationship to Existing Specs
 
-- **Supersedes** the authorization sections of `platform-model.md` §1 (Scoping Rules, Token Scoping) — this spec makes them concrete
+- **Supersedes** the authorization sections of `platform-model.md` §1 (Scoping Rules, Token Scoping) — this spec makes them concrete. Also adds `repo_id: Id` to Task (not in platform-model's struct but consistent with its "Task → Repository" scoping rule).
 - **Amends** `abac-policy-engine.md` — adds §"Request Pipeline Integration" (the middleware design)
 - **Amends** `identity-security.md` — RBAC extractors are a migration step toward ABAC, not the permanent architecture
 - **Implements** the built-in policies listed in `abac-policy-engine.md` §"Built-In Policies"
 - **Depends on** `api-conventions.md` for URL structure conventions
+- **Requires amendment to** `platform-model.md` — several endpoints defined there (personas, secrets) use flat routes that don't conform to `api-conventions.md` §1.1. When implemented, these must be workspace-scoped (e.g., `POST /api/v1/workspaces/:ws_id/personas`) for ABAC resource resolution.
 - **Informed by** the API audit findings (C1–C3, H1–H4) documented in the milestone spec
