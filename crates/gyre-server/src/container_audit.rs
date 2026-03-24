@@ -13,45 +13,8 @@
 
 use gyre_common::Id;
 use gyre_domain::{AuditEvent, AuditEventType};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Lifecycle record for a container that was spawned to run an agent process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerAuditRecord {
-    /// The agent this container was spawned for.
-    pub agent_id: String,
-    /// Full container ID returned by `{runtime} run --detach`.
-    pub container_id: String,
-    /// Image that was used (e.g. `ghcr.io/my-org/gyre-agent:latest`).
-    pub image: String,
-    /// SHA-256 image digest from `{runtime} inspect --format={{.Image}}`.
-    /// None when inspect fails (best-effort).
-    pub image_hash: Option<String>,
-    /// Runtime that managed this container: `"docker"` or `"podman"`.
-    pub runtime: String,
-    /// Unix epoch when the container was started.
-    pub started_at: u64,
-    /// Unix epoch when the container was observed to have stopped.
-    /// `None` while the container is still running.
-    pub stopped_at: Option<u64>,
-    /// Container exit code. `None` while still running.
-    pub exit_code: Option<i32>,
-}
-
-/// Shared in-memory store: agent_id → ContainerAuditRecord.
-pub type ContainerAuditStore = Arc<Mutex<HashMap<String, ContainerAuditRecord>>>;
-
-/// Create a new empty store (called once in `build_state`).
-pub fn new_store() -> ContainerAuditStore {
-    Arc::new(Mutex::new(HashMap::new()))
-}
+pub use gyre_domain::ContainerAuditRecord;
 
 // ---------------------------------------------------------------------------
 // Lifecycle helpers
@@ -83,21 +46,20 @@ pub async fn capture_spawn_audit(
 /// Runs `{runtime} inspect` to retrieve the exit code and finish time.
 /// If inspect fails (container already removed) timestamps fall back to the
 /// current time so the record remains useful for audit purposes.
-pub async fn capture_exit_audit(store: &ContainerAuditStore, agent_id: &str) {
-    let (container_id, runtime) = {
-        let guard = store.lock().await;
-        match guard.get(agent_id) {
-            Some(r) => (r.container_id.clone(), r.runtime.clone()),
-            None => return,
-        }
+pub async fn capture_exit_audit(repo: &dyn gyre_ports::ContainerAuditRepository, agent_id: &str) {
+    let (container_id, runtime) = match repo.find_by_agent_id(agent_id).await {
+        Ok(Some(r)) => (r.container_id, r.runtime),
+        _ => return,
     };
 
     let (exit_code, stopped_at) = get_exit_info(&runtime, &container_id).await;
-    let mut guard = store.lock().await;
-    if let Some(rec) = guard.get_mut(agent_id) {
-        rec.exit_code = exit_code;
-        rec.stopped_at = Some(stopped_at.unwrap_or_else(now_secs));
-    }
+    let _ = repo
+        .update_exit(
+            agent_id,
+            exit_code,
+            Some(stopped_at.unwrap_or_else(now_secs)),
+        )
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,13 +280,6 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn new_store_is_empty() {
-        let store = new_store();
-        let guard = store.try_lock().unwrap();
-        assert!(guard.is_empty());
-    }
 
     #[tokio::test]
     async fn capture_spawn_audit_fills_fields() {

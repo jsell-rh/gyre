@@ -120,6 +120,14 @@ pub async fn spawn_agent(
 
     let now = now_secs();
 
+    // Reject duplicate agent names with a clear 400 rather than a 500.
+    if let Ok(Some(_)) = state.agents.find_by_name(&req.name).await {
+        return Err(ApiError::InvalidInput(format!(
+            "an agent named '{}' already exists; choose a different name",
+            req.name
+        )));
+    }
+
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
@@ -289,10 +297,15 @@ pub async fn spawn_agent(
     let spawned_container_image: Option<String>; // M19.3/M19.4
 
     {
+        // Docker requires an absolute working directory path. Canonicalize the
+        // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
+        // relative (e.g. the default "./repos/").
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
-            worktree_path.clone()
+            std::fs::canonicalize(&worktree_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| worktree_path.clone())
         } else {
-            // For containers, use /workspace (absolute path required by Docker).
+            // Worktree not yet on disk — fall back to /workspace (absolute).
             "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
@@ -407,11 +420,7 @@ pub async fn spawn_agent(
                             &runtime_str,
                         )
                         .await;
-                        state
-                            .container_audits
-                            .lock()
-                            .await
-                            .insert(agent.id.to_string(), rec);
+                        let _ = state.container_audits.save(&rec).await;
 
                         // M19.3: Emit AgentContainerSpawned domain event.
                         let _ = state.event_tx.send(DomainEvent::AgentContainerSpawned {
@@ -459,30 +468,27 @@ pub async fn spawn_agent(
                                         .remove(&agent_id_str);
                                     // M19.3: Update audit record on container exit.
                                     container_audit::capture_exit_audit(
-                                        &state_mon.container_audits,
+                                        state_mon.container_audits.as_ref(),
                                         &agent_id_str,
                                     )
                                     .await;
 
                                     // M23: Emit container_stopped audit event (best-effort).
                                     {
-                                        let exit_code = state_mon
+                                        let audit_rec = state_mon
                                             .container_audits
-                                            .lock()
+                                            .find_by_agent_id(&agent_id_str)
                                             .await
-                                            .get(&agent_id_str)
-                                            .and_then(|r| r.exit_code);
+                                            .ok()
+                                            .flatten();
+                                        let exit_code =
+                                            audit_rec.as_ref().and_then(|r| r.exit_code);
                                         let ctx = crate::container_audit::AuditCtx {
                                             audit: state_mon.audit.as_ref(),
                                             broadcast_tx: &state_mon.audit_broadcast_tx,
                                         };
-                                        let container_id_for_evt = state_mon
-                                            .container_audits
-                                            .lock()
-                                            .await
-                                            .get(&agent_id_str)
-                                            .map(|r| r.container_id.clone())
-                                            .unwrap_or_default();
+                                        let container_id_for_evt =
+                                            audit_rec.map(|r| r.container_id).unwrap_or_default();
                                         crate::container_audit::emit_stopped(
                                             &ctx,
                                             &agent_id_str,

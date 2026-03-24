@@ -217,11 +217,7 @@ pub async fn create_gate(
         created_at: now_secs(),
     };
 
-    state
-        .quality_gates
-        .lock()
-        .await
-        .insert(gate.id.to_string(), gate.clone());
+    state.quality_gates.save(&gate).await?;
 
     Ok((StatusCode::CREATED, Json(GateResponse::from(gate))))
 }
@@ -231,11 +227,11 @@ pub async fn list_gates(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
 ) -> Result<Json<Vec<GateResponse>>, ApiError> {
-    let gates = state.quality_gates.lock().await;
-    let mut result: Vec<GateResponse> = gates
-        .values()
-        .filter(|g| g.repo_id.as_str() == repo_id)
-        .cloned()
+    let mut result: Vec<GateResponse> = state
+        .quality_gates
+        .list_by_repo_id(&repo_id)
+        .await?
+        .into_iter()
         .map(GateResponse::from)
         .collect();
     result.sort_by_key(|g| g.created_at);
@@ -247,14 +243,13 @@ pub async fn delete_gate(
     State(state): State<Arc<AppState>>,
     Path((repo_id, gate_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let mut gates = state.quality_gates.lock().await;
-    match gates.get(&gate_id) {
+    match state.quality_gates.find_by_id(&gate_id).await? {
         None => Err(ApiError::NotFound(format!("gate {gate_id} not found"))),
         Some(g) if g.repo_id.as_str() != repo_id => {
             Err(ApiError::NotFound(format!("gate {gate_id} not found")))
         }
         _ => {
-            gates.remove(&gate_id);
+            state.quality_gates.delete(&gate_id).await?;
             Ok(StatusCode::NO_CONTENT)
         }
     }
@@ -265,11 +260,11 @@ pub async fn list_mr_gate_results(
     State(state): State<Arc<AppState>>,
     Path(mr_id): Path<String>,
 ) -> Result<Json<Vec<GateResultResponse>>, ApiError> {
-    let results = state.gate_results.lock().await;
-    let mut out: Vec<GateResultResponse> = results
-        .values()
-        .filter(|r| r.mr_id.as_str() == mr_id)
-        .cloned()
+    let mut out: Vec<GateResultResponse> = state
+        .gate_results
+        .list_by_mr_id(&mr_id)
+        .await?
+        .into_iter()
         .map(GateResultResponse::from)
         .collect();
     out.sort_by_key(|r| r.started_at.unwrap_or(0));
@@ -312,11 +307,7 @@ pub async fn approve_spec(
     let mut approval = SpecApproval::new(new_id(), req.path, req.sha, approver_id, now);
     approval.signature = req.signature;
 
-    state
-        .spec_approvals
-        .lock()
-        .await
-        .insert(approval.id.to_string(), approval.clone());
+    state.spec_approvals.create(&approval).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -330,13 +321,13 @@ pub async fn list_spec_approvals(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<SpecApprovalResponse>>, ApiError> {
     let path_filter = params.get("path").map(|s| s.as_str());
-    let approvals = state.spec_approvals.lock().await;
-    let mut result: Vec<SpecApprovalResponse> = approvals
-        .values()
-        .filter(|a| path_filter.is_none_or(|p| a.spec_path == p))
-        .cloned()
-        .map(SpecApprovalResponse::from)
-        .collect();
+    let all = if let Some(path) = path_filter {
+        state.spec_approvals.list_by_path(path).await?
+    } else {
+        state.spec_approvals.list_all().await?
+    };
+    let mut result: Vec<SpecApprovalResponse> =
+        all.into_iter().map(SpecApprovalResponse::from).collect();
     result.sort_by_key(|a| a.approved_at);
     Ok(Json(result))
 }
@@ -358,9 +349,10 @@ pub async fn revoke_spec_approval(
         .unwrap_or_else(|| format!("agent:{}", auth.agent_id));
     let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
 
-    let mut approvals = state.spec_approvals.lock().await;
-    let approval = approvals
-        .get_mut(&req.approval_id)
+    let approval = state
+        .spec_approvals
+        .find_by_id(&Id::new(&req.approval_id))
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("approval {} not found", req.approval_id)))?;
 
     if approval.revoked_at.is_some() {
@@ -376,11 +368,20 @@ pub async fn revoke_spec_approval(
         ));
     }
 
-    approval.revoked_at = Some(now_secs());
-    approval.revoked_by = Some(caller_id);
-    approval.revocation_reason = Some(req.reason);
+    let now = now_secs();
+    state
+        .spec_approvals
+        .revoke(&Id::new(&req.approval_id), &caller_id, &req.reason, now)
+        .await?;
 
-    Ok(Json(SpecApprovalResponse::from(approval.clone())))
+    // Return updated approval.
+    let updated = state
+        .spec_approvals
+        .find_by_id(&Id::new(&req.approval_id))
+        .await?
+        .unwrap_or(approval);
+
+    Ok(Json(SpecApprovalResponse::from(updated)))
 }
 
 /// Check that a spec_ref ("path@sha") has an active approval in the ledger.
@@ -398,10 +399,12 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
         ));
     }
 
-    let approvals = state.spec_approvals.lock().await;
-    let has_active_approval = approvals
-        .values()
-        .any(|a| a.spec_path == path && a.spec_sha == sha && a.is_active());
+    let active = state
+        .spec_approvals
+        .list_active_by_path(path)
+        .await
+        .unwrap_or_default();
+    let has_active_approval = active.iter().any(|a| a.spec_sha == sha);
 
     if has_active_approval {
         Ok(())
