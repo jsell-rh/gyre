@@ -76,14 +76,14 @@ pub enum Destination {
 
 **`workspace_id` is `Option<Id>`:** Most messages have a workspace scope. `Broadcast` messages do not — they span all workspaces (admin dashboards, `DataSeeded`). The DB column is nullable; Broadcast messages are not stored in the DB (in-memory only), so the nullable column is never exercised in practice. Non-Broadcast messages with `workspace_id: None` are rejected with 400.
 
-**Origin resolution from auth context:**
+**Origin and tenant resolution from auth context:**
 
-| Auth mechanism | Maps to |
-|---|---|
-| Agent JWT (EdDSA, starts with `ey`) | `Agent(sub claim)` |
-| Keycloak JWT (OIDC) | `User(user_id from token)` |
-| API key (`gyre_*`) | `User(user_id from key lookup)` |
-| Global `GYRE_AUTH_TOKEN` | `Server` |
+| Auth mechanism | `MessageOrigin` | `tenant_id` source |
+|---|---|---|
+| Agent JWT (EdDSA) | `Agent(sub claim)` | `tenant_id` JWT claim (or default tenant if absent) |
+| Keycloak JWT (OIDC) | `User(user_id from token)` | `tenant_id` JWT claim (from Keycloak realm mapping) |
+| API key (`gyre_*`) | `User(user_id from key lookup)` | User's `tenant_id` from `UserRepository` |
+| Global `GYRE_AUTH_TOKEN` | `Server` | Default tenant (the bootstrap tenant from `hierarchy-enforcement.md`) |
 
 **Security note:** The global `GYRE_AUTH_TOKEN` maps to `Server` origin, which bypasses workspace scoping and can target `Broadcast`. In production, this token MUST be rotated from the default `gyre-dev-token` and access restricted. Any holder of this token can forge server-originated messages, undermining the attestation model.
 
@@ -94,8 +94,17 @@ pub enum Destination {
 One enum replaces the three current type systems. Organized into three **tiers** that determine signing and persistence behavior:
 
 ```rust
-/// Serde: internally tagged with #[serde(tag = "kind")].
+/// Serde: externally tagged with #[serde(rename_all = "snake_case")].
 /// Unknown kind strings deserialize to Custom(s) via #[serde(other)].
+///
+/// Wire format: the `kind` field on the Message envelope is a plain snake_case
+/// string — e.g., "agent_created", "task_assignment", "tool_call_start".
+/// Custom kinds use the raw string: Custom("my_event") → "my_event".
+///
+/// Note: the legacy DomainEvent uses PascalCase ("AgentCreated"). During
+/// migration Phases 2-3, the server maps PascalCase → snake_case when
+/// re-emitting legacy events through the unified bus.
+#[serde(rename_all = "snake_case")]
 pub enum MessageKind {
     // ── Tier 1: Directed (signed + persisted + ack-based) ─────────────
     TaskAssignment,
@@ -142,12 +151,12 @@ pub enum MessageKind {
 **Changes from prior draft:**
 - `BudgetWarning` and `BudgetExhausted` moved from Directed to **Event** tier. These are server-originated notifications — ack semantics are meaningless because the server enforces budget limits regardless of whether the agent acknowledges.
 - `AgentError` moved from Telemetry to **Event** tier. Errors represent failures that need investigation; losing them to an ephemeral buffer is unacceptable.
-- `ActivityRecorded` **removed**. It was an echo of telemetry events, redundant in a unified bus where telemetry flows through the same envelope type.
+- `ActivityRecorded` **removed**. It was an echo of telemetry events, redundant in a unified bus where telemetry flows through the same envelope type. Existing callsites that emit `DomainEvent::ActivityRecorded` should be updated in Phase 1 to emit the specific `MessageKind` that the activity represents (e.g., `ToolCallStart`, `RunStarted`), or deleted if they duplicate telemetry already submitted by the agent via the inbox.
 - `MrMerged` **added** to Event tier. The notification system needs a distinct kind for merge events rather than inferring from `MrStatusChanged` with `status: "merged"`.
 
 **`Custom(String)` tier:** Defaults to **Event** tier (signed, persisted with TTL). A sender can request Directed-tier handling by including `"tier": "directed"` in the request body, which makes the message ack-based. Telemetry tier is not available for Custom messages — if you need attestation, use Event; if you need delivery guarantees, use Directed.
 
-**`Custom(String)` serialization:** Uses serde `#[serde(tag = "kind")]` with `#[serde(other)]`. Known variant names (e.g., `"AgentCreated"`) match the built-in variant first; unknown strings fall through to `Custom(s)`. There is no runtime collision check — serde's deserialization handles precedence correctly.
+**`Custom(String)` serialization:** The `MessageKind` enum uses `#[serde(rename_all = "snake_case")]` (externally tagged) with `#[serde(other)]` on the `Custom(String)` variant. The `kind` field on the `Message` struct serializes as a plain string: `"kind": "task_assignment"`. Known snake_case variant names match built-in variants first; unknown strings fall through to `Custom(s)`. No runtime collision check is needed — serde handles precedence correctly.
 
 **Tier behavior:**
 
@@ -223,19 +232,21 @@ This is consistent with the existing commit signature approach (`commit_signatur
 Clients connect to `GET /ws` and authenticate as today. After auth, the client sends a subscription message:
 
 ```json
-{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}, {"workspace_id": "ws-456"}], "last_seen": null}
+{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700}
 ```
 
-The `Subscribe` variant is added to `gyre_common::WsMessage`. To avoid breaking old CLI versions that can't parse unknown variants, the `WsMessage` enum should use `#[serde(other)]` on a catch-all variant so unrecognized message types are silently ignored rather than causing deserialization errors.
+`last_seen` is `Option<u64>` — Unix epoch seconds matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen`, capped at 1000 messages. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
+
+The `Subscribe` variant is added to `gyre_common::WsMessage`. To avoid breaking old CLI versions, also add a catch-all `Unknown` variant with `#[serde(other)]` to `WsMessage` so unrecognized message types are silently ignored rather than causing deserialization errors.
 
 During migration, clients that don't send `Subscribe` receive legacy broadcast behavior (all domain events, unscoped).
 
+**WebSocket identity for agent-targeted delivery:** The current WebSocket auth uses a shared token comparison with no identity extraction. For `Destination::Agent(id)` delivery over WebSocket, the server must know which connection belongs to which agent. **Phase 2 prerequisite:** WebSocket auth must accept JWT-based authentication (in addition to the shared token). When a client authenticates with an agent JWT, the server extracts the `sub` claim and associates that agent ID with the connection. Clients authenticating with the shared global token receive workspace-scoped and broadcast messages but NOT agent-targeted messages (those are only available via REST poll for shared-token clients).
+
 The server filters outgoing messages:
-- `Destination::Agent(id)` — delivered only to that agent's WebSocket connection (matched by auth identity)
+- `Destination::Agent(id)` — delivered only to the WebSocket connection authenticated with a JWT whose `sub` matches `id`. If no matching connection exists, the message is still persisted and available via REST poll.
 - `Destination::Workspace(id)` — delivered to all clients whose subscription includes that workspace
 - `Destination::Broadcast` — delivered to all connected clients (admin dashboards, legacy clients)
-
-**Reconnection and catch-up:** When a WebSocket reconnects, the client includes a `last_seen` timestamp in the Subscribe message. The server replays persisted Event-tier messages newer than `last_seen` for the subscribed workspaces, capped at 1000 messages. If more than 1000 messages exist since `last_seen`, the server returns the newest 1000 and includes a `"truncated": true` flag — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. Telemetry-tier messages are not replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
 
 #### REST (fallback — poll delivery)
 
@@ -261,7 +272,7 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 |---|---|---|
 | **Directed** | At-least-once (persisted until ack, redelivered on poll) | DB — no TTL, expires only on ack or agent completion |
 | **Event** | Best-effort push + queryable history | DB — configurable TTL (default 7 days, `GYRE_EVENT_TTL_SECS`) |
-| **Telemetry** | Best-effort push only | In-memory ring buffer (configurable, default 10,000 entries per workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Total buffer capped at 100 workspaces × max_per_workspace to bound memory. |
+| **Telemetry** | Best-effort push only | In-memory ring buffer (configurable, default 10,000 entries per workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). LRU eviction across workspaces when total exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100). Telemetry is best-effort — no tenant isolation guarantee at this layer. |
 
 **Directed-tier queue depth:** Max 1000 unacked messages per agent (configurable, `GYRE_AGENT_INBOX_MAX`). When the limit is reached, new messages to that agent are rejected with 429 and the sender receives an error. Messages are NOT silently dropped — this preserves the at-least-once guarantee. The agent or an admin must ack or the agent must be completed/killed to free the inbox.
 
@@ -316,8 +327,13 @@ pub trait MessageRepository: Send + Sync {
         limit: Option<usize>,
     ) -> Result<Vec<Message>>;
 
-    /// Delete messages older than the given epoch. Returns count deleted.
-    async fn expire(&self, older_than: u64) -> Result<u64>;
+    /// Delete Event-tier messages older than the given epoch. Returns count deleted.
+    /// Only affects messages where to_type != 'agent' (Event tier).
+    async fn expire_events(&self, older_than: u64) -> Result<u64>;
+
+    /// Delete acked Directed messages for completed agents older than the given epoch.
+    /// Covers the GYRE_DEAD_INBOX_TTL_SECS cleanup path.
+    async fn expire_dead_inboxes(&self, older_than: u64) -> Result<u64>;
 }
 ```
 
@@ -348,8 +364,8 @@ CREATE TABLE messages (
     from_type TEXT NOT NULL,          -- 'server', 'agent', 'user'
     from_id TEXT,                     -- NULL for server origin
     workspace_id TEXT,                -- NULL only for broadcast (not stored)
-    to_type TEXT NOT NULL,            -- 'agent', 'workspace', 'broadcast'
-    to_id TEXT,                       -- NULL for workspace/broadcast
+    to_type TEXT NOT NULL,            -- 'agent', 'workspace' (broadcast not stored)
+    to_id TEXT,                       -- agent_id for agent, workspace_id for workspace
     kind TEXT NOT NULL,
     payload TEXT,                     -- JSON
     created_at INTEGER NOT NULL,
@@ -496,7 +512,7 @@ Four phases. Each phase is independently revertible by feature flag (`GYRE_MESSA
 **Phase 3: Migrate agent inbox.**
 - New `POST /api/v1/messages` becomes the primary send endpoint.
 - Old `POST /api/v1/agents/:id/messages` becomes a **compatibility adapter**: it accepts the old request body (`{from, content, message_type}`), transforms it to the new format (`{to: {agent: id}, kind: message_type.type, payload: content}`), and forwards to the new handler. Returns the new response shape. Logs a deprecation warning.
-- Old `GET /api/v1/agents/:id/messages` becomes a compatibility adapter that calls `list_unacked`, maps results to the old response format, and **auto-acknowledges** all returned messages. This preserves drain-on-read semantics for legacy agents that have no ack logic. New agents should use the new endpoint with explicit acks.
+- Old `GET /api/v1/agents/:id/messages` becomes a compatibility adapter that calls `list_unacked`, maps results to the old response format, and **auto-acknowledges** all returned messages on successful response. This preserves drain-on-read semantics for legacy agents that have no ack logic. **Known risk:** if the HTTP response is lost after the server commits the acks, the client misses the messages. This is accepted as a known regression during migration — the legacy drain behavior had the same atomicity issue (delete-then-respond). New agents should use the new endpoint with explicit acks to avoid this.
 - `FreeText` message type: the compatibility adapter maps `FreeText{body}` to `Custom("free_text")` with `payload: {"body": body}`. A deprecation warning is logged.
 
 **Phase 4: Remove legacy.**
