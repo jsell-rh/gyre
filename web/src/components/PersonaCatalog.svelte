@@ -125,7 +125,7 @@
             </div>
             <div class="card-meta">
               <div class="persona-name">{persona.name}</div>
-              <Badge variant={scopeVariant(persona.scope)} label={scopeLabel(persona.scope)} />
+              <Badge variant={scopeVariant(persona.scope)} value={scopeLabel(persona.scope)} />
             </div>
           </div>
           {#if persona.description}
@@ -134,7 +134,7 @@
           {#if persona.capabilities?.length > 0}
             <div class="capabilities">
               {#each persona.capabilities as cap}
-                <Badge variant="default" label={cap} />
+                <Badge variant="default" value={cap} />
               {/each}
             </div>
           {/if}
