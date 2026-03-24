@@ -314,8 +314,8 @@ impl MergeRequestRepository for SqliteStorage {
 mod tests {
     use super::*;
     use crate::sqlite::SqliteStorage;
-    use gyre_domain::{Project, Repository};
-    use gyre_ports::{ProjectRepository, RepoRepository};
+    use gyre_domain::Repository;
+    use gyre_ports::RepoRepository;
     use tempfile::NamedTempFile;
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
@@ -324,12 +324,10 @@ mod tests {
         (tmp, s)
     }
 
-    async fn create_repo(s: &SqliteStorage, project_id: &str, repo_id: &str) {
-        let p = Project::new(Id::new(project_id), format!("proj-{}", project_id), 1000);
-        let _ = ProjectRepository::create(s, &p).await;
+    async fn create_repo(s: &SqliteStorage, _workspace_id: &str, repo_id: &str) {
         let r = Repository::new(
             Id::new(repo_id),
-            Id::new(project_id),
+            Id::new("ws1"),
             format!("repo-{}", repo_id),
             format!("/repos/{}", repo_id),
             1000,

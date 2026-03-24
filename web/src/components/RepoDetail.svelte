@@ -69,7 +69,7 @@
   const GATE_TYPES = ['TestCommand', 'LintCommand', 'AgentReview', 'AgentValidation', 'RequiredApprovals'];
   const BUILTIN_PUSH_GATES = ['conventional-commit', 'task-ref', 'no-em-dash'];
 
-  const cloneUrl = `${window.location.origin}/git/${repo.project_id}/${repo.name}.git`;
+  const cloneUrl = `${window.location.origin}/git/${repo.id}/${repo.name}.git`;
 
   const tabs = $derived([
     { id: 'branches', label: 'Branches', count: branches.length || undefined },

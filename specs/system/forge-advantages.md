@@ -192,9 +192,7 @@ Gyre manages structured git ref namespaces beyond `refs/heads/` and `refs/tags/`
 |---|---|
 | `refs/agents/{agent-id}/head` | Current working branch per agent |
 | `refs/agents/{agent-id}/snapshots/{n}` | Point-in-time snapshots for undo |
-| `refs/ralph/{task-id}/spec` | Commit representing the accepted spec |
-| `refs/ralph/{task-id}/implement` | Branch at implement-phase completion |
-| `refs/ralph/{task-id}/review/{n}` | State at each review iteration |
+| `refs/tasks/{task-id}` | Branch tip for this task's implementation |
 | `refs/speculative/{branch}` | Speculative merge result (ephemeral) |
 | `refs/reviews/{mr-id}/comments` | Review comments as git notes |
 | `refs/queue/{entry-id}` | Merge queue state per entry |
@@ -209,14 +207,14 @@ through discovery APIs.
 
 **Ralph loop acceleration:**
 An orchestrator can reconstruct the full history of any task by reading structured refs -- no
-database query required. `git fetch origin refs/ralph/TASK-007/*` retrieves every phase artifact.
-Diffing `refs/ralph/TASK-007/spec` against `refs/ralph/TASK-007/implement` shows exactly what the
-agent built versus what was specified.
+database query required. `git fetch origin refs/tasks/TASK-007` retrieves the task's branch tip.
+Combined with `refs/agents/{agent-id}/snapshots/*`, the full session-by-session history is
+reconstructable from git alone.
 
 **Agent identity integration:**
 Ref namespace writes are gated by the agent's OIDC token scope. An agent may write to
-`refs/agents/{its-own-id}/` but not to another agent's namespace. The `refs/ralph/` namespace is
-written by the server during phase transitions, not directly by agents -- enforced by the
+`refs/agents/{its-own-id}/` but not to another agent's namespace. The `refs/tasks/` namespace is
+written by the server at spawn time, not directly by agents -- enforced by the
 receive-pack pre-accept layer.
 
 ---

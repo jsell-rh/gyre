@@ -18,7 +18,7 @@
 
   const placeholderText = `{
   "version": "1",
-  "project_id": "...",
+  "workspace_id": "...",
   "repo_id": "...",
   "agents": [
     {

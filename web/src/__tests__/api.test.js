@@ -66,24 +66,24 @@ describe('api.js — auth header', () => {
     expect(url).toBe('/api/v1/tasks');
   });
 
-  it('api.projects() calls /api/v1/projects', async () => {
+  it('api.repos() calls /api/v1/repos', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
     );
-    await api.projects();
+    await api.repos();
     const [url] = global.fetch.mock.calls[0];
-    expect(url).toBe('/api/v1/projects');
+    expect(url).toBe('/api/v1/repos');
   });
 
-  it('api.createProject() sends POST with body', async () => {
+  it('api.createRepo() sends POST with workspace_id in body', async () => {
     global.fetch = vi.fn(() =>
-      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ id: '1' }) })
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ id: 'r1' }) })
     );
-    await api.createProject({ name: 'test', description: 'desc' });
+    await api.createRepo({ name: 'test-repo', workspace_id: 'ws-1' });
     const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe('/api/v1/projects');
+    expect(url).toBe('/api/v1/repos');
     expect(options.method).toBe('POST');
-    expect(JSON.parse(options.body)).toEqual({ name: 'test', description: 'desc' });
+    expect(JSON.parse(options.body)).toEqual({ name: 'test-repo', workspace_id: 'ws-1' });
   });
 
   it('api.createTask() sends POST with body', async () => {
@@ -106,20 +106,20 @@ describe('api.js — auth header', () => {
     expect(url).toBe('/api/v1/merge-queue');
   });
 
-  it('api.repos(projectId) calls /api/v1/repos?project_id=<id>', async () => {
+  it('api.repos({ workspaceId }) calls /api/v1/repos?workspace_id=<id>', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
     );
-    await api.repos('proj-123');
+    await api.repos({ workspaceId: 'ws-123' });
     const [url] = global.fetch.mock.calls[0];
-    expect(url).toBe('/api/v1/repos?project_id=proj-123');
+    expect(url).toBe('/api/v1/repos?workspace_id=ws-123');
   });
 
   it('api.createRepo() sends POST to /api/v1/repos with body', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ id: 'r1' }) })
     );
-    await api.createRepo({ name: 'my-repo', project_id: 'proj-1', default_branch: 'main' });
+    await api.createRepo({ name: 'my-repo', workspace_id: 'ws-1', default_branch: 'main' });
     const [url, options] = global.fetch.mock.calls[0];
     expect(url).toBe('/api/v1/repos');
     expect(options.method).toBe('POST');
@@ -135,14 +135,14 @@ describe('api.js — auth header', () => {
     expect(url).toBe('/api/v1/repos');
   });
 
-  it('api.repos() does NOT call /projects/:id/repos (nonexistent route)', async () => {
+  it('api.repos() with no args calls /api/v1/repos without filter', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
     );
-    await api.repos('proj-abc');
+    await api.repos();
     const [url] = global.fetch.mock.calls[0];
-    expect(url).not.toMatch(/\/projects\/proj-abc\/repos/);
-    expect(url).toContain('project_id=proj-abc');
+    expect(url).toBe('/api/v1/repos');
+    expect(url).not.toContain('project_id');
   });
 
   it('api.createMirrorRepo() POSTs to /api/v1/repos/mirror', async () => {
