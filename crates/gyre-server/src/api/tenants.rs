@@ -70,13 +70,17 @@ pub async fn create_tenant(
 }
 
 pub async fn list_tenants(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<TenantResponse>>, ApiError> {
     let tenants = state.tenants.list().await?;
-    Ok(Json(tenants.into_iter().map(TenantResponse::from).collect()))
+    Ok(Json(
+        tenants.into_iter().map(TenantResponse::from).collect(),
+    ))
 }
 
 pub async fn get_tenant(
+    _admin: crate::auth::AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<TenantResponse>, ApiError> {
@@ -173,6 +177,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/tenants")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -189,6 +194,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/tenants/nonexistent")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
