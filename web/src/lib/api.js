@@ -353,6 +353,10 @@ export const api = {
     request(`/personas/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePersona: (id) =>
     request(`/personas/${id}`, { method: 'DELETE' }),
+  approvePersona: (id) =>
+    request(`/personas/${id}/approve`, { method: 'POST' }),
+  resolvePersona: (slug, scopeKind, scopeId) =>
+    request(`/personas/resolve?slug=${encodeURIComponent(slug)}&scope_kind=${encodeURIComponent(scopeKind)}&scope_id=${encodeURIComponent(scopeId)}`),
   // Dependency graph (M22.5)
   dependencyGraph: () => request('/dependencies/graph'),
   repoDependencies: (id) => request(`/repos/${id}/dependencies`),
