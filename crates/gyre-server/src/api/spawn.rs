@@ -120,6 +120,14 @@ pub async fn spawn_agent(
 
     let now = now_secs();
 
+    // Reject duplicate agent names with a clear 400 rather than a 500.
+    if let Ok(Some(_)) = state.agents.find_by_name(&req.name).await {
+        return Err(ApiError::InvalidInput(format!(
+            "an agent named '{}' already exists; choose a different name",
+            req.name
+        )));
+    }
+
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
@@ -289,10 +297,15 @@ pub async fn spawn_agent(
     let spawned_container_image: Option<String>; // M19.3/M19.4
 
     {
+        // Docker requires an absolute working directory path. Canonicalize the
+        // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
+        // relative (e.g. the default "./repos/").
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
-            worktree_path.clone()
+            std::fs::canonicalize(&worktree_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| worktree_path.clone())
         } else {
-            // For containers, use /workspace (absolute path required by Docker).
+            // Worktree not yet on disk — fall back to /workspace (absolute).
             "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
