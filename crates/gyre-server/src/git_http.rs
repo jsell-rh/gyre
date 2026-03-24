@@ -726,10 +726,11 @@ async fn check_pre_accept_gates(
     agent_id: &str,
 ) -> Result<(), String> {
     // Get gate names configured for this repo.
-    let gate_names = {
-        let gates = state.repo_push_gates.lock().await;
-        gates.get(repo_id).cloned().unwrap_or_default()
-    };
+    let gate_names = state
+        .repo_push_gates
+        .get_for_repo(repo_id)
+        .await
+        .unwrap_or_default();
     if gate_names.is_empty() {
         return Ok(());
     }
@@ -1068,28 +1069,24 @@ async fn process_spec_lifecycle(
                 };
 
                 if !stale_paths.is_empty() {
-                    let mut approvals = state.spec_approvals.lock().await;
+                    let reason = format!(
+                        "spec file {} in push to {}",
+                        match status_char {
+                            'M' => "modified",
+                            'D' => "deleted",
+                            'R' => "renamed",
+                            _ => "changed",
+                        },
+                        default_branch
+                    );
                     let mut invalidated = 0usize;
-                    for approval in approvals.values_mut() {
-                        if approval.is_active()
-                            && stale_paths.iter().any(|&p| approval.spec_path == p)
-                        {
-                            approval.revoked_at = Some(now);
-                            approval.revoked_by = Some("system:spec-lifecycle".to_string());
-                            approval.revocation_reason = Some(format!(
-                                "spec file {} in push to {}",
-                                match status_char {
-                                    'M' => "modified",
-                                    'D' => "deleted",
-                                    'R' => "renamed",
-                                    _ => "changed",
-                                },
-                                default_branch
-                            ));
-                            invalidated += 1;
-                        }
+                    for &stale_path in &stale_paths {
+                        let _ = state
+                            .spec_approvals
+                            .revoke_all_for_path(stale_path, "system:spec-lifecycle", &reason, now)
+                            .await;
+                        invalidated += 1;
                     }
-                    drop(approvals);
                     if invalidated > 0 {
                         info!(
                             spec_path = %path,

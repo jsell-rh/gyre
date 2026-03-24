@@ -198,13 +198,14 @@ pub async fn agent_heartbeat(
             // (or instead of) the PID check.
             let container_alive = if let Some(ref cid) = att.container_id {
                 // Detect runtime from the container audit record (best-effort).
-                let runtime = {
-                    let audits = state.container_audits.lock().await;
-                    audits
-                        .get(&id)
-                        .map(|r| r.runtime.clone())
-                        .unwrap_or_else(|| "docker".to_string())
-                };
+                let runtime = state
+                    .container_audits
+                    .find_by_agent_id(&id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| r.runtime)
+                    .unwrap_or_else(|| "docker".to_string());
                 let result = tokio::process::Command::new(&runtime)
                     .args(["inspect", "--format={{.State.Running}}", cid.as_str()])
                     .output()

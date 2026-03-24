@@ -133,9 +133,12 @@ pub async fn list_specs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListSpecsQuery>,
 ) -> Json<Vec<SpecLedgerResponse>> {
-    let ledger = state.spec_ledger.lock().await;
-    let mut specs: Vec<SpecLedgerResponse> = ledger
-        .values()
+    let mut specs: Vec<SpecLedgerResponse> = state
+        .spec_ledger
+        .list_all()
+        .await
+        .unwrap_or_default()
+        .into_iter()
         .filter(|e| {
             if let Some(kind_filter) = &params.kind {
                 e.kind.as_deref() == Some(kind_filter.as_str())
@@ -143,7 +146,6 @@ pub async fn list_specs(
                 true
             }
         })
-        .cloned()
         .map(Into::into)
         .collect();
     specs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -157,11 +159,13 @@ pub async fn list_specs(
 pub async fn list_pending_specs(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<SpecLedgerResponse>> {
-    let ledger = state.spec_ledger.lock().await;
-    let mut specs: Vec<SpecLedgerResponse> = ledger
-        .values()
+    let mut specs: Vec<SpecLedgerResponse> = state
+        .spec_ledger
+        .list_all()
+        .await
+        .unwrap_or_default()
+        .into_iter()
         .filter(|e| e.approval_status == ApprovalStatus::Pending)
-        .cloned()
         .map(Into::into)
         .collect();
     specs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -175,11 +179,13 @@ pub async fn list_pending_specs(
 pub async fn list_drifted_specs(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<SpecLedgerResponse>> {
-    let ledger = state.spec_ledger.lock().await;
-    let mut specs: Vec<SpecLedgerResponse> = ledger
-        .values()
+    let mut specs: Vec<SpecLedgerResponse> = state
+        .spec_ledger
+        .list_all()
+        .await
+        .unwrap_or_default()
+        .into_iter()
         .filter(|e| e.drift_status == "drifted")
-        .cloned()
         .map(Into::into)
         .collect();
     specs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -191,14 +197,14 @@ pub async fn list_drifted_specs(
 // ---------------------------------------------------------------------------
 
 pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::Response<String> {
-    let ledger = state.spec_ledger.lock().await;
+    let all_entries = state.spec_ledger.list_all().await.unwrap_or_default();
 
     // Group specs by directory.
     let mut by_dir: std::collections::BTreeMap<String, Vec<SpecLedgerEntry>> =
         std::collections::BTreeMap::new();
-    for entry in ledger.values() {
+    for entry in all_entries {
         let dir = entry.path.split('/').next().unwrap_or("other").to_string();
-        by_dir.entry(dir).or_default().push(entry.clone());
+        by_dir.entry(dir).or_default().push(entry);
     }
 
     let mut md = String::from("# Spec Registry Index\n\n");
@@ -253,10 +259,10 @@ pub async fn get_spec(
 ) -> Result<Json<SpecLedgerResponse>, ApiError> {
     // axum already URL-decodes path segments.
     let spec_path = encoded_path;
-    let ledger = state.spec_ledger.lock().await;
-    ledger
-        .get(&spec_path)
-        .cloned()
+    state
+        .spec_ledger
+        .find_by_path(&spec_path)
+        .await?
         .map(|e| Json(e.into()))
         .ok_or_else(|| ApiError::NotFound(format!("spec '{spec_path}' not in registry")))
 }
@@ -294,25 +300,29 @@ pub async fn approve_spec(
     }
 
     // Verify spec is in the ledger.
-    {
-        let ledger = state.spec_ledger.lock().await;
-        if !ledger.contains_key(&spec_path) {
-            return Err(ApiError::NotFound(format!(
-                "spec '{spec_path}' not in registry"
-            )));
-        }
+    if state.spec_ledger.find_by_path(&spec_path).await?.is_none() {
+        return Err(ApiError::NotFound(format!(
+            "spec '{spec_path}' not in registry"
+        )));
     }
 
     // Enforce link-based approval gates.
     {
-        let links = state.spec_links_store.lock().await;
-        let ledger = state.spec_ledger.lock().await;
+        // Collect relevant links without holding the lock across await points.
+        let relevant_links: Vec<_> = {
+            let links = state.spec_links_store.lock().await;
+            links
+                .iter()
+                .filter(|l| l.source_path == spec_path)
+                .cloned()
+                .collect()
+        };
 
-        for link in links.iter().filter(|l| l.source_path == spec_path) {
+        for link in &relevant_links {
             match &link.link_type {
                 SpecLinkType::Implements => {
                     // Parent spec must be approved before this spec can be approved.
-                    if let Some(parent) = ledger.get(&link.target_path) {
+                    if let Some(parent) = state.spec_ledger.find_by_path(&link.target_path).await? {
                         if parent.approval_status != ApprovalStatus::Approved {
                             return Err(ApiError::InvalidInput(format!(
                                 "cannot approve '{}': implements '{}' which is not yet approved",
@@ -323,7 +333,7 @@ pub async fn approve_spec(
                 }
                 SpecLinkType::ConflictsWith => {
                     // Conflicting spec must not be approved.
-                    if let Some(conflicting) = ledger.get(&link.target_path) {
+                    if let Some(conflicting) = state.spec_ledger.find_by_path(&link.target_path).await? {
                         if conflicting.approval_status == ApprovalStatus::Approved {
                             return Err(ApiError::InvalidInput(format!(
                                 "cannot approve '{}': conflicts with '{}' which is already approved — resolve the conflict first",
@@ -359,17 +369,15 @@ pub async fn approve_spec(
     };
 
     // Record in approval history.
-    state.spec_approval_history.lock().await.push(event.clone());
+    let _ = state.spec_approval_history.record(&event).await;
 
     // Update ledger approval_status based on new approval.
     // For simplicity: any valid approval for the current SHA sets status to Approved.
-    {
-        let mut ledger = state.spec_ledger.lock().await;
-        if let Some(entry) = ledger.get_mut(&spec_path) {
-            if entry.current_sha == req.sha {
-                entry.approval_status = ApprovalStatus::Approved;
-                entry.updated_at = now;
-            }
+    if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
+        if entry.current_sha == req.sha {
+            entry.approval_status = ApprovalStatus::Approved;
+            entry.updated_at = now;
+            let _ = state.spec_ledger.save(&entry).await;
         }
     }
 
@@ -390,13 +398,14 @@ pub async fn revoke_spec_approval(
     let now = now_secs();
 
     // Find the most recent active approval for this spec path.
-    let mut history = state.spec_approval_history.lock().await;
-    let active = history
-        .iter_mut()
-        .rev()
-        .find(|e| e.spec_path == spec_path && e.is_active());
+    let events = state
+        .spec_approval_history
+        .list_by_path(&spec_path)
+        .await
+        .unwrap_or_default();
+    let active_event = events.into_iter().rev().find(|e| e.is_active());
 
-    match active {
+    match active_event {
         None => Err(ApiError::NotFound(format!(
             "no active approval for spec '{spec_path}'"
         ))),
@@ -419,16 +428,16 @@ pub async fn revoke_spec_approval(
                 ));
             }
 
-            ev.revoked_at = Some(now);
-            ev.revoked_by = Some(auth.agent_id.clone());
-            ev.revocation_reason = Some(req.reason);
+            let _ = state
+                .spec_approval_history
+                .revoke_event(&ev.id, now, &auth.agent_id, &req.reason)
+                .await;
 
             // Reset ledger approval_status to Pending.
-            drop(history);
-            let mut ledger = state.spec_ledger.lock().await;
-            if let Some(entry) = ledger.get_mut(&spec_path) {
+            if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
                 entry.approval_status = ApprovalStatus::Pending;
                 entry.updated_at = now;
+                let _ = state.spec_ledger.save(&entry).await;
             }
 
             Ok(Json(serde_json::json!({
@@ -449,11 +458,12 @@ pub async fn spec_approval_history(
     Path(encoded_path): Path<String>,
 ) -> Json<Vec<SpecApprovalEventResponse>> {
     let spec_path = encoded_path;
-    let history = state.spec_approval_history.lock().await;
-    let events: Vec<SpecApprovalEventResponse> = history
-        .iter()
-        .filter(|e| e.spec_path == spec_path)
-        .cloned()
+    let events: Vec<SpecApprovalEventResponse> = state
+        .spec_approval_history
+        .list_by_path(&spec_path)
+        .await
+        .unwrap_or_default()
+        .into_iter()
         .map(Into::into)
         .collect();
     Json(events)
@@ -525,13 +535,10 @@ pub async fn get_spec_links(
     let spec_path = encoded_path;
 
     // Verify spec exists.
-    {
-        let ledger = state.spec_ledger.lock().await;
-        if !ledger.contains_key(&spec_path) {
-            return Err(ApiError::NotFound(format!(
-                "spec '{spec_path}' not in registry"
-            )));
-        }
+    if state.spec_ledger.find_by_path(&spec_path).await?.is_none() {
+        return Err(ApiError::NotFound(format!(
+            "spec '{spec_path}' not in registry"
+        )));
     }
 
     let links = state.spec_links_store.lock().await;
@@ -550,11 +557,11 @@ pub async fn get_spec_links(
 // ---------------------------------------------------------------------------
 
 pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGraphResponse> {
-    let ledger = state.spec_ledger.lock().await;
+    let all_entries = state.spec_ledger.list_all().await.unwrap_or_default();
     let links = state.spec_links_store.lock().await;
 
-    let mut nodes: Vec<SpecGraphNode> = ledger
-        .values()
+    let mut nodes: Vec<SpecGraphNode> = all_entries
+        .iter()
         .map(|e| SpecGraphNode {
             path: e.path.clone(),
             title: e.title.clone(),
@@ -601,10 +608,9 @@ mod tests {
         // Seed a spec entry into the ledger.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                ledger.insert(
-                    "system/design-principles.md".to_string(),
-                    SpecLedgerEntry {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
                         path: "system/design-principles.md".to_string(),
                         title: "Design Principles".to_string(),
                         owner: "user:jsell".to_string(),
@@ -617,8 +623,9 @@ mod tests {
                         drift_status: "unknown".to_string(),
                         created_at: 1700000000,
                         updated_at: 1700000000,
-                    },
-                );
+                    })
+                    .await
+                    .unwrap();
             })
         });
 
@@ -744,8 +751,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
 
         // Ledger should now be Approved.
-        let ledger = state.spec_ledger.lock().await;
-        let entry = ledger.get("system/design-principles.md").unwrap();
+        let entry = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.approval_status, ApprovalStatus::Approved);
     }
 
@@ -786,51 +797,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Ledger back to Pending.
-        let ledger = state.spec_ledger.lock().await;
-        let entry = ledger.get("system/design-principles.md").unwrap();
+        let entry = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.approval_status, ApprovalStatus::Pending);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_pending_filters_correctly() {
         let state = test_state();
-        {
-            let mut ledger = state.spec_ledger.lock().await;
-            ledger.insert(
-                "system/pending.md".to_string(),
-                SpecLedgerEntry {
-                    path: "system/pending.md".to_string(),
-                    title: "Pending".to_string(),
-                    owner: "user:jsell".to_string(),
-                    kind: None,
-                    current_sha: "a".repeat(40),
-                    approval_mode: "human_only".to_string(),
-                    approval_status: ApprovalStatus::Pending,
-                    linked_tasks: vec![],
-                    linked_mrs: vec![],
-                    drift_status: "unknown".to_string(),
-                    created_at: 1700000000,
-                    updated_at: 1700000000,
-                },
-            );
-            ledger.insert(
-                "system/approved.md".to_string(),
-                SpecLedgerEntry {
-                    path: "system/approved.md".to_string(),
-                    title: "Approved".to_string(),
-                    owner: "user:jsell".to_string(),
-                    kind: None,
-                    current_sha: "b".repeat(40),
-                    approval_mode: "human_only".to_string(),
-                    approval_status: ApprovalStatus::Approved,
-                    linked_tasks: vec![],
-                    linked_mrs: vec![],
-                    drift_status: "clean".to_string(),
-                    created_at: 1700000000,
-                    updated_at: 1700000000,
-                },
-            );
-        }
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/pending.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/approved.md", ApprovalStatus::Approved))
+            .await
+            .unwrap();
         let app = crate::api::api_router().with_state(state);
         let resp = app
             .oneshot(
@@ -868,31 +856,32 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Helper: seed a spec with a given approval status
+    // Helper: build a SpecLedgerEntry with a given approval status
     // -----------------------------------------------------------------------
 
+    fn make_ledger_entry(path: &str, status: ApprovalStatus) -> SpecLedgerEntry {
+        SpecLedgerEntry {
+            path: path.to_string(),
+            title: path.to_string(),
+            owner: "user:jsell".to_string(),
+            current_sha: "a".repeat(40),
+            approval_mode: "human_only".to_string(),
+            approval_status: status,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "unknown".to_string(),
+            created_at: 1700000000,
+            updated_at: 1700000000,
+        }
+    }
+
+    // Legacy helper used by the sync_supersedes test which bypasses AppState.
     fn seed_spec(
         ledger: &mut std::collections::HashMap<String, SpecLedgerEntry>,
         path: &str,
         status: ApprovalStatus,
     ) {
-        ledger.insert(
-            path.to_string(),
-            SpecLedgerEntry {
-                path: path.to_string(),
-                title: path.to_string(),
-                owner: "user:jsell".to_string(),
-                kind: None,
-                current_sha: "a".repeat(40),
-                approval_mode: "human_only".to_string(),
-                approval_status: status,
-                linked_tasks: vec![],
-                linked_mrs: vec![],
-                drift_status: "unknown".to_string(),
-                created_at: 1700000000,
-                updated_at: 1700000000,
-            },
-        );
+        ledger.insert(path.to_string(), make_ledger_entry(path, status));
     }
 
     // -----------------------------------------------------------------------
@@ -906,24 +895,26 @@ mod tests {
 
         // parent spec: pending (not yet approved)
         // child spec: implements parent
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                seed_spec(&mut ledger, "system/parent.md", ApprovalStatus::Pending);
-                seed_spec(&mut ledger, "system/child.md", ApprovalStatus::Pending);
-                let mut links = state.spec_links_store.lock().await;
-                links.push(SpecLinkEntry {
-                    id: "child-implements-parent".to_string(),
-                    source_path: "system/child.md".to_string(),
-                    link_type: SpecLinkType::Implements,
-                    target_path: "system/parent.md".to_string(),
-                    target_sha: None,
-                    reason: None,
-                    status: "active".to_string(),
-                    created_at: 1700000000,
-                    stale_since: None,
-                });
-            })
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/parent.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/child.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "child-implements-parent".to_string(),
+            source_path: "system/child.md".to_string(),
+            link_type: SpecLinkType::Implements,
+            target_path: "system/parent.md".to_string(),
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
         });
 
         let app = crate::api::api_router().with_state(state);
@@ -950,24 +941,26 @@ mod tests {
         use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
         let state = test_state();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                seed_spec(&mut ledger, "system/parent.md", ApprovalStatus::Approved);
-                seed_spec(&mut ledger, "system/child.md", ApprovalStatus::Pending);
-                let mut links = state.spec_links_store.lock().await;
-                links.push(SpecLinkEntry {
-                    id: "child-implements-parent".to_string(),
-                    source_path: "system/child.md".to_string(),
-                    link_type: SpecLinkType::Implements,
-                    target_path: "system/parent.md".to_string(),
-                    target_sha: None,
-                    reason: None,
-                    status: "active".to_string(),
-                    created_at: 1700000000,
-                    stale_since: None,
-                });
-            })
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/parent.md", ApprovalStatus::Approved))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/child.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "child-implements-parent".to_string(),
+            source_path: "system/child.md".to_string(),
+            link_type: SpecLinkType::Implements,
+            target_path: "system/parent.md".to_string(),
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
         });
 
         let app = crate::api::api_router().with_state(state);
@@ -998,24 +991,26 @@ mod tests {
         use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
         let state = test_state();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                seed_spec(&mut ledger, "system/old.md", ApprovalStatus::Approved);
-                seed_spec(&mut ledger, "system/new.md", ApprovalStatus::Pending);
-                let mut links = state.spec_links_store.lock().await;
-                links.push(SpecLinkEntry {
-                    id: "new-conflicts-old".to_string(),
-                    source_path: "system/new.md".to_string(),
-                    link_type: SpecLinkType::ConflictsWith,
-                    target_path: "system/old.md".to_string(),
-                    target_sha: None,
-                    reason: Some("incompatible permission model".to_string()),
-                    status: "active".to_string(),
-                    created_at: 1700000000,
-                    stale_since: None,
-                });
-            })
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/old.md", ApprovalStatus::Approved))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/new.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "new-conflicts-old".to_string(),
+            source_path: "system/new.md".to_string(),
+            link_type: SpecLinkType::ConflictsWith,
+            target_path: "system/old.md".to_string(),
+            target_sha: None,
+            reason: Some("incompatible permission model".to_string()),
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
         });
 
         let app = crate::api::api_router().with_state(state);
@@ -1042,24 +1037,26 @@ mod tests {
         use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
         let state = test_state();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                seed_spec(&mut ledger, "system/old.md", ApprovalStatus::Pending);
-                seed_spec(&mut ledger, "system/new.md", ApprovalStatus::Pending);
-                let mut links = state.spec_links_store.lock().await;
-                links.push(SpecLinkEntry {
-                    id: "new-conflicts-old".to_string(),
-                    source_path: "system/new.md".to_string(),
-                    link_type: SpecLinkType::ConflictsWith,
-                    target_path: "system/old.md".to_string(),
-                    target_sha: None,
-                    reason: None,
-                    status: "active".to_string(),
-                    created_at: 1700000000,
-                    stale_since: None,
-                });
-            })
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/old.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/new.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "new-conflicts-old".to_string(),
+            source_path: "system/new.md".to_string(),
+            link_type: SpecLinkType::ConflictsWith,
+            target_path: "system/old.md".to_string(),
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
         });
 
         let app = crate::api::api_router().with_state(state);
@@ -1105,25 +1102,27 @@ mod tests {
         use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
         let state = test_state();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                seed_spec(&mut ledger, "system/a.md", ApprovalStatus::Pending);
-                seed_spec(&mut ledger, "system/b.md", ApprovalStatus::Pending);
-                let mut links = state.spec_links_store.lock().await;
-                // a → b (outbound from a, inbound to b)
-                links.push(SpecLinkEntry {
-                    id: "a-depends-b".to_string(),
-                    source_path: "system/a.md".to_string(),
-                    link_type: SpecLinkType::DependsOn,
-                    target_path: "system/b.md".to_string(),
-                    target_sha: None,
-                    reason: None,
-                    status: "active".to_string(),
-                    created_at: 1700000000,
-                    stale_since: None,
-                });
-            })
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/a.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/b.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        // a → b (outbound from a, inbound to b)
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "a-depends-b".to_string(),
+            source_path: "system/a.md".to_string(),
+            link_type: SpecLinkType::DependsOn,
+            target_path: "system/b.md".to_string(),
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
         });
 
         let app = crate::api::api_router().with_state(state);
@@ -1155,24 +1154,26 @@ mod tests {
         use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
         let state = test_state();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut ledger = state.spec_ledger.lock().await;
-                seed_spec(&mut ledger, "system/a.md", ApprovalStatus::Approved);
-                seed_spec(&mut ledger, "system/b.md", ApprovalStatus::Pending);
-                let mut links = state.spec_links_store.lock().await;
-                links.push(SpecLinkEntry {
-                    id: "b-implements-a".to_string(),
-                    source_path: "system/b.md".to_string(),
-                    link_type: SpecLinkType::Implements,
-                    target_path: "system/a.md".to_string(),
-                    target_sha: None,
-                    reason: None,
-                    status: "active".to_string(),
-                    created_at: 1700000000,
-                    stale_since: None,
-                });
-            })
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/a.md", ApprovalStatus::Approved))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/b.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "b-implements-a".to_string(),
+            source_path: "system/b.md".to_string(),
+            link_type: SpecLinkType::Implements,
+            target_path: "system/a.md".to_string(),
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
         });
 
         let app = crate::api::api_router().with_state(state);

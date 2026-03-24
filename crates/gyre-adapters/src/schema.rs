@@ -413,6 +413,87 @@ diesel::table! {
 }
 
 diesel::table! {
+    quality_gates (id) {
+        id -> Text,
+        repo_id -> Text,
+        name -> Text,
+        gate_type -> Text,
+        command -> Nullable<Text>,
+        required_approvals -> Nullable<Integer>,
+        persona -> Nullable<Text>,
+        required -> Integer,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    gate_results (id) {
+        id -> Text,
+        gate_id -> Text,
+        mr_id -> Text,
+        status -> Text,
+        output -> Nullable<Text>,
+        started_at -> Nullable<BigInt>,
+        finished_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    repo_push_gates (repo_id) {
+        repo_id -> Text,
+        gate_names -> Text,
+    }
+}
+
+diesel::table! {
+    spec_policies (repo_id) {
+        repo_id -> Text,
+        require_spec_ref -> Integer,
+        require_approved_spec -> Integer,
+        warn_stale_spec -> Integer,
+        require_current_spec -> Integer,
+    }
+}
+
+diesel::table! {
+    attestation_bundles (mr_id) {
+        mr_id -> Text,
+        attestation -> Text,
+        signature -> Text,
+        signing_key_id -> Text,
+    }
+}
+
+diesel::table! {
+    container_audit_records (agent_id) {
+        agent_id -> Text,
+        container_id -> Text,
+        image -> Text,
+        image_hash -> Nullable<Text>,
+        runtime -> Text,
+        started_at -> BigInt,
+        stopped_at -> Nullable<BigInt>,
+        exit_code -> Nullable<Integer>,
+    }
+}
+
+diesel::table! {
+    spec_ledger_entries (path) {
+        path -> Text,
+        title -> Text,
+        owner -> Text,
+        current_sha -> Text,
+        approval_mode -> Text,
+        approval_status -> Text,
+        linked_tasks -> Text,
+        linked_mrs -> Text,
+        drift_status -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     budget_usages (entity_key) {
         entity_key -> Text,
         entity_type -> Text,
@@ -422,6 +503,21 @@ diesel::table! {
         active_agents -> Integer,
         period_start -> BigInt,
         updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    spec_approval_events (id) {
+        id -> Text,
+        spec_path -> Text,
+        spec_sha -> Text,
+        approver_type -> Text,
+        approver_id -> Text,
+        persona -> Nullable<Text>,
+        approved_at -> BigInt,
+        revoked_at -> Nullable<BigInt>,
+        revoked_by -> Nullable<Text>,
+        revocation_reason -> Nullable<Text>,
     }
 }
 
@@ -457,4 +553,12 @@ diesel::allow_tables_to_appear_in_same_query!(
     budget_configs,
     kv_store,
     budget_usages,
+    quality_gates,
+    gate_results,
+    repo_push_gates,
+    spec_policies,
+    attestation_bundles,
+    container_audit_records,
+    spec_ledger_entries,
+    spec_approval_events,
 );

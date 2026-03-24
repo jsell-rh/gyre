@@ -1653,6 +1653,34 @@ impl KvJsonStore for MemKvStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Batch-A in-memory repositories (quality gates, push gates, spec policy,
+// attestation, container audit, spec ledger, spec approval event history)
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+pub struct MemQualityGateRepository {
+    gates: Arc<Mutex<HashMap<String, gyre_domain::QualityGate>>>,
+}
+
+#[async_trait]
+impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
+    async fn save(&self, gate: &gyre_domain::QualityGate) -> Result<()> {
+        self.gates.lock().await.insert(gate.id.to_string(), gate.clone());
+        Ok(())
+    }
+    async fn find_by_id(&self, id: &str) -> Result<Option<gyre_domain::QualityGate>> {
+        Ok(self.gates.lock().await.get(id).cloned())
+    }
+    async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
+        Ok(self.gates.lock().await.values().filter(|g| g.repo_id.to_string() == repo_id).cloned().collect())
+    }
+    async fn delete(&self, id: &str) -> Result<()> {
+        self.gates.lock().await.remove(id);
+        Ok(())
+    }
+}
+
 // ── MemBudgetUsageRepository ──────────────────────────────────────────────────
 
 /// In-memory BudgetUsageRepository for tests and development.
@@ -1764,6 +1792,100 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
     }
 }
 
+#[derive(Default)]
+pub struct MemGateResultRepository {
+    results: Arc<Mutex<HashMap<String, gyre_domain::GateResult>>>,
+}
+
+#[async_trait]
+impl gyre_ports::GateResultRepository for MemGateResultRepository {
+    async fn save(&self, result: &gyre_domain::GateResult) -> Result<()> {
+        self.results.lock().await.insert(result.id.to_string(), result.clone());
+        Ok(())
+    }
+    async fn update_status(
+        &self,
+        id: &str,
+        status: gyre_domain::GateStatus,
+        started_at: Option<u64>,
+        finished_at: Option<u64>,
+        output: Option<String>,
+    ) -> Result<()> {
+        if let Some(r) = self.results.lock().await.get_mut(id) {
+            r.status = status;
+            if let Some(s) = started_at { r.started_at = Some(s); }
+            if let Some(f) = finished_at { r.finished_at = Some(f); }
+            if output.is_some() { r.output = output; }
+        }
+        Ok(())
+    }
+    async fn find_by_id(&self, id: &str) -> Result<Option<gyre_domain::GateResult>> {
+        Ok(self.results.lock().await.get(id).cloned())
+    }
+    async fn list_by_mr_id(&self, mr_id: &str) -> Result<Vec<gyre_domain::GateResult>> {
+        Ok(self.results.lock().await.values().filter(|r| r.mr_id.to_string() == mr_id).cloned().collect())
+    }
+}
+
+#[derive(Default)]
+pub struct MemPushGateRepository {
+    store: Arc<Mutex<HashMap<String, Vec<String>>>>,
+}
+
+#[async_trait]
+impl gyre_ports::PushGateRepository for MemPushGateRepository {
+    async fn get_for_repo(&self, repo_id: &str) -> Result<Vec<String>> {
+        Ok(self.store.lock().await.get(repo_id).cloned().unwrap_or_default())
+    }
+    async fn set_for_repo(&self, repo_id: &str, gates: Vec<String>) -> Result<()> {
+        self.store.lock().await.insert(repo_id.to_string(), gates);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecApprovalRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
+    async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
+        self.store.lock().await.insert(approval.id.to_string(), approval.clone());
+        Ok(())
+    }
+    async fn find_by_id(&self, id: &gyre_common::Id) -> Result<Option<gyre_domain::SpecApproval>> {
+        Ok(self.store.lock().await.get(&id.to_string()).cloned())
+    }
+    async fn list_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
+        Ok(self.store.lock().await.values().filter(|a| a.spec_path == spec_path).cloned().collect())
+    }
+    async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
+        Ok(self.store.lock().await.values().filter(|a| a.spec_path == spec_path && a.is_active()).cloned().collect())
+    }
+    async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+    async fn revoke(&self, id: &gyre_common::Id, revoked_by: &str, reason: &str, now: u64) -> Result<()> {
+        if let Some(a) = self.store.lock().await.get_mut(&id.to_string()) {
+            a.revoked_at = Some(now);
+            a.revoked_by = Some(revoked_by.to_string());
+            a.revocation_reason = Some(reason.to_string());
+        }
+        Ok(())
+    }
+    async fn revoke_all_for_path(&self, spec_path: &str, revoked_by: &str, reason: &str, now: u64) -> Result<()> {
+        for a in self.store.lock().await.values_mut() {
+            if a.spec_path == spec_path && a.is_active() {
+                a.revoked_at = Some(now);
+                a.revoked_by = Some(revoked_by.to_string());
+                a.revocation_reason = Some(reason.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// In-memory BudgetRepository (stores BudgetConfig limits by entity key).
 #[derive(Default)]
 pub struct MemBudgetConfigRepository {
@@ -1804,6 +1926,114 @@ impl BudgetRepository for MemBudgetConfigRepository {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecPolicyRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::SpecPolicy>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecPolicyRepository for MemSpecPolicyRepository {
+    async fn get_for_repo(&self, repo_id: &str) -> Result<gyre_domain::SpecPolicy> {
+        Ok(self.store.lock().await.get(repo_id).cloned().unwrap_or_default())
+    }
+    async fn set_for_repo(&self, repo_id: &str, policy: gyre_domain::SpecPolicy) -> Result<()> {
+        self.store.lock().await.insert(repo_id.to_string(), policy);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemAttestationRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::AttestationBundle>>>,
+}
+
+#[async_trait]
+impl gyre_ports::AttestationRepository for MemAttestationRepository {
+    async fn find_by_mr_id(&self, mr_id: &str) -> Result<Option<gyre_domain::AttestationBundle>> {
+        Ok(self.store.lock().await.get(mr_id).cloned())
+    }
+    async fn save(&self, mr_id: &str, bundle: &gyre_domain::AttestationBundle) -> Result<()> {
+        self.store.lock().await.insert(mr_id.to_string(), bundle.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemContainerAuditRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::ContainerAuditRecord>>>,
+}
+
+#[async_trait]
+impl gyre_ports::ContainerAuditRepository for MemContainerAuditRepository {
+    async fn find_by_agent_id(&self, agent_id: &str) -> Result<Option<gyre_domain::ContainerAuditRecord>> {
+        Ok(self.store.lock().await.get(agent_id).cloned())
+    }
+    async fn save(&self, record: &gyre_domain::ContainerAuditRecord) -> Result<()> {
+        self.store.lock().await.insert(record.agent_id.clone(), record.clone());
+        Ok(())
+    }
+    async fn update_exit(&self, agent_id: &str, exit_code: Option<i32>, stopped_at: Option<u64>) -> Result<()> {
+        if let Some(r) = self.store.lock().await.get_mut(agent_id) {
+            r.exit_code = exit_code;
+            r.stopped_at = stopped_at;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecLedgerRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
+    async fn find_by_path(&self, path: &str) -> Result<Option<gyre_domain::SpecLedgerEntry>> {
+        Ok(self.store.lock().await.get(path).cloned())
+    }
+    async fn list_all(&self) -> Result<Vec<gyre_domain::SpecLedgerEntry>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+    async fn save(&self, entry: &gyre_domain::SpecLedgerEntry) -> Result<()> {
+        self.store.lock().await.insert(entry.path.clone(), entry.clone());
+        Ok(())
+    }
+    async fn delete_by_path(&self, path: &str) -> Result<()> {
+        self.store.lock().await.remove(path);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecApprovalEventRepository {
+    store: Arc<Mutex<Vec<gyre_domain::SpecApprovalEvent>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecApprovalEventRepository for MemSpecApprovalEventRepository {
+    async fn record(&self, event: &gyre_domain::SpecApprovalEvent) -> Result<()> {
+        self.store.lock().await.push(event.clone());
+        Ok(())
+    }
+    async fn list_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApprovalEvent>> {
+        Ok(self.store.lock().await.iter().filter(|e| e.spec_path == spec_path).cloned().collect())
+    }
+    async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApprovalEvent>> {
+        Ok(self.store.lock().await.clone())
+    }
+    async fn revoke_event(&self, id: &str, revoked_at: u64, revoked_by: &str, reason: &str) -> Result<()> {
+        for e in self.store.lock().await.iter_mut() {
+            if e.id == id {
+                e.revoked_at = Some(revoked_at);
+                e.revoked_by = Some(revoked_by.to_string());
+                e.revocation_reason = Some(reason.to_string());
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1855,24 +2085,24 @@ pub fn test_state() -> Arc<crate::AppState> {
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
-        quality_gates: Arc::new(Mutex::new(HashMap::new())),
-        gate_results: Arc::new(Mutex::new(HashMap::new())),
+        quality_gates: Arc::new(MemQualityGateRepository::default()),
+        gate_results: Arc::new(MemGateResultRepository::default()),
         push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
-        repo_push_gates: Arc::new(Mutex::new(HashMap::new())),
+        repo_push_gates: Arc::new(MemPushGateRepository::default()),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         db_storage: None,
-        spec_approvals: Arc::new(Mutex::new(HashMap::new())),
-        spec_policies: Arc::new(Mutex::new(HashMap::new())),
-        attestation_store: Arc::new(Mutex::new(HashMap::new())),
+        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
+        spec_policies: Arc::new(MemSpecPolicyRepository::default()),
+        attestation_store: Arc::new(MemAttestationRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
-        container_audits: crate::container_audit::new_store(),
-        spec_ledger: Arc::new(Mutex::new(HashMap::new())),
-        spec_approval_history: Arc::new(Mutex::new(Vec::new())),
+        container_audits: Arc::new(MemContainerAuditRepository::default()),
+        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
+        spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),

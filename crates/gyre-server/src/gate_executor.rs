@@ -17,13 +17,11 @@ const AGENT_GATE_TIMEOUT_SECS: u64 = 300;
 /// then spawn a background task that runs each gate and updates the result.
 pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) {
     // Collect gates for this repo.
-    let gates: Vec<_> = {
-        let lock = state.quality_gates.lock().await;
-        lock.values()
-            .filter(|g| g.repo_id.as_str() == repo_id.as_str())
-            .cloned()
-            .collect()
-    };
+    let gates = state
+        .quality_gates
+        .list_by_repo_id(repo_id.as_str())
+        .await
+        .unwrap_or_default();
 
     if gates.is_empty() {
         return;
@@ -31,23 +29,19 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
 
     // Create Pending GateResult for each gate.
     let mut result_ids: Vec<(Id, gyre_domain::QualityGate)> = Vec::new();
-    {
-        let mut lock = state.gate_results.lock().await;
-        for gate in &gates {
-            let result_id = Id::new(uuid::Uuid::new_v4().to_string());
-            let _now = now_secs();
-            let result = GateResult {
-                id: result_id.clone(),
-                gate_id: gate.id.clone(),
-                mr_id: mr_id.clone(),
-                status: GateStatus::Pending,
-                output: None,
-                started_at: None,
-                finished_at: None,
-            };
-            lock.insert(result_id.to_string(), result);
-            result_ids.push((result_id, gate.clone()));
-        }
+    for gate in &gates {
+        let result_id = Id::new(uuid::Uuid::new_v4().to_string());
+        let result = GateResult {
+            id: result_id.clone(),
+            gate_id: gate.id.clone(),
+            mr_id: mr_id.clone(),
+            status: GateStatus::Pending,
+            output: None,
+            started_at: None,
+            finished_at: None,
+        };
+        let _ = state.gate_results.save(&result).await;
+        result_ids.push((result_id, gate.clone()));
     }
 
     // Spawn background tasks for each gate.
@@ -64,13 +58,10 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
     let started_at = now_secs();
 
     // Mark as Running.
-    {
-        let mut lock = state.gate_results.lock().await;
-        if let Some(r) = lock.get_mut(result_id.as_str()) {
-            r.status = GateStatus::Running;
-            r.started_at = Some(started_at);
-        }
-    }
+    let _ = state
+        .gate_results
+        .update_status(result_id.as_str(), GateStatus::Running, Some(started_at), None, None)
+        .await;
 
     let (status, output) = match &gate.gate_type {
         GateType::TestCommand | GateType::LintCommand => {
@@ -130,12 +121,10 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         }
     }
 
-    let mut lock = state.gate_results.lock().await;
-    if let Some(r) = lock.get_mut(result_id.as_str()) {
-        r.status = status;
-        r.output = Some(output);
-        r.finished_at = Some(finished_at);
-    }
+    let _ = state
+        .gate_results
+        .update_status(result_id.as_str(), status, None, Some(finished_at), Some(output))
+        .await;
 }
 
 /// Run an AgentReview gate.
@@ -558,21 +547,20 @@ async fn run_command(cmd: &str) -> (GateStatus, String) {
 /// Returns `Err(msg)` if any required gate has failed.
 /// Non-required (advisory) gates that fail are recorded but do not block merging.
 pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, String> {
-    let results = {
-        let lock = state.gate_results.lock().await;
-        lock.values()
-            .filter(|r| r.mr_id.as_str() == mr_id.as_str())
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-
-    // Build a lookup of gate required-ness.
-    let gates = state.quality_gates.lock().await;
+    let results = state
+        .gate_results
+        .list_by_mr_id(mr_id.as_str())
+        .await
+        .unwrap_or_default();
 
     for r in &results {
         // Look up whether this gate is required (default: true for unknown gates).
-        let is_required = gates
-            .get(r.gate_id.as_str())
+        let is_required = state
+            .quality_gates
+            .find_by_id(r.gate_id.as_str())
+            .await
+            .ok()
+            .flatten()
             .map(|g| g.required)
             .unwrap_or(true);
 
@@ -816,21 +804,19 @@ mod tests {
         let gate_id = Id::new(Uuid::new_v4().to_string());
         let result_id = Id::new(Uuid::new_v4().to_string());
 
-        {
-            let mut lock = state.gate_results.lock().await;
-            lock.insert(
-                result_id.to_string(),
-                GateResult {
-                    id: result_id.clone(),
-                    gate_id,
-                    mr_id: mr_id.clone(),
-                    status: GateStatus::Pending,
-                    output: None,
-                    started_at: None,
-                    finished_at: None,
-                },
-            );
-        }
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id,
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
 
         let result = check_gates_for_mr(&state, &mr_id).await;
         assert_eq!(result, Ok(false));
@@ -843,21 +829,19 @@ mod tests {
         let gate_id = Id::new(Uuid::new_v4().to_string());
         let result_id = Id::new(Uuid::new_v4().to_string());
 
-        {
-            let mut lock = state.gate_results.lock().await;
-            lock.insert(
-                result_id.to_string(),
-                GateResult {
-                    id: result_id.clone(),
-                    gate_id: gate_id.clone(),
-                    mr_id: mr_id.clone(),
-                    status: GateStatus::Failed,
-                    output: Some("test failure".to_string()),
-                    started_at: None,
-                    finished_at: None,
-                },
-            );
-        }
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate_id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Failed,
+                output: Some("test failure".to_string()),
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
 
         let result = check_gates_for_mr(&state, &mr_id).await;
         assert!(result.is_err());
@@ -873,40 +857,36 @@ mod tests {
         let result_id = Id::new(Uuid::new_v4().to_string());
 
         // Register the gate as advisory (required=false).
-        {
-            let mut gates = state.quality_gates.lock().await;
-            gates.insert(
-                gate_id.to_string(),
-                gyre_domain::QualityGate {
-                    id: gate_id.clone(),
-                    repo_id: Id::new(Uuid::new_v4().to_string()),
-                    name: "advisory-lint".to_string(),
-                    gate_type: GateType::LintCommand,
-                    command: Some("false".to_string()),
-                    required_approvals: None,
-                    persona: None,
-                    required: false,
-                    created_at: now_secs(),
-                },
-            );
-        }
+        state
+            .quality_gates
+            .save(&gyre_domain::QualityGate {
+                id: gate_id.clone(),
+                repo_id: Id::new(Uuid::new_v4().to_string()),
+                name: "advisory-lint".to_string(),
+                gate_type: GateType::LintCommand,
+                command: Some("false".to_string()),
+                required_approvals: None,
+                persona: None,
+                required: false,
+                created_at: now_secs(),
+            })
+            .await
+            .unwrap();
 
         // Record a Failed result for this advisory gate.
-        {
-            let mut lock = state.gate_results.lock().await;
-            lock.insert(
-                result_id.to_string(),
-                GateResult {
-                    id: result_id.clone(),
-                    gate_id: gate_id.clone(),
-                    mr_id: mr_id.clone(),
-                    status: GateStatus::Failed,
-                    output: Some("lint warnings".to_string()),
-                    started_at: None,
-                    finished_at: None,
-                },
-            );
-        }
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate_id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Failed,
+                output: Some("lint warnings".to_string()),
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
 
         // Non-required gate failure should return Ok(true) — MR can proceed.
         let result = check_gates_for_mr(&state, &mr_id).await;

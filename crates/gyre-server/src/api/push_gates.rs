@@ -54,10 +54,8 @@ pub async fn get_push_gates(
 
     let gates = state
         .repo_push_gates
-        .lock()
+        .get_for_repo(&repo_id)
         .await
-        .get(&repo_id)
-        .cloned()
         .unwrap_or_default();
 
     let available: Vec<String> = state
@@ -111,9 +109,8 @@ pub async fn set_push_gates(
 
     state
         .repo_push_gates
-        .lock()
-        .await
-        .insert(repo_id.clone(), req.gates.clone());
+        .set_for_repo(&repo_id, req.gates.clone())
+        .await?;
 
     Ok((
         StatusCode::OK,

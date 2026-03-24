@@ -14,6 +14,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+
 // ---------------------------------------------------------------------------
 // Manifest structs (parsed from specs/manifest.yaml)
 // ---------------------------------------------------------------------------
@@ -192,78 +194,11 @@ pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
 // Ledger types (runtime state tracked per spec)
 // ---------------------------------------------------------------------------
 
-/// Approval status of a spec in the ledger.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalStatus {
-    Pending,
-    Approved,
-    Deprecated,
-}
+// ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
 
-impl std::fmt::Display for ApprovalStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApprovalStatus::Pending => write!(f, "pending"),
-            ApprovalStatus::Approved => write!(f, "approved"),
-            ApprovalStatus::Deprecated => write!(f, "deprecated"),
-        }
-    }
-}
-
-/// A single ledger entry tracking runtime state for one spec.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpecLedgerEntry {
-    pub path: String,
-    pub title: String,
-    pub owner: String,
-    /// Optional kind for meta-specs: "meta:persona", "meta:principle", "meta:standard", "meta:process".
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// Git blob SHA of the spec file at HEAD.
-    pub current_sha: String,
-    /// Approval mode from the manifest.
-    pub approval_mode: String,
-    /// Current approval status.
-    pub approval_status: ApprovalStatus,
-    /// Task IDs associated with this spec.
-    pub linked_tasks: Vec<String>,
-    /// MR IDs referencing this spec via spec_ref.
-    pub linked_mrs: Vec<String>,
-    /// Drift status: "clean", "drifted", "unknown".
-    pub drift_status: String,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-/// An event in the approval history for a spec.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpecApprovalEvent {
-    pub id: String,
-    pub spec_path: String,
-    /// The blob SHA that was approved.
-    pub spec_sha: String,
-    /// "human" or "agent".
-    pub approver_type: String,
-    /// Identity string, e.g. "user:jsell" or "agent:<uuid>".
-    pub approver_id: String,
-    /// Agent persona name (null for human approvers).
-    pub persona: Option<String>,
-    pub approved_at: u64,
-    pub revoked_at: Option<u64>,
-    pub revoked_by: Option<String>,
-    pub revocation_reason: Option<String>,
-}
-
-impl SpecApprovalEvent {
-    pub fn is_active(&self) -> bool {
-        self.revoked_at.is_none()
-    }
-}
-
-/// Type alias for the shared ledger store.
+/// Type alias for the shared ledger store (in-memory, used by tests and sync_spec_ledger).
 pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
-/// Type alias for the shared approval history store.
+/// Type alias for the shared approval history store (in-memory).
 pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
 
 /// A resolved link entry stored in the forge's spec link graph.
@@ -302,7 +237,7 @@ pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
 /// - `supersedes` links: target spec is marked Deprecated in ledger.
 /// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted".
 pub async fn sync_spec_ledger(
-    ledger: &SpecLedger,
+    ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,
     repo_path: &str,
     new_sha: &str,
@@ -334,91 +269,84 @@ pub async fn sync_spec_ledger(
         manifest.specs.iter().map(|e| e.path.clone()).collect();
 
     // 4. For each manifest entry, compute blob SHA and sync ledger.
-    {
-        let mut ledger_guard = ledger.lock().await;
-        let now_secs = now;
-
-        for entry in &manifest.specs {
-            let spec_file_path = format!("specs/{}", entry.path);
-            let blob_sha = match get_blob_sha(&git_bin, repo_path, new_sha, &spec_file_path).await {
-                Some(sha) => sha,
-                None => {
-                    warn!(
-                        repo_path,
-                        spec_path = %entry.path,
-                        "spec-registry: manifest entry has no corresponding file at HEAD"
-                    );
-                    // Still register as pending with empty sha to track it.
-                    "".to_string()
-                }
-            };
-
-            let approval_mode = entry.effective_approval_mode().to_string();
-            let auto_invalidate = entry.effective_auto_invalidate(&manifest.defaults);
-
-            if let Some(existing) = ledger_guard.get_mut(&entry.path) {
-                // Already in ledger — check if SHA changed.
-                if existing.current_sha != blob_sha && !blob_sha.is_empty() {
-                    info!(
-                        spec_path = %entry.path,
-                        old_sha = %existing.current_sha,
-                        new_sha = %blob_sha,
-                        "spec-registry: SHA changed"
-                    );
-                    existing.current_sha = blob_sha;
-                    existing.updated_at = now_secs;
-                    if auto_invalidate {
-                        existing.approval_status = ApprovalStatus::Pending;
-                        info!(spec_path = %entry.path, "spec-registry: approval invalidated (content changed)");
-                    }
-                }
-                // Update mutable fields from manifest (title/owner/kind may change).
-                existing.title = entry.title.clone();
-                existing.owner = entry.owner.clone();
-                existing.kind = entry.kind.clone();
-                existing.approval_mode = approval_mode;
-                // Un-deprecate if it reappears in manifest.
-                if existing.approval_status == ApprovalStatus::Deprecated {
-                    existing.approval_status = ApprovalStatus::Pending;
-                    existing.updated_at = now_secs;
-                }
-            } else {
-                // New entry — create ledger record.
-                info!(spec_path = %entry.path, "spec-registry: new spec registered");
-                ledger_guard.insert(
-                    entry.path.clone(),
-                    SpecLedgerEntry {
-                        path: entry.path.clone(),
-                        title: entry.title.clone(),
-                        owner: entry.owner.clone(),
-                        kind: entry.kind.clone(),
-                        current_sha: blob_sha,
-                        approval_mode,
-                        approval_status: ApprovalStatus::Pending,
-                        linked_tasks: vec![],
-                        linked_mrs: vec![],
-                        drift_status: "unknown".to_string(),
-                        created_at: now_secs,
-                        updated_at: now_secs,
-                    },
+    for entry in &manifest.specs {
+        let spec_file_path = format!("specs/{}", entry.path);
+        let blob_sha = match get_blob_sha(&git_bin, repo_path, new_sha, &spec_file_path).await {
+            Some(sha) => sha,
+            None => {
+                warn!(
+                    repo_path,
+                    spec_path = %entry.path,
+                    "spec-registry: manifest entry has no corresponding file at HEAD"
                 );
+                "".to_string()
             }
-        }
+        };
 
-        // 5. Deprecate ledger entries no longer in manifest.
-        for (path, entry) in ledger_guard.iter_mut() {
-            if !manifest_paths.contains(path) && entry.approval_status != ApprovalStatus::Deprecated
+        let approval_mode = entry.effective_approval_mode().to_string();
+        let auto_invalidate = entry.effective_auto_invalidate(&manifest.defaults);
+
+        let updated_entry = if let Ok(Some(mut existing)) =
+            ledger.find_by_path(&entry.path).await
+        {
+            // Already in ledger — check if SHA changed.
+            if existing.current_sha != blob_sha && !blob_sha.is_empty() {
+                info!(
+                    spec_path = %entry.path,
+                    old_sha = %existing.current_sha,
+                    new_sha = %blob_sha,
+                    "spec-registry: SHA changed"
+                );
+                existing.current_sha = blob_sha;
+                existing.updated_at = now;
+                if auto_invalidate {
+                    existing.approval_status = ApprovalStatus::Pending;
+                    info!(spec_path = %entry.path, "spec-registry: approval invalidated (content changed)");
+                }
+            }
+            existing.title = entry.title.clone();
+            existing.owner = entry.owner.clone();
+            existing.approval_mode = approval_mode;
+            if existing.approval_status == ApprovalStatus::Deprecated {
+                existing.approval_status = ApprovalStatus::Pending;
+                existing.updated_at = now;
+            }
+            existing
+        } else {
+            info!(spec_path = %entry.path, "spec-registry: new spec registered");
+            SpecLedgerEntry {
+                path: entry.path.clone(),
+                title: entry.title.clone(),
+                owner: entry.owner.clone(),
+                kind: entry.kind.clone(),
+                current_sha: blob_sha,
+                approval_mode,
+                approval_status: ApprovalStatus::Pending,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "unknown".to_string(),
+                created_at: now,
+                updated_at: now,
+            }
+        };
+        let _ = ledger.save(&updated_entry).await;
+    }
+
+    // 5. Deprecate ledger entries no longer in manifest.
+    if let Ok(all_entries) = ledger.list_all().await {
+        for mut e in all_entries {
+            if !manifest_paths.contains(&e.path) && e.approval_status != ApprovalStatus::Deprecated
             {
-                info!(spec_path = %path, "spec-registry: spec deprecated (removed from manifest)");
-                entry.approval_status = ApprovalStatus::Deprecated;
-                entry.updated_at = now_secs;
+                info!(spec_path = %e.path, "spec-registry: spec deprecated (removed from manifest)");
+                e.approval_status = ApprovalStatus::Deprecated;
+                e.updated_at = now;
+                let _ = ledger.save(&e).await;
             }
         }
     }
 
     // 6. Process spec links from manifest — enforce supersedes/extends, update links store.
     {
-        // Collect all links declared in this manifest push.
         let mut new_links: Vec<SpecLinkEntry> = Vec::new();
         for entry in &manifest.specs {
             for link in &entry.links {
@@ -437,52 +365,43 @@ pub async fn sync_spec_ledger(
             }
         }
 
-        // Enforce link semantics inside the ledger.
-        {
-            let mut ledger_guard = ledger.lock().await;
-
-            for link in &new_links {
-                match link.link_type {
-                    SpecLinkType::Supersedes => {
-                        // Mark the target spec as Deprecated.
-                        if let Some(target_entry) = ledger_guard.get_mut(&link.target_path) {
-                            if target_entry.approval_status != ApprovalStatus::Deprecated {
+        // Enforce link semantics.
+        for link in &new_links {
+            match link.link_type {
+                SpecLinkType::Supersedes => {
+                    if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await {
+                        if target_entry.approval_status != ApprovalStatus::Deprecated {
+                            info!(
+                                source = %link.source_path,
+                                target = %link.target_path,
+                                "spec-registry: supersedes link — marking target deprecated"
+                            );
+                            target_entry.approval_status = ApprovalStatus::Deprecated;
+                            target_entry.updated_at = now;
+                            let _ = ledger.save(&target_entry).await;
+                        }
+                    }
+                }
+                SpecLinkType::Extends => {
+                    if let Some(pinned_sha) = &link.target_sha {
+                        if let Ok(Some(target_entry)) = ledger.find_by_path(&link.target_path).await {
+                            let current_sha = &target_entry.current_sha;
+                            if !current_sha.is_empty() && current_sha != pinned_sha {
                                 info!(
                                     source = %link.source_path,
                                     target = %link.target_path,
-                                    "spec-registry: supersedes link — marking target deprecated"
+                                    "spec-registry: extends target SHA changed — marking extending spec drifted"
                                 );
-                                target_entry.approval_status = ApprovalStatus::Deprecated;
-                                target_entry.updated_at = now;
-                            }
-                        }
-                    }
-                    SpecLinkType::Extends => {
-                        // Check if the target's SHA changed since the link was pinned.
-                        // If so, mark the extending spec as drifted.
-                        if let Some(pinned_sha) = &link.target_sha {
-                            let target_sha_current = ledger_guard
-                                .get(&link.target_path)
-                                .map(|e| e.current_sha.clone());
-                            if let Some(current_sha) = target_sha_current {
-                                if !current_sha.is_empty() && &current_sha != pinned_sha {
-                                    info!(
-                                        source = %link.source_path,
-                                        target = %link.target_path,
-                                        "spec-registry: extends target SHA changed — marking extending spec drifted"
-                                    );
-                                    if let Some(source_entry) =
-                                        ledger_guard.get_mut(&link.source_path)
-                                    {
-                                        source_entry.drift_status = "drifted".to_string();
-                                        source_entry.updated_at = now;
-                                    }
+                                if let Ok(Some(mut source_entry)) = ledger.find_by_path(&link.source_path).await {
+                                    source_entry.drift_status = "drifted".to_string();
+                                    source_entry.updated_at = now;
+                                    let _ = ledger.save(&source_entry).await;
                                 }
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
