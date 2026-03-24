@@ -374,5 +374,12 @@ export const api = {
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
   getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphTimeline: (id, since, until) => {
+    const params = new URLSearchParams();
+    if (since != null) params.set('since', since);
+    if (until != null) params.set('until', until);
+    const qs = params.toString();
+    return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
+  },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
 };
