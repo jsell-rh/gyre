@@ -281,6 +281,7 @@ impl MessageRepository for SqliteStorage {
             diesel::update(
                 messages::table
                     .filter(messages::id.eq(mid.as_str()))
+                    .filter(messages::to_type.eq("agent"))
                     .filter(messages::to_id.eq(aid.as_str()))
                     .filter(messages::acknowledged.eq(0_i32)),
             )
@@ -863,6 +864,136 @@ mod tests {
         // Expire acked inboxes older than 1000 ms
         let deleted = storage.expire_acked_inboxes(1000).await.unwrap();
         assert_eq!(deleted, 3);
+    }
+
+    #[tokio::test]
+    async fn list_by_workspace_before_cursor_pagination() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-cursor-page");
+
+        // Store 5 events, each 1000ms apart
+        for i in 1u64..=5 {
+            storage
+                .store(&make_workspace_event(
+                    &format!("page-{i}"),
+                    "ws-cursor-page",
+                    MessageKind::AgentCreated,
+                    i * 1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // First page: newest 3 (no before cursor) → page-5, page-4, page-3
+        let page1 = storage
+            .list_by_workspace(&ws_id, None, None, None, None, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1[0].id, Id::new("page-5"));
+        assert_eq!(page1[2].id, Id::new("page-3"));
+
+        // Second page: before (3000, page-3) → page-2, page-1
+        let page2 = storage
+            .list_by_workspace(
+                &ws_id,
+                None,
+                None,
+                Some(3000),
+                Some(&Id::new("page-3")),
+                Some(3),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].id, Id::new("page-2"));
+        assert_eq!(page2[1].id, Id::new("page-1"));
+    }
+
+    #[tokio::test]
+    async fn store_and_retrieve_with_payload() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-payload");
+        let payload = serde_json::json!({
+            "task_id": "TASK-42",
+            "spec_ref": "specs/foo.md"
+        });
+        let msg = Message {
+            id: Id::new("payload-msg"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Agent(Id::new("sender-agent")),
+            workspace_id: Some(ws_id),
+            to: Destination::Agent(Id::new("recv-agent")),
+            kind: MessageKind::TaskAssignment,
+            payload: Some(payload.clone()),
+            created_at: 50_000,
+            signature: Some("sig".to_string()),
+            key_id: Some("kid-1".to_string()),
+            acknowledged: false,
+        };
+        storage.store(&msg).await.unwrap();
+        let found = storage
+            .find_by_id(&Id::new("payload-msg"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.payload.unwrap()["task_id"], "TASK-42");
+        // Verify MessageOrigin::Agent round-trips
+        assert_eq!(found.from, MessageOrigin::Agent(Id::new("sender-agent")));
+        assert_eq!(found.to, Destination::Agent(Id::new("recv-agent")));
+    }
+
+    #[tokio::test]
+    async fn store_and_retrieve_user_origin() {
+        let (_tmp, storage) = tmp_storage();
+        let msg = Message {
+            id: Id::new("user-origin-msg"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::User(Id::new("user-99")),
+            workspace_id: Some(Id::new("ws-user")),
+            to: Destination::Workspace(Id::new("ws-user")),
+            kind: MessageKind::StatusUpdate,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        storage.store(&msg).await.unwrap();
+        let found = storage
+            .find_by_id(&Id::new("user-origin-msg"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.from, MessageOrigin::User(Id::new("user-99")));
+        assert_eq!(found.to, Destination::Workspace(Id::new("ws-user")));
+    }
+
+    #[tokio::test]
+    async fn expire_acked_inboxes_agent_orphaned() {
+        let (_tmp, storage) = tmp_storage();
+        let agent_id = Id::new("orphaned-agent");
+
+        for i in 1u64..=2 {
+            storage
+                .store(&make_directed(
+                    &format!("orph-{i}"),
+                    "orphaned-agent",
+                    "ws-orph",
+                    i * 100,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Bulk-ack with agent_orphaned reason
+        storage
+            .acknowledge_all(&agent_id, "agent_orphaned")
+            .await
+            .unwrap();
+
+        let deleted = storage.expire_acked_inboxes(10_000).await.unwrap();
+        assert_eq!(deleted, 2);
     }
 
     #[tokio::test]

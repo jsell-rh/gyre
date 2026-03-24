@@ -281,6 +281,7 @@ impl MessageRepository for PgStorage {
             diesel::update(
                 messages::table
                     .filter(messages::id.eq(mid.as_str()))
+                    .filter(messages::to_type.eq("agent"))
                     .filter(messages::to_id.eq(aid.as_str()))
                     .filter(messages::acknowledged.eq(0_i32)),
             )
