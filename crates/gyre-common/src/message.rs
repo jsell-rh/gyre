@@ -772,4 +772,29 @@ mod tests {
         assert_eq!(buf.list_since(&ws_b, 0, 100).len(), 2);
         assert_eq!(buf.list_since(&ws_c, 0, 100).len(), 1);
     }
+
+    #[test]
+    fn telemetry_buffer_list_since_limit_truncates() {
+        let buf = TelemetryBuffer::new(1000, 100);
+        let ws = Id::new("ws-limit");
+        for i in 1u64..=10 {
+            let mut msg = make_telemetry(Some(ws.clone()));
+            msg.id = Id::new(format!("m{}", i));
+            msg.created_at = i;
+            buf.push(msg);
+        }
+        // All 10 messages have created_at > 0; limit to 3
+        let results = buf.list_since(&ws, 0, 3);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn telemetry_buffer_default_has_expected_capacity() {
+        let buf = TelemetryBuffer::default();
+        let ws = Id::new("ws-default");
+        // Default should accept pushes without panicking
+        let msg = make_telemetry(Some(ws.clone()));
+        buf.push(msg);
+        assert_eq!(buf.list_since(&ws, 0, 100).len(), 1);
+    }
 }
