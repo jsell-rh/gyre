@@ -9,7 +9,11 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 10_000 },
   webServer: {
-    command: 'GYRE_PORT=2222 GYRE_AUTH_TOKEN=e2e-test-token cargo run -p gyre-server',
+    // In CI the release binary is pre-built by the workflow; use it directly to avoid
+    // recompiling inside the 120s timeout.  Locally fall back to `cargo run`.
+    command: process.env.CI
+      ? '../target/release/gyre-server'
+      : 'cargo run -p gyre-server',
     url: 'http://localhost:2222/health',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
