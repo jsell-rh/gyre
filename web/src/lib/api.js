@@ -354,4 +354,10 @@ export const api = {
   myNotifications: () => request('/users/me/notifications'),
   markNotificationRead: (id) =>
     request(`/users/me/notifications/${id}/read`, { method: 'POST' }),
+  // Knowledge graph (M30 — System Explorer)
+  graphNodes: (repoId) => request(`/repos/${repoId}/graph/nodes`),
+  graphEdges: (repoId) => request(`/repos/${repoId}/graph/edges`),
+  graphSearch: (repoId, q) =>
+    request(`/repos/${repoId}/graph/search?q=${encodeURIComponent(q)}`),
+  graphRisk: (repoId) => request(`/repos/${repoId}/graph/risk`),
 };

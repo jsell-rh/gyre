@@ -6,6 +6,14 @@ import en from '../locales/en.json';
 addMessages('en', en);
 init({ fallbackLocale: 'en', initialLocale: 'en' });
 
+// Mock ResizeObserver (not available in jsdom)
+global.ResizeObserver = class ResizeObserver {
+  constructor(cb) { this._cb = cb; }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+
 // Mock fetch globally for all tests
 global.fetch = vi.fn(() =>
   Promise.resolve({
