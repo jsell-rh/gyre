@@ -96,23 +96,11 @@ async fn jwks_endpoint_returns_ed25519_key() {
 async fn spawn_returns_jwt_token() {
     let (base, client) = start_server().await;
 
-    // Create project, repo, task.
-    let proj: serde_json::Value = client
-        .post(format!("{base}/api/v1/projects"))
-        .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "m18-proj", "description": ""}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let proj_id = proj["id"].as_str().unwrap();
-
+    // Create repo and task.
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "m18-repo", "workspace_id": proj_id}))
+        .json(&serde_json::json!({"name": "m18-repo", "workspace_id": "ws-m18"}))
         .send()
         .await
         .unwrap()
@@ -166,23 +154,11 @@ async fn spawn_returns_jwt_token() {
 async fn jwt_token_authenticates_api_calls() {
     let (base, client) = start_server().await;
 
-    // Setup project/repo/task.
-    let proj: serde_json::Value = client
-        .post(format!("{base}/api/v1/projects"))
-        .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "jwt-auth-proj", "description": ""}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let proj_id = proj["id"].as_str().unwrap();
-
+    // Setup repo/task.
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "jwt-auth-repo", "workspace_id": proj_id}))
+        .json(&serde_json::json!({"name": "jwt-auth-repo", "workspace_id": "ws-jwt-auth"}))
         .send()
         .await
         .unwrap()
@@ -223,7 +199,7 @@ async fn jwt_token_authenticates_api_calls() {
 
     // Use the JWT to list projects (should succeed).
     let list_resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {jwt_token}"))
         .send()
         .await
@@ -242,22 +218,10 @@ async fn token_info_for_jwt_agent_token() {
     let (base, client) = start_server().await;
 
     // Setup and spawn.
-    let proj: serde_json::Value = client
-        .post(format!("{base}/api/v1/projects"))
-        .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "info-proj", "description": ""}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let proj_id = proj["id"].as_str().unwrap();
-
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "info-repo", "workspace_id": proj_id}))
+        .json(&serde_json::json!({"name": "info-repo", "workspace_id": "ws-info"}))
         .send()
         .await
         .unwrap()
@@ -347,22 +311,10 @@ async fn token_info_for_global_token() {
 async fn jwt_revoked_after_agent_complete() {
     let (base, client) = start_server().await;
 
-    let proj: serde_json::Value = client
-        .post(format!("{base}/api/v1/projects"))
-        .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "revoke-proj", "description": ""}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let proj_id = proj["id"].as_str().unwrap();
-
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "revoke-repo", "workspace_id": proj_id}))
+        .json(&serde_json::json!({"name": "revoke-repo", "workspace_id": "ws-revoke"}))
         .send()
         .await
         .unwrap()
@@ -403,7 +355,7 @@ async fn jwt_revoked_after_agent_complete() {
 
     // Verify JWT works before complete.
     let pre = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {jwt_token}"))
         .send()
         .await
@@ -430,7 +382,7 @@ async fn jwt_revoked_after_agent_complete() {
 
     // JWT must now be rejected.
     let post = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {jwt_token}"))
         .send()
         .await

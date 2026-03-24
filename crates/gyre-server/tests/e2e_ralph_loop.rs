@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the complete agent development cycle:
 //!   1. Start server with real git operations
-//!   2. Create project + repo via API
+//!   2. Create repo via API
 //!   3. Create task via API
 //!   4. Spawn agent via /api/v1/agents/spawn (gets token + worktree)
 //!   5. Agent clones repo via smart HTTP (Bearer token auth)
