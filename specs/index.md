@@ -21,6 +21,7 @@ What Gyre does - the product.
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
 | ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
+| Hierarchy Enforcement | [`system/hierarchy-enforcement.md`](system/hierarchy-enforcement.md) | Making the ownership hierarchy load-bearing: Tenant entity, non-optional workspace_id, ABAC middleware integration, tenant filtering, legacy cleanup |
 | Design Principles | [`system/design-principles.md`](system/design-principles.md) | Core invariants that govern all decisions |
 | Source Control | [`system/source-control.md`](system/source-control.md) | Built-in git forge, MRs, merge queue, jj evaluation |
 | Forge Advantages | [`system/forge-advantages.md`](system/forge-advantages.md) | 8 capabilities only possible with a forge-native agent platform |
@@ -52,6 +53,7 @@ How Gyre gets built - process and standards for the agent team.
 | Spec | Path | Summary |
 |---|---|---|
 | Architecture & Standards | [`development/architecture.md`](development/architecture.md) | Rust, Svelte, DDD, hexagonal, storage, API |
+| API Design Conventions | [`development/api-conventions.md`](development/api-conventions.md) | URL structure, naming rules, parameter conventions, auth contract, deprecation protocol, mechanical enforcement |
 | Database & Migrations | [`development/database-migrations.md`](development/database-migrations.md) | Diesel ORM, paired up/down migrations, multi-tenant row isolation, startup behavior |
 | Ralph Loops | [`development/ralph-loops.md`](development/ralph-loops.md) | Core loop definition, meta loops, coordination |
 | Agent Experience (Day One) | [`development/agent-experience.md`](development/agent-experience.md) | Testing, observability, repo as system of record, cache hits, entropy management |
@@ -115,6 +117,7 @@ How Gyre gets built - process and standards for the agent team.
 | M30: Knowledge Graph | [`milestones/m30-knowledge-graph.md`](milestones/m30-knowledge-graph.md) | Live knowledge graph extracted from source code: `GraphNode`/`GraphEdge` domain types, `RustExtractor` (syn-based AST), 13 graph API endpoints, push-triggered automatic extraction (M30b) |
 | M31: UI Journeys | [`milestones/m31-ui-journeys.md`](milestones/m31-ui-journeys.md) | Intent-centric dashboard: Inbox (action queue), Briefing (narrative digest), System Explorer Canvas (MoldableView SVG graph), navigation restructure, keyboard shortcuts `i`/`b` |
 | M32: Meta-Spec Reconciliation | [`milestones/m32-meta-spec-reconciliation.md`](milestones/m32-meta-spec-reconciliation.md) | Spec `kind` field (meta:persona/principle/standard/process), workspace meta-spec-set bindings, blast-radius endpoint, `meta_spec_set_sha` in spawn provenance, MetaSpecs UI |
+| M34: Hierarchy Enforcement | [`milestones/m34-hierarchy-enforcement.md`](milestones/m34-hierarchy-enforcement.md) | Load-bearing ownership hierarchy: Tenant entity, non-optional workspace_id, ABAC middleware, tenant isolation, auth gap fixes, URL restructure |
 
 ## Open Questions
 
