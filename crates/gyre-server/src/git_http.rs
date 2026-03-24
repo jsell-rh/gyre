@@ -1488,13 +1488,13 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_unknown_repo_returns_404() {
-        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, _repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/git/nonexistent-id/no-such-repo.git/info/refs?service=git-upload-pack"
-                    ))
+                    .uri(
+                        "/git/nonexistent-id/no-such-repo.git/info/refs?service=git-upload-pack",
+                    )
                     .header("Authorization", auth_header())
                     .body(Body::empty())
                     .unwrap(),
