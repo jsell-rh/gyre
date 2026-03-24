@@ -276,12 +276,24 @@ mod tests {
     #[tokio::test]
     async fn find_by_task_id() {
         let (_tmp, s) = setup();
-        let ac1 = make_commit("c1", "agent1", "repo1", "sha1")
-            .with_provenance(Some("task-A".to_string()), None, None, None);
-        let ac2 = make_commit("c2", "agent2", "repo1", "sha2")
-            .with_provenance(Some("task-A".to_string()), None, None, None);
-        let ac3 = make_commit("c3", "agent1", "repo1", "sha3")
-            .with_provenance(Some("task-B".to_string()), None, None, None);
+        let ac1 = make_commit("c1", "agent1", "repo1", "sha1").with_provenance(
+            Some("task-A".to_string()),
+            None,
+            None,
+            None,
+        );
+        let ac2 = make_commit("c2", "agent2", "repo1", "sha2").with_provenance(
+            Some("task-A".to_string()),
+            None,
+            None,
+            None,
+        );
+        let ac3 = make_commit("c3", "agent1", "repo1", "sha3").with_provenance(
+            Some("task-B".to_string()),
+            None,
+            None,
+            None,
+        );
         AgentCommitRepository::record(&s, &ac1).await.unwrap();
         AgentCommitRepository::record(&s, &ac2).await.unwrap();
         AgentCommitRepository::record(&s, &ac3).await.unwrap();

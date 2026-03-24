@@ -75,10 +75,7 @@ pub struct AibomResponse {
 ///
 /// The heuristic now uses `model_context` (which carries `wl_*` JWT claims and
 /// `stack_hash`) rather than the removed `ralph_step` field.
-fn resolve_attestation_level(
-    stored: Option<&str>,
-    model_context: Option<&str>,
-) -> &'static str {
+fn resolve_attestation_level(stored: Option<&str>, model_context: Option<&str>) -> &'static str {
     if let Some(lvl) = stored {
         match lvl {
             "server-verified" => return "server-verified",
@@ -183,10 +180,8 @@ pub async fn get_aibom(
             (agent_id_str.clone(), None, 0, false, false)
         });
         entry.2 += 1;
-        let lvl = resolve_attestation_level(
-            ac.attestation_level.as_deref(),
-            ac.model_context.as_deref(),
-        );
+        let lvl =
+            resolve_attestation_level(ac.attestation_level.as_deref(), ac.model_context.as_deref());
         if lvl == "server-verified" {
             entry.3 = true;
         } else if lvl == "self-reported" {

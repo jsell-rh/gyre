@@ -1,3 +1,4 @@
+use crate::agent_tracking::LoopConfig;
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -48,6 +49,11 @@ pub struct Agent {
     #[serde(default)]
     pub disconnected_behavior: DisconnectedBehavior,
     pub workspace_id: Option<gyre_common::Id>,
+    /// Current session iteration count for the Ralph loop.
+    #[serde(default)]
+    pub iteration: u32,
+    /// Ralph loop configuration (when present, server manages session cycle).
+    pub loop_config: Option<LoopConfig>,
 }
 
 impl Agent {
@@ -64,6 +70,8 @@ impl Agent {
             spawned_by: None,
             disconnected_behavior: DisconnectedBehavior::default(),
             workspace_id: None,
+            iteration: 0,
+            loop_config: None,
         }
     }
 

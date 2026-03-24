@@ -209,9 +209,7 @@ impl AgentCommitRepository for MemAgentCommitRepository {
             .cloned()
             .collect())
     }
-
 }
-
 
 #[derive(Default)]
 pub struct MemWorktreeRepository {
