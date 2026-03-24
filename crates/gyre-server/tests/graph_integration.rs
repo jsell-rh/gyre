@@ -556,6 +556,8 @@ async fn test_link_node_to_spec_requires_developer_role() {
         resp.status(),
         403,
         "link_node_to_spec must require Developer or Admin role"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Push-triggered extraction test (M30b)
@@ -735,6 +737,5 @@ async fn test_push_triggers_graph_extraction() {
     assert!(
         !deltas.is_empty(),
         "expected at least one architectural delta after push"
-
     );
 }
