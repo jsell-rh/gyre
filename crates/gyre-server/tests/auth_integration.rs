@@ -308,7 +308,7 @@ async fn token_revoked_after_agent_complete() {
     let repo_resp: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", &auth)
-        .json(&serde_json::json!({"project_id": "revoke-proj", "name": "revoke-repo"}))
+        .json(&serde_json::json!({"workspace_id": "revoke-proj", "name": "revoke-repo"}))
         .send()
         .await
         .unwrap()

@@ -132,7 +132,7 @@ async fn create_repo(ctx: &Ctx, _proj_id: &str) -> String {
     let r = ctx
         .post_json(
             "/api/v1/repos",
-            json!({"project_id": pid, "name": format!("repo-{}", uuid::Uuid::new_v4())}),
+            json!({"workspace_id": pid, "name": format!("repo-{}", uuid::Uuid::new_v4())}),
         )
         .await;
     let repo: Value = r.json().await.unwrap();
@@ -604,7 +604,7 @@ async fn test_push_triggers_graph_extraction() {
     let repo_resp: Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth)
-        .json(&json!({ "project_id": &project_id, "name": "rust-repo" }))
+        .json(&json!({ "workspace_id": &project_id, "name": "rust-repo" }))
         .send()
         .await
         .unwrap()

@@ -112,7 +112,7 @@ async fn spawn_returns_jwt_token() {
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "m18-repo", "project_id": proj_id}))
+        .json(&serde_json::json!({"name": "m18-repo", "workspace_id": proj_id}))
         .send()
         .await
         .unwrap()
@@ -182,7 +182,7 @@ async fn jwt_token_authenticates_api_calls() {
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "jwt-auth-repo", "project_id": proj_id}))
+        .json(&serde_json::json!({"name": "jwt-auth-repo", "workspace_id": proj_id}))
         .send()
         .await
         .unwrap()
@@ -257,7 +257,7 @@ async fn token_info_for_jwt_agent_token() {
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "info-repo", "project_id": proj_id}))
+        .json(&serde_json::json!({"name": "info-repo", "workspace_id": proj_id}))
         .send()
         .await
         .unwrap()
@@ -362,7 +362,7 @@ async fn jwt_revoked_after_agent_complete() {
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "revoke-repo", "project_id": proj_id}))
+        .json(&serde_json::json!({"name": "revoke-repo", "workspace_id": proj_id}))
         .send()
         .await
         .unwrap()

@@ -282,7 +282,7 @@ async fn create_repo(ctx: &Ctx, project_id: &str) -> String {
     let j = ctx
         .post_json(
             "/api/v1/repos",
-            json!({"project_id": project_id, "name": "test-repo"}),
+            json!({"workspace_id": project_id, "name": "test-repo"}),
         )
         .await;
     j["id"].as_str().unwrap().to_string()
@@ -296,7 +296,7 @@ async fn repos_create_and_get() {
     let resp = ctx
         .post(
             "/api/v1/repos",
-            json!({"project_id": proj_id, "name": "myrepo"}),
+            json!({"workspace_id": proj_id, "name": "myrepo"}),
         )
         .await;
     assert_eq!(resp.status(), 201);
@@ -1190,7 +1190,7 @@ async fn compose_apply_status_teardown() {
             "/api/v1/compose/apply",
             json!({
                 "version": "1",
-                "project_id": proj_id,
+                "workspace_id": proj_id,
                 "repo_id": repo_id,
                 "agents": [
                     {

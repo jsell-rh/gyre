@@ -67,17 +67,12 @@ pub async fn compose_apply(
             .map_err(|e| ApiError::InvalidInput(format!("JSON parse error: {e}")))?
     };
 
-    // Validate repo and project exist
+    // Validate repo exists
     state
         .repos
         .find_by_id(&spec.repo_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", spec.repo_id)))?;
-    state
-        .projects
-        .find_by_id(&spec.project_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("project {} not found", spec.project_id)))?;
 
     // Validate and topologically sort
     let ordered = spec.validate_and_sort().map_err(ApiError::InvalidInput)?;
@@ -225,28 +220,12 @@ mod tests {
     }
 
     async fn create_project_and_repo(app: Router) -> (Router, String, String) {
-        // Create project
-        let proj_body = serde_json::json!({ "name": "test-project", "description": null });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/projects")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&proj_body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let proj = body_json(resp).await;
-        let project_id = proj["id"].as_str().unwrap().to_string();
+        let workspace_id = "test-ws".to_string();
 
         // Create repo
         let repo_body = serde_json::json!({
             "name": "test-repo",
-            "project_id": project_id,
-            "description": null
+            "workspace_id": workspace_id
         });
         let resp = app
             .clone()
@@ -263,17 +242,16 @@ mod tests {
         let repo = body_json(resp).await;
         let repo_id = repo["id"].as_str().unwrap().to_string();
 
-        (app, project_id, repo_id)
+        (app, workspace_id, repo_id)
     }
 
     #[tokio::test]
     async fn compose_apply_creates_agent_tree() {
         let app = app();
-        let (app, project_id, repo_id) = create_project_and_repo(app).await;
+        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
-            "project_id": project_id,
             "repo_id": repo_id,
             "agents": [
                 {
@@ -339,11 +317,10 @@ mod tests {
     #[tokio::test]
     async fn compose_status_returns_agent_states() {
         let app = app();
-        let (app, project_id, repo_id) = create_project_and_repo(app).await;
+        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
-            "project_id": project_id,
             "repo_id": repo_id,
             "agents": [{
                 "name": "status-agent",
@@ -393,11 +370,10 @@ mod tests {
     #[tokio::test]
     async fn compose_teardown_stops_all_agents() {
         let app = app();
-        let (app, project_id, repo_id) = create_project_and_repo(app).await;
+        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
-            "project_id": project_id,
             "repo_id": repo_id,
             "agents": [
                 {
@@ -468,11 +444,10 @@ mod tests {
     #[tokio::test]
     async fn compose_apply_yaml_format() {
         let app = app();
-        let (app, project_id, repo_id) = create_project_and_repo(app).await;
+        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let yaml = format!(
             r#"version: "1"
-project_id: {project_id}
 repo_id: {repo_id}
 agents:
   - name: yaml-agent
@@ -510,7 +485,6 @@ agents:
 
         let compose = serde_json::json!({
             "version": "1",
-            "project_id": project_id,
             "repo_id": "nonexistent-repo",
             "agents": [{
                 "name": "a",
@@ -540,11 +514,10 @@ agents:
     #[tokio::test]
     async fn compose_apply_validates_cycle() {
         let app = app();
-        let (app, project_id, repo_id) = create_project_and_repo(app).await;
+        let (app, workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
             "version": "1",
-            "project_id": project_id,
             "repo_id": repo_id,
             "agents": [
                 {

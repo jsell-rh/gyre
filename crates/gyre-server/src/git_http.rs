@@ -4,9 +4,9 @@
 //! and `git receive-pack`. This is the same approach used by GitLab, Gitea, etc.
 //!
 //! Supported routes:
-//!   GET  /git/:project/:repo/info/refs?service={git-upload-pack|git-receive-pack}
-//!   POST /git/:project/:repo/git-upload-pack
-//!   POST /git/:project/:repo/git-receive-pack
+//!   GET  /git/:repo_id/:repo/info/refs?service={git-upload-pack|git-receive-pack}
+//!   POST /git/:repo_id/:repo/git-upload-pack
+//!   POST /git/:repo_id/:repo/git-receive-pack
 
 use axum::{
     body::Body,
@@ -62,40 +62,32 @@ fn service_header(service: &str) -> Vec<u8> {
 // Repo lookup
 // ---------------------------------------------------------------------------
 
-/// Resolve `:project` + `:repo` URL segments to a Repository record.
+/// Resolve `:repo_id` + `:repo` URL segments to a Repository record.
 ///
-/// * `project`  — the project_id (UUID string) used when the repo was created.
+/// * `repo_id`  — the repository UUID from the URL path.
 /// * `repo_seg` — the repo segment from the URL, e.g. `my-repo.git`.
 async fn resolve_repo(
     state: &Arc<AppState>,
-    project: &str,
+    repo_id: &str,
     repo_seg: &str,
 ) -> Result<gyre_domain::Repository, Response> {
-    let repo_name = repo_seg.strip_suffix(".git").unwrap_or(repo_seg);
+    let _repo_name = repo_seg.strip_suffix(".git").unwrap_or(repo_seg);
 
-    let repos = state
+    state
         .repos
-        .list_by_project(&Id::new(project))
+        .find_by_id(&Id::new(repo_id))
         .await
-        .map_err(|e| git_err(format!("db error: {e}")))?;
-
-    repos
-        .into_iter()
-        .find(|r| r.name == repo_name)
-        .ok_or_else(|| {
-            not_found(format!(
-                "repo '{repo_name}' not found in project '{project}'"
-            ))
-        })
+        .map_err(|e| git_err(format!("db error: {e}")))?
+        .ok_or_else(|| not_found(format!("repo '{repo_id}' not found")))
 }
 
 /// Resolve to just the filesystem path (convenience wrapper).
 async fn resolve_repo_path(
     state: &Arc<AppState>,
-    project: &str,
+    repo_id: &str,
     repo_seg: &str,
 ) -> Result<String, Response> {
-    resolve_repo(state, project, repo_seg).await.map(|r| r.path)
+    resolve_repo(state, repo_id, repo_seg).await.map(|r| r.path)
 }
 
 // ---------------------------------------------------------------------------
@@ -104,12 +96,12 @@ async fn resolve_repo_path(
 
 #[derive(Deserialize)]
 pub struct GitPath {
-    project: String,
+    repo_id: String,
     repo: String,
 }
 
 // ---------------------------------------------------------------------------
-// GET /git/:project/:repo/info/refs?service=git-{upload,receive}-pack
+// GET /git/:repo_id/:repo/info/refs?service=git-{upload,receive}-pack
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -119,7 +111,7 @@ pub struct InfoRefsQuery {
 
 pub async fn git_info_refs(
     State(state): State<Arc<AppState>>,
-    Path(GitPath { project, repo }): Path<GitPath>,
+    Path(GitPath { repo_id, repo }): Path<GitPath>,
     Query(InfoRefsQuery { service }): Query<InfoRefsQuery>,
     _auth: AuthenticatedAgent,
 ) -> Response {
@@ -133,7 +125,7 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path = match resolve_repo_path(&state, &project, &repo).await {
+    let repo_path = match resolve_repo_path(&state, &repo_id, &repo).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -173,16 +165,16 @@ pub async fn git_info_refs(
 }
 
 // ---------------------------------------------------------------------------
-// POST /git/:project/:repo/git-upload-pack  (clone / fetch)
+// POST /git/:repo_id/:repo/git-upload-pack  (clone / fetch)
 // ---------------------------------------------------------------------------
 
 pub async fn git_upload_pack(
     State(state): State<Arc<AppState>>,
-    Path(GitPath { project, repo }): Path<GitPath>,
+    Path(GitPath { repo_id, repo }): Path<GitPath>,
     _auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let repo_path = match resolve_repo_path(&state, &project, &repo).await {
+    let repo_path = match resolve_repo_path(&state, &repo_id, &repo).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -207,30 +199,23 @@ pub async fn git_upload_pack(
 }
 
 // ---------------------------------------------------------------------------
-// POST /git/:project/:repo/git-receive-pack  (push)
+// POST /git/:repo_id/:repo/git-receive-pack  (push)
 // ---------------------------------------------------------------------------
 
 pub async fn git_receive_pack(
     State(state): State<Arc<AppState>>,
-    Path(GitPath { project, repo }): Path<GitPath>,
+    Path(GitPath { repo_id, repo }): Path<GitPath>,
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    info!(
-        agent_id = %auth.agent_id,
-        has_jwt_claims = auth.jwt_claims.is_some(),
-        project = %project,
-        repo = %repo,
-        "git-receive-pack: push attempt"
-    );
-    let resolved = match resolve_repo(&state, &project, &repo).await {
+    let resolved = match resolve_repo(&state, &repo_id, &repo).await {
         Ok(r) => r,
         Err(r) => return r,
     };
     if resolved.is_mirror {
         warn!(
             agent_id = %auth.agent_id,
-            project = %project,
+            repo_id = %repo_id,
             repo = %repo,
             "git-receive-pack 403: repository is a read-only mirror"
         );
@@ -1370,11 +1355,11 @@ mod tests {
         assert!(status.success(), "git init --bare failed");
 
         let state = test_state();
-        let project_id = "test-proj-id";
+        let repo_id = "repo-1";
 
         let repo = Repository {
-            id: Id::new("repo-1"),
-            project_id: Id::new(project_id),
+            id: Id::new(repo_id),
+            workspace_id: Id::new("ws1"),
             name: "my-repo".to_string(),
             path: repo_path.to_str().unwrap().to_string(),
             default_branch: "main".to_string(),
@@ -1383,22 +1368,21 @@ mod tests {
             mirror_url: None,
             mirror_interval_secs: None,
             last_mirror_sync: None,
-            workspace_id: None,
         };
         state.repos.create(&repo).await.unwrap();
 
         let repo_path_str = repo_path.to_str().unwrap().to_string();
 
         let app = Router::new()
-            .route("/git/:project/:repo/info/refs", get(git_info_refs))
-            .route("/git/:project/:repo/git-upload-pack", post(git_upload_pack))
+            .route("/git/:repo_id/:repo/info/refs", get(git_info_refs))
+            .route("/git/:repo_id/:repo/git-upload-pack", post(git_upload_pack))
             .route(
-                "/git/:project/:repo/git-receive-pack",
+                "/git/:repo_id/:repo/git-receive-pack",
                 post(git_receive_pack),
             )
             .with_state(state.clone());
 
-        (app, state, tmp, project_id.to_string(), repo_path_str)
+        (app, state, tmp, repo_id.to_string(), repo_path_str)
     }
 
     fn auth_header() -> &'static str {
@@ -1407,12 +1391,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_upload_pack_without_auth_returns_401() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-upload-pack"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -1424,12 +1408,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_invalid_token_returns_401() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", "Bearer wrong-token")
                     .body(Body::empty())
@@ -1442,12 +1426,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_upload_pack_returns_200_with_correct_content_type() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1464,12 +1448,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_receive_pack_returns_200_with_correct_content_type() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-receive-pack"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-receive-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1486,12 +1470,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_unknown_service_returns_400() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-bogus"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-bogus"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1504,12 +1488,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_unknown_repo_returns_404() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/no-such-repo.git/info/refs?service=git-upload-pack"
+                        "/git/nonexistent-id/no-such-repo.git/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1522,12 +1506,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_body_starts_with_service_header() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1548,7 +1532,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_token_accepted_for_info_refs() {
-        let (app, state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
         state
             .kv_store
             .kv_set("agent_tokens", "agent-7", "my-agent-token".to_string())
@@ -1559,7 +1543,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{repo_id_val}/my-repo.git/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", "Bearer my-agent-token")
                     .body(Body::empty())
@@ -1573,13 +1557,13 @@ mod tests {
     /// End-to-end: git clone via smart HTTP using actual git binary.
     #[tokio::test(flavor = "multi_thread")]
     async fn git_clone_empty_repo_via_smart_http() {
-        let (_, state, _tmp, project, _path) = git_app_with_repo().await;
+        let (_, state, _tmp, repo_id_val, _path) = git_app_with_repo().await;
 
         let app = Router::new()
-            .route("/git/:project/:repo/info/refs", get(git_info_refs))
-            .route("/git/:project/:repo/git-upload-pack", post(git_upload_pack))
+            .route("/git/:repo_id/:repo/info/refs", get(git_info_refs))
+            .route("/git/:repo_id/:repo/git-upload-pack", post(git_upload_pack))
             .route(
-                "/git/:project/:repo/git-receive-pack",
+                "/git/:repo_id/:repo/git-receive-pack",
                 post(git_receive_pack),
             )
             .with_state(state);
@@ -1589,7 +1573,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let clone_dir = TempDir::new().unwrap();
-        let url = format!("http://127.0.0.1:{port}/git/{project}/my-repo.git");
+        let url = format!("http://127.0.0.1:{port}/git/{repo_id_val}/my-repo.git");
 
         // Run git clone in a blocking thread so we don't starve the async executor.
         let clone_target = clone_dir.path().join("cloned");

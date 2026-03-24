@@ -70,7 +70,7 @@ async fn full_ralph_loop_via_gyre() {
         .post(format!("{api}/repos"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "project_id": project_id,
+            "workspace_id": project_id,
             "name": "gyre-e2e",
         }))
         .send()

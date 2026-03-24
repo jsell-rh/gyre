@@ -28,7 +28,7 @@ fn redact_url_credentials(url: String) -> String {
 
 #[derive(Deserialize)]
 pub struct CreateRepoRequest {
-    pub project_id: String,
+    pub workspace_id: String,
     pub name: String,
     /// Ignored — path is always computed server-side (C-4 security fix).
     #[serde(default)]
@@ -38,7 +38,7 @@ pub struct CreateRepoRequest {
 
 #[derive(Deserialize)]
 pub struct CreateMirrorRequest {
-    pub project_id: String,
+    pub workspace_id: String,
     pub name: String,
     pub url: String,
     pub interval_secs: Option<u64>,
@@ -46,14 +46,13 @@ pub struct CreateMirrorRequest {
 
 #[derive(Deserialize)]
 pub struct ListReposQuery {
-    pub project_id: Option<String>,
     pub workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct RepoResponse {
     pub id: String,
-    pub project_id: String,
+    pub workspace_id: String,
     pub name: String,
     // path is intentionally omitted — it is a server-internal filesystem path.
     pub default_branch: String,
@@ -68,7 +67,7 @@ impl From<Repository> for RepoResponse {
     fn from(r: Repository) -> Self {
         Self {
             id: r.id.to_string(),
-            project_id: r.project_id.to_string(),
+            workspace_id: r.workspace_id.to_string(),
             name: r.name,
             default_branch: r.default_branch,
             created_at: r.created_at,
@@ -96,22 +95,22 @@ pub async fn create_repo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRepoRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
-    // Reject path traversal in project_id and name.
-    for field in [req.project_id.as_str(), req.name.as_str()] {
+    // Reject path traversal in workspace_id and name.
+    for field in [req.workspace_id.as_str(), req.name.as_str()] {
         if field.contains("..") || field.contains('/') {
             return Err(ApiError::InvalidInput(
-                "project_id and name must not contain '..' or '/'".to_string(),
+                "workspace_id and name must not contain '..' or '/'".to_string(),
             ));
         }
     }
     let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
     // C-4 fix: always compute path server-side, never from user input.
-    let repo_path = format!("{}/{}/{}.git", repos_root, req.project_id, req.name);
+    let repo_path = format!("{}/{}/{}.git", repos_root, req.workspace_id, req.name);
 
     let now = now_secs();
     let mut repo = Repository::new(
         new_id(),
-        Id::new(req.project_id),
+        Id::new(req.workspace_id),
         req.name,
         repo_path.clone(),
         now,
@@ -146,8 +145,6 @@ pub async fn list_repos(
 ) -> Result<Json<Vec<RepoResponse>>, ApiError> {
     let repos = if let Some(ws_id) = params.workspace_id {
         state.repos.list_by_workspace(&Id::new(ws_id)).await?
-    } else if let Some(project_id) = params.project_id {
-        state.repos.list_by_project(&Id::new(project_id)).await?
     } else {
         state.repos.list().await?
     };
@@ -216,11 +213,11 @@ pub async fn create_mirror_repo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateMirrorRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
-    // Reject path traversal in project_id and name.
-    for field in [req.project_id.as_str(), req.name.as_str()] {
+    // Reject path traversal in workspace_id and name.
+    for field in [req.workspace_id.as_str(), req.name.as_str()] {
         if field.contains("..") || field.contains('/') {
             return Err(ApiError::InvalidInput(
-                "project_id and name must not contain '..' or '/'.".to_string(),
+                "workspace_id and name must not contain '..' or '/'.".to_string(),
             ));
         }
     }
@@ -231,12 +228,12 @@ pub async fn create_mirror_repo(
         ));
     }
     let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
-    let repo_path = format!("{}/{}/{}.git", repos_root, req.project_id, req.name);
+    let repo_path = format!("{}/{}/{}.git", repos_root, req.workspace_id, req.name);
 
     let now = now_secs();
     let repo = Repository {
         id: new_id(),
-        project_id: Id::new(req.project_id),
+        workspace_id: Id::new(req.workspace_id),
         name: req.name,
         path: repo_path.clone(),
         default_branch: "main".to_string(),
@@ -245,7 +242,6 @@ pub async fn create_mirror_repo(
         mirror_url: Some(req.url.clone()),
         mirror_interval_secs: req.interval_secs,
         last_mirror_sync: None,
-        workspace_id: None,
     };
     state.repos.create(&repo).await?;
 
@@ -300,7 +296,7 @@ mod tests {
     async fn create_and_get_repo() {
         let app = app();
         let body = serde_json::json!({
-            "project_id": "proj-1",
+            "workspace_id": "ws-1",
             "name": "gyre"
         });
         let create_resp = app
@@ -335,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn create_repo_auto_generates_path() {
         let body = serde_json::json!({
-            "project_id": "proj-99",
+            "workspace_id": "ws-99",
             "name": "my-svc"
         });
         let resp = app()
@@ -360,7 +356,7 @@ mod tests {
     async fn create_repo_ignores_user_supplied_path() {
         // C-4 security fix: user-supplied path is ignored; server computes path.
         let body = serde_json::json!({
-            "project_id": "proj-1",
+            "workspace_id": "ws-1",
             "name": "gyre",
             "path": "/custom/path/gyre.git"
         });
@@ -383,10 +379,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_repos_by_project() {
+    async fn list_repos_by_workspace() {
         let app = app();
         let body = serde_json::json!({
-            "project_id": "proj-42",
+            "workspace_id": "ws-42",
             "name": "my-repo"
         });
         app.clone()
@@ -404,7 +400,7 @@ mod tests {
         let list_resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos?project_id=proj-42")
+                    .uri("/api/v1/repos?workspace_id=ws-42")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -433,7 +429,7 @@ mod tests {
     async fn list_branches_returns_empty_for_noop() {
         let app = app();
         // Create a repo first
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test"});
         let create_resp = app
             .clone()
             .oneshot(
@@ -480,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn commit_log_returns_empty_for_noop() {
         let app = app();
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test2"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test2"});
         let create_resp = app
             .clone()
             .oneshot(
