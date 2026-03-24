@@ -49,11 +49,12 @@ pub struct Message {
     pub payload: Option<Value>,     // Structured data specific to the kind
 
     // Attestation — PROOF it happened (None for telemetry tier)
-    pub created_at: u64,
+    pub created_at: u64,            // Unix epoch MILLISECONDS (not seconds) for sub-second ordering
     pub signature: Option<String>,  // Ed25519 — present on directed + event tier, absent on telemetry
     pub key_id: Option<String>,     // kid from server's JWKS
 
-    // Delivery state (point-to-point only)
+    // Delivery state — only semantically meaningful for Directed tier with
+    // Destination::Agent. Always false for Event/Telemetry/Workspace messages.
     pub acknowledged: bool,
 }
 
@@ -156,7 +157,9 @@ pub enum MessageKind {
 
 **`Custom(String)` tier:** Defaults to **Event** tier (signed, persisted with TTL). A sender can request Directed-tier handling by including `"tier": "directed"` in the request body, which makes the message ack-based. Telemetry tier is not available for Custom messages — if you need attestation, use Event; if you need delivery guarantees, use Directed.
 
-**`Custom(String)` serialization:** The `MessageKind` enum uses `#[serde(rename_all = "snake_case")]` (externally tagged) with `#[serde(other)]` on the `Custom(String)` variant. The `kind` field on the `Message` struct serializes as a plain string: `"kind": "task_assignment"`. Known snake_case variant names match built-in variants first; unknown strings fall through to `Custom(s)`. No runtime collision check is needed — serde handles precedence correctly.
+**Tier + Destination constraint:** Directed tier is only valid with `Destination::Agent(id)`. Directed + Workspace is rejected with 400 — ack-based delivery is meaningless for fan-out messages where no single agent owns the message. Event and Telemetry tiers work with any destination.
+
+**`Custom(String)` serialization:** Serde's `#[serde(other)]` attribute only works on unit variants, not tuple variants like `Custom(String)`. Therefore, `MessageKind` requires a **custom `Deserialize` implementation** — the same pattern already used by `AgEventType` in `gyre-common/src/protocol.rs` (lines 40-53). Serialization: known variants emit their snake_case name (e.g., `"task_assignment"`); `Custom(s)` emits the raw string. Deserialization: match against known names first; unknown strings become `Custom(s)`. The `kind` field on the `Message` struct is a plain string on the wire: `"kind": "task_assignment"`.
 
 **Tier behavior:**
 
@@ -335,8 +338,10 @@ pub trait MessageRepository: Send + Sync {
     /// Only affects messages where to_type != 'agent' (Event tier).
     async fn expire_events(&self, older_than: u64) -> Result<u64>;
 
-    /// Delete acked Directed messages for completed agents older than the given epoch.
-    /// Covers the GYRE_DEAD_INBOX_TTL_SECS cleanup path.
+    /// Delete acked Directed messages older than the given epoch where
+    /// ack_reason = 'agent_completed'. Covers GYRE_DEAD_INBOX_TTL_SECS cleanup.
+    /// Does NOT require agent state lookup — uses the ack_reason column set by
+    /// acknowledge_all() when an agent completes.
     async fn expire_dead_inboxes(&self, older_than: u64) -> Result<u64>;
 }
 ```
@@ -353,7 +358,7 @@ pub struct TelemetryBuffer {
 }
 ```
 
-Telemetry is pushed through the existing `broadcast::channel` for WebSocket delivery and stored in the ring buffer for `GET /api/v1/activity` queries. This preserves the current performance characteristics.
+Telemetry is pushed through the existing `broadcast::channel` for WebSocket delivery and stored in the ring buffer for `GET /api/v1/activity` queries. This preserves the current performance characteristics. **Subscription authorization:** The server verifies workspace membership when processing `Subscribe` messages — a client cannot subscribe to a workspace it doesn't belong to. This prevents telemetry leakage across workspaces even though the buffer itself has no tenant isolation.
 
 #### Workspace Fan-Out Persistence
 
@@ -374,7 +379,7 @@ CREATE TABLE messages (
     to_id TEXT,                       -- agent_id for agent, workspace_id for workspace
     kind TEXT NOT NULL,
     payload TEXT,                     -- JSON
-    created_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,      -- Unix epoch MILLISECONDS
     signature TEXT,                   -- NULL for unsigned (telemetry not stored anyway)
     key_id TEXT,
     acknowledged INTEGER NOT NULL DEFAULT 0,
@@ -466,7 +471,7 @@ GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch>&before=<epoc
 Authorization: Bearer <token>
 ```
 
-Returns Event-tier messages for a workspace. Requires workspace membership (verified via `WorkspaceMembershipRepository`). Cursor-based pagination via `?after=<message-id>`.
+Returns Event-tier messages for a workspace. Requires workspace membership (verified via `WorkspaceMembershipRepository`). Cursor-based pagination via `?before=<epoch_ms>` — returns messages with `created_at < before`, ordered newest first. Use the `created_at` of the last result as `before` for the next page.
 
 #### Telemetry (existing endpoint, new backing store)
 
@@ -500,34 +505,24 @@ The MCP SSE endpoint (`GET /mcp/sse`) subscribes to the message bus filtered by 
 
 The MCP `gyre_record_activity` tool becomes a thin wrapper that creates a Telemetry-tier `Message` with the appropriate `MessageKind` and `Destination::Workspace(caller's workspace)`.
 
-### Migration Path
+### Implementation Notes
 
-Four phases. Each phase is independently revertible by feature flag (`GYRE_MESSAGE_BUS_PHASE`, default 0 = legacy behavior).
+Since this is a greenfield system with no production deployment, the unified message bus replaces the existing channels directly — no phased migration or feature flags are needed.
 
-**Phase 1: Dual-write events.**
-- Add `MessageRepository`, `Message` struct, `TelemetryBuffer`, new `POST /api/v1/messages` endpoint.
-- Server-originated events write to both the new message table AND the existing `event_tx` broadcast channel.
-- Consistency model: broadcast is fire-and-forget as today; DB write is authoritative. If DB write fails, the event is logged at `error` level but the broadcast still goes out. This is acceptable because Event tier is best-effort.
-- Old WebSocket delivery unchanged. New endpoint available but not required.
+**Workspace resolution for server events:** When the server constructs a `Message` from a domain event, it resolves `workspace_id` by looking up the referenced entity (agent, task, MR, repo). This is a single DB read, cached in the handler context since the handler already loaded the entity to emit the event. For `QueueUpdated` and `DataSeeded` (no entity reference), use `Destination::Broadcast` with `workspace_id: None`.
 
-**Phase 2: Subscription model.**
-- Add `Subscribe` variant to `gyre_common::WsMessage`. Also add `#[serde(other)]` catch-all variant to `WsMessage` so old CLI versions that encounter unknown message types don't crash on deserialization.
-- Clients that send `Subscribe` get workspace-scoped delivery from the new bus.
-- Clients that don't subscribe get legacy broadcast behavior (backwards compatible — all domain events, all activity, no scoping).
-- Dashboard and CLI updated to send `Subscribe` on connect.
+**What gets replaced:**
+- `DomainEvent` enum and `event_tx: broadcast::Sender<DomainEvent>` in `AppState` → Event-tier messages through the unified bus
+- `ActivityStore` and `broadcast_tx: broadcast::Sender<ActivityEventData>` → `TelemetryBuffer` for telemetry tier
+- `agent_messages` KvJsonStore namespace and drain-on-read inbox → `MessageRepository` with ack-based Directed tier
+- `WsMessage::ActivityEvent` variant → unified `Message` delivery over WebSocket with subscription scoping
 
-**Phase 3: Migrate agent inbox.**
-- New `POST /api/v1/messages` becomes the primary send endpoint.
-- Old `POST /api/v1/agents/:id/messages` becomes a **compatibility adapter**: it accepts the old request body (`{from, content, message_type}`), transforms it to the new format (`{to: {agent: id}, kind: message_type.type, payload: content}`), and forwards to the new handler. Returns the new response shape. Logs a deprecation warning.
-- Old `GET /api/v1/agents/:id/messages` becomes a compatibility adapter that calls `list_unacked`, maps results to the old response format, and **auto-acknowledges** all returned messages on successful response. This preserves drain-on-read semantics for legacy agents that have no ack logic. **Known risk:** if the HTTP response is lost after the server commits the acks, the client misses the messages. This is accepted as a known regression during migration — the legacy drain behavior had the same atomicity issue (delete-then-respond). New agents should use the new endpoint with explicit acks to avoid this.
-- `FreeText` message type: the compatibility adapter maps `FreeText{body}` to `Custom("free_text")` with `payload: {"body": body}`. A deprecation warning is logged.
+**What gets added to `WsMessage`:**
+- `Subscribe` variant for workspace-scoped subscriptions
+- `ReplayCatchUp` variant for reconnection truncation signals
+- Catch-all `Unknown` variant with custom deserialize for forward compatibility
 
-**Phase 4: Remove legacy.**
-- Drop old `agent_messages` KvJsonStore namespace.
-- Remove `ActivityStore` (replaced by `TelemetryBuffer`).
-- Remove separate `DomainEvent` broadcast channel (unified bus handles delivery).
-- Remove compatibility adapter on old inbox endpoint (returns 410 Gone with pointer to new endpoint).
-- Requires: all known agent code and CLI updated to use new endpoints (verified by integration tests).
+**Backwards compatibility:** The old `POST/GET /api/v1/agents/:id/messages` endpoints are removed. All agent communication uses `POST /api/v1/messages` (send) and `GET /api/v1/agents/:id/messages` (poll with ack). The `FreeText` message type is not supported — use `Custom("free_text")` with structured payload instead.
 
 ### Edge Cases
 
