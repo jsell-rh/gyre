@@ -977,9 +977,9 @@ async fn push_with_url_scoped_extraheader_succeeds() {
     let scoped_base = format!("http://127.0.0.1:{port}");
 
     let proj = uniq("proj-urlscoped");
-    create_repo(&client, &api, &auth_hdr, &proj, "urlscoped-repo").await;
+    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "urlscoped-repo").await;
 
-    let clone_url = format!("{base_url}/git/{proj}/urlscoped-repo.git");
+    let clone_url = format!("{base_url}/git/{repo_id}/urlscoped-repo.git");
     let scoped_base_c = scoped_base.clone();
     let token_owned = token.to_string();
 
@@ -1101,11 +1101,12 @@ async fn global_token_bypasses_abac_on_push() {
 
     let base_url_c = base_url.clone();
     let token_owned = token.to_string();
+    let repo_id_c = repo_id.clone();
 
     let (push_ok, push_stderr) = tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/abac-bypass-repo.git");
+        let clone_url = format!("{base_url_c}/git/{repo_id_c}/abac-bypass-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
         let clone_stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
