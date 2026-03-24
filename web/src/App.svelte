@@ -28,6 +28,8 @@
   import DependencyGraph from './components/DependencyGraph.svelte';
   import SpecGraph from './components/SpecGraph.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import Inbox from './components/Inbox.svelte';
+  import Briefing from './components/Briefing.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
@@ -222,7 +224,19 @@
       }
     }
     window.addEventListener('popstate', handlePopstate);
-    return () => window.removeEventListener('popstate', handlePopstate);
+
+    function handleJourneyKeys(e) {
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === 'i') { e.preventDefault(); navigate('inbox'); }
+        if (e.key === 'b') { e.preventDefault(); navigate('briefing'); }
+      }
+    }
+    window.addEventListener('keydown', handleJourneyKeys);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopstate);
+      window.removeEventListener('keydown', handleJourneyKeys);
+    };
   });
 
   function onWorkspaceChange(e) {
@@ -238,6 +252,8 @@
   }
 
   const viewTitles = {
+    inbox:              'Inbox',
+    briefing:           'Briefing',
     dashboard:          'Dashboard',
     activity:           'Activity Feed',
     agents:             'Agents',
@@ -363,7 +379,11 @@
     </header>
 
     <main class="content" id="main-content" tabindex="-1">
-      {#if currentView === 'dashboard'}
+      {#if currentView === 'inbox'}
+        <Inbox />
+      {:else if currentView === 'briefing'}
+        <Briefing />
+      {:else if currentView === 'dashboard'}
         <DashboardHome {wsStore} onnavigate={(v) => navigate(v)} />
       {:else if currentView === 'activity'}
         <ActivityFeed {wsStore} />

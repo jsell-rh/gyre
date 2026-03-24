@@ -1,9 +1,39 @@
 <script>
+  import { onMount } from 'svelte';
+  import { api } from '../lib/api.js';
+
   let { current = $bindable('dashboard'), onnavigate = undefined } = $props();
 
   let collapsed = $state(false);
+  let inboxCount = $state(0);
+
+  // Load inbox badge count (review MRs + pending specs)
+  async function loadInboxCount() {
+    try {
+      const [mrs, specs] = await Promise.allSettled([
+        api.mergeRequests({ status: 'review' }),
+        api.getPendingSpecs(),
+      ]);
+      const mrCount = mrs.status === 'fulfilled' ? (mrs.value || []).length : 0;
+      const specCount = specs.status === 'fulfilled' ? (specs.value || []).length : 0;
+      inboxCount = mrCount + specCount;
+    } catch { /* ignore */ }
+  }
+
+  onMount(() => {
+    loadInboxCount();
+    const interval = setInterval(loadInboxCount, 60000);
+    return () => clearInterval(interval);
+  });
 
   const sections = [
+    {
+      label: 'Journeys',
+      items: [
+        { id: 'inbox',    label: 'Inbox',    icon: inboxIcon(),    showBadge: true },
+        { id: 'briefing', label: 'Briefing', icon: briefingIcon() },
+      ],
+    },
     {
       label: 'Overview',
       items: [
@@ -63,6 +93,8 @@
   }
 
   // SVG icon helpers — inline SVG strings
+  function inboxIcon()      { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>'; }
+  function briefingIcon()   { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>'; }
   function dashboardIcon()  { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>'; }
   function activityIcon()   { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>'; }
   function projectsIcon()   { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18"><path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>'; }
@@ -136,6 +168,9 @@
                 <span class="nav-icon" aria-hidden="true">{@html item.icon}</span>
                 {#if !collapsed}
                   <span class="nav-label" aria-hidden="true">{item.label}</span>
+                  {#if item.showBadge && inboxCount > 0}
+                    <span class="nav-badge" aria-label="{inboxCount} pending">{inboxCount}</span>
+                  {/if}
                 {/if}
               </button>
             </li>
@@ -291,8 +326,24 @@
   }
 
   .nav-label {
+    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .nav-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 999px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    flex-shrink: 0;
   }
 
   /* Footer */
