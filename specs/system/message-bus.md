@@ -78,7 +78,7 @@ pub enum Destination {
 }
 ```
 
-**`workspace_id` is `Option<Id>`:** Most messages have a workspace scope. `Broadcast` messages do not — they span all workspaces (admin dashboards, `DataSeeded`). The DB column is nullable; Broadcast messages are not stored in the DB (in-memory only), so the nullable column is never exercised in practice. Non-Broadcast messages with `workspace_id: None` are rejected with 400.
+**`workspace_id` is `Option<Id>`:** Most messages have a workspace scope. `Broadcast` messages do not — they span all workspaces (admin dashboards, `DataSeeded`). The DB column is `NOT NULL` because Broadcast messages are never persisted (in-memory only). **Adapter implementation note:** The Diesel model struct for DB persistence should use `workspace_id: String` (non-optional). The `Message` domain struct uses `Option<Id>`. The adapter's `store()` method rejects messages with `workspace_id: None` — this is enforced by construction since only Directed and Event tier messages are stored, and the send handler validates that these always have a workspace. Non-Broadcast messages with `workspace_id: None` are rejected with 400 at the API layer.
 
 **Origin and tenant resolution from auth context:**
 
@@ -301,7 +301,7 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 |---|---|---|
 | **Directed** | At-least-once (persisted until ack, redelivered on poll) | DB — no TTL, expires only on ack or agent completion |
 | **Event** | Best-effort push + queryable history | DB — configurable TTL (default 7 days, `GYRE_EVENT_TTL_SECS`) |
-| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. LRU eviction is global across workspaces (default cap 100, `GYRE_TELEMETRY_MAX_WORKSPACES`). **Mitigation:** eviction prefers workspaces with the most entries (largest-first, not LRU), preventing a single tenant from flushing the entire buffer by creating many empty workspaces. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
+| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. When workspace count exceeds `GYRE_TELEMETRY_MAX_WORKSPACES` (default 100), the workspace with the most entries is evicted first (largest-first). **Mitigation:** largest-first eviction prevents a tenant from flushing the buffer by creating many empty workspaces, preventing a single tenant from flushing the entire buffer by creating many empty workspaces. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
 
 **Directed-tier queue depth:** Max 1000 unacked messages per agent (configurable, `GYRE_AGENT_INBOX_MAX`). When the limit is reached, new messages to that agent are rejected with 429 and the sender receives an error. Messages are NOT silently dropped — this preserves the at-least-once guarantee. The agent or an admin must ack or the agent must be completed/killed to free the inbox.
 
@@ -309,15 +309,17 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 
 ### Scoping Rules
 
-1. **Agents can only send Directed messages to agents in the same workspace.** Enforced by looking up the sender's `workspace_id` from the agent record (the sender's JWT contains `agent_id`; the server looks up the agent to get its `workspace_id`) and comparing with the recipient agent's `workspace_id`. Returns 403 if mismatched. This requires two agent lookups per Directed send — acceptable given that Directed messages are low-frequency.
+1. **All `Destination::Agent(id)` messages validate tenant isolation.** The target agent's `tenant_id` must match the message's `tenant_id`, regardless of origin (including `Server`). This prevents a server bug from leaking messages across tenants. For agent-originated messages, the sender must also be in the same workspace as the recipient (see below).
 
-2. **Cross-workspace messaging is server-mediated.** Workspace orchestrators do not message each other directly. Instead, cross-workspace coordination flows through server-originated events. When a Workspace Orchestrator creates a cross-repo task or MR dependency (via existing REST endpoints), the server emits the appropriate Event-tier messages (`TaskCreated`, `MrCreated`) into each affected workspace. The orchestrators observe these events in their own workspace's message stream. This avoids the need for cross-workspace agent messaging entirely.
+2. **Agents can only send Directed messages to agents in the same workspace.** Enforced by looking up the sender's `workspace_id` from the agent record (the sender's JWT contains `agent_id`; the server looks up the agent to get its `workspace_id`) and comparing with the recipient agent's `workspace_id`. Returns 403 if mismatched. This requires two agent lookups per Directed send — acceptable given that Directed messages are low-frequency.
 
-3. **Server-originated messages inherit the workspace of the entity they describe.** An `AgentCreated` event for an agent in workspace X has `workspace_id: Some(X)` and is only delivered to clients subscribed to workspace X.
+3. **Cross-workspace messaging is server-mediated.** Workspace orchestrators do not message each other directly. Instead, cross-workspace coordination flows through server-originated events. When a Workspace Orchestrator creates a cross-repo task or MR dependency (via existing REST endpoints), the server emits the appropriate Event-tier messages (`TaskCreated`, `MrCreated`) into each affected workspace. The orchestrators observe these events in their own workspace's message stream. This avoids the need for cross-workspace agent messaging entirely.
 
-4. **Broadcast destination requires Server origin or Admin role.** Agent JWTs cannot target Broadcast. API key callers with Admin role can target Broadcast for operational announcements.
+4. **Server-originated messages inherit the workspace of the entity they describe.** An `AgentCreated` event for an agent in workspace X has `workspace_id: Some(X)` and is only delivered to clients subscribed to workspace X.
 
-5. **Workspace fan-out requires workspace membership.** An agent can only send `Destination::Workspace(id)` if its `workspace_id` matches `id`. Users can target any workspace they are a member of (verified via `WorkspaceMembershipRepository`).
+5. **Broadcast destination requires Server origin or Admin role.** Agent JWTs cannot target Broadcast. API key callers with Admin role can target Broadcast for operational announcements.
+
+6. **Workspace fan-out requires workspace membership.** An agent can only send `Destination::Workspace(id)` if its `workspace_id` matches `id`. Users can target any workspace they are a member of (verified via `WorkspaceMembershipRepository`).
 
 ### Storage
 
@@ -337,10 +339,10 @@ pub trait MessageRepository: Send + Sync {
     /// Cursor is composite `(created_at, id)` to handle same-millisecond writes.
     /// Query: `WHERE (created_at, id) > (after_ts, after_id) ORDER BY created_at, id LIMIT limit`.
     /// Cursor is always composite `(created_at, id)`. When `after_id` is absent,
-    /// the query uses `WHERE created_at >= after_ts ORDER BY created_at, id LIMIT limit`
-    /// (timestamp-only lower bound). When `after_id` is present, the query uses the
-    /// full composite: `WHERE (created_at, id) > (after_ts, after_id)`.
-    /// First poll: `after_ts=0, after_id=None`. These are two intentional query paths.
+    /// the query uses `WHERE created_at > after_ts ORDER BY created_at, id LIMIT limit`
+    /// (strict greater-than, no re-delivery). When `after_id` is present, the query uses
+    /// the full composite: `WHERE (created_at, id) > (after_ts, after_id)`.
+    /// First poll: `after_ts=0, after_id=None`. Both paths use strict `>` — no duplicates.
     async fn list_after(
         &self,
         agent_id: &Id,
@@ -458,7 +460,7 @@ pub trait MessageConsumer: Send + Sync {
 }
 ```
 
-This decouples the send path from consumer latency — the hot path does one `mpsc::send` (non-blocking, bounded backpressure) and returns immediately. The notification system implements `MessageConsumer`: when it receives a `GateFailure` message, it creates a notification for the relevant human users. Additional consumers (e.g., SIEM forwarding, analytics) register on the same channel. If the channel is full, messages are dropped with a warning log — consumer processing must keep up, but slow consumers don't block message delivery.
+This decouples the send path from consumer latency — the hot path does one `mpsc::send` (non-blocking, bounded backpressure) and returns immediately. The notification system implements `MessageConsumer`: when it receives a `GateFailure` message, it creates a notification for the relevant human users. Additional consumers (e.g., SIEM forwarding, analytics) register on the same channel. If the channel is full, messages are dropped with a warning log — consumer processing must keep up, but slow consumers don't block message delivery. Consumer drops do not affect the at-least-once guarantee for Directed tier — that guarantee is between the bus and the recipient agent (via persistence + ack). Consumers are downstream observers; they can re-query `list_by_workspace` if they need to catch up after a drop.
 
 ### API
 
@@ -534,7 +536,7 @@ GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch_ms>&before_ts
 Authorization: Bearer <token>
 ```
 
-Returns Event-tier messages for a workspace. Requires workspace membership (verified via `WorkspaceMembershipRepository`). Cursor-based pagination via `?before=<epoch_ms>` — returns messages with `created_at < before`, ordered newest first. Use the `created_at` of the last result as `before` for the next page.
+Returns Event-tier messages for a workspace. Requires workspace membership (verified via `WorkspaceMembershipRepository`). Composite cursor pagination: use `?before_ts=<epoch_ms>&before_id=<msg-id>` from the last result to get the next page (newest first). Omit both for the first page.
 
 #### Telemetry (existing endpoint, new backing store)
 
