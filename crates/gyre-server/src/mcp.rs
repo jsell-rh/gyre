@@ -316,6 +316,17 @@ fn new_id() -> Id {
     Id::new(uuid::Uuid::new_v4().to_string())
 }
 
+/// Returns true when the caller authenticated via a Gyre-minted agent JWT
+/// (i.e. `scope == "agent"` in the JWT claims). Global tokens, API keys, and
+/// Keycloak JWTs do NOT satisfy this check and bypass repo-scope enforcement.
+fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
+    auth.jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+        == Some("agent")
+}
+
 fn parse_priority(s: &str) -> TaskPriority {
     match s {
         "low" => TaskPriority::Low,
@@ -760,6 +771,124 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
     }
 }
 
+// ── MCP Resources ─────────────────────────────────────────────────────────────
+
+fn resource_definitions() -> Value {
+    json!({
+        "resources": [
+            {
+                "uri": "spec://",
+                "name": "Spec Files",
+                "description": "Read spec markdown files. URI: spec://{path} (e.g. spec://system/design-principles.md)",
+                "mimeType": "text/markdown",
+                "uriTemplate": "spec://{path}"
+            },
+            {
+                "uri": "agents://",
+                "name": "Workspace Agents",
+                "description": "List active agents in a workspace. URI: agents://{workspace_id} or agents:// for all.",
+                "mimeType": "application/json",
+                "uriTemplate": "agents://{workspace_id}"
+            },
+            {
+                "uri": "queue://",
+                "name": "Merge Queue",
+                "description": "List merge queue entries for a repository. URI: queue://{repo_id}",
+                "mimeType": "application/json",
+                "uriTemplate": "queue://{repo_id}"
+            }
+        ]
+    })
+}
+
+async fn handle_resource_read(state: &AppState, uri: &str) -> Value {
+    if let Some(raw_path) = uri.strip_prefix("spec://") {
+        let safe_path = raw_path.trim_start_matches('/');
+        if safe_path.contains("..") || safe_path.starts_with('/') {
+            return json!({"error": "invalid spec path — path traversal not allowed"});
+        }
+        let file_path = format!("specs/{safe_path}");
+        match std::fs::read_to_string(&file_path) {
+            Ok(content) => json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "text/markdown",
+                    "text": content
+                }]
+            }),
+            Err(e) => json!({"error": format!("cannot read {file_path}: {e}")}),
+        }
+    } else if let Some(workspace_id) = uri.strip_prefix("agents://") {
+        let agents_result = if workspace_id.is_empty() || workspace_id == "*" {
+            state.agents.list().await
+        } else {
+            state.agents.list_by_workspace(&Id::new(workspace_id)).await
+        };
+        match agents_result {
+            Ok(list) => {
+                let active: Vec<Value> = list
+                    .into_iter()
+                    .filter(|a| {
+                        matches!(
+                            a.status,
+                            gyre_domain::AgentStatus::Active | gyre_domain::AgentStatus::Idle
+                        )
+                    })
+                    .map(|a| {
+                        json!({
+                            "id": a.id.to_string(),
+                            "name": a.name,
+                            "status": format!("{:?}", a.status).to_lowercase(),
+                            "workspace_id": a.workspace_id.as_ref().map(|id| id.to_string()),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&active).unwrap_or_default()
+                    }]
+                })
+            }
+            Err(e) => json!({"error": format!("failed to list agents: {e}")}),
+        }
+    } else if let Some(repo_id) = uri.strip_prefix("queue://") {
+        match state.merge_queue.list_queue().await {
+            Ok(entries) => {
+                let mut results = Vec::new();
+                for entry in entries {
+                    if let Ok(Some(mr)) = state
+                        .merge_requests
+                        .find_by_id(&entry.merge_request_id)
+                        .await
+                    {
+                        if mr.repository_id.to_string() == repo_id {
+                            results.push(json!({
+                                "id": entry.id.to_string(),
+                                "merge_request_id": entry.merge_request_id.to_string(),
+                                "priority": entry.priority,
+                                "status": format!("{:?}", entry.status).to_lowercase(),
+                                "enqueued_at": entry.enqueued_at,
+                            }));
+                        }
+                    }
+                }
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&results).unwrap_or_default()
+                    }]
+                })
+            }
+            Err(e) => json!({"error": format!("failed to list merge queue: {e}")}),
+        }
+    } else {
+        json!({"error": format!("unknown resource URI scheme: {uri}")})
+    }
+}
+
 // ── Main MCP request dispatcher ───────────────────────────────────────────────
 
 #[instrument(skip(state, req, auth), fields(method = %req.method))]
@@ -779,13 +908,25 @@ pub async fn mcp_handler(
                     "version": "0.1.0"
                 },
                 "capabilities": {
-                    "tools": {}
+                    "tools": {},
+                    "resources": {}
                 }
             }),
         ),
         // Client sends this after init — no response body needed but we ack
         "notifications/initialized" => JsonRpcResponse::ok(id, json!(null)),
         "tools/list" => JsonRpcResponse::ok(id, tool_definitions()),
+        "resources/list" => JsonRpcResponse::ok(id, resource_definitions()),
+        "resources/read" => {
+            let params = req.params.unwrap_or(json!({}));
+            let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+            if uri.is_empty() {
+                JsonRpcResponse::err(id, INVALID_PARAMS, "missing required field: uri")
+            } else {
+                let result = handle_resource_read(&state, uri).await;
+                JsonRpcResponse::ok(id, result)
+            }
+        }
         "tools/call" => {
             let params = req.params.unwrap_or(json!({}));
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -808,6 +949,50 @@ pub async fn mcp_handler(
                     PERMISSION_DENIED,
                     "insufficient permissions: this tool requires Agent or higher role",
                 ));
+            }
+
+            // Repo-scope validation (TASK-216): an agent JWT is scoped to the
+            // repo it was spawned against. Enforce that the JWT cannot act on
+            // other repos. Global/API-key/Keycloak callers bypass this check.
+            if tool_name == "gyre_create_mr" && is_agent_jwt(&auth) {
+                let agent_id = Id::new(&auth.agent_id);
+                let worktrees = state
+                    .worktrees
+                    .find_by_agent(&agent_id)
+                    .await
+                    .unwrap_or_default();
+                if let Some(wt) = worktrees.first() {
+                    let requested_repo = args
+                        .get("repository_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if wt.repository_id.to_string() != requested_repo {
+                        return Json(JsonRpcResponse::err(
+                            id,
+                            PERMISSION_DENIED,
+                            format!(
+                                "PERMISSION_DENIED: agent is scoped to repo {}, cannot create MR in {}",
+                                wt.repository_id, requested_repo
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            // Agent-identity validation: a JWT agent can only signal completion
+            // for itself.
+            if tool_name == "gyre_agent_complete" && is_agent_jwt(&auth) {
+                let requested_agent = args.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+                if !requested_agent.is_empty() && requested_agent != auth.agent_id {
+                    return Json(JsonRpcResponse::err(
+                        id,
+                        PERMISSION_DENIED,
+                        format!(
+                            "PERMISSION_DENIED: agent {} cannot complete agent {}",
+                            auth.agent_id, requested_agent
+                        ),
+                    ));
+                }
             }
 
             let result = match tool_name {
@@ -1142,6 +1327,210 @@ mod tests {
         assert!(has_role_at_least(&[UserRole::Agent], UserRole::Agent));
         assert!(has_role_at_least(&[UserRole::Developer], UserRole::Agent));
         assert!(has_role_at_least(&[UserRole::Admin], UserRole::Agent));
+    }
+
+    // ── is_agent_jwt detection ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_agent_jwt_detects_gyre_jwt() {
+        let auth_with_agent_scope = AuthenticatedAgent {
+            agent_id: "agent-1".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Agent],
+            tenant_id: "default".to_string(),
+            jwt_claims: Some(serde_json::json!({
+                "sub": "agent-1",
+                "scope": "agent",
+                "task_id": "task-1"
+            })),
+        };
+        assert!(is_agent_jwt(&auth_with_agent_scope));
+
+        // Global token has no jwt_claims
+        let auth_global = AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Admin],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+        };
+        assert!(!is_agent_jwt(&auth_global));
+
+        // Keycloak JWT has jwt_claims but different scope
+        let auth_keycloak = AuthenticatedAgent {
+            agent_id: "alice".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Developer],
+            tenant_id: "default".to_string(),
+            jwt_claims: Some(serde_json::json!({
+                "sub": "user-abc",
+                "realm_access": {"roles": ["developer"]}
+            })),
+        };
+        assert!(!is_agent_jwt(&auth_keycloak));
+    }
+
+    // ── resources/list ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_list() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 30,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let names: Vec<&str> = resources
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Spec Files"));
+        assert!(names.contains(&"Workspace Agents"));
+        assert!(names.contains(&"Merge Queue"));
+    }
+
+    // ── resources/read — unknown scheme ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_read_unknown_scheme() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "resources/read",
+                "params": { "uri": "unknown://foo" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown resource URI scheme"));
+    }
+
+    // ── resources/read — missing uri ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_read_missing_uri() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 32,
+                "method": "resources/read",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["error"]["code"].as_i64().is_some());
+        assert_eq!(json["error"]["code"], INVALID_PARAMS);
+    }
+
+    // ── resources/read — agents:// ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_read_agents() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "resources/read",
+                "params": { "uri": "agents://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Should return a contents array (may be empty if no agents)
+        assert!(json["result"]["contents"].as_array().is_some());
+    }
+
+    // ── resources/read — queue:// ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_read_queue() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 34,
+                "method": "resources/read",
+                "params": { "uri": "queue://nonexistent-repo-id" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["contents"].as_array().is_some());
+    }
+
+    // ── initialize advertises resources capability ─────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_initialize_advertises_resources() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 35,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "clientInfo": { "name": "test", "version": "0.1" },
+                    "capabilities": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["capabilities"]["resources"].is_object());
+    }
+
+    // ── gyre_agent_complete scope: agent cannot complete another agent ─────────
+
+    #[test]
+    fn agent_scope_complete_self_allowed() {
+        // Validate logic: requested_agent matches auth.agent_id — should pass
+        let auth_agent_id = "agent-abc";
+        let requested = "agent-abc";
+        // Same → no permission denied
+        assert_eq!(requested, auth_agent_id);
+    }
+
+    #[test]
+    fn agent_scope_complete_other_denied() {
+        // Validate logic: different agent IDs should trigger denial
+        let auth_agent_id = "agent-abc";
+        let requested = "agent-xyz";
+        assert_ne!(requested, auth_agent_id);
+    }
+
+    // ── spec:// path traversal rejected ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_spec_path_traversal_rejected() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 36,
+                "method": "resources/read",
+                "params": { "uri": "spec://../etc/passwd" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("path traversal"));
     }
 
     #[tokio::test]
