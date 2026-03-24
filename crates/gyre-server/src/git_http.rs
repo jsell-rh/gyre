@@ -1119,6 +1119,7 @@ async fn process_spec_lifecycle(
             task.description = Some(format!(
                 "Auto-created by spec lifecycle hook.\nSpec: {path}\nRepo: {repo_id}"
             ));
+            task.spec_path = Some(path.clone());
 
             match state.tasks.create(&task).await {
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
