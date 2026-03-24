@@ -9,6 +9,7 @@
     edges = [],
     repoId = '',
     onSelectNode = undefined,
+    showSpecLinkage = false,
   } = $props();
 
   const navigate = getContext('navigate');
@@ -154,17 +155,31 @@
   // Drill-in state: when set, only show this node + immediate neighbors
   let drillNode = $state(null);
 
-  // Derived: visible nodes/edges (drill-in or full graph)
+  // Spec-linkage overlay state
+  let specLinkageOn = $state(showSpecLinkage);
+  let showUnspeccedOnly = $state(false);
+
+  // Spec linkage statistics
+  let specCounts = $derived(() => {
+    const specced = nodes.filter(n => !!n.spec_path).length;
+    return { specced, unspecced: nodes.length - specced };
+  });
+
+  // Derived: visible nodes/edges (drill-in + unspecced filter)
   let visibleNodes = $derived(() => {
-    if (!drillNode) return nodes;
-    const neighborIds = new Set([drillNode.id]);
-    for (const e of edges) {
-      const src = e.source_id ?? e.from_node_id ?? e.from;
-      const tgt = e.target_id ?? e.to_node_id ?? e.to;
-      if (src === drillNode.id) neighborIds.add(tgt);
-      if (tgt === drillNode.id) neighborIds.add(src);
+    let result = nodes;
+    if (drillNode) {
+      const neighborIds = new Set([drillNode.id]);
+      for (const e of edges) {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        if (src === drillNode.id) neighborIds.add(tgt);
+        if (tgt === drillNode.id) neighborIds.add(src);
+      }
+      result = result.filter(n => neighborIds.has(n.id));
     }
-    return nodes.filter(n => neighborIds.has(n.id));
+    if (showUnspeccedOnly) result = result.filter(n => !n.spec_path);
+    return result;
   });
 
   let visibleEdges = $derived(() => {
@@ -235,6 +250,17 @@
     if (type === 'function') return 'ellipse';
     if (type === 'endpoint') return 'hexagon';
     return 'rect';
+  }
+
+  // Spec-linkage ring color for a node
+  function specRingColor(node) {
+    if (!node.spec_path) return { color: '#ef4444', dashed: true };
+    switch (node.spec_confidence) {
+      case 'High':   return { color: '#22c55e', dashed: false };
+      case 'Medium': return { color: '#eab308', dashed: false };
+      case 'Low':    return { color: '#f97316', dashed: false };
+      default:       return { color: '#ef4444', dashed: true };
+    }
   }
 
   // Compute SVG bounds based on node positions
@@ -451,6 +477,26 @@
         <span class="drill-label">Drill-in: <strong>{drillNode.name}</strong></span>
       {/if}
       <button
+        class="tool-btn"
+        class:active={specLinkageOn}
+        onclick={() => (specLinkageOn = !specLinkageOn)}
+        title="Toggle spec linkage overlay"
+        aria-pressed={specLinkageOn}
+      >
+        Spec Linkage
+      </button>
+      {#if specLinkageOn}
+        <button
+          class="tool-btn"
+          class:active={showUnspeccedOnly}
+          onclick={() => (showUnspeccedOnly = !showUnspeccedOnly)}
+          title="Show only unspecced nodes"
+          aria-pressed={showUnspeccedOnly}
+        >
+          Unspecced only ({specCounts().unspecced})
+        </button>
+      {/if}
+      <button
         class="tool-btn risk-toggle"
         class:active={showRiskHeatmap}
         onclick={() => (showRiskHeatmap = !showRiskHeatmap)}
@@ -533,6 +579,7 @@
           {@const isRiskHighlighted = highlightedNodeId === node.id}
           {@const isHighlighted = isFindHighlighted || isRiskHighlighted}
           {@const isDimmed = highlightedNodeIds.size > 0 && !highlightedNodeIds.has(node.id)}
+          {@const ring = specLinkageOn ? specRingColor(node) : null}
           {@const scale = getNodeScale(node.id)}
           <g
             class="graph-node"
@@ -583,6 +630,19 @@
                 opacity="0.9"
               />
             {/if}
+            <!-- Spec-linkage ring overlay -->
+            {#if ring}
+              <circle
+                class="spec-ring"
+                r="36"
+                fill="none"
+                stroke={ring.color}
+                stroke-width="2.5"
+                stroke-dasharray={ring.dashed ? '4 3' : 'none'}
+                opacity="0.85"
+                pointer-events="none"
+              />
+            {/if}
             <text
               text-anchor="middle"
               dominant-baseline="middle"
@@ -603,6 +663,36 @@
           </g>
         {/each}
       </svg>
+
+      <!-- Spec-linkage legend overlay -->
+      {#if specLinkageOn}
+        <div class="spec-legend" aria-label="Spec linkage legend">
+          <div class="spec-legend-title">Spec Coverage</div>
+          {#each [
+            { label: 'High confidence', color: '#22c55e', dashed: false },
+            { label: 'Medium confidence', color: '#eab308', dashed: false },
+            { label: 'Low confidence', color: '#f97316', dashed: false },
+            { label: 'Unspecced', color: '#ef4444', dashed: true },
+          ] as entry}
+            <div class="spec-legend-item">
+              <svg width="20" height="12" aria-hidden="true">
+                <circle
+                  cx="6" cy="6" r="5"
+                  fill="none"
+                  stroke={entry.color}
+                  stroke-width="2"
+                  stroke-dasharray={entry.dashed ? '3 2' : 'none'}
+                />
+              </svg>
+              <span>{entry.label}</span>
+            </div>
+          {/each}
+          <div class="spec-legend-counts">
+            <span class="spec-count specced">{specCounts().specced} specced</span>
+            <span class="spec-count unspecced">{specCounts().unspecced} unspecced</span>
+          </div>
+        </div>
+      {/if}
 
       <!-- Risk heat-map sidebar panel -->
       {#if showRiskHeatmap}
@@ -909,6 +999,12 @@
     flex-shrink: 0;
   }
 
+  .tool-btn.active {
+    background: rgba(34, 197, 94, 0.12);
+    border-color: #22c55e;
+    color: #22c55e;
+  }
+
   .drill-back {
     border-color: var(--color-primary);
     color: var(--color-primary);
@@ -1050,6 +1146,57 @@
     background: var(--color-border, #1e293b);
     margin: 4px 0;
   }
+
+  /* Spec-linkage legend overlay */
+  .spec-legend {
+    position: absolute;
+    bottom: var(--space-4);
+    left: var(--space-4);
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-width: 160px;
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+  }
+
+  .spec-legend-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-1);
+  }
+
+  .spec-legend-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .spec-legend-counts {
+    display: flex;
+    gap: var(--space-3);
+    padding-top: var(--space-1);
+    border-top: 1px solid var(--color-border);
+    margin-top: var(--space-1);
+  }
+
+  .spec-count {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+
+  .spec-count.specced { color: #22c55e; }
+  .spec-count.unspecced { color: #ef4444; }
 
   /* Detail panel */
   .detail-panel {
