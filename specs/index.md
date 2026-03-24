@@ -23,6 +23,7 @@ What Gyre does - the product.
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
 | ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
 | Hierarchy Enforcement | [`system/hierarchy-enforcement.md`](system/hierarchy-enforcement.md) | Making the ownership hierarchy load-bearing: Tenant entity, non-optional workspace_id, ABAC middleware integration, tenant filtering, legacy cleanup |
+| Unified Message Bus | [`system/message-bus.md`](system/message-bus.md) | One signed envelope for all inter-component communication: three-tier model (directed/event/telemetry), server-attested signing, workspace-scoped routing, ack-based delivery |
 | Design Principles | [`system/design-principles.md`](system/design-principles.md) | Core invariants that govern all decisions |
 | Source Control | [`system/source-control.md`](system/source-control.md) | Built-in git forge, MRs, merge queue, jj evaluation |
 | Forge Advantages | [`system/forge-advantages.md`](system/forge-advantages.md) | 8 capabilities only possible with a forge-native agent platform |
