@@ -40,7 +40,7 @@
 
   // SIEM modal state
   let siemModal = $state(null); // null | { mode: 'create' | 'edit', target?: obj }
-  let siemForm = $state({ url: '', format: 'json', enabled: true, filter: '' });
+  let siemForm = $state({ name: '', url: '', format: 'json', enabled: true, filter: '' });
   let siemLoading = $state(false);
 
   // Compute modal state
@@ -116,12 +116,18 @@
 
   // SIEM actions
   function openSiemCreate() {
-    siemForm = { url: '', format: 'json', enabled: true, filter: '' };
+    siemForm = { name: '', url: '', format: 'json', enabled: true, filter: '' };
     siemModal = { mode: 'create' };
   }
 
   function openSiemEdit(target) {
-    siemForm = { url: target.url ?? '', format: target.format ?? 'json', enabled: target.enabled ?? true, filter: target.filter ?? '' };
+    siemForm = {
+      name: target.name ?? '',
+      url: target.config?.url ?? '',
+      format: target.config?.format ?? 'json',
+      enabled: target.enabled ?? true,
+      filter: target.config?.filter ?? '',
+    };
     siemModal = { mode: 'edit', target };
   }
 
@@ -129,12 +135,13 @@
 
   async function saveSiem() {
     siemLoading = true;
+    const config = { url: siemForm.url, format: siemForm.format, filter: siemForm.filter };
     try {
       if (siemModal.mode === 'create') {
-        await api.siemCreate(siemForm);
+        await api.siemCreate({ name: siemForm.name, target_type: 'webhook', config, enabled: siemForm.enabled });
         toastSuccess('SIEM target created.');
       } else {
-        await api.siemUpdate(siemModal.target.id, siemForm);
+        await api.siemUpdate(siemModal.target.id, { config, enabled: siemForm.enabled });
         toastSuccess('SIEM target updated.');
       }
       siemTargets = await api.siemList().then(r => Array.isArray(r) ? r : (r?.targets ?? []));
@@ -168,7 +175,9 @@
   async function saveCompute() {
     computeLoading = true;
     try {
-      await api.computeCreate(computeForm);
+      const body = { name: computeForm.name, target_type: computeForm.target_type };
+      if (computeForm.host) body.config = { host: computeForm.host, port: computeForm.port || undefined };
+      await api.computeCreate(body);
       computeTargets = await api.computeList().then(r => Array.isArray(r) ? r : (r?.targets ?? []));
       toastSuccess('Compute target created.');
       closeComputeModal();
@@ -783,9 +792,9 @@
           <tbody>
             {#each siemTargets as target}
               <tr>
-                <td class="mono dim">{target.url}</td>
-                <td class="dim">{target.format ?? 'json'}</td>
-                <td class="dim">{target.filter || '—'}</td>
+                <td class="mono dim">{target.config?.url ?? target.url ?? '—'}</td>
+                <td class="dim">{target.config?.format ?? target.format ?? 'json'}</td>
+                <td class="dim">{target.config?.filter ?? (target.filter || '—')}</td>
                 <td>
                   <Badge value={target.enabled ? 'active' : 'idle'} />
                 </td>
@@ -980,6 +989,12 @@
     onkeydown={(e) => { if (e.key === 'Escape') closeSiemModal(); }}
   >
     <h3 class="modal-title">{siemModal.mode === 'create' ? 'Add SIEM Target' : 'Edit SIEM Target'}</h3>
+    {#if siemModal.mode === 'create'}
+    <div class="form-field">
+      <label class="form-label" for="siem-name">Name</label>
+      <input id="siem-name" class="filter-input full-width" bind:value={siemForm.name} placeholder="e.g. splunk-prod" onkeydown={(e) => e.key === 'Enter' && saveSiem()} />
+    </div>
+    {/if}
     <div class="form-field">
       <label class="form-label" for="siem-url">Webhook URL</label>
       <input id="siem-url" class="filter-input full-width" bind:value={siemForm.url} placeholder="https://siem.example.com/ingest" onkeydown={(e) => e.key === 'Enter' && saveSiem()} />
@@ -1002,7 +1017,7 @@
     </div>
     <div class="modal-actions">
       <button class="secondary-btn" onclick={closeSiemModal}>Cancel</button>
-      <button class="primary-btn" onclick={saveSiem} disabled={siemLoading || !siemForm.url}>
+      <button class="primary-btn" onclick={saveSiem} disabled={siemLoading || !siemForm.url || (siemModal?.mode === 'create' && !siemForm.name)}>
         {siemLoading ? 'Saving…' : 'Save'}
       </button>
     </div>
