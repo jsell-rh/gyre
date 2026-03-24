@@ -120,6 +120,7 @@ How Gyre gets built - process and standards for the agent team.
 | M31: UI Journeys | [`milestones/m31-ui-journeys.md`](milestones/m31-ui-journeys.md) | Intent-centric dashboard: Inbox (action queue), Briefing (narrative digest), System Explorer Canvas (MoldableView SVG graph), navigation restructure, keyboard shortcuts `i`/`b` |
 | M32: Meta-Spec Reconciliation | [`milestones/m32-meta-spec-reconciliation.md`](milestones/m32-meta-spec-reconciliation.md) | Spec `kind` field (meta:persona/principle/standard/process), workspace meta-spec-set bindings, blast-radius endpoint, `meta_spec_set_sha` in spawn provenance, MetaSpecs UI |
 | M34: Hierarchy Enforcement | [`milestones/m34-hierarchy-enforcement.md`](milestones/m34-hierarchy-enforcement.md) | Load-bearing ownership hierarchy: Tenant entity, non-optional workspace_id, ABAC middleware, tenant isolation, auth gap fixes, URL restructure |
+| M35: Unified Message Bus | (see [`system/message-bus.md`](system/message-bus.md)) | Signed message envelope replacing REST inbox + domain events + activity store. Depends on M34 Slice 3. |
 
 ## Open Questions
 

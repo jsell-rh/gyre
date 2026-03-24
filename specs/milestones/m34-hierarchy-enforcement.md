@@ -17,15 +17,15 @@ Six vertical slices, each independently shippable and testable. Earlier slices c
 **What:** Add three architecture lint scripts that catch hierarchy and authorization violations. These run in CI and pre-commit, giving agents immediate feedback.
 
 **Deliverables:**
-- `scripts/check-api-auth.sh` — scans `api_router()` route registrations; for every `post()`, `put()`, `delete()` handler, greps the handler's function signature for an authorization extractor (`AdminOnly`, `RequireDeveloper`, `RequireAgent`, `RequireReadOnly`, or `AuthenticatedAgent`). Fails with remediation instructions if any are missing.
+- `scripts/check-api-auth.sh` — scans `api_router()` route registrations against the ABAC `ResourceResolver` registry. Every route (GET/POST/PUT/DELETE) must have a corresponding `RouteResourceMapping` entry or be in the ABAC-exempt list. This covers reads too, because workspace-membership enforcement requires resource resolution on all requests.
 - `scripts/check-tenant-filter.sh` — scans all `impl ... for SqliteStorage` and `impl ... for PgStorage` query methods; verifies that every method building a Diesel `QueryDsl` chain includes `.filter(<table>::tenant_id.eq(`. Fails with the method name and file location.
-- `scripts/check-hierarchy.sh` — scans domain struct definitions in `crates/gyre-domain/src/` for the fields `workspace_id` and `tenant_id`; fails if any are declared as `Option<Id>` instead of `Id`. (Note: this script will fail immediately against current code — that's expected. It documents the target state. Disable it until Slice 3 completes, then enable.)
-- Add all three to `.pre-commit-config.yaml` (check-hierarchy disabled initially).
+- `scripts/check-hierarchy.sh` — scans domain struct definitions for `Option<Id>` on hierarchy fields. Gated by `GYRE_CHECK_HIERARCHY=1` env var (see script line 20). Initially disabled (`GYRE_CHECK_HIERARCHY` not set). Slice 3 enables it by setting `GYRE_CHECK_HIERARCHY=1` in CI workflow env.
+- Add all three to `.pre-commit-config.yaml` and CI.
 - Add all three to CI workflow.
 
 **Tests:** The scripts themselves are the tests. Verify they catch known violations in current code.
 
-**Why first:** These scripts protect every subsequent slice. An agent working on Slice 4 who forgets an auth extractor gets immediate feedback, not a security review finding months later.
+**Why first:** These scripts protect every subsequent slice. An agent working on Slice 4 who forgets a `RouteResourceMapping` entry gets immediate feedback.
 
 ### Slice 2: Tenant Entity
 
@@ -61,53 +61,9 @@ Six vertical slices, each independently shippable and testable. Earlier slices c
 
 **Migration safety:** The backfill migration runs before the column constraint change. If any row has `workspace_id IS NULL` and there's no default workspace, the migration fails loudly rather than silently corrupting data.
 
-### Slice 4: Fix Authorization Gaps
+### Slice 4: ABAC Middleware
 
-**What:** Add RBAC extractors to all unprotected mutating endpoints. Fix tenant filtering in adapters. Remove duplicate spec approval.
-
-**Deliverables:**
-
-Authorization extractors added:
-| Endpoint | Extractor |
-|---|---|
-| `POST /api/v1/projects` | `RequireDeveloper` |
-| `PUT /api/v1/projects/:id` | `RequireDeveloper` |
-| `DELETE /api/v1/projects/:id` | `AdminOnly` |
-| `POST /api/v1/repos` | `RequireDeveloper` |
-| `POST /api/v1/tasks` | `RequireDeveloper` |
-| `PUT /api/v1/tasks/:id` | `RequireDeveloper` |
-| `POST /api/v1/agents` | `RequireAgent` |
-| `PUT /api/v1/agents/:id/status` | `RequireAgent` |
-| `POST /api/v1/merge-requests` | `RequireDeveloper` |
-| `POST /api/v1/agents/spawn` | `RequireDeveloper` |
-| `POST /api/v1/analytics/events` | `RequireAgent` |
-| `POST /api/v1/costs` | `RequireAgent` |
-| `POST /api/v1/audit/events` | `RequireAgent` |
-
-Tenant filtering fixed:
-- `MergeRequestRepository`: add `tenant_id` filter to `list()`, `list_by_status()`, `list_by_repo()`, `find_by_id()`
-- `RepoRepository`: add `tenant_id` filter to `list()`, `list_by_project()`
-- Verify all other repository implementations filter consistently
-
-Legacy cleanup:
-- Remove `POST /api/v1/specs/approve` from `gates.rs` (or redirect to path-scoped variant)
-- Remove `POST /api/v1/specs/revoke` from `gates.rs`
-- Move `POST /api/v1/search/reindex` to `POST /api/v1/admin/search/reindex`
-
-Persistence fix:
-- Create `MetaSpecSetRepository` port trait
-- Implement in SQLite/PG/memory adapters
-- Replace `meta_spec_sets: Arc<Mutex<HashMap<...>>>` in `AppState`
-
-**Tests:**
-- `scripts/check-api-auth.sh` passes (all mutating handlers have extractors)
-- `scripts/check-tenant-filter.sh` passes (all adapter queries filter tenant)
-- Integration test: `tests/tenant_isolation.rs` — two-tenant data isolation
-- Integration test: `tests/authorization_coverage.rs` — verify each newly-protected endpoint returns 403 for unauthorized callers
-
-### Slice 5: ABAC Middleware
-
-**What:** Wire ABAC evaluation into the axum middleware stack. Deploy built-in policies. Verify behavior matches existing RBAC.
+**What:** Wire ABAC evaluation into the axum middleware stack. Deploy built-in policies. This must land BEFORE Slice 5 (cleanup) so that all endpoints are protected when legacy code is removed.
 
 **Deliverables:**
 - `crates/gyre-server/src/abac_middleware.rs` — axum middleware that:
@@ -117,7 +73,7 @@ Persistence fix:
   4. Evaluates ABAC policies
   5. Returns 403 on Deny, proceeds on Allow
   6. Logs decision to audit trail
-- `ResourceResolver` struct: registry mapping route patterns to resource types
+- `ResourceResolver` struct: registry mapping route patterns to resource types (every route — GET/POST/PUT/DELETE — must have an entry for workspace resolution)
 - Built-in policies (seeded at startup, cannot be deleted):
   - `system-full-access` — system tokens bypass ABAC
   - `admin-all-operations` — Admin role allows all actions
@@ -132,23 +88,47 @@ Persistence fix:
 - Entity lookup cache: per-request cache of resolved entity (avoids double-lookup in handler)
 
 **Tests:**
+- `scripts/check-api-auth.sh` passes (all mutating routes have `ResourceResolver` entries)
 - `tests/abac_middleware.rs` — unit tests for middleware with mock policies
-- `tests/abac_builtin_policies.rs` — integration tests verifying built-in policies replicate current RBAC behavior exactly
+- `tests/abac_builtin_policies.rs` — integration tests verifying built-in policies enforce correct access control
 - `tests/workspace_scoping.rs` — entities in workspace A invisible from workspace B
 
-**Important:** RBAC extractors remain during this slice as defense-in-depth. They are not removed until Slice 5 is proven in CI.
+### Slice 5: Tenant Filtering + Legacy Cleanup
 
-### Slice 6: URL Restructure
-
-**What:** Add hierarchy-scoped routes as primary access patterns. Deprecate (don't remove) flat collection routes. Standardize parameter naming.
+**What:** Fix tenant filtering in adapters. Remove duplicate/legacy endpoints. Persist meta-spec-sets. ABAC middleware (Slice 4) already protects all endpoints, so this cleanup is safe.
 
 **Deliverables:**
 
-New routes (additions, not replacements):
+Tenant filtering:
+- `MergeRequestRepository`: add `tenant_id` filter to `list()`, `list_by_status()`, `list_by_repo()`, `find_by_id()`
+- `RepoRepository`: add `tenant_id` filter to `list()`, `list_by_workspace()`
+- Remove `list_by_project()` (Project entity removed by M33)
+- Verify all other repository implementations filter consistently
+
+Legacy cleanup:
+- Remove `POST /api/v1/specs/approve` from `gates.rs`
+- Remove `POST /api/v1/specs/revoke` from `gates.rs`
+- Move `POST /api/v1/search/reindex` to `POST /api/v1/admin/search/reindex`
+
+Persistence:
+- Create `MetaSpecSetRepository` port trait
+- Implement in SQLite/PG/memory adapters
+- Replace `meta_spec_sets: Arc<Mutex<HashMap<...>>>` in `AppState`
+
+**Tests:**
+- `scripts/check-tenant-filter.sh` passes (all adapter queries filter tenant)
+- Integration test: `tests/tenant_isolation.rs` — two-tenant data isolation
+
+### Slice 6: URL Restructure
+
+**What:** Implement hierarchy-scoped routes as primary access patterns. Standardize parameter naming.
+
+**Deliverables:**
+
+Primary routes:
 ```
 GET  /api/v1/workspaces/:workspace_id/tasks
 GET  /api/v1/workspaces/:workspace_id/agents
-GET  /api/v1/workspaces/:workspace_id/repos/:repo_id/merge-requests
 GET  /api/v1/workspaces/:workspace_id/merge-requests
 ```
 
@@ -158,18 +138,17 @@ Parameter renaming (in existing routes):
 | `:wt_id` | `:worktree_id` |
 | `:dep_id` | `:dependency_id` |
 
-Existing flat routes (`/api/v1/tasks`, `/api/v1/agents`, `/api/v1/merge-requests`) remain but add `Deprecation: true` response header. They will be moved to `/api/v1/admin/` in a future milestone.
+Flat convenience routes (`/api/v1/tasks/:id`, `/api/v1/agents/:id`, etc.) remain for single-entity-by-ID access per `api-conventions.md` §1.2.
 
-Git URL alignment (if M33 has landed):
+Git URL:
 ```
-/git/:workspace_slug/:repo_name/*   (new, primary)
-/git/:repo_id/:repo_name/*          (existing, deprecated)
+/git/:workspace_slug/:repo_name/*
 ```
 
 **Tests:**
 - `scripts/check-api-conventions.sh` passes
-- Integration tests for new scoped routes return the same data as flat routes (when called with the correct workspace)
-- Integration tests for parameter renaming (old names return 404 or redirect)
+- Integration tests for workspace-scoped routes
+- Integration tests for git URL resolution (workspace_slug + repo_name → repo entity)
 
 ---
 
@@ -179,7 +158,7 @@ Git URL alignment (if M33 has landed):
 |---|---|
 | `Tenant` exists as domain entity with default instance | Unit tests, bootstrap smoke test |
 | `workspace_id` is `Id` (not `Option<Id>`) on Task, Agent, MR, Repo | `scripts/check-hierarchy.sh`, compiler |
-| Every mutating endpoint has an auth extractor | `scripts/check-api-auth.sh` |
+| Every route has a `RouteResourceMapping` in the ABAC `ResourceResolver` | `scripts/check-api-auth.sh` |
 | Every adapter query filters by `tenant_id` | `scripts/check-tenant-filter.sh` |
 | Two-tenant data isolation holds | `tests/tenant_isolation.rs` |
 | ABAC middleware evaluates on every request | `tests/abac_middleware.rs` |
@@ -196,7 +175,11 @@ Git URL alignment (if M33 has landed):
 - **M33 (Remove Project):** Slice 6 git URL changes depend on M33 landing first. All other slices are independent.
 - **Existing specs:** `platform-model.md`, `abac-policy-engine.md`, `identity-security.md` — this milestone implements what they define.
 
+## Successor: Unified Message Bus
+
+The unified message bus (`message-bus.md`) depends on M34 Slice 3 (non-optional `workspace_id`) and should be implemented as the next milestone after M34. It replaces the REST inbox, domain event broadcast, and activity store with a single signed message envelope. See `message-bus.md` for the full spec.
+
 ## Risk
 
-- **Slice 3 (non-optional workspace_id)** is the highest-risk migration. It touches every entity type and every test. The backfill migration must be tested against a copy of production data before running.
-- **Slice 5 (ABAC middleware)** changes the authorization model for every request. Defense-in-depth (keeping RBAC extractors) mitigates regression risk during rollout.
+- **Slice 3 (non-optional workspace_id)** touches every entity type and every test. Comprehensive test coverage is essential.
+- **Slice 4 (ABAC middleware)** changes the authorization model for every request. Integration tests must verify every endpoint returns correct 200/403 behavior before merging.
