@@ -1,0 +1,652 @@
+<script>
+  import Badge from './Badge.svelte';
+  import EmptyState from './EmptyState.svelte';
+
+  let {
+    nodes = [],
+    edges = [],
+    onSelectNode = undefined,
+  } = $props();
+
+  // Pan/zoom state
+  let svgEl = $state(null);
+  let viewBox = $state({ x: 0, y: 0, w: 900, h: 600 });
+  let isPanning = $state(false);
+  let panStart = $state({ x: 0, y: 0 });
+
+  // Selected node
+  let selectedNode = $state(null);
+
+  // Layout: position nodes
+  let nodePositions = $derived(() => {
+    if (!nodes.length) return {};
+    const byType = {};
+    for (const n of nodes) {
+      const t = n.node_type ?? 'Unknown';
+      byType[t] = (byType[t] ?? []);
+      byType[t].push(n);
+    }
+
+    const typeOrder = ['package', 'module', 'type', 'interface', 'function', 'endpoint', 'component', 'table', 'constant'];
+    const cols = Object.keys(byType).sort((a, b) => {
+      const ai = typeOrder.indexOf(a);
+      const bi = typeOrder.indexOf(b);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
+
+    const positions = {};
+    const colW = 160;
+    const rowH = 60;
+    const startX = 80;
+    const startY = 60;
+
+    cols.forEach((col, ci) => {
+      const group = byType[col];
+      group.forEach((n, ri) => {
+        positions[n.id] = {
+          x: startX + ci * colW,
+          y: startY + ri * rowH,
+        };
+      });
+    });
+
+    return positions;
+  });
+
+  // Node type → color mapping (node_type values are snake_case from API)
+  function nodeColor(type) {
+    switch (type) {
+      case 'package':   return { fill: '#3b1fa8', stroke: '#7c5ff5' };
+      case 'module':    return { fill: '#1a3a6b', stroke: '#4a9eff' };
+      case 'type':      return { fill: '#14532d', stroke: '#22c55e' };
+      case 'interface': return { fill: '#78350f', stroke: '#f59e0b' };
+      case 'function':  return { fill: '#134e4a', stroke: '#14b8a6' };
+      case 'endpoint':  return { fill: '#7f1d1d', stroke: '#ef4444' };
+      case 'component': return { fill: '#4a1d96', stroke: '#a78bfa' };
+      case 'table':     return { fill: '#374151', stroke: '#9ca3af' };
+      case 'constant':  return { fill: '#713f12', stroke: '#fbbf24' };
+      default:          return { fill: '#1e293b', stroke: '#64748b' };
+    }
+  }
+
+  function nodeShape(type) {
+    if (type === 'interface') return 'diamond';
+    if (type === 'function') return 'ellipse';
+    if (type === 'endpoint') return 'hexagon';
+    return 'rect';
+  }
+
+  // Compute SVG bounds based on node positions
+  let canvasBounds = $derived(() => {
+    const pos = nodePositions();
+    const xs = Object.values(pos).map(p => p.x);
+    const ys = Object.values(pos).map(p => p.y);
+    if (!xs.length) return { w: 900, h: 600 };
+    return {
+      w: Math.max(900, Math.max(...xs) + 200),
+      h: Math.max(600, Math.max(...ys) + 120),
+    };
+  });
+
+  function getPos(id) {
+    const p = nodePositions()[id];
+    return p ?? { x: 400, y: 300 };
+  }
+
+  // Pan/zoom handlers
+  function onMouseDown(e) {
+    if (e.button !== 0) return;
+    // Only pan if not clicking a node
+    if (e.target.closest('.graph-node')) return;
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY };
+    e.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    if (!isPanning) return;
+    const dx = e.clientX - panStart.x;
+    const dy = e.clientY - panStart.y;
+    const scaleX = viewBox.w / (svgEl?.clientWidth ?? 900);
+    const scaleY = viewBox.h / (svgEl?.clientHeight ?? 600);
+    viewBox = {
+      ...viewBox,
+      x: viewBox.x - dx * scaleX,
+      y: viewBox.y - dy * scaleY,
+    };
+    panStart = { x: e.clientX, y: e.clientY };
+  }
+
+  function onMouseUp() {
+    isPanning = false;
+  }
+
+  function onWheel(e) {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 1.15 : 0.87;
+    const rect = svgEl?.getBoundingClientRect();
+    const mx = rect ? (e.clientX - rect.left) / rect.width * viewBox.w + viewBox.x : viewBox.x + viewBox.w / 2;
+    const my = rect ? (e.clientY - rect.top) / rect.height * viewBox.h + viewBox.y : viewBox.y + viewBox.h / 2;
+    viewBox = {
+      x: mx - (mx - viewBox.x) * factor,
+      y: my - (my - viewBox.y) * factor,
+      w: viewBox.w * factor,
+      h: viewBox.h * factor,
+    };
+  }
+
+  function resetView() {
+    const b = canvasBounds();
+    viewBox = { x: 0, y: 0, w: b.w, h: b.h };
+  }
+
+  function selectNode(node) {
+    selectedNode = node;
+    onSelectNode?.(node);
+  }
+
+  function closeDetail() {
+    selectedNode = null;
+  }
+
+  // Node shape renderers
+  function rectPath(cx, cy, w, h) {
+    const x = cx - w / 2, y = cy - h / 2;
+    return `M${x},${y + 3} Q${x},${y} ${x + 3},${y} L${x + w - 3},${y} Q${x + w},${y} ${x + w},${y + 3} L${x + w},${y + h - 3} Q${x + w},${y + h} ${x + w - 3},${y + h} L${x + 3},${y + h} Q${x},${y + h} ${x},${y + h - 3} Z`;
+  }
+
+  function diamondPath(cx, cy, s) {
+    return `M${cx},${cy - s} L${cx + s},${cy} L${cx},${cy + s} L${cx - s},${cy} Z`;
+  }
+
+  function hexPath(cx, cy, r) {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+      const a = (Math.PI / 180) * (60 * i - 30);
+      pts.push(`${cx + r * Math.cos(a)},${cy + r * Math.sin(a)}`);
+    }
+    return `M${pts[0]} L${pts.slice(1).join(' L')} Z`;
+  }
+
+  function relativeTime(ts) {
+    if (!ts) return '';
+    const diff = Date.now() / 1000 - ts;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+</script>
+
+<div class="canvas-wrap">
+  {#if !nodes.length}
+    <EmptyState
+      title="No graph data"
+      message="Select a repository to view its knowledge graph. Graph nodes are extracted on push."
+    />
+  {:else}
+    <div class="canvas-toolbar">
+      <button class="tool-btn" onclick={resetView} title="Reset view">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/>
+        </svg>
+        Reset
+      </button>
+      <span class="node-count">{nodes.length} nodes · {edges.length} edges</span>
+      <div class="legend">
+        {#each [['Package','#7c5ff5'],['Module','#4a9eff'],['Type','#22c55e'],['Interface','#f59e0b'],['Function','#14b8a6'],['Endpoint','#ef4444'],['Component','#a78bfa'],['Table','#9ca3af'],['Constant','#fbbf24']] as [label, color]}
+          <span class="legend-item">
+            <span class="legend-dot" style="background:{color}"></span>
+            {label}
+          </span>
+        {/each}
+      </div>
+    </div>
+
+    <div class="graph-area" class:has-panel={!!selectedNode}>
+      <!-- SVG Canvas -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <svg
+        bind:this={svgEl}
+        class="graph-svg"
+        class:panning={isPanning}
+        viewBox="{viewBox.x} {viewBox.y} {viewBox.w} {viewBox.h}"
+        role="application"
+        aria-label="Architecture graph canvas — pan with drag, zoom with scroll"
+        onmousedown={onMouseDown}
+        onmousemove={onMouseMove}
+        onmouseup={onMouseUp}
+        onmouseleave={onMouseUp}
+        onwheel={onWheel}
+      >
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#475569" />
+          </marker>
+          <marker id="arrow-hover" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8" />
+          </marker>
+        </defs>
+
+        <!-- Edges -->
+        {#each edges as edge}
+          {@const from = getPos(edge.source_id ?? edge.from_node_id ?? edge.from)}
+          {@const to = getPos(edge.target_id ?? edge.to_node_id ?? edge.to)}
+          <line
+            class="graph-edge"
+            x1={from.x} y1={from.y}
+            x2={to.x} y2={to.y}
+            marker-end="url(#arrow)"
+          />
+        {/each}
+
+        <!-- Nodes -->
+        {#each nodes as node}
+          {@const pos = getPos(node.id)}
+          {@const colors = nodeColor(node.node_type)}
+          {@const shape = nodeShape(node.node_type)}
+          {@const isSelected = selectedNode?.id === node.id}
+          <g
+            class="graph-node"
+            class:selected={isSelected}
+            transform="translate({pos.x},{pos.y})"
+            role="button"
+            tabindex="0"
+            aria-label="{node.node_type}: {node.name}"
+            aria-pressed={isSelected}
+            onclick={() => selectNode(node)}
+            onkeydown={(e) => e.key === 'Enter' && selectNode(node)}
+          >
+            {#if shape === 'diamond'}
+              <path
+                d={diamondPath(0, 0, 22)}
+                fill={colors.fill}
+                stroke={isSelected ? '#fff' : colors.stroke}
+                stroke-width={isSelected ? 2 : 1.5}
+                opacity="0.9"
+              />
+            {:else if shape === 'ellipse'}
+              <ellipse
+                rx="28" ry="14"
+                fill={colors.fill}
+                stroke={isSelected ? '#fff' : colors.stroke}
+                stroke-width={isSelected ? 2 : 1.5}
+                opacity="0.9"
+              />
+            {:else if shape === 'hexagon'}
+              <path
+                d={hexPath(0, 0, 22)}
+                fill={colors.fill}
+                stroke={isSelected ? '#fff' : colors.stroke}
+                stroke-width={isSelected ? 2 : 1.5}
+                opacity="0.9"
+              />
+            {:else}
+              <!-- rect (Package, Module, Struct, Table, Spec, default) -->
+              <path
+                d={rectPath(0, 0, 64, 28)}
+                fill={colors.fill}
+                stroke={isSelected ? '#fff' : colors.stroke}
+                stroke-width={isSelected ? 2 : 1.5}
+                opacity="0.9"
+              />
+            {/if}
+            <text
+              text-anchor="middle"
+              dominant-baseline="middle"
+              font-size="9"
+              fill="#f1f5f9"
+              font-family="var(--font-mono)"
+              pointer-events="none"
+              style="user-select:none"
+            >
+              {(node.name ?? '').substring(0, 12)}
+            </text>
+            {#if isSelected}
+              <circle r="4" cx="26" cy="-12" fill="var(--color-primary)" />
+            {/if}
+          </g>
+        {/each}
+      </svg>
+
+      <!-- Detail side panel -->
+      {#if selectedNode}
+        {@const colors = nodeColor(selectedNode.node_type)}
+        <div class="detail-panel" role="complementary" aria-label="Node details">
+          <div class="panel-header" style="border-left: 3px solid {colors.stroke}">
+            <div class="panel-title-row">
+              <span class="panel-type">{selectedNode.node_type}</span>
+              <button class="close-btn" onclick={closeDetail} aria-label="Close detail panel">×</button>
+            </div>
+            <span class="panel-name">{selectedNode.name}</span>
+            {#if selectedNode.qualified_name && selectedNode.qualified_name !== selectedNode.name}
+              <span class="panel-qualified">{selectedNode.qualified_name}</span>
+            {/if}
+          </div>
+
+          <div class="panel-body">
+            {#if selectedNode.file_path}
+              <div class="panel-row">
+                <span class="panel-label">File</span>
+                <span class="panel-val mono">{selectedNode.file_path}:{selectedNode.line_start ?? ''}</span>
+              </div>
+            {/if}
+
+            {#if selectedNode.visibility}
+              <div class="panel-row">
+                <span class="panel-label">Visibility</span>
+                <Badge variant="default" value={selectedNode.visibility} />
+              </div>
+            {/if}
+
+            {#if selectedNode.spec_path}
+              <div class="panel-row">
+                <span class="panel-label">Spec</span>
+                <span class="panel-val mono spec-link">{selectedNode.spec_path}</span>
+              </div>
+            {/if}
+
+            {#if selectedNode.spec_confidence}
+              <div class="panel-row">
+                <span class="panel-label">Confidence</span>
+                <Badge
+                  variant={selectedNode.spec_confidence === 'High' ? 'success' : selectedNode.spec_confidence === 'Medium' ? 'warning' : 'default'}
+                  value={selectedNode.spec_confidence}
+                />
+              </div>
+            {/if}
+
+            {#if selectedNode.doc_comment}
+              <div class="panel-section">
+                <div class="panel-label">Doc</div>
+                <p class="panel-doc">{selectedNode.doc_comment}</p>
+              </div>
+            {/if}
+
+            <div class="panel-metrics">
+              {#if selectedNode.complexity != null}
+                <div class="metric">
+                  <span class="metric-val">{selectedNode.complexity}</span>
+                  <span class="metric-label">complexity</span>
+                </div>
+              {/if}
+              {#if selectedNode.churn_count_30d != null}
+                <div class="metric">
+                  <span class="metric-val">{selectedNode.churn_count_30d}</span>
+                  <span class="metric-label">churn/30d</span>
+                </div>
+              {/if}
+            </div>
+
+            {#if selectedNode.last_modified_at}
+              <div class="panel-row">
+                <span class="panel-label">Modified</span>
+                <span class="panel-val">{relativeTime(selectedNode.last_modified_at)}</span>
+              </div>
+            {/if}
+
+            {#if selectedNode.last_modified_by}
+              <div class="panel-row">
+                <span class="panel-label">By agent</span>
+                <span class="panel-val mono">{selectedNode.last_modified_by}</span>
+              </div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+</div>
+
+<style>
+  .canvas-wrap {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .canvas-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .tool-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    transition: border-color var(--transition-fast), color var(--transition-fast);
+  }
+
+  .tool-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-text);
+  }
+
+  .node-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .legend {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .graph-area {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .graph-svg {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    background: var(--color-surface);
+    cursor: grab;
+    display: block;
+  }
+
+  .graph-svg.panning {
+    cursor: grabbing;
+  }
+
+  .graph-edge {
+    stroke: #334155;
+    stroke-width: 1.5;
+    stroke-opacity: 0.7;
+    transition: stroke var(--transition-fast);
+  }
+
+  .graph-node {
+    cursor: pointer;
+  }
+
+  .graph-node:hover path,
+  .graph-node:hover ellipse {
+    filter: brightness(1.3);
+  }
+
+  .graph-node.selected path,
+  .graph-node.selected ellipse {
+    filter: brightness(1.4);
+  }
+
+  /* Detail panel */
+  .detail-panel {
+    width: 280px;
+    flex-shrink: 0;
+    background: var(--color-surface);
+    border-left: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    flex-shrink: 0;
+  }
+
+  .panel-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-1);
+  }
+
+  .panel-type {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .close-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0;
+  }
+
+  .close-btn:hover { color: var(--color-text); }
+
+  .panel-name {
+    display: block;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+
+  .panel-qualified {
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    margin-top: 2px;
+    word-break: break-all;
+  }
+
+  .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .panel-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .panel-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .panel-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+    min-width: 64px;
+  }
+
+  .panel-val {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    word-break: break-all;
+  }
+
+  .panel-val.mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .spec-link {
+    color: var(--color-primary);
+  }
+
+  .panel-doc {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.5;
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    font-style: italic;
+  }
+
+  .panel-metrics {
+    display: flex;
+    gap: var(--space-4);
+  }
+
+  .metric {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .metric-val {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    line-height: 1;
+  }
+
+  .metric-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+</style>
