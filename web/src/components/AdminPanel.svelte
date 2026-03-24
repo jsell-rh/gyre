@@ -794,7 +794,7 @@
               <tr>
                 <td class="mono dim">{target.config?.url ?? target.url ?? '—'}</td>
                 <td class="dim">{target.config?.format ?? target.format ?? 'json'}</td>
-                <td class="dim">{target.config?.filter ?? target.filter || '—'}</td>
+                <td class="dim">{target.config?.filter ?? (target.filter || '—')}</td>
                 <td>
                   <Badge value={target.enabled ? 'active' : 'idle'} />
                 </td>
