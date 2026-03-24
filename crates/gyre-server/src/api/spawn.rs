@@ -91,7 +91,7 @@ pub async fn spawn_agent(
         .map_err(ApiError::Forbidden)?;
 
     // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
-    super::budget::check_spawn_budget(&state, &repo.project_id.to_string())
+    super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
         .await
         .map_err(ApiError::TooManyRequests)?;
 
@@ -136,7 +136,7 @@ pub async fn spawn_agent(
         agent.disconnected_behavior = behavior;
     }
     agent.assign_task(Id::new(&req.task_id));
-    agent.workspace_id = repo.workspace_id.clone();
+    agent.workspace_id = Some(repo.workspace_id.clone());
     agent
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
@@ -245,8 +245,8 @@ pub async fn spawn_agent(
     task.updated_at = now;
     state.tasks.update(&task).await?;
 
-    // Build clone URL: {base_url}/git/{project_id}/{repo_name}
-    let clone_url = format!("{}/git/{}/{}", state.base_url, repo.project_id, repo.name);
+    // Build clone URL: {base_url}/git/{repo_id}/{repo_name}
+    let clone_url = format!("{}/git/{}/{}", state.base_url, repo.id, repo.name);
 
     // M19.1: Resolve the effective compute target.
     // Priority: compute_target_id from request → GYRE_DEFAULT_COMPUTE_TARGET env → local.
@@ -731,7 +731,7 @@ pub async fn spawn_agent(
     let _ = state.analytics.record(&ev).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
-    super::budget::increment_active_agents(&state, &repo.project_id.to_string()).await;
+    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
 
     // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
     // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
@@ -881,7 +881,7 @@ pub async fn complete_agent(
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        super::budget::decrement_active_agents(&state, &repo.project_id.to_string()).await;
+        super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
 
     // Notify the spawning user that an MR needs review (M22.8).
@@ -918,7 +918,7 @@ mod tests {
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -1073,8 +1073,8 @@ mod tests {
             "clone_url should contain /git/: {clone_url}"
         );
         assert!(
-            clone_url.contains("proj-1"),
-            "clone_url should contain project id: {clone_url}"
+            clone_url.contains(&repo_id),
+            "clone_url should contain repo id: {clone_url}"
         );
         assert!(
             clone_url.contains("test-repo"),

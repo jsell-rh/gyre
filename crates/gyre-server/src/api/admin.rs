@@ -26,7 +26,7 @@ pub struct SystemHealthResponse {
     pub agent_count: usize,
     pub active_agents: usize,
     pub task_count: usize,
-    pub project_count: usize,
+    pub repo_count: usize,
     pub version: &'static str,
 }
 
@@ -42,7 +42,7 @@ pub async fn admin_health(
         .filter(|a| a.status == AgentStatus::Active)
         .count();
     let tasks = state.tasks.list().await?;
-    let projects = state.projects.list().await?;
+    let repos = state.repos.list().await?;
 
     Ok(Json(SystemHealthResponse {
         status: "ok",
@@ -50,7 +50,7 @@ pub async fn admin_health(
         agent_count: agents.len(),
         active_agents,
         task_count: tasks.len(),
-        project_count: projects.len(),
+        repo_count: repos.len(),
         version: env!("CARGO_PKG_VERSION"),
     }))
 }
@@ -186,8 +186,7 @@ pub async fn admin_export(
     _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (projects, agents, tasks, merge_requests, activity_events) = tokio::try_join!(
-        state.projects.list(),
+    let (agents, tasks, merge_requests, activity_events) = tokio::try_join!(
         state.agents.list(),
         state.tasks.list(),
         state.merge_requests.list(),
@@ -199,7 +198,6 @@ pub async fn admin_export(
 
     Ok(Json(serde_json::json!({
         "exported_at": now_secs(),
-        "projects": projects,
         "repos": repos,
         "agents": agents,
         "tasks": tasks,
@@ -404,15 +402,15 @@ pub async fn admin_seed(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SeedResponse>, ApiError> {
     use gyre_domain::{
-        Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Project, Repository, Task,
+        Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
         TaskPriority, TaskStatus,
     };
 
-    // Idempotency: if seed project already exists, return early.
-    let existing = state.projects.find_by_id(&Id::new("seed-proj-1")).await?;
+    // Idempotency: if seed repo already exists, return early.
+    let existing = state.repos.find_by_id(&Id::new("seed-repo-1")).await?;
     if existing.is_some() {
         return Ok(Json(SeedResponse {
-            projects: 2,
+            projects: 0,
             repos: 3,
             agents: 4,
             tasks: 6,
@@ -425,34 +423,26 @@ pub async fn admin_seed(
 
     let now = now_secs();
 
-    // ── Projects ──────────────────────────────────────────────────────────────
-    let mut proj1 = Project::new(Id::new("seed-proj-1"), "Gyre Platform", now - 3600);
-    proj1.description = Some("Core platform services and agent infrastructure".to_string());
-    let mut proj2 = Project::new(Id::new("seed-proj-2"), "Infrastructure", now - 3600);
-    proj2.description = Some("NixOS configs, CI/CD pipelines, and tooling".to_string());
-    state.projects.create(&proj1).await?;
-    state.projects.create(&proj2).await?;
-
     // ── Repos ─────────────────────────────────────────────────────────────────
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),
-        Id::new("seed-proj-1"),
+        Id::new("default"),
         "gyre-core",
-        "./repos/seed-proj-1/gyre-core.git",
+        "./repos/default/gyre-core.git",
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
-        Id::new("seed-proj-1"),
+        Id::new("default"),
         "gyre-web",
-        "./repos/seed-proj-1/gyre-web.git",
+        "./repos/default/gyre-web.git",
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
-        Id::new("seed-proj-2"),
+        Id::new("default"),
         "infra-config",
-        "./repos/seed-proj-2/infra-config.git",
+        "./repos/default/infra-config.git",
         now - 3300,
     );
     state.repos.create(&repo1).await?;
@@ -1096,7 +1086,6 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json["projects"].is_array());
         assert!(json["repos"].is_array());
         assert!(json["agents"].is_array());
         assert!(json["tasks"].is_array());
@@ -1335,8 +1324,8 @@ mod tests {
         assert_eq!(json["activity_events"], 5);
         assert_eq!(json["already_seeded"], false);
 
-        let projects = state.projects.list().await.unwrap();
-        assert_eq!(projects.len(), 2);
+        let repos = state.repos.list().await.unwrap();
+        assert_eq!(repos.len(), 3);
         let agents = state.agents.list().await.unwrap();
         assert_eq!(agents.len(), 4);
         let tasks = state.tasks.list().await.unwrap();
@@ -1379,9 +1368,9 @@ mod tests {
         let json2 = body_json(resp2).await;
         assert_eq!(json2["already_seeded"], true);
 
-        // No duplicate projects created
-        let projects = state.projects.list().await.unwrap();
-        assert_eq!(projects.len(), 2);
+        // No duplicate repos created
+        let repos = state.repos.list().await.unwrap();
+        assert_eq!(repos.len(), 3);
     }
 
     #[tokio::test]

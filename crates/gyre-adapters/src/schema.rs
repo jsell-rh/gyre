@@ -2,21 +2,8 @@
 // Matches migrations/2024-01-01-000001_initial_schema/up.sql
 
 diesel::table! {
-    projects (id) {
-        id -> Text,
-        name -> Text,
-        description -> Nullable<Text>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-        tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
-    }
-}
-
-diesel::table! {
     repositories (id) {
         id -> Text,
-        project_id -> Text,
         name -> Text,
         path -> Text,
         default_branch -> Text,
@@ -26,7 +13,7 @@ diesel::table! {
         mirror_interval_secs -> Nullable<BigInt>,
         last_mirror_sync -> Nullable<BigInt>,
         tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
     }
 }
 
@@ -531,7 +518,6 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
-    projects,
     repositories,
     agents,
     tasks,

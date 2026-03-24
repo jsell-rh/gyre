@@ -126,40 +126,28 @@ test.describe('Dashboard home', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Projects
+// Repositories (M33: Project entity removed, repos now workspace-scoped)
 // ---------------------------------------------------------------------------
 
-test.describe('Projects', () => {
-  test('create_project_via_modal', async ({ page }) => {
+test.describe('Repositories', () => {
+  test('repo_list_shows_new_repo_button', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Projects');
+    await navigateTo(page, 'Repositories');
 
-    // Click "New Project" button
-    const newProjectBtn = page.getByRole('button', { name: /new project/i });
-    await newProjectBtn.click();
-
-    // Modal opens — fill the form
-    const nameInput = page.locator('input[placeholder="my-project"], input[placeholder*="project"]').first();
-    await nameInput.waitFor({ state: 'visible' });
-    const projectName = `e2e-project-${Date.now()}`;
-    await nameInput.fill(projectName);
-
-    // Submit — use CSS locator: aria-hidden on modal-backdrop hides buttons from getByRole
-    await page.locator('[role="dialog"] button:has-text("Create Project")').click();
-
-    // Toast should appear confirming success
-    await expect(page.getByText('Project created')).toBeVisible({ timeout: 5000 });
+    // New Repo button should be visible
+    const newRepoBtn = page.getByRole('button', { name: /new repo/i });
+    await expect(newRepoBtn).toBeVisible({ timeout: 5000 });
   });
 
-  test('project_list_shows_empty_state_or_projects', async ({ page }) => {
+  test('repo_list_shows_repos_or_empty_state', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Projects');
+    await navigateTo(page, 'Repositories');
 
-    // Either projects are visible (from seed) or empty state is shown
-    const hasProjects = await page.locator('.project-card, [class*="card"]').count();
-    const emptyState = page.locator('[class*="empty"], text="No projects"');
+    // Either repos are visible (from seed) or empty state is shown
+    const hasRepos = await page.locator('.repo-card, [class*="card"]').count();
+    const emptyState = page.locator('[class*="empty"], text="No repositories"');
     // At least one of the two conditions holds
-    expect(hasProjects > 0 || await emptyState.count() > 0).toBeTruthy();
+    expect(hasRepos > 0 || await emptyState.count() > 0).toBeTruthy();
   });
 });
 

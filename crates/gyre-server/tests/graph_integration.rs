@@ -118,21 +118,11 @@ fn make_edge(repo_id: &str, src: &Id, tgt: &Id, edge_type: EdgeType) -> GraphEdg
 }
 
 /// Create a repo via REST and return its ID string.
-async fn create_repo(ctx: &Ctx, _proj_id: &str) -> String {
-    // Create project first.
-    let p = ctx
-        .post_json(
-            "/api/v1/projects",
-            json!({"name": format!("proj-{}", uuid::Uuid::new_v4()), "description": ""}),
-        )
-        .await;
-    let proj: Value = p.json().await.unwrap();
-    let pid = proj["id"].as_str().unwrap();
-
+async fn create_repo(ctx: &Ctx, _ws_id: &str) -> String {
     let r = ctx
         .post_json(
             "/api/v1/repos",
-            json!({"project_id": pid, "name": format!("repo-{}", uuid::Uuid::new_v4())}),
+            json!({"workspace_id": format!("ws-{}", uuid::Uuid::new_v4()), "name": format!("repo-{}", uuid::Uuid::new_v4())}),
         )
         .await;
     let repo: Value = r.json().await.unwrap();
@@ -583,28 +573,16 @@ async fn test_push_triggers_graph_extraction() {
 
     let client = reqwest::Client::new();
     let auth = format!("Bearer {token}");
-    let proj = format!(
-        "proj-{}",
+    let ws_id = format!(
+        "ws-{}",
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
 
-    // Create a project and repo.
-    let project_resp: Value = client
-        .post(format!("{api}/projects"))
-        .header("Authorization", &auth)
-        .json(&json!({ "name": &proj, "description": "graph extraction test" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let project_id = project_resp["id"].as_str().unwrap().to_string();
-
+    // Create a repo (no project needed in M33+).
     let repo_resp: Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth)
-        .json(&json!({ "project_id": &project_id, "name": "rust-repo" }))
+        .json(&json!({ "workspace_id": &ws_id, "name": "rust-repo" }))
         .send()
         .await
         .unwrap()
@@ -612,8 +590,8 @@ async fn test_push_triggers_graph_extraction() {
         .await
         .unwrap();
     let repo_id = repo_resp["id"].as_str().unwrap().to_string();
-    // Git URLs use project_id (UUID), not project name.
-    let clone_url = format!("{base_url}/git/{project_id}/rust-repo.git");
+    // Git URLs use repo_id directly.
+    let clone_url = format!("{base_url}/git/{repo_id}/rust-repo.git");
     let token_owned = token.to_string();
     let clone_url_owned = clone_url.clone();
 

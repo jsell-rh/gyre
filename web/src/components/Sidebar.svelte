@@ -43,8 +43,8 @@
   });
 
   function isActive(id) {
-    if (id === 'projects') {
-      return current === 'projects' || current === 'repo-detail' || current === 'mr-detail';
+    if (id === 'repos') {
+      return current === 'repos' || current === 'repo-detail' || current === 'mr-detail';
     }
     if (id === 'workspaces') {
       return current === 'workspaces' || current === 'workspace-detail';
@@ -296,10 +296,10 @@
       {/if}
       <ul role="list" aria-label={collapsed ? 'Source Control' : undefined}>
         <li>
-          <button class="nav-item" class:active={isActive('projects')} onclick={() => nav('projects')}
-            aria-label="Projects" aria-current={isActive('projects') ? 'page' : undefined}>
-            <span class="nav-icon" aria-hidden="true">{@html projectsIcon()}</span>
-            {#if !collapsed}<span class="nav-label">Projects</span>{/if}
+          <button class="nav-item" class:active={isActive('repos')} onclick={() => nav('repos')}
+            aria-label="Repositories" aria-current={isActive('repos') ? 'page' : undefined}>
+            <span class="nav-icon" aria-hidden="true">{@html reposIcon()}</span>
+            {#if !collapsed}<span class="nav-label">Repositories</span>{/if}
           </button>
         </li>
         <li>

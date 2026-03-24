@@ -107,7 +107,6 @@ mod tests {
             rate_limiter: crate::rate_limit::RateLimiter::new(rate),
             auth_token: base.auth_token.clone(),
             base_url: base.base_url.clone(),
-            projects: base.projects.clone(),
             repos: base.repos.clone(),
             agents: base.agents.clone(),
             tasks: base.tasks.clone(),

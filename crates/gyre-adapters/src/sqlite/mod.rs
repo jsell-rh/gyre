@@ -22,7 +22,6 @@ pub mod merge_request;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
-pub mod project;
 pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
@@ -154,7 +153,6 @@ mod tests {
         let (_tmp, storage) = tmp_storage();
         let mut conn = storage.pool.get().unwrap();
         let tables = [
-            "projects",
             "repositories",
             "agents",
             "tasks",

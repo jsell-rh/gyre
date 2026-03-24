@@ -259,7 +259,7 @@ pub async fn create_mr(
 
     // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
     if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
+        mr.workspace_id = Some(repo.workspace_id.clone());
         if let Ok(diff) = state
             .git_ops
             .diff(&repo.path, &req.target_branch, &req.source_branch)
