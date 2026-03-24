@@ -302,6 +302,7 @@ export const api = {
       body: JSON.stringify({ reason }),
     }),
   getSpecHistory: (path) => request(`/specs/${encodeURIComponent(path)}/history`),
+  getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
   // Search (M22.7)
@@ -352,6 +353,10 @@ export const api = {
     request(`/personas/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePersona: (id) =>
     request(`/personas/${id}`, { method: 'DELETE' }),
+  approvePersona: (id) =>
+    request(`/personas/${id}/approve`, { method: 'POST' }),
+  resolvePersona: (slug, scopeKind, scopeId) =>
+    request(`/personas/resolve?slug=${encodeURIComponent(slug)}&scope_kind=${encodeURIComponent(scopeKind)}&scope_id=${encodeURIComponent(scopeId)}`),
   // Dependency graph (M22.5)
   dependencyGraph: () => request('/dependencies/graph'),
   repoDependencies: (id) => request(`/repos/${id}/dependencies`),
@@ -373,5 +378,13 @@ export const api = {
   repoGraphTypes: (id) => request(`/repos/${id}/graph/types`),
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
+  getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphTimeline: (id, since, until) => {
+    const params = new URLSearchParams();
+    if (since != null) params.set('since', since);
+    if (until != null) params.set('until', until);
+    const qs = params.toString();
+    return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
+  },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
 };

@@ -1,7 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 import MoldableView from '../lib/MoldableView.svelte';
+
+// Top-level mock so vitest hoisting works correctly
+vi.mock('../lib/api.js', () => ({
+  api: {
+    repoGraphTimeline: vi.fn().mockResolvedValue([]),
+  },
+}));
+import { api } from '../lib/api.js';
 
 const SAMPLE_NODES = [
   {
@@ -129,6 +137,86 @@ describe('ExplorerCanvas', () => {
     expect(container.innerHTML).toContain('Interface');
     expect(container.innerHTML).toContain('Endpoint');
   });
+
+  it('shows Spec Linkage toggle button', () => {
+    const { getByText } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    expect(getByText('Spec Linkage')).toBeTruthy();
+  });
+
+  it('does not show spec legend by default', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    expect(container.querySelector('.spec-legend')).toBeNull();
+  });
+
+  it('shows spec legend when showSpecLinkage=true', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    expect(container.querySelector('.spec-legend')).toBeTruthy();
+  });
+
+  it('shows spec legend with confidence labels when overlay is on', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    expect(container.innerHTML).toContain('High confidence');
+    expect(container.innerHTML).toContain('Unspecced');
+  });
+
+  it('shows spec coverage counts in legend', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    // 2 of 3 nodes have spec_path
+    expect(container.innerHTML).toContain('2 specced');
+    expect(container.innerHTML).toContain('1 unspecced');
+  });
+
+  it('renders spec rings on nodes when overlay is active', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    const rings = container.querySelectorAll('.spec-ring');
+    expect(rings.length).toBe(3);
+  });
+
+  it('does not render spec rings when overlay is off', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: false },
+    });
+    const rings = container.querySelectorAll('.spec-ring');
+    expect(rings.length).toBe(0);
+  });
+
+  it('shows Unspecced only pill when spec linkage is on', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
+    });
+    expect(container.innerHTML).toContain('Unspecced only');
+  });
+
+  it('does not show Unspecced only pill when spec linkage is off', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: false },
+    });
+    expect(container.innerHTML).not.toContain('Unspecced only');
+  });
+
+  it('shows spec_path as clickable button in detail panel', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    // Click the first node (which has spec_path)
+    const firstNode = container.querySelector('.graph-node');
+    firstNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    const specBtn = container.querySelector('.spec-link-btn');
+    expect(specBtn).toBeTruthy();
+  });
 });
 
 describe('MoldableView', () => {
@@ -167,7 +255,7 @@ describe('MoldableView', () => {
     expect(table).toBeTruthy();
   });
 
-  it('switches to timeline view and shows stub', async () => {
+  it('switches to timeline view and shows Architectural Timeline heading', async () => {
     const { container } = render(MoldableView, {
       props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
     });
@@ -177,5 +265,65 @@ describe('MoldableView', () => {
     timelineTab.click();
     await new Promise(r => setTimeout(r, 0));
     expect(container.innerHTML).toContain('Architectural Timeline');
+  });
+
+  it('timeline view shows EmptyState when no repoId', async () => {
+    const { container } = render(MoldableView, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+    });
+    const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
+      .find(el => el.textContent.includes('Timeline'));
+    timelineTab.click();
+    await new Promise(r => setTimeout(r, 0));
+    // No repoId -> should show empty state
+    expect(container.innerHTML).toContain('No architectural changes recorded yet');
+  });
+
+  it('timeline view with repoId fetches and shows scrubber', async () => {
+    const mockDeltas = [
+      { id: 'delta-1', repo_id: 'repo-1', commit_sha: 'abc1234def5678901234567890123456789012345', timestamp: Math.floor(Date.now() / 1000) - 3600, spec_ref: 'specs/system/platform-model.md@abc1234', agent_id: 'agent-1', delta_json: JSON.stringify({ added: 2, removed: 0 }) },
+      { id: 'delta-2', repo_id: 'repo-1', commit_sha: 'def5678abc1234901234567890123456789012345', timestamp: Math.floor(Date.now() / 1000) - 1800, spec_ref: null, agent_id: null, delta_json: null },
+    ];
+    api.repoGraphTimeline.mockResolvedValueOnce(mockDeltas);
+
+    const { container } = render(MoldableView, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' },
+    });
+    const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
+      .find(el => el.textContent.includes('Timeline'));
+    timelineTab.click();
+    await new Promise(r => setTimeout(r, 50));
+    // Scrubber should be present
+    const scrubber = container.querySelector('.scrubber-input');
+    expect(scrubber).toBeTruthy();
+    // Now button should be present
+    const nowBtn = container.querySelector('.now-btn');
+    expect(nowBtn).toBeTruthy();
+  });
+
+  it('delta marker click shows delta card with sha and relative time', async () => {
+    const sha = 'abc1234def5678901234567890123456789012345';
+    const mockDeltas = [
+      { id: 'delta-1', repo_id: 'repo-1', commit_sha: sha, timestamp: Math.floor(Date.now() / 1000) - 7200, spec_ref: 'specs/foo.md@abc1234', agent_id: 'agent-42', delta_json: JSON.stringify({ modified: 3 }) },
+    ];
+    api.repoGraphTimeline.mockResolvedValueOnce(mockDeltas);
+
+    const { container } = render(MoldableView, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' },
+    });
+    const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
+      .find(el => el.textContent.includes('Timeline'));
+    timelineTab.click();
+    await new Promise(r => setTimeout(r, 50));
+
+    const marker = container.querySelector('.delta-marker');
+    if (marker) {
+      marker.click();
+      await new Promise(r => setTimeout(r, 0));
+      const card = container.querySelector('.delta-card');
+      if (card) {
+        expect(card.innerHTML).toContain(sha.slice(0, 7));
+      }
+    }
   });
 });

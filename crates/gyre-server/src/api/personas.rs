@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{BudgetConfig, Persona, PersonaScope};
+use gyre_domain::{BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -87,6 +87,13 @@ pub struct PersonaResponse {
     pub max_tokens: Option<u32>,
     pub budget: Option<BudgetConfig>,
     pub created_at: u64,
+    pub version: u32,
+    pub content_hash: String,
+    pub owner: Option<String>,
+    pub approval_status: PersonaApprovalStatus,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<u64>,
+    pub updated_at: u64,
 }
 
 impl From<Persona> for PersonaResponse {
@@ -104,6 +111,13 @@ impl From<Persona> for PersonaResponse {
             max_tokens: p.max_tokens,
             budget: p.budget,
             created_at: p.created_at,
+            version: p.version,
+            content_hash: p.content_hash,
+            owner: p.owner,
+            approval_status: p.approval_status,
+            approved_by: p.approved_by,
+            approved_at: p.approved_at,
+            updated_at: p.updated_at,
         }
     }
 }
@@ -128,6 +142,8 @@ pub async fn create_persona(
     persona.temperature = req.temperature;
     persona.max_tokens = req.max_tokens;
     persona.budget = req.budget;
+    // Recompute hash now that capabilities are set.
+    persona.refresh_content_hash();
     state.personas.create(&persona).await?;
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
@@ -200,6 +216,9 @@ pub async fn update_persona(
     if let Some(budget) = req.budget {
         persona.budget = Some(budget);
     }
+    persona.version += 1;
+    persona.updated_at = now_secs();
+    persona.refresh_content_hash();
     state.personas.update(&persona).await?;
     Ok(Json(PersonaResponse::from(persona)))
 }
@@ -216,6 +235,72 @@ pub async fn delete_persona(
         .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
     state.personas.delete(&Id::new(id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/personas/:id/approve — Admin only; sets approval_status=Approved.
+pub async fn approve_persona(
+    admin: crate::auth::AdminOnly,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<PersonaResponse>, ApiError> {
+    let mut persona = state
+        .personas
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
+    let now = now_secs();
+    persona.approval_status = PersonaApprovalStatus::Approved;
+    persona.approved_by = Some(admin.agent_id.clone());
+    persona.approved_at = Some(now);
+    persona.updated_at = now;
+    state.personas.update(&persona).await?;
+    Ok(Json(PersonaResponse::from(persona)))
+}
+
+#[derive(Deserialize)]
+pub struct ResolvePersonaQuery {
+    pub slug: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+}
+
+/// GET /api/v1/personas/resolve?scope_kind=Repo&scope_id={id}&slug={slug}
+/// Nearest-wins scope resolution: Repo > Workspace > Tenant.
+pub async fn resolve_persona(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ResolvePersonaQuery>,
+) -> Result<Json<PersonaResponse>, ApiError> {
+    let slug = q.slug.as_str();
+    let scope_id = Id::new(&q.scope_id);
+
+    // Try each scope in order: Repo -> Workspace -> Tenant
+    let scopes_to_try: Vec<PersonaScope> = match q.scope_kind.as_str() {
+        "Repo" => vec![
+            PersonaScope::Repo(scope_id.clone()),
+            PersonaScope::Workspace(scope_id.clone()),
+            PersonaScope::Tenant(scope_id.clone()),
+        ],
+        "Workspace" => vec![
+            PersonaScope::Workspace(scope_id.clone()),
+            PersonaScope::Tenant(scope_id.clone()),
+        ],
+        "Tenant" => vec![PersonaScope::Tenant(scope_id.clone())],
+        other => {
+            return Err(ApiError::InvalidInput(format!(
+                "unknown scope_kind: {other}"
+            )))
+        }
+    };
+
+    for scope in &scopes_to_try {
+        if let Some(persona) = state.personas.find_by_slug_and_scope(slug, scope).await? {
+            return Ok(Json(PersonaResponse::from(persona)));
+        }
+    }
+
+    Err(ApiError::NotFound(format!(
+        "persona with slug '{slug}' not found in scope chain"
+    )))
 }
 
 #[cfg(test)]

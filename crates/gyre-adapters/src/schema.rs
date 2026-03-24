@@ -62,6 +62,7 @@ diesel::table! {
         updated_at -> BigInt,
         tenant_id -> Text,
         workspace_id -> Nullable<Text>,
+        spec_path -> Nullable<Text>,
     }
 }
 
@@ -281,6 +282,13 @@ diesel::table! {
         max_tokens -> Nullable<Integer>,
         budget -> Nullable<Text>,
         created_at -> BigInt,
+        version -> Integer,
+        content_hash -> Text,
+        owner -> Nullable<Text>,
+        approval_status -> Text,
+        approved_by -> Nullable<Text>,
+        approved_at -> Nullable<BigInt>,
+        updated_at -> BigInt,
     }
 }
 
