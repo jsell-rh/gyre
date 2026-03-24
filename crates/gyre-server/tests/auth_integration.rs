@@ -52,6 +52,7 @@ async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
 
     // Pre-seed a user and API key before starting the server.
     let user = User::new(

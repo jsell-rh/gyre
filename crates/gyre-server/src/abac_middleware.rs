@@ -454,6 +454,26 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 850: Non-admin users denied from admin resources.
+        // Admin-all-operations (900) evaluates first and allows Admin role.
+        // This catches Developer, Agent, ReadOnly attempting admin endpoints.
+        Policy {
+            id: Id::new("builtin-admin-only-deny"),
+            name: "admin-only-deny".to_string(),
+            description: "Non-admin roles are denied access to admin resources".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 850,
+            effect: PolicyEffect::Deny,
+            conditions: vec![], // no conditions — matches everyone (Admin already allowed at 900)
+            actions: vec!["*".to_string()],
+            resource_types: vec!["admin".to_string()],
+            enabled: true,
+            built_in: true,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 800: Developer role → allow read + write + agent actions.
         Policy {
             id: Id::new("builtin-developer-write-access"),
