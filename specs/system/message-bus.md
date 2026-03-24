@@ -55,8 +55,9 @@ pub struct Message {
 
     // Delivery state — only semantically meaningful for Directed tier with
     // Destination::Agent. Always false for Event/Telemetry/Workspace messages.
-    // Excluded from API responses and WebSocket pushes (#[serde(skip_serializing)]).
-    // Only visible in the DB and in the GET inbox response (where it's useful).
+    // Excluded from send (POST) responses and WebSocket pushes via conditional
+    // serialization — the field IS included in GET inbox responses where the
+    // agent needs to see delivery state for crash recovery.
     pub acknowledged: bool,
 }
 
@@ -159,9 +160,12 @@ pub enum MessageKind {
 
 **`Custom(String)` tier:** Defaults to **Event** tier (signed, persisted with TTL). A sender can request Directed-tier handling by including `"tier": "directed"` in the request body, which makes the message ack-based. Telemetry tier is not available for Custom messages — if you need attestation, use Event; if you need delivery guarantees, use Directed.
 
-**Tier + Destination constraint:** Directed tier is only valid with `Destination::Agent(id)`. Directed + Workspace is rejected with 400 — ack-based delivery is meaningless for fan-out messages where no single agent owns the message. Event and Telemetry tiers work with any destination.
+**Tier + Destination constraints:**
+- Directed tier requires `Destination::Agent(id)`. Directed + Workspace is rejected with 400 — ack semantics are meaningless for fan-out.
+- Telemetry tier requires `Destination::Workspace(id)`. Telemetry + Broadcast is rejected with 400 — there is no valid `TelemetryBuffer` key for `workspace_id: None`. Telemetry + Agent is rejected — telemetry is observability, not communication.
+- Event tier works with any destination.
 
-**Kind + Origin constraint:** Server-originated Event-tier kinds (`AgentCreated`, `TaskCreated`, `MrStatusChanged`, `GateFailure`, `PushRejected`, etc.) can only be emitted by `MessageOrigin::Server`. An agent attempting to send `"kind": "gate_failure"` receives 403. Agents may send Directed-tier kinds (`TaskAssignment`, `ReviewRequest`, `StatusUpdate`, `Escalation`) and Telemetry-tier kinds. Agents may also send `Custom(name)` at Event or Directed tier. This prevents agents from forging system events.
+**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all Event-tier kinds defined in the enum above (from `AgentCreated` through `AgentError`). The send handler checks: if `kind.server_only() && origin != Server`, reject with 403. This is structural — new server-only kinds added to the enum automatically get the restriction by updating `server_only()`, rather than maintaining a separate allowlist. Agents may send Directed-tier kinds, Telemetry-tier kinds, and `Custom(name)` at Event or Directed tier.
 
 **`Custom(String)` serialization:** Serde's `#[serde(other)]` attribute only works on unit variants, not tuple variants like `Custom(String)`. Therefore, `MessageKind` requires a **custom `Deserialize` implementation** — the same pattern already used by `AgEventType` in `gyre-common/src/protocol.rs` (lines 40-53). Serialization: known variants emit their snake_case name (e.g., `"task_assignment"`); `Custom(s)` emits the raw string. Deserialization: match against known names first; unknown strings become `Custom(s)`. The `kind` field on the `Message` struct is a plain string on the wire: `"kind": "task_assignment"`.
 
@@ -258,7 +262,7 @@ Clients connect to `GET /ws` and authenticate as today. After auth, the client s
 {"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700000}
 ```
 
-`last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen`, capped at 1000 messages. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
+`last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen` **filtered to the subscribed workspaces only**, capped at 1000 messages total across all subscribed workspaces. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
 
 The `Subscribe` variant is added to `gyre_common::WsMessage`. To avoid breaking old CLI versions, also add a catch-all `Unknown` variant with `#[serde(other)]` to `WsMessage` so unrecognized message types are silently ignored rather than causing deserialization errors.
 
@@ -332,12 +336,12 @@ pub trait MessageRepository: Send + Sync {
     /// List Directed messages for an agent after a cursor position, oldest first.
     /// Cursor is composite `(created_at, id)` to handle same-millisecond writes.
     /// Query: `WHERE (created_at, id) > (after_ts, after_id) ORDER BY created_at, id LIMIT limit`.
-    /// First poll: `after_ts=0, after_id=""`. Subsequent: use last message's values.
+    /// First poll: `after_ts=0, after_id=None`. Subsequent: use last message's values.
     async fn list_after(
         &self,
         agent_id: &Id,
         after_ts: u64,
-        after_id: &str,
+        after_id: Option<&Id>,
         limit: usize,
     ) -> Result<Vec<Message>>;
 
@@ -354,15 +358,16 @@ pub trait MessageRepository: Send + Sync {
     async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> Result<u64>;
 
     /// List messages in a workspace, optionally filtered by kind.
-    /// Cursor-based pagination: `before` is a `created_at` value — returns messages
-    /// with `created_at < before`, ordered by `created_at DESC`. This aligns with
-    /// the `idx_messages_workspace` index for efficient range scans.
+    /// Cursor-based pagination: composite `(before_ts, before_id)` — returns messages
+    /// with `(created_at, id) < (before_ts, before_id)`, ordered newest first.
+    /// Same composite cursor pattern as `list_after` to handle same-millisecond writes.
     async fn list_by_workspace(
         &self,
         workspace_id: &Id,
         kind: Option<&str>,
         since: Option<u64>,
-        before: Option<u64>,
+        before_ts: Option<u64>,
+        before_id: Option<&Id>,
         limit: Option<usize>,
     ) -> Result<Vec<Message>>;
 
@@ -372,14 +377,14 @@ pub trait MessageRepository: Send + Sync {
     async fn expire_events(&self, older_than: u64) -> Result<u64>;
 
     /// Delete Directed messages for dead agents older than the given epoch.
-    /// Matches messages where:
-    ///   (ack_reason IN ('agent_completed', 'agent_orphaned'))  -- completed/orphaned agents
-    ///   OR (to_type = 'agent' AND acknowledged = 0 AND created_at < older_than
-    ///       AND NOT EXISTS active agent with that to_id)        -- unclaimed messages
-    /// The second clause catches messages sent after agent completion that were
-    /// never acked and have no ack_reason. Requires a join/subquery against
-    /// the agents table to verify the agent is no longer active.
-    async fn expire_dead_inboxes(&self, older_than: u64) -> Result<u64>;
+    /// Matches messages where ack_reason IN ('agent_completed', 'agent_orphaned').
+    async fn expire_acked_inboxes(&self, older_than: u64) -> Result<u64>;
+
+    /// Delete unacked Directed messages for specific dead agent IDs.
+    /// The server layer (not the repository) determines which agents are dead
+    /// by querying AgentRepository, then passes the IDs here. This preserves
+    /// port isolation — MessageRepository does not depend on AgentRepository.
+    async fn expire_for_agents(&self, agent_ids: &[Id], older_than: u64) -> Result<u64>;
 }
 ```
 
@@ -510,7 +515,7 @@ Idempotent. Returns 200 whether the message was already acked or not.
 #### Querying (workspace-scoped)
 
 ```
-GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch>&before=<epoch>&limit=50
+GET /api/v1/workspaces/:id/messages?kind=gate_failure&since=<epoch_ms>&before_ts=<epoch_ms>&before_id=<msg-id>&limit=50
 Authorization: Bearer <token>
 ```
 
