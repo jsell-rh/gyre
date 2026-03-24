@@ -3,6 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
+use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
     DependencyEdge, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
@@ -11,7 +12,6 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
-use gyre_domain::BudgetUsage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
@@ -1706,16 +1706,16 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
         now: u64,
     ) -> Result<BudgetUsage> {
         let mut guard = self.store.lock().await;
-        let usage = guard.entry(entity_key.to_string()).or_insert_with(|| {
-            BudgetUsage {
+        let usage = guard
+            .entry(entity_key.to_string())
+            .or_insert_with(|| BudgetUsage {
                 entity_type: entity_type.to_string(),
                 entity_id: gyre_common::Id::new(entity_id.to_string()),
                 tokens_used_today: 0,
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
-            }
-        });
+            });
         usage.active_agents = usage.active_agents.saturating_add(1);
         Ok(usage.clone())
     }
@@ -1738,16 +1738,16 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
         cost_usd: f64,
     ) -> Result<()> {
         let mut guard = self.store.lock().await;
-        let usage = guard.entry(entity_key.to_string()).or_insert_with(|| {
-            BudgetUsage {
+        let usage = guard
+            .entry(entity_key.to_string())
+            .or_insert_with(|| BudgetUsage {
                 entity_type: entity_type.to_string(),
                 entity_id: gyre_common::Id::new(entity_id.to_string()),
                 tokens_used_today: 0,
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
-            }
-        });
+            });
         usage.tokens_used_today = usage.tokens_used_today.saturating_add(tokens);
         usage.cost_today += cost_usd;
         Ok(())
@@ -1772,12 +1772,22 @@ pub struct MemBudgetConfigRepository {
 
 #[async_trait]
 impl BudgetRepository for MemBudgetConfigRepository {
-    async fn set_config(&self, entity_key: &str, config: &gyre_domain::BudgetConfig) -> anyhow::Result<()> {
-        self.store.lock().await.insert(entity_key.to_string(), config.clone());
+    async fn set_config(
+        &self,
+        entity_key: &str,
+        config: &gyre_domain::BudgetConfig,
+    ) -> anyhow::Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(entity_key.to_string(), config.clone());
         Ok(())
     }
 
-    async fn get_config(&self, entity_key: &str) -> anyhow::Result<Option<gyre_domain::BudgetConfig>> {
+    async fn get_config(
+        &self,
+        entity_key: &str,
+    ) -> anyhow::Result<Option<gyre_domain::BudgetConfig>> {
         Ok(self.store.lock().await.get(entity_key).cloned())
     }
 
@@ -1787,7 +1797,13 @@ impl BudgetRepository for MemBudgetConfigRepository {
     }
 
     async fn list_all(&self) -> anyhow::Result<Vec<(String, gyre_domain::BudgetConfig)>> {
-        Ok(self.store.lock().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
     }
 }
 

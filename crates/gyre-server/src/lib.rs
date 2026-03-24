@@ -607,13 +607,19 @@ pub fn build_state(
         spec_ledger: Arc::new(Mutex::new(HashMap::new())),
         spec_approval_history: Arc::new(Mutex::new(Vec::new())),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
-        budget_configs: store!(dyn BudgetRepository, mem::MemBudgetConfigRepository::default()),
+        budget_configs: store!(
+            dyn BudgetRepository,
+            mem::MemBudgetConfigRepository::default()
+        ),
         budget_usages: store!(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
         ),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
-        workspaces: store!(dyn WorkspaceRepository, mem::MemWorkspaceRepository::default()),
+        workspaces: store!(
+            dyn WorkspaceRepository,
+            mem::MemWorkspaceRepository::default()
+        ),
         personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
         policies: store!(dyn PolicyRepository, mem::MemPolicyRepository::default()),
         workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
@@ -665,11 +671,7 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
     }
 
     // Idempotent: skip if any target with this name already exists.
-    if let Ok(Some(_)) = state
-        .kv_store
-        .kv_get("compute_targets", DEFAULT_NAME)
-        .await
-    {
+    if let Ok(Some(_)) = state.kv_store.kv_get("compute_targets", DEFAULT_NAME).await {
         tracing::debug!("default compute target '{DEFAULT_NAME}' already registered");
         return;
     }

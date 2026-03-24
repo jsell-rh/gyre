@@ -28,11 +28,7 @@ pub async fn discover_agents(
 
     let mut result: Vec<AgentCard> = Vec::new();
     for a in &agents {
-        if let Ok(Some(json)) = state
-            .kv_store
-            .kv_get("agent_cards", a.id.as_str())
-            .await
-        {
+        if let Ok(Some(json)) = state.kv_store.kv_get("agent_cards", a.id.as_str()).await {
             if let Ok(card) = serde_json::from_str::<AgentCard>(&json) {
                 result.push(card);
             }

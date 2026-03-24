@@ -77,14 +77,28 @@ pub async fn check_repo_abac(
     repo_id: &str,
     auth: &AuthenticatedAgent,
 ) -> Result<(), String> {
-    let repo_policies: Vec<AbacPolicy> = state
+    // Security invariant (M29.5B-A): if the store returns data that cannot
+    // be parsed, DENY access (fail-closed) rather than silently treating it
+    // as "no policies" which would bypass ABAC enforcement.
+    let raw = state
         .kv_store
         .kv_get("abac_policies", repo_id)
         .await
         .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+        .flatten();
+
+    let repo_policies: Vec<AbacPolicy> = match raw {
+        None => vec![], // No policies stored = unrestricted.
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            tracing::error!(
+                security = "abac_policy_parse_fail",
+                repo_id = repo_id,
+                err = %e,
+                "DENY: corrupt ABAC policy data in kv store"
+            );
+            format!("ABAC policy data corrupt for repo {repo_id}")
+        })?,
+    };
 
     if repo_policies.is_empty() {
         return Ok(()); // No policies = unrestricted.
@@ -288,7 +302,11 @@ mod tests {
         }];
         state
             .kv_store
-            .kv_set("abac_policies", "repo-1", serde_json::to_string(&policy).unwrap())
+            .kv_set(
+                "abac_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
             .await
             .unwrap();
         // Global token / API key: jwt_claims is None → bypass.
@@ -314,7 +332,11 @@ mod tests {
         }];
         state
             .kv_store
-            .kv_set("abac_policies", "repo-A", serde_json::to_string(&policy_a).unwrap())
+            .kv_set(
+                "abac_policies",
+                "repo-A",
+                serde_json::to_string(&policy_a).unwrap(),
+            )
             .await
             .unwrap();
         let auth = AuthenticatedAgent {
@@ -339,7 +361,11 @@ mod tests {
         }];
         state
             .kv_store
-            .kv_set("abac_policies", "repo-B", serde_json::to_string(&policy_b).unwrap())
+            .kv_set(
+                "abac_policies",
+                "repo-B",
+                serde_json::to_string(&policy_b).unwrap(),
+            )
             .await
             .unwrap();
         // Agent only has scope for repo:A, not repo:B
@@ -374,12 +400,20 @@ mod tests {
             }];
             state
                 .kv_store
-                .kv_set("abac_policies", "repo-A", serde_json::to_string(&pa).unwrap())
+                .kv_set(
+                    "abac_policies",
+                    "repo-A",
+                    serde_json::to_string(&pa).unwrap(),
+                )
                 .await
                 .unwrap();
             state
                 .kv_store
-                .kv_set("abac_policies", "repo-B", serde_json::to_string(&pb).unwrap())
+                .kv_set(
+                    "abac_policies",
+                    "repo-B",
+                    serde_json::to_string(&pb).unwrap(),
+                )
                 .await
                 .unwrap();
         }

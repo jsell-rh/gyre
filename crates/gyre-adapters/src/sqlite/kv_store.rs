@@ -293,8 +293,7 @@ impl BudgetUsageRepository for SqliteStorage {
                 .context("ensure budget_usage row")?;
             diesel::update(budget_usages::table.find(&key))
                 .set((
-                    budget_usages::active_agents
-                        .eq(budget_usages::active_agents + 1),
+                    budget_usages::active_agents.eq(budget_usages::active_agents + 1),
                     budget_usages::updated_at.eq(ts),
                 ))
                 .execute(&mut *conn)
@@ -365,8 +364,7 @@ impl BudgetUsageRepository for SqliteStorage {
                 .set((
                     budget_usages::tokens_used_today
                         .eq(budget_usages::tokens_used_today + tokens as i64),
-                    budget_usages::cost_today
-                        .eq(budget_usages::cost_today + cost_usd),
+                    budget_usages::cost_today.eq(budget_usages::cost_today + cost_usd),
                     budget_usages::updated_at.eq(ts),
                 ))
                 .execute(&mut *conn)

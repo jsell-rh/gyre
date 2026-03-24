@@ -321,7 +321,11 @@ pub async fn git_receive_pack(
                 .ok()
                 .flatten()
                 .is_some();
-            if has_policy { "server-verified" } else { "self-reported" }
+            if has_policy {
+                "server-verified"
+            } else {
+                "self-reported"
+            }
         } else {
             "unattested"
         }

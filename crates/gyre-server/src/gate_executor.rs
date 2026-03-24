@@ -509,7 +509,10 @@ async fn run_validation_agent_process(
 
 /// Remove a gate agent's token from the auth store.
 async fn revoke_gate_token(state: &Arc<AppState>, gate_agent_id: &str) {
-    let _ = state.kv_store.kv_remove("agent_tokens", gate_agent_id).await;
+    let _ = state
+        .kv_store
+        .kv_remove("agent_tokens", gate_agent_id)
+        .await;
 }
 
 async fn run_command(cmd: &str) -> (GateStatus, String) {
