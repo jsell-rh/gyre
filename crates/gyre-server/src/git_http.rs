@@ -387,6 +387,16 @@ pub async fn git_receive_pack(
                 &update.new_sha,
             )
             .await;
+            // Knowledge graph: extract Rust symbols and architecture (M30b).
+            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            crate::graph_extraction::extract_and_store_graph(
+                &repo_path_clone,
+                &repo_id_clone,
+                &update.new_sha,
+                state_clone.graph_store.as_ref(),
+                &git_bin,
+            )
+            .await;
         }
     });
 
