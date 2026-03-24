@@ -324,6 +324,15 @@ export const api = {
     const qs = params.toString();
     return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
   },
+  // Tenants (M34)
+  tenants: () => request('/tenants'),
+  tenant: (id) => request(`/tenants/${id}`),
+  createTenant: (data) =>
+    request('/tenants', { method: 'POST', body: JSON.stringify(data) }),
+  updateTenant: (id, data) =>
+    request(`/tenants/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteTenant: (id) =>
+    request(`/tenants/${id}`, { method: 'DELETE' }),
   // Workspaces (M22.5)
   workspaces: () => request('/workspaces'),
   workspace: (id) => request(`/workspaces/${id}`),

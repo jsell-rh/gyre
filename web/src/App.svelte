@@ -21,6 +21,7 @@
   import SpecApprovalsView from './components/SpecApprovalsView.svelte';
   import SpecDashboard from './components/SpecDashboard.svelte';
   import AuditView from './components/AuditView.svelte';
+  import TenantList from './components/TenantList.svelte';
   import WorkspaceList from './components/WorkspaceList.svelte';
   import WorkspaceDetail from './components/WorkspaceDetail.svelte';
   import PersonaCatalog from './components/PersonaCatalog.svelte';
@@ -51,6 +52,11 @@
   let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
   let tokenInfo = $state(null);
   let searchOpen = $state(false);
+
+  // Tenant selector state
+  let tenants = $state([]);
+  let selectedTenantId = $state(localStorage.getItem('gyre_tenant_id') || '');
+  let selectedTenant = $state(null);
 
   // Workspace selector state
   let workspaces = $state([]);
@@ -135,7 +141,8 @@
 
   // Sync browser history ↔ app state using onMount to avoid reactive loops
   onMount(async () => {
-    // Fetch workspaces for the selector
+    // Fetch tenants and workspaces for selectors
+    try { tenants = await api.tenants(); } catch { /* ignore */ }
     try { workspaces = await api.workspaces(); } catch { /* ignore */ }
 
     // Support both path-based URLs and legacy hash-based URLs
@@ -241,6 +248,13 @@
     };
   });
 
+  function onTenantChange(e) {
+    const id = e.target.value;
+    selectedTenantId = id;
+    localStorage.setItem('gyre_tenant_id', id);
+    selectedTenant = id ? (tenants.find(t => t.id === id) ?? null) : null;
+  }
+
   function onWorkspaceChange(e) {
     const id = e.target.value;
     selectedWorkspaceId = id;
@@ -276,6 +290,7 @@
     'meta-specs':       'Meta-Specs',
     admin:              'Admin Panel',
     settings:           'Settings',
+    tenants:            'Tenants',
     workspaces:         'Workspaces',
     'workspace-detail': 'Workspace',
     personas:           'Persona Catalog',
@@ -322,6 +337,25 @@
         </nav>
       </div>
       <div class="topbar-right">
+        <!-- Tenant selector -->
+        {#if tenants.length > 1}
+          <div class="ws-selector-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" class="ws-icon" aria-hidden="true">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+            </svg>
+            <select
+              class="ws-selector"
+              value={selectedTenantId}
+              onchange={onTenantChange}
+              aria-label="Select tenant"
+            >
+              <option value="">All Tenants</option>
+              {#each tenants as t}
+                <option value={t.id}>{t.name}</option>
+              {/each}
+            </select>
+          </div>
+        {/if}
         <!-- Workspace selector -->
         {#if workspaces.length > 0}
           <div class="ws-selector-wrap">
@@ -438,6 +472,8 @@
         <SpecGraph />
       {:else if currentView === 'meta-specs'}
         <MetaSpecs />
+      {:else if currentView === 'tenants'}
+        <TenantList />
       {:else if currentView === 'workspaces'}
         <WorkspaceList onSelect={(ws) => navigate('workspace-detail', { workspace: ws })} />
       {:else if currentView === 'workspace-detail' && selectedWorkspace}

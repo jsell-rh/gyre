@@ -270,6 +270,8 @@ pub struct AppState {
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
+    /// Tenant repository (M34).
+    pub tenants: Arc<dyn gyre_ports::TenantRepository>,
     /// Workspace repository (M22.1).
     pub workspaces: Arc<dyn WorkspaceRepository>,
     /// Persona repository (M22.1).
@@ -644,6 +646,10 @@ pub fn build_state(
             mem::MemBudgetUsageRepository::default()
         ),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        tenants: store!(
+            dyn gyre_ports::TenantRepository,
+            mem::MemTenantRepository::default()
+        ),
         workspaces: store!(
             dyn WorkspaceRepository,
             mem::MemWorkspaceRepository::default()

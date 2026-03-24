@@ -164,6 +164,7 @@ mod tests {
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
             search: base.search.clone(),
+            tenants: base.tenants.clone(),
             workspaces: base.workspaces.clone(),
             personas: base.personas.clone(),
             policies: base.policies.clone(),
