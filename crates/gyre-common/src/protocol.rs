@@ -1,3 +1,4 @@
+use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// AG-UI typed event taxonomy (replaces free-form event_type strings).
@@ -87,6 +88,12 @@ pub struct ActivityEventData {
     pub timestamp: u64,
 }
 
+/// Workspace scope for a WebSocket subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeScope {
+    pub workspace_id: Id,
+}
+
 /// WebSocket message types shared between server and CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -118,6 +125,21 @@ pub enum WsMessage {
     ActivityResponse {
         events: Vec<ActivityEventData>,
     },
+    /// Subscribe to workspace-scoped message delivery.
+    /// `last_seen` is epoch milliseconds — when present the server replays
+    /// persisted Event-tier messages with created_at > last_seen.
+    Subscribe {
+        scopes: Vec<SubscribeScope>,
+        last_seen: Option<u64>,
+    },
+    /// Sent by the server when replay was truncated at 1000 messages.
+    /// The client can fetch the full history via GET /api/v1/workspaces/:id/messages.
+    ReplayCatchUp {
+        truncated: bool,
+    },
+    /// Catch-all for unrecognized message types — silently ignored for forward compatibility.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
