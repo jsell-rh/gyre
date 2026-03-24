@@ -448,7 +448,7 @@ impl TaskRepository for MemTaskRepository {
             .lock()
             .await
             .values()
-            .filter(|t| t.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|t| &t.workspace_id == workspace_id)
             .cloned()
             .collect())
     }

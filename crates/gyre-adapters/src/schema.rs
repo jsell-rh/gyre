@@ -48,8 +48,9 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        repo_id -> Text,
     }
 }
 
