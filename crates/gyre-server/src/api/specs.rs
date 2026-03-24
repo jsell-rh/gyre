@@ -872,6 +872,7 @@ mod tests {
             path: path.to_string(),
             title: path.to_string(),
             owner: "user:jsell".to_string(),
+            kind: None,
             current_sha: "a".repeat(40),
             approval_mode: "human_only".to_string(),
             approval_status: status,
