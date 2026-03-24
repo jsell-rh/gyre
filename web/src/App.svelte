@@ -30,6 +30,7 @@
   import UserProfile from './components/UserProfile.svelte';
   import Inbox from './components/Inbox.svelte';
   import Briefing from './components/Briefing.svelte';
+  import ExplorerView from './components/ExplorerView.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Breadcrumb from './lib/Breadcrumb.svelte';
@@ -279,6 +280,7 @@
     budget:             'Budget Dashboard',
     dependencies:       'Dependency Graph',
     profile:            'My Profile',
+    explorer:           'System Explorer',
   };
 
   let breadcrumbs = $derived(() => {
@@ -443,6 +445,8 @@
         <DependencyGraph />
       {:else if currentView === 'profile'}
         <UserProfile />
+      {:else if currentView === 'explorer'}
+        <ExplorerView />
       {:else if currentView === 'admin'}
         <AdminPanel />
       {:else}
