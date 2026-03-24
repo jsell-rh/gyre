@@ -302,7 +302,7 @@
 
 {#if !$isLoading}
 <div class="app">
-  <Sidebar bind:current={currentView} onnavigate={(v) => navigate(v)} />
+  <Sidebar bind:current={currentView} onnavigate={(v) => navigate(v)} {selectedWorkspace} {selectedRepo} />
 
   <div class="main">
     <header class="topbar">
