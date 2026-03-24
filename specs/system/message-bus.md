@@ -301,7 +301,7 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 |---|---|---|
 | **Directed** | At-least-once (persisted until ack, redelivered on poll) | DB — no TTL, expires only on ack or agent completion |
 | **Event** | Best-effort push + queryable history | DB — configurable TTL (default 7 days, `GYRE_EVENT_TTL_SECS`) |
-| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. LRU eviction is global across workspaces (default cap 100, `GYRE_TELEMETRY_MAX_WORKSPACES`). **Accepted risk:** a noisy tenant can evict other tenants' buffers. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
+| **Telemetry** | Best-effort push only | In-memory ring buffer (default 10,000 entries/workspace, `GYRE_TELEMETRY_BUFFER_SIZE`). Keyed by `workspace_id` — read isolation is structural. LRU eviction is global across workspaces (default cap 100, `GYRE_TELEMETRY_MAX_WORKSPACES`). **Mitigation:** eviction prefers workspaces with the most entries (largest-first, not LRU), preventing a single tenant from flushing the entire buffer by creating many empty workspaces. Telemetry is best-effort; consumers who need durability should query Event-tier messages instead. |
 
 **Directed-tier queue depth:** Max 1000 unacked messages per agent (configurable, `GYRE_AGENT_INBOX_MAX`). When the limit is reached, new messages to that agent are rejected with 429 and the sender receives an error. Messages are NOT silently dropped — this preserves the at-least-once guarantee. The agent or an admin must ack or the agent must be completed/killed to free the inbox.
 
@@ -336,8 +336,11 @@ pub trait MessageRepository: Send + Sync {
     /// List Directed messages for an agent after a cursor position, oldest first.
     /// Cursor is composite `(created_at, id)` to handle same-millisecond writes.
     /// Query: `WHERE (created_at, id) > (after_ts, after_id) ORDER BY created_at, id LIMIT limit`.
-    /// First poll: `after_ts=0, after_id=None` → query degrades to `WHERE created_at > 0`.
-    /// Subsequent: use last message's (created_at, id) → `WHERE (created_at, id) > (ts, id)`.
+    /// Cursor is always composite `(created_at, id)`. When `after_id` is absent,
+    /// the query uses `WHERE created_at >= after_ts ORDER BY created_at, id LIMIT limit`
+    /// (timestamp-only lower bound). When `after_id` is present, the query uses the
+    /// full composite: `WHERE (created_at, id) > (after_ts, after_id)`.
+    /// First poll: `after_ts=0, after_id=None`. These are two intentional query paths.
     async fn list_after(
         &self,
         agent_id: &Id,
@@ -446,17 +449,16 @@ The existing `NotificationRepository` with 16 `NotificationType` variants overla
 - **Messages** are inter-component communication (agent-to-agent, server-to-agent). They are the raw events.
 - **Notifications** are user-facing alerts derived from messages. They have read/unread state, priority levels, and are scoped to human users, not agents.
 
-The notification system becomes a **consumer** of the message bus. The implementation mechanism: the server's message-send path (after storing the message and pushing to the broadcast channel) calls an in-process `MessageConsumer` trait:
+The notification system becomes a **consumer** of the message bus. The implementation mechanism: the server's message-send path (after storing the message) clones it into a bounded `tokio::sync::mpsc` channel. A background task drains the channel and dispatches to registered consumers:
 
 ```rust
 pub trait MessageConsumer: Send + Sync {
-    /// Called synchronously after a message is stored/broadcast.
-    /// Implementations must be fast (no blocking I/O in the hot path).
+    /// Called off the hot path in a background task. May perform I/O (DB writes, etc.).
     async fn on_message(&self, message: &Message);
 }
 ```
 
-The notification system implements `MessageConsumer`. When it receives a `GateFailure` message, it creates a `GateFailure` notification for the relevant human users. This replaces the current ad-hoc notification creation scattered across handlers. Additional consumers (e.g., SIEM forwarding, analytics) can implement the same trait.
+This decouples the send path from consumer latency — the hot path does one `mpsc::send` (non-blocking, bounded backpressure) and returns immediately. The notification system implements `MessageConsumer`: when it receives a `GateFailure` message, it creates a notification for the relevant human users. Additional consumers (e.g., SIEM forwarding, analytics) register on the same channel. If the channel is full, messages are dropped with a warning log — consumer processing must keep up, but slow consumers don't block message delivery.
 
 ### API
 
