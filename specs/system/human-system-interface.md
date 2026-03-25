@@ -384,6 +384,101 @@ This linkage is heuristic (name matching) and may not resolve every span. Unreso
 
 **Storage:** Traces are stored per-MR, capped at the most recent gate run per MR. Old traces are evicted when the MR merges (the merged trace is preserved on the `MergeAttestation` for provenance). This bounds storage: at most one trace per open MR.
 
+**Input/output truncation:** `input_summary` and `output_summary` are truncated to 4KB each. The full payloads are stored as a separate blob (zstd-compressed, max 1MB per trace) retrievable via `GET /api/v1/merge-requests/:id/trace/spans/:span_id/payload`. This keeps the trace timeline lightweight while allowing drill-down into full payloads.
+
+**Crate placement:** `GateTrace` and `TraceSpan` live in `gyre-common` (shared wire types). `TraceRepository` lives in `gyre-ports`. The OTLP receiver lives in `gyre-server` (it's an ingestion endpoint, not domain logic).
+
+**Port trait** (in `gyre-ports`):
+```rust
+#[async_trait]
+pub trait TraceRepository: Send + Sync {
+    /// Store a gate trace (replaces any existing trace for the same MR).
+    async fn store(&self, trace: &GateTrace) -> Result<()>;
+    /// Get the most recent trace for an MR.
+    async fn get_by_mr(&self, mr_id: &Id) -> Result<Option<GateTrace>>;
+    /// Get a specific span's full payload (input/output bodies).
+    async fn get_span_payload(&self, gate_run_id: &Id, span_id: &str) -> Result<Option<SpanPayload>>;
+    /// Promote a trace to permanent storage (called on MR merge for attestation).
+    async fn promote_to_attestation(&self, mr_id: &Id) -> Result<()>;
+    /// Delete traces for an MR (called on MR close without merge).
+    async fn delete_by_mr(&self, mr_id: &Id) -> Result<()>;
+}
+
+pub struct SpanPayload {
+    pub input: Option<Vec<u8>>,   // full request body
+    pub output: Option<Vec<u8>>,  // full response body
+}
+```
+
+**Gate configuration:** The `TraceCapture` gate is configured per-repo in the gate manifest:
+```yaml
+gates:
+  - name: trace-capture
+    type: TraceCapture
+    config:
+      # The gate runner starts an OTLP receiver on this port before running tests
+      otlp_port: 4317              # gRPC OTLP receiver port (default)
+      # Env var injected into the test process so the app sends spans to the collector
+      env:
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317"
+        OTEL_SERVICE_NAME: "{{repo_name}}"
+      # Which test command to instrument (runs with OTel env vars set)
+      test_command: "cargo test --features integration"
+      # Max spans per trace (prevents unbounded storage from fuzz tests)
+      max_spans: 10000
+      # Whether to capture external dependency spans (requires real network access)
+      capture_external: false      # default: false (use mocks)
+```
+
+The gate runner lifecycle:
+1. Start OTLP gRPC receiver on `otlp_port`
+2. Run `test_command` with the OTel env vars injected
+3. Collect all received spans
+4. Stop the receiver
+5. Resolve span-to-graph-node linkage (post-capture)
+6. Store the `GateTrace` via `TraceRepository::store`
+7. Report gate pass/fail (the trace gate itself always passes — trace capture is observational, not a quality gate)
+
+**OTLP receiver configuration** (server-level, `docs/server-config.md`):
+```
+GYRE_OTLP_ENABLED=true           # Enable the OTLP receiver (default: true)
+GYRE_OTLP_GRPC_PORT=4317         # gRPC OTLP receiver port (default: 4317)
+GYRE_OTLP_MAX_SPANS_PER_TRACE=10000  # Safety cap (default: 10000)
+```
+
+**REST endpoints:**
+
+`GET /api/v1/merge-requests/:id/trace` — returns the `GateTrace` for an MR. ABAC: `RouteResourceMapping` with `resource_type: "mr"`, `id_param: "id"`, `action: "read"`. Response (200):
+```json
+{
+  "mr_id": "...",
+  "gate_run_id": "...",
+  "commit_sha": "...",
+  "captured_at": 1711324800,
+  "span_count": 47,
+  "root_spans": ["span-001", "span-012"],
+  "spans": [
+    {
+      "span_id": "span-001",
+      "parent_span_id": null,
+      "operation_name": "POST /payments/retry",
+      "service_name": "payment-api",
+      "kind": "Server",
+      "start_time": 1711324800000000,
+      "duration_us": 300000,
+      "attributes": {"http.method": "POST", "http.status_code": "200"},
+      "input_summary": "{\"payment_id\": \"pay_123\", \"attempt\": 2}",
+      "output_summary": "{\"status\": \"success\", \"retry_id\": \"ret_456\"}",
+      "status": "Ok",
+      "graph_node_id": "node-endpoint-retry"
+    }
+  ]
+}
+```
+If no trace exists: 404. The `root_spans` array identifies top-level spans (entry points) for the flow animation.
+
+`GET /api/v1/merge-requests/:id/trace/spans/:span_id/payload` — returns the full input/output for a specific span. ABAC: same as parent. Response (200): `{input: "<base64>", output: "<base64>"}`. 404 if the span has no stored payload.
+
 #### Explorer Visualization: Animated Data Flow
 
 **Prior art:** Netflix Vizceral (animated particles flowing through a service graph), Kiali (Istio traffic flow), Jaeger (trace timeline with time scrubbing).
@@ -568,7 +663,23 @@ Each row links to the underlying data: clicking a gate result opens the gate det
 | Merge queue events | `QueueUpdated` messages |
 | Notifications created | `Notification` records |
 
-**Access:** The System Trace view is a detail panel tab ("Trace") available on MR and agent entities. It can also be accessed from the Explorer's Change View by clicking any change entry. Data endpoint: `GET /api/v1/merge-requests/:id/trace` — returns the assembled timeline (new endpoint, ABAC `resource_type: "mr"`, `action: "read"`).
+**Access:** The System Trace view is a detail panel tab ("Trace") available on MR and agent entities. It can also be accessed from the Explorer's Change View by clicking any change entry. Data endpoint: `GET /api/v1/merge-requests/:id/timeline` — returns the assembled SDLC timeline (ABAC `resource_type: "mr"`, `id_param: "id"`, `action: "read"`). Response (200):
+```json
+{
+  "mr_id": "...",
+  "events": [
+    {"timestamp": 1711324800, "type": "SpecLifecycleTrigger", "detail": {"spec_path": "...", "task_id": "..."}},
+    {"timestamp": 1711324815, "type": "AgentSpawned", "detail": {"agent_id": "...", "persona": "..."}},
+    {"timestamp": 1711324822, "type": "ConversationTurn", "detail": {"turn": 3, "summary": "Created RetryPolicy type"}},
+    {"timestamp": 1711324860, "type": "GitPush", "detail": {"commit_sha": "...", "files_changed": 3}},
+    {"timestamp": 1711324861, "type": "GateResult", "detail": {"gate": "cargo-test", "status": "pass"}},
+    {"timestamp": 1711324862, "type": "GraphExtraction", "detail": {"nodes_added": 2, "nodes_modified": 1}},
+    {"timestamp": 1711324870, "type": "MergeQueueEnqueued", "detail": {"position": 3}},
+    {"timestamp": 1711324880, "type": "Merged", "detail": {}}
+  ]
+}
+```
+Note: this is the SDLC activity timeline (what Gyre did). For the built software's data flow traces (OTel spans), see `GET /api/v1/merge-requests/:id/trace` in §3a.
 
 ### Saved Views (Curated, Shared)
 

@@ -426,7 +426,43 @@ Specifies spatial arrangement.
 | `"timeline"` | Nodes on a horizontal time axis by `last_modified` or delta timestamp. | Change history, evolution |
 | `"side-by-side"` | Two sub-views side by side. Used for spec realization and diffs. Not to be confused with the Split content area layout (§2) which is the main+detail panel pattern. | Comparison, before/after |
 | `"diff"` | Structural diff — added/modified/removed nodes between two graph snapshots. | Preview impact, change review |
-| `"flow"` | Animated particle flow (Vizceral-inspired). Nodes are services/modules; edges show data flow as animated particles. Each particle = one traced request. Node badges show aggregate metrics (RPS, error rate). Time-scrubbable. Requires `trace_source` in the data layer. | Request flow, data pipelines, understanding "what happens when X calls Y" |
+| `"flow"` | Animated particle flow (Vizceral-inspired). Nodes are services/modules; edges show data flow as animated particles. Each particle = one traced request. Node badges show aggregate metrics. Time-scrubbable. Requires `trace_source` in the data layer. | Request flow, data pipelines, understanding "what happens when X calls Y" |
+
+**Flow layout detail:**
+
+The `"flow"` layout renders the knowledge graph with animated particles representing traced requests from gate execution (per `human-system-interface.md` §3a Test-Time Trace Capture).
+
+**Particle rendering:**
+- Each root span spawns a particle at the entry node. The particle travels along edges following the span tree's parent→child relationships.
+- **Size:** 4px diameter (scales to 6px on hover).
+- **Color:** by span status — success: `#3b82f6` (blue), error: `#ef4444` (red). Configurable via `particle_color` encoding.
+- **Trail:** particles leave a fading trail (opacity decay over 200ms, 20px trail length) showing the path taken.
+- **Multiple test cases:** each root span (test request) gets a particle. Particles from different test cases are distinguished by slight color variation (hue-shifted within the success/error palette). A legend shows which test case each hue represents.
+- **Rendering:** Canvas 2D overlay on top of the SVG node/edge layer. For >100 concurrent particles, switch to WebGL (via a `<canvas>` element with `getContext('webgl2')`). The SVG layer handles nodes/edges (clickable, accessible); the Canvas/WebGL layer handles particles only (performance-critical, not interactive).
+
+**Interaction events in flow layout:**
+- **Click node during animation:** pauses playback, opens the detail panel showing the span data for the particle currently at/nearest that node.
+- **Click particle:** pauses playback, shows the full span tooltip (operation name, input/output summary, duration, status).
+- **Click edge during animation:** shows all spans that traversed this edge with their timings.
+- **Hover node:** shows aggregate badge (for test-time: total spans through this node, error count, mean duration — NOT production metrics like RPS).
+- **Double-click node:** drills down to the next C4 level (same as other layouts).
+- **Scrub bar:** drag to any point in the trace timeline. All particles freeze at their positions at that timestamp. The time range is `[min(span.start_time), max(span.start_time + span.duration_us)]` across all spans.
+
+**Node badge metrics (test-time):**
+For test-time traces, the Vizceral-style ring gauge on each node shows:
+- **Span count:** total spans that hit this node across all test cases
+- **Error rate:** percentage of spans with `status: Error`
+- **Mean duration:** average `duration_us` of spans at this node
+
+These are computed from the `GateTrace` spans, not from production metrics. When production traces are available (Observable lens), the badges switch to `rps`, `error_rate`, `latency_p99` — the same visual component, different data source.
+
+**Control bar additions for flow layout:**
+When `"flow"` is the active layout, the Explorer control bar gains playback controls (below or alongside the existing Lens/View selectors):
+```
+[▶ Play] [⏸ Pause] [⏭ Step] [Speed: 1x ▾] [Scrub: ━━━●━━━━] [Test: all ▾]
+```
+- **Test selector:** filter which test case(s) to animate (dropdown of root span names).
+- Playback controls are hidden when a non-flow layout is active.
 
 **Composability:** A `"side-by-side"` layout contains two sub-view specs:
 
