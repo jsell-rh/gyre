@@ -150,7 +150,7 @@ One click. No ABAC knowledge required.
 All trust level transitions (workspace `trust_level` field update AND policy delete+create) are performed in a **single database transaction** — if creating the new policies fails, the workspace field is not updated either. On rollback, the endpoint returns `409 Conflict` with `{"error": "Trust level transition failed — policies could not be created"}` so the UI can display an actionable error. The ABAC policy cache (`abac-policy-engine.md` §Performance) is invalidated **after** the transaction commits — not on each individual policy write — to prevent intermediate states from being visible to concurrent requests.
 
 **Policy naming conventions and priorities:**
-- `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions. **Priority: 100-199** (below user-created policies, so user-created Allow policies can override trust Deny policies when intentional).
+- `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions. **Priority: 100-199** (below user-created policies, so user-created Allow policies can override trust Deny policies when intentional). **Reserved prefix:** the ABAC policy CRUD endpoint rejects user creation of policies with `trust:` or `builtin:` prefixes (400 error).
 - `builtin:` prefix — immutable server-seeded policies, never deleted by trust transitions. Priority: per built-in policy table.
 - No prefix — user-created custom policies, preserved across transitions. **Priority: 200-299** (above trust presets — user intent takes precedence over preset defaults).
 
@@ -1002,6 +1002,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `spec-lifecycle.md` §"Spec Approval Interaction" | Add SHA-match check: when a spec modification is detected on the default branch, if the new SHA already has a valid approval in the ledger (e.g., pre-approved on a feature branch before merge), preserve the approval instead of invalidating it. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent), `message.send` (scope: workspace), `message.poll` (scope: agent), `message.ack` (scope: agent) — per `message-bus.md` MCP tools section. |
 | `platform-model.md` §4 agent spawn | Add `agent_type: Option<String>` field to spawn request (values: `null` for normal agents, `"interrogation"` for interrogation agents per §4). |
+| `platform-model.md` §4 MCP resources | Add `conversation://context` resource (scope: agent, read-only) — provides the original agent's conversation history to interrogation agents. The server populates this resource at spawn time from `ConversationRepository::get`. |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
 | `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. Clarify that `{workspace}` segment uses **slug** (not name). Add `?repo_id=` query parameter to `GET /specs/:path/links` for path disambiguation (same pattern as `/history` and `/progress`). |
 | `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |

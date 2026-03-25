@@ -161,9 +161,15 @@ pub struct ArchitecturalDelta {
     pub agent_id: Option<Id>,
     pub nodes_added: Vec<GraphNode>,
     pub nodes_removed: Vec<GraphNode>,
-    pub nodes_modified: Vec<(GraphNode, Vec<FieldChange>)>,
+    pub nodes_modified: Vec<(GraphNode, Vec<FieldChange>)>, // FieldChange defined below
     pub edges_added: Vec<GraphEdge>,
     pub edges_removed: Vec<GraphEdge>,
+}
+
+pub struct FieldChange {
+    pub field: String,           // e.g., "visibility", "doc_comment", "spec_path"
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
 }
 ```
 
@@ -235,7 +241,7 @@ Both are grounded in the knowledge graph — the LLM is summarizing structured d
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /api/v1/repos/{id}/graph` | GET | Full knowledge graph for a repo (nodes + edges) |
+| `GET /api/v1/repos/{id}/graph` | GET | Full knowledge graph for a repo (nodes + edges). Optional `?concept=` query param for case-insensitive substring filtering on node name/qualified_name (distinct from manifest-based `/graph/concept/:name`). |
 | `GET /api/v1/repos/{id}/graph/types` | GET | All types with relationships |
 | `GET /api/v1/repos/{id}/graph/modules` | GET | Module tree with containment |
 | `GET /api/v1/repos/{id}/graph/node/{node_id}` | GET | Single node with all edges |
