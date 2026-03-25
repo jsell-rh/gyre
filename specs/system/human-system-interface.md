@@ -115,7 +115,13 @@ Workspace Settings > Trust Level
 
 One click. No ABAC knowledge required.
 
-**Storage:** The trust level is a field on the `Workspace` entity: `trust_level: TrustLevel` (enum: `Supervised`, `Guided`, `Autonomous`, `Custom`). Changing trust level is a `PUT /api/v1/workspaces/:id` update (existing endpoint, `resource_type: "workspace"`, `action: "write"` — requires Admin workspace role). The ABAC policy replacement is a **server-internal side effect** of the workspace update, not a separate policy-write action. The handler updates the workspace entity, then atomically creates/deletes the trust-related ABAC policies. The human doesn't interact with policies directly — they set a trust level, and the server manages the policies.
+**Storage:** The trust level is a field on the `Workspace` entity: `trust_level: TrustLevel` (enum: `Supervised`, `Guided`, `Autonomous`, `Custom`). Changing trust level is a `PUT /api/v1/workspaces/:id` update (existing endpoint, `resource_type: "workspace"`, `action: "write"` — requires Admin workspace role). The ABAC policy replacement is a **server-internal side effect** of the workspace update:
+
+- **Preset → Preset:** Server deletes trust-managed policies from the old preset, creates policies for the new preset.
+- **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
+- **Custom → Preset:** Server deletes ALL trust-managed policies (identified by a `trust_managed: true` metadata tag on the policy), then creates the preset's policies. User-created non-trust policies are preserved.
+
+Trust-managed policies are tagged with `trust_managed: true` in their metadata so the server can distinguish them from user-created policies during transitions.
 
 ### What Each Level Controls
 
@@ -441,7 +447,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
      | `decisions` | `[{what: String, why: String, confidence: String, alternatives_considered: Option<[String]>}]` | yes |
      | `uncertainties` | `[String]` | yes |
      | `conversation_sha` | Option\<String\> | no |
-3. The notification consumer (per `message-bus.md` §MessageConsumer) receives `AgentCompleted` messages and creates Inbox items for **all workspace members with Admin or Developer workspace role** when the completion summary contains non-empty `uncertainties`. The Inbox item priority is 1 (highest).
+3. The `agent.complete` handler directly creates Inbox notifications for **all workspace members with Admin or Developer workspace role** when the completion summary contains non-empty `uncertainties`. This is NOT routed through the `MessageConsumer` bounded channel (which can drop messages under backpressure). Priority-1 Inbox items are too critical to be fire-and-forget — they are created synchronously in the completion handler alongside the MR attestation write.
 4. The Briefing consumes `AgentCompleted` messages for the "Completed" section
 
 One LLM call at completion time, not continuous overhead. The summary is also used as seed context for interrogation agents.
@@ -525,8 +531,8 @@ Storage requires a new port trait:
 // gyre-ports
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
-    /// Store a conversation blob. Returns the SHA-256 hash.
-    async fn store(&self, agent_id: &Id, conversation: &[u8]) -> Result<String>;
+    /// Store a conversation blob with metadata. Returns the SHA-256 hash.
+    async fn store(&self, agent_id: &Id, workspace_id: &Id, conversation: &[u8]) -> Result<String>;
     /// Retrieve a conversation by SHA.
     async fn get(&self, conversation_sha: &str) -> Result<Option<Vec<u8>>>;
     /// Record a turn-to-commit link (called from git push handler).
@@ -536,7 +542,7 @@ pub trait ConversationRepository: Send + Sync {
 }
 ```
 
-**REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). Requires workspace membership for the workspace of the agent that produced the conversation (looked up via the MR attestation or `AgentCompleted` message). The adapter implementation (`gyre-adapters`) stores conversations encrypted at rest in the same database as other entities; large conversations (>1MB) are stored as files on disk with the SHA as filename.
+**REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). Authorization: the `ConversationRepository::store` method records `(sha, agent_id, workspace_id)` as metadata alongside the blob. The retrieval endpoint looks up `workspace_id` from this metadata and verifies the caller has workspace membership — no cross-repository join needed. The adapter stores conversations encrypted at rest; large conversations (>1MB) are stored as files on disk with the SHA as filename.
 
 The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a compressed binary blob, encrypted at rest by the adapter. The upload is part of the completion flow — called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
 
@@ -801,7 +807,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" is an in-view panel, not the app sidebar. |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). |
-| `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` and `message` to the resource type list. |
+| `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`) and `message` (attributes: `workspace_id`, `to_agent_id`) to the resource type list. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent). |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
