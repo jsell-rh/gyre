@@ -89,7 +89,9 @@ async fn create_repo(
     let ws: serde_json::Value = client
         .post(format!("{api}/workspaces"))
         .header("Authorization", auth_hdr)
-        .json(&serde_json::json!({ "tenant_id": "default", "name": project_id, "slug": project_id }))
+        .json(
+            &serde_json::json!({ "tenant_id": "default", "name": project_id, "slug": project_id }),
+        )
         .send()
         .await
         .unwrap()
