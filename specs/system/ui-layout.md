@@ -395,7 +395,7 @@ Specifies what to pull from the knowledge graph.
 
 | Field | Type | Description |
 |---|---|---|
-| `concept` | `Option<String>` | Concept search — matches node `name` or `qualified_name` (case-insensitive substring) |
+| `concept` | `Option<String>` | Concept search — matches node `name` or `qualified_name` (case-insensitive substring). This is a text search, not a manifest-declared concept view from `realized-model.md` §4 — the two are different mechanisms. The `GET /repos/:id/graph/concept/:name` endpoint uses the manifest-based concept projections; the view spec `concept` field does substring matching on the graph query response. |
 | `node_types` | `Vec<String>` | Filter to these node types. Empty = all types. |
 | `edge_types` | `Vec<String>` | Include only these edge types. Empty = all edges. |
 | `depth` | `u32` | Traversal depth from matching nodes (0 = matched nodes only, 1 = +neighbors, etc.) |
