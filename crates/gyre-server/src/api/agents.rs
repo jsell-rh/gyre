@@ -9,7 +9,6 @@ use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -99,9 +98,14 @@ pub async fn create_agent(
             facets,
         })
         .await;
-    let _ = state.event_tx.send(DomainEvent::AgentCreated {
-        id: agent.id.to_string(),
-    });
+    state
+        .emit_event(
+            Some(agent.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(agent.workspace_id.clone()),
+            gyre_common::message::MessageKind::AgentCreated,
+            Some(serde_json::json!({"agent_id": agent.id.to_string()})),
+        )
+        .await;
 
     let token = uuid::Uuid::new_v4().to_string();
     state
@@ -174,10 +178,14 @@ pub async fn update_agent_status(
         .transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
-    let _ = state.event_tx.send(DomainEvent::AgentStatusChanged {
-        id: agent.id.to_string(),
-        status: req.status.clone(),
-    });
+    state
+        .emit_event(
+            Some(agent.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(agent.workspace_id.clone()),
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({"agent_id": agent.id.to_string(), "status": req.status})),
+        )
+        .await;
     Ok(Json(AgentResponse::from(agent)))
 }
 

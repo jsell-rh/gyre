@@ -8,7 +8,7 @@ use uuid::Uuid;
 use gyre_common::Id;
 use gyre_domain::{GateResult, GateStatus, GateType, Review, ReviewDecision};
 
-use crate::{domain_events::DomainEvent, AppState};
+use crate::AppState;
 
 /// Default timeout for agent-based gates (5 minutes).
 const AGENT_GATE_TIMEOUT_SECS: u64 = 300;
@@ -90,26 +90,35 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         "gate execution complete"
     );
 
-    // Emit GateFailure domain event so the MR's author agent can react immediately.
+    // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
         let gate_type_str = format!("{:?}", gate.gate_type);
-        let spec_ref = state
+        let (spec_ref, workspace_id) = state
             .merge_requests
             .find_by_id(&mr_id)
             .await
             .ok()
             .flatten()
-            .and_then(|mr| mr.spec_ref);
+            .map(|mr| (mr.spec_ref, Some(mr.workspace_id)))
+            .unwrap_or((None, None));
         let gate_agent_id = format!("gate-agent:{}", gate.id);
-        let _ = state.event_tx.send(DomainEvent::GateFailure {
-            mr_id: mr_id.to_string(),
-            gate_name: gate.name.clone(),
-            gate_type: gate_type_str,
-            status: "Failed".to_string(),
-            output: output.clone(),
-            spec_ref,
-            gate_agent_id,
-        });
+        let ws_id = workspace_id.unwrap_or_else(|| gyre_common::Id::new("default"));
+        state
+            .emit_event(
+                Some(ws_id.clone()),
+                gyre_common::message::Destination::Workspace(ws_id),
+                gyre_common::message::MessageKind::GateFailure,
+                Some(serde_json::json!({
+                    "mr_id": mr_id.to_string(),
+                    "gate_name": gate.name,
+                    "gate_type": gate_type_str,
+                    "status": "Failed",
+                    "output": output,
+                    "spec_ref": spec_ref,
+                    "gate_agent_id": gate_agent_id,
+                })),
+            )
+            .await;
     }
 
     // Notify MR author when gate fails (M22.8).
