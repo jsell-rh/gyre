@@ -566,7 +566,7 @@ Full-Width layout. Content adapts to scope:
 
 Click a spec → detail panel opens with tabs: **Content** (markdown viewer), **Edit** (markdown editor + LLM chat via `POST /repos/:id/specs/assist`), **Progress** (task list with status), **Links** (spec link graph for this spec), **History** (approval event timeline).
 
-Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path` (detail), `GET /api/v1/specs/:path/links` (links — defined in `spec-links.md`), `GET /api/v1/specs/:path/history` (approval event timeline — response: `[{event: "approved"|"invalidated"|"created", user_id, timestamp, sha}]`), `GET /api/v1/specs/:path/progress` (task rollup — response: `{total_tasks, completed_tasks, tasks: [{id, title, status, agent_id}]}`). New sub-endpoints use `RouteResourceMapping` with `resource_type: "spec"`, `workspace_param` resolved from the spec's owning repo's workspace.
+Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path?repo_id=` (detail — `repo_id` required to disambiguate spec paths across repos), `GET /api/v1/specs/:path/links?repo_id=` (links — defined in `spec-links.md`), `GET /api/v1/specs/:path/history?repo_id=` (approval event timeline — response: `[{event: "approved"|"invalidated"|"created", user_id, timestamp, sha}]`), `GET /api/v1/specs/:path/progress?repo_id=` (task rollup — response: `{total_tasks, completed_tasks, tasks: [{id, title, status, agent_id}]}`). The `repo_id` query parameter is required on all spec-by-path endpoints because spec paths (e.g., `system/vision.md`) are not globally unique — the same path can exist in different repos. Per-handler auth resolves workspace from the `repo_id` parameter.
 
 ---
 

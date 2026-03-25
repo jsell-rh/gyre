@@ -84,7 +84,7 @@ CREATE TABLE user_workspace_state (
 -- Added to check-tenant-filter.sh skip list alongside MessageRepository
 ```
 
-The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
+The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch_seconds>` (epoch seconds, consistent with `last_seen_at` storage and domain entity timestamps per `hierarchy-enforcement.md` §1). No separate endpoint needed to read `last_seen_at` — the server handles it internally.
 
 Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
@@ -603,11 +603,13 @@ Clicking "Ask why" (disabled with tooltip "Conversation unavailable" when `conve
   priority: 202
   effect: allow
   actions: ["read"]
-  resource_types: ["conversation", "explorer_view"]
+  resource_types: ["conversation", "explorer_view", "spec", "mr", "repo", "task"]
   conditions:
     - attribute: subject.id
       operator: equals
       value: "agent:INTERROGATION_AGENT_UUID"
+  # Read access to spec/mr/repo/task is required for the interrogation agent
+  # to answer questions about the original agent's work context
 ```
 
 The policies use `subject.id` conditions (not a new `Agent` scope variant) to target the specific interrogation agent, staying within `abac-policy-engine.md`'s existing `PolicyScope` enum (Tenant, Workspace, Repo). The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes).
@@ -967,7 +969,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays and structural prediction are deferred — the meta-specs preview loop (Editor Split in `ui-layout.md` §8) replaces inline ghost overlays with a dedicated preview workflow. |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`. Add `user_workspace_state` to `check-tenant-filter.sh` skip list. |
 | `api-conventions.md` §6 | Acknowledge per-handler auth as a third authorization mechanism alongside "no auth (public)" and "ABAC middleware." Per-handler auth is used for endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4. |
-| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
+| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent), `message.send` (scope: workspace), `message.poll` (scope: agent), `message.ack` (scope: agent) — per `message-bus.md` MCP tools section. |
