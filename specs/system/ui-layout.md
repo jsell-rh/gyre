@@ -161,8 +161,8 @@ Below the canvas, a control bar with:
 All three LLM endpoints (`explorer-views/generate`, `briefing/ask`, `specs/assist`) share these behaviors:
 
 **Streaming:** All responses stream via Server-Sent Events (SSE). The client sends a POST, the server responds with `Content-Type: text/event-stream`. Events:
-- `event: partial` — incremental JSON chunks (for `explanation` and `answer` fields)
-- `event: complete` — final complete JSON response (view_spec, diff, or answer)
+- `event: partial` — incremental text chunks (for `explanation` and `answer` fields only — structured data like `view_spec` and `diff` arrays are not streamed incrementally)
+- `event: complete` — final complete JSON response (view_spec, diff, or answer as a single unit)
 - `event: error` — error message if the LLM fails
 
 The client renders incrementally as `partial` events arrive (explanation text appears progressively). The `complete` event carries the full response for client-side caching. If the connection drops before `complete`, the client retries with the same request (idempotent — same question produces same view).
