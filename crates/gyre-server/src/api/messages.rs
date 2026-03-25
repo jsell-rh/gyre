@@ -218,7 +218,9 @@ pub async fn send_message(
                 .find_by_id(sender_id)
                 .await
                 .map_err(ApiError::Internal)?
-                .ok_or_else(|| ApiError::NotFound(format!("sender agent {} not found", sender_id)))?;
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("sender agent {} not found", sender_id))
+                })?;
             if sender_agent.workspace_id != ws_id {
                 return Err(ApiError::Forbidden(
                     "agents can only send Directed messages to agents in the same workspace"
@@ -271,7 +273,9 @@ pub async fn send_message(
                 .find_by_id(sender_id)
                 .await
                 .map_err(ApiError::Internal)?
-                .ok_or_else(|| ApiError::NotFound(format!("sender agent {} not found", sender_id)))?;
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("sender agent {} not found", sender_id))
+                })?;
             if sender_agent.workspace_id != ws_id {
                 return Err(ApiError::Forbidden(
                     "agents can only send to their own workspace".to_string(),
@@ -325,7 +329,11 @@ pub async fn send_message(
 
     // Persist Directed and Event tier only (Telemetry is in-memory, Broadcast is not stored).
     if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
-        state.messages.store(&msg).await.map_err(ApiError::Internal)?;
+        state
+            .messages
+            .store(&msg)
+            .await
+            .map_err(ApiError::Internal)?;
     }
 
     // Dispatch to consumers (best-effort, non-blocking).
@@ -346,9 +354,9 @@ fn parse_destination(v: &Value) -> Result<Destination, ApiError> {
     if v.as_str() == Some("broadcast") {
         return Ok(Destination::Broadcast);
     }
-    Err(ApiError::BadRequest(format!(
-        "invalid 'to' field: expected {{\"agent\": \"id\"}}, {{\"workspace\": \"id\"}}, or \"broadcast\""
-    )))
+    Err(ApiError::BadRequest(
+        "invalid 'to' field: expected {\"agent\": \"id\"}, {\"workspace\": \"id\"}, or \"broadcast\"".to_string()
+    ))
 }
 
 // ── receive endpoint (poll) ───────────────────────────────────────────────────
@@ -512,6 +520,7 @@ mod tests {
         Id,
     };
     use gyre_domain::Agent;
+    #[allow(unused_imports)]
     use gyre_ports::MessageRepository as _;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -568,7 +577,10 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["kind"], "task_assignment");
         assert!(json["signature"].is_string(), "message should be signed");
-        assert!(json.get("acknowledged").is_none(), "acknowledged should be excluded from send response");
+        assert!(
+            json.get("acknowledged").is_none(),
+            "acknowledged should be excluded from send response"
+        );
     }
 
     #[tokio::test]

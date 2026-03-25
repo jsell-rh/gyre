@@ -2201,10 +2201,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
         Ok(())
     }
 
-    async fn find_by_id(
-        &self,
-        id: &Id,
-    ) -> Result<Option<gyre_common::message::Message>> {
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_common::message::Message>> {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
     }
 
@@ -2229,7 +2226,11 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
             })
             .cloned()
             .collect();
-        msgs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.as_str().cmp(b.id.as_str())));
+        msgs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        });
         msgs.truncate(limit);
         Ok(msgs)
     }
@@ -2247,7 +2248,11 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
             .filter(|m| !m.acknowledged)
             .cloned()
             .collect();
-        msgs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.as_str().cmp(b.id.as_str())));
+        msgs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        });
         msgs.truncate(limit);
         Ok(msgs)
     }
@@ -2300,7 +2305,12 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
         let guard = self.store.lock().await;
         let mut msgs: Vec<_> = guard
             .values()
-            .filter(|m| m.workspace_id.as_ref().map(|ws| ws == workspace_id).unwrap_or(false))
+            .filter(|m| {
+                m.workspace_id
+                    .as_ref()
+                    .map(|ws| ws == workspace_id)
+                    .unwrap_or(false)
+            })
             .filter(|m| !matches!(&m.to, Destination::Agent(_)))
             .filter(|m| kind.map(|k| m.kind.as_str() == k).unwrap_or(true))
             .filter(|m| since.map(|s| m.created_at >= s).unwrap_or(true))
@@ -2313,7 +2323,11 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
             })
             .cloned()
             .collect();
-        msgs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.as_str().cmp(a.id.as_str())));
+        msgs.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
         if let Some(lim) = limit {
             msgs.truncate(lim);
         }
@@ -2324,9 +2338,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
         use gyre_common::message::Destination;
         let mut guard = self.store.lock().await;
         let before = guard.len();
-        guard.retain(|_, m| {
-            matches!(&m.to, Destination::Agent(_)) || m.created_at >= older_than
-        });
+        guard.retain(|_, m| matches!(&m.to, Destination::Agent(_)) || m.created_at >= older_than);
         Ok((before - guard.len()) as u64)
     }
 

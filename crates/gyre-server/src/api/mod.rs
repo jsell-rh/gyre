@@ -2,7 +2,6 @@ pub mod activity;
 pub mod admin;
 pub mod agent_logs;
 pub mod agent_messages;
-pub mod messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
@@ -24,6 +23,7 @@ pub mod jj;
 pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
+pub mod messages;
 pub mod meta_specs;
 pub mod network;
 pub mod personas;
@@ -184,10 +184,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/agents/:id/heartbeat", put(agents::agent_heartbeat))
         .route("/api/v1/agents/:id/complete", post(spawn::complete_agent))
         .route("/api/v1/agents/:id/card", put(update_agent_card))
-        .route(
-            "/api/v1/agents/:id/messages",
-            get(messages::poll_messages),
-        )
+        .route("/api/v1/agents/:id/messages", get(messages::poll_messages))
         .route(
             "/api/v1/agents/:id/messages/:message_id/ack",
             put(messages::ack_message),

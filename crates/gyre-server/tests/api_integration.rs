@@ -379,7 +379,11 @@ async fn agent_messages_send_and_receive() {
             }),
         )
         .await;
-    assert!(resp.status().is_success(), "send returned: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "send returned: {}",
+        resp.status()
+    );
 
     // Poll messages via cursor-based GET (non-destructive).
     let msgs = ctx
