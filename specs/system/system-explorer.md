@@ -335,8 +335,7 @@ The "fast" tier uses the knowledge graph + LLM to predict impact without running
 POST /api/v1/repos/{id}/graph/predict
 {
   "spec_path": "specs/system/search.md",
-  "draft_content": "<full spec with changes>",
-  "current_graph_snapshot": "<graph-version-id>"
+  "draft_content": "<full spec with changes>"
 }
 
 // Response (2-5 seconds)

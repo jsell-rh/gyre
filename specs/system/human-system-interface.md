@@ -588,7 +588,7 @@ MR #52: Payment retry endpoint
   [Diff] [Gates] [Attestation] [Ask Why]
 ```
 
-Clicking "Ask why" (disabled with tooltip "Conversation unavailable" when `conversation_sha` is null in the attestation) calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field and `conversation_sha` in the request body. The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, retrieves the conversation via `ConversationRepository::get`, and **provides the conversation to the agent** via an MCP resource `conversation://context` (not injected into the system prompt — conversations can be up to 10MB which exceeds LLM context windows). The interrogation agent's runtime reads this resource on startup and uses it as grounding context, truncating to the last N turns that fit within the model's context window. The system prompt references the conversation resource rather than inlining it. The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
+Clicking "Ask why" (disabled with tooltip "Conversation unavailable" when `conversation_sha` is null in the attestation) calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field and `conversation_sha` in the request body. The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, retrieves the conversation via `ConversationRepository::get`, and **provides the conversation to the agent** via an MCP resource `conversation://context` (not injected into the system prompt — conversations can be up to 10MB which exceeds LLM context windows). The **server truncates** the conversation when populating the MCP resource at spawn time: it keeps the last N turns that fit within the configured model's context window (using the workspace's `llm_model` to determine the limit). The truncated conversation is what the MCP resource serves — the agent runtime receives a pre-truncated context, not the full blob. The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
 - The original agent's conversation history (retrieved via `ConversationRepository::get(conversation_sha)` — the SHA is stored in the MR attestation bundle's `conversation_sha` field and in the `AgentCompleted` message payload)
 - The original agent's persona
 - The spec the task was implementing
@@ -926,7 +926,7 @@ METRICS
 | Section | Data Source |
 |---|---|
 | Completed | Spec registry + task rollup + agent completion summaries |
-| In Progress | Task status + agent activity + in-flight `Escalation` messages (for uncertainties from active agents) + completion summary uncertainties (for recently completed agents) |
+| In Progress | Task status + agent activity + in-flight uncertainties (queried from `Notification` table where `notification_type = 'AgentNeedsClarification'` and `resolved_at IS NULL` — these are created by the orchestrator from `Escalation` messages, so the Briefing reads notifications, not Directed messages directly) + completion summary uncertainties (for recently completed agents) |
 | Cross-Workspace | Cross-workspace spec link watcher |
 | Exceptions | Gate results + spec assertion failures + MR reverts (MRs with `Reverted` status) |
 | Metrics | Budget usage + analytics |
