@@ -116,7 +116,7 @@ The detail panel slides in from the right when the user clicks an entity (node, 
 | Tab | When | Content |
 |---|---|---|
 | **Info** | Always | Entity metadata, properties, status |
-| **Spec** | When entity has `spec_path` | Spec content viewer + editor + LLM chat |
+| **Spec** | When entity has `spec_path` (graph nodes, agents) | Spec content viewer + editor + LLM chat. Note: when opening a spec entity directly from the Specs view (§6), the detail panel uses the richer tab set: Content, Edit, Progress, Links, History. The "Spec" tab here is the summary version for non-spec entities. |
 | **Chat** | When entity is an agent or has an author agent | Scoped inline chat showing recipient |
 | **History** | When entity has modification history | Timeline of changes, conversation turn links |
 | **Diff** | When viewing an MR | Side-by-side code diff |

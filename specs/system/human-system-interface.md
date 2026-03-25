@@ -81,6 +81,7 @@ CREATE TABLE user_workspace_state (
 );
 -- No tenant_id column: workspace_id is globally unique and tenant-bound
 -- (same exemption rationale as MessageRepository — see message-bus.md)
+-- Added to check-tenant-filter.sh skip list alongside MessageRepository
 ```
 
 The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
@@ -245,12 +246,25 @@ CREATE INDEX idx_notifications_user_ws ON notifications (user_id, workspace_id, 
 ```
 The `dismissed_at` field tracks user dismissals (used by trust suggestions to suppress re-creation for 30 days). The `resolved_at` field tracks resolution (action taken). The Inbox badge count is the count of notifications where `resolved_at IS NULL AND dismissed_at IS NULL`.
 
+**Port trait** (in `gyre-ports`):
+```rust
+#[async_trait]
+pub trait NotificationRepository: Send + Sync {
+    async fn create(&self, notification: &Notification) -> Result<()>;
+    async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>>;
+    async fn list_for_user(&self, user_id: &Id, workspace_id: &Id, min_priority: Option<u8>, max_priority: Option<u8>) -> Result<Vec<Notification>>;
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()>;
+    async fn resolve(&self, id: &Id, user_id: &Id, action_taken: Option<&str>) -> Result<()>;
+    async fn count_unresolved(&self, user_id: &Id, workspace_id: &Id) -> Result<u64>;
+}
+```
+
 **Notification endpoints:**
 - `GET /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=` — list notifications for the authenticated user (no ABAC resource type needed — `/users/me/*` endpoints are implicitly scoped to the authenticated user's identity)
-- `PUT /api/v1/notifications/:id/dismiss` — set `dismissed_at` to now. Response: 204.
-- `PUT /api/v1/notifications/:id/resolve` — set `resolved_at` to now. Request body: `{action_taken: "approved"}` (optional, for audit). Response: 204.
+- `POST /api/v1/notifications/:id/dismiss` — set `dismissed_at` to now. Response: 204. (POST per `api-conventions.md` §2.2 — action endpoints are always POST.)
+- `POST /api/v1/notifications/:id/resolve` — set `resolved_at` to now. Request body: `{action_taken: "approved"}` (optional, for audit). Response: 204.
 
-Both mutation endpoints verify the notification belongs to the authenticated user (per-handler auth, not ABAC middleware).
+All notification endpoints (`GET /users/me/notifications`, `POST /notifications/:id/dismiss`, `POST /notifications/:id/resolve`) use per-handler auth (the handler verifies the notification belongs to the authenticated user). These are added to the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4 alongside git HTTP and conversations.
 
 ---
 
@@ -932,11 +946,12 @@ These are architectural constraints, not implementation work. They ensure we don
 | Spec | Amendment Needed |
 |---|---|
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays and structural prediction are deferred — the meta-specs preview loop (Editor Split in `ui-layout.md` §8) replaces inline ghost overlays with a dedicated preview workflow. |
-| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add `GET /api/v1/conversations/:sha` to the ABAC-exempt endpoint list (per-handler auth, like git HTTP). |
+| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`. Add `user_workspace_state` to `check-tenant-filter.sh` skip list. |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent), `message.send` (scope: workspace), `message.poll` (scope: agent), `message.ack` (scope: agent) — per `message-bus.md` MCP tools section. |
+| `platform-model.md` §4 agent spawn | Add `agent_type: Option<String>` field to spawn request (values: `null` for normal agents, `"interrogation"` for interrogation agents per §4). |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
 | `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. Clarify that `{workspace}` segment uses **slug** (not name). |
 | `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |

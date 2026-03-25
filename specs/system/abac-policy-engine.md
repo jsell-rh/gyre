@@ -236,7 +236,12 @@ Collect applicable policies:
   3. Tenant-scoped policies
   |
   v
-Sort by priority (highest first)
+Check immutable Deny policies first:
+  - Evaluate all policies where immutable == true && effect == Deny
+  - If ANY immutable Deny matches → Deny (cannot be overridden)
+  |
+  v
+Sort remaining policies by priority (highest first)
   |
   v
 Evaluate each policy's conditions:

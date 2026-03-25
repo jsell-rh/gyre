@@ -306,4 +306,4 @@ CREATE TABLE graph_deltas (
 
 **Enables:**
 - **system-explorer.md** — the knowledge graph is the data layer for the explorer UI
-- **ui-journeys.md** — the briefing narrative is generated from architectural deltas
+- **human-system-interface.md** — the briefing narrative is generated from architectural deltas (supersedes `ui-journeys.md`)
