@@ -153,7 +153,7 @@ All trust level transitions (workspace `trust_level` field update AND policy del
 **Policy naming conventions and priorities:**
 - `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions. **Priority: 100-199** (below user-created policies, so user-created Allow policies can override trust Deny policies when intentional). **Reserved prefix:** the ABAC policy CRUD endpoint rejects user creation of policies with `trust:` or `builtin:` prefixes (400 error).
 - `builtin:` prefix — immutable server-seeded policies, never deleted by trust transitions. Priority: per built-in policy table.
-- No prefix — user-created custom policies, preserved across transitions. **Priority: 200-299** (above trust presets — user intent takes precedence over preset defaults).
+- No prefix — user-created custom policies, preserved across transitions. **Priority: 200-299** (above trust presets — user intent takes precedence over preset defaults). Note: user-created policies cannot override built-in policies (400-1000) because built-in policies have higher priority. This is intentional — built-ins enforce system invariants (tenant isolation, workspace membership, default deny) that should not be overridable by workspace-level custom policies.
 
 ### What Each Level Controls
 
@@ -555,7 +555,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 | Priority | Type | Creation Path |
 |---|---|---|
 | 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
-| 2 | Spec pending approval | Synchronous in `specs/save` handler (spec-edit MRs create the notification on MR creation). For agent-authored specs, the orchestrator creates the notification when the spec enters the approval queue. Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
+| 2 | Spec pending approval | Synchronous in `specs/save` handler (human spec-edit MRs). For agent-authored specs: the `agent.complete` handler creates the notification when the agent's MR enters the merge queue with a pending spec approval gate (the gate evaluation detects the unapproved spec and creates the notification). Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
 | 3 | Gate failure | Synchronous in gate evaluation handler |
 | 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler (the push hook must query `spec_links` for inbound cross-workspace links and create notifications for dependent workspace members — amend `spec-lifecycle.md` to add this notification step alongside the existing task creation) |
 | 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
