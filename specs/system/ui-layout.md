@@ -154,7 +154,7 @@ Below the canvas, a control bar with:
 - Lens selector (Structural / Evaluative / Observable)
 - View selector (Boundary / Spec Realization / Change / saved views / LLM-generated)
 - Search input (`/` to focus — canvas-local search, highlights matching nodes)
-- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate`). Request: `{question: "How does auth work?", repo_id?: "<uuid>"}`. Response (200): `{view_spec: {...}, explanation: "..."}`. On error or unanswerable question: `{view_spec: null, explanation: "I cannot visualize that — here's why...", fallback: {layout: "list", ...}}` (200 with null view_spec and a fallback list view). The server sends the LLM: the question, the list of available node types and counts in the workspace, and the view spec grammar schema. The LLM produces a view spec or explains why it can't. The generated view is **ephemeral** (not auto-saved) — the user can save it explicitly via the saved views CRUD. Requires workspace membership. ABAC resource type: `explorer_view`.
+- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate`). Request: `{question: "How does auth work?", repo_id?: "<uuid>"}`. Response (200): `{view_spec: {...}, explanation: "..."}`. On error or unanswerable question: `{view_spec: null, explanation: "I cannot visualize that — here's why...", fallback: {layout: "list", ...}}` (200 with null view_spec and a fallback list view). The server sends the LLM: the question, the list of available node types and counts in the workspace, and the view spec grammar schema. The LLM produces a view spec or explains why it can't. The generated view is **ephemeral** (not auto-saved) — the user can save it explicitly via the saved views CRUD. Requires workspace membership. ABAC resource type: `explorer_view`. **Budget:** LLM calls from `generate`, `briefing/ask`, and `specs/assist` endpoints are charged to the workspace budget as `llm_query` cost entries (using the existing cost tracking from `analytics.md`). Rate limited to 10 requests/minute per user per workspace.
 
 When a node is clicked, the Split layout activates (canvas compresses to 60%, detail panel at 40%).
 
@@ -461,15 +461,56 @@ The lens selector, view selector, search, and ask input are in the control bar b
 
 Default view: Boundary View (C4 Level 2 — crates/packages). Further drill-down to modules (Level 3) and types (Level 4). The detail panel shows type/function detail with spec linkage, churn metrics, and conversation turn provenance.
 
-The Code sub-view (branches, commits, MRs, merge queue) is accessed via a tab in the control bar (which is always **below** the canvas, consistent with §2):
+The Code sub-view is accessed via a tab in the control bar (which is always **below** the canvas, consistent with §2):
 
 ```
 [Architecture] [Code] | [Lens: Structural ▾] [View: Boundary ▾] | [/ Search] [Ask...]
 ```
 
+**Code tab layout** (Full-Width, replaces canvas):
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Branches  │  Merge Requests  │  Merge Queue              │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  [Branch list / MR list / Queue entries]                 │
+│  (sortable table, one row per entity)                    │
+│  Click row → detail panel opens (Split layout)           │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+Three sub-tabs within Code: **Branches** (from `GET /repos/:id/branches` + `GET /repos/:id/commits`), **Merge Requests** (from `GET /merge-requests?repository_id=:id`), **Merge Queue** (from `GET /merge-queue`). Each sub-tab renders a sortable table. Clicking a row opens the detail panel with entity-specific tabs (MR detail: Diff/Gates/Attestation/Ask Why).
+
 ---
 
-## 6. Inbox Layout
+## 6. Specs View Layout
+
+Full-Width layout. Content adapts to scope:
+
+**Tenant/Workspace scope:** Sortable table of specs with columns: Path, Status (Approved/Pending/Deprecated), Kind (if meta-spec), Owner, Last Updated. Filter pills for status and kind. Data from `GET /api/v1/specs?workspace_id=` (workspace) or `GET /api/v1/specs` (tenant).
+
+**Repo scope:** Spec list with implementation progress per spec:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Specs: payment-api                    [+ New Spec]       │
+├──────────────────────────────────────────────────────────┤
+│ payment-retry.md        Approved ✓   4/5 tasks  ████░   │
+│ charge-processing.md    Approved ✓   5/5 tasks  █████   │
+│ identity-security.md    Pending ◐    0/3 tasks  ░░░░░   │
+│ search.md               Approved ✓   2/4 tasks  ██░░░   │
+└──────────────────────────────────────────────────────────┘
+```
+
+Click a spec → detail panel opens with tabs: **Content** (markdown viewer), **Edit** (markdown editor + LLM chat via `POST /repos/:id/specs/assist`), **Progress** (task list with status), **Links** (spec link graph for this spec), **History** (approval event timeline).
+
+Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path` (detail), `GET /api/v1/specs/:path/links` (links), `GET /api/v1/specs/:path/history` (history), `GET /api/v1/specs/:path/progress` (task rollup).
+
+---
+
+## 7. Inbox Layout
 
 ### Item Structure
 
