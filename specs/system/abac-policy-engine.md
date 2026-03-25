@@ -238,7 +238,8 @@ Collect applicable policies:
   v
 Check immutable Deny policies first:
   - Evaluate all policies where immutable == true && effect == Deny
-  - If ANY immutable Deny matches → Deny (cannot be overridden)
+  - Each immutable Deny is evaluated against request attributes (conditions must match)
+  - If ANY immutable Deny's conditions match → Deny (cannot be overridden by any Allow)
   |
   v
 Sort remaining policies by priority (highest first)

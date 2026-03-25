@@ -143,6 +143,7 @@ pub enum MessageKind {
     BudgetExhausted,
     AgentError,
     AgentCompleted,         // per human-system-interface.md §4 — completion summary
+    ReconciliationCompleted, // per meta-spec-reconciliation.md §11 — consumed for priority-6 notifications
 
     // ── Tier 3: Telemetry (unsigned + in-memory only) ─────────────────
     ToolCallStart,
@@ -208,6 +209,7 @@ Each `MessageKind` has a defined payload schema. The server validates payloads o
 | `PushAccepted` | `repo_id: Id, branch: String, agent_id: Id, commit_count: u64, task_id: Option<Id>, ralph_step: Option<String>` | `repo_id`, `branch`, `agent_id`. Note: `commit_count` is `u64` on the wire; migration maps from `usize` in `DomainEvent::PushAccepted`. |
 | `SpecChanged` | `repo_id: Id, spec_path: String, change_kind: String, task_id: Id, dependent_workspace_id: Option<Id>, source_workspace_slug: Option<String>` | `repo_id`, `spec_path`, `change_kind`, `task_id`. Optional fields present for cross-workspace notifications. |
 | `AgentCompleted` | `agent_id: Id, task_id: Id, spec_ref: Option<String>, decisions: [{what, why, confidence, alternatives_considered?}], uncertainties: [String], conversation_sha: Option<String>` | `agent_id`, `task_id` |
+| `ReconciliationCompleted` | `workspace_id: Id, persona_id: Id, persona_name: String, specs_evaluated: u32, specs_changed: u32, preview_branch: Option<String>` | `workspace_id`, `persona_id` |
 | `GateFailure` | `mr_id: Id, gate_name: String, gate_type: String, status: String, output: String, spec_ref: Option<String>, gate_agent_id: Id` | `mr_id`, `gate_name` |
 | `StaleSpecWarning` | `mr_id: Id, repo_id: Id, spec_path: String, spec_sha: String, current_sha: String` | all |
 | `SpeculativeConflict` | `repo_id: Id, branch: String, conflicting_files: Vec<String>` | all |
