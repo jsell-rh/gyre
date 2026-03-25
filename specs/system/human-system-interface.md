@@ -166,7 +166,8 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
 ```yaml
 - name: require-human-spec-approval
   scope: tenant
-  priority: 1000        # maximum — cannot be overridden by custom policies
+  priority: 999
+  immutable: true        # ABAC engine skips priority override for immutable policies
   effect: deny
   actions: ["approve"]
   resource_types: ["spec"]
@@ -177,7 +178,11 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
   description: "Spec approval is always human, regardless of trust level"
 ```
 
-This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy. Built-in policies in `abac-policy-engine.md` "cannot be deleted" but can be "overridden by higher-priority custom policies." To prevent override, this policy uses **priority 1000** (the maximum) — no custom policy can have higher priority. The Custom trust editor grays it out with tooltip: "Spec approval is always human — this policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
+This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy.
+
+**Priority and override behavior:** The `require-human-spec-approval` policy uses `priority: 999` and is marked as `immutable: true` (a new boolean flag on `Policy` — requires amending `abac-policy-engine.md`). Immutable policies cannot be overridden regardless of priority — the ABAC evaluation engine skips priority-based override logic for immutable policies. The `system-full-access` policy (which enables server-internal operations) operates at `priority: 1000` but only applies to `subject.id == "gyre-system-token"`, not to spec approval — spec approval actions are carved out from `system-full-access` via an explicit condition: `actions: ["*"] EXCEPT approve ON spec`. This means even the superuser token cannot approve specs programmatically.
+
+The Custom trust editor grays out immutable policies with tooltip: "This policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
 Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
@@ -703,7 +708,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Detected by the knowledge graph: when two agents push implementations for the same spec (same `spec_path`, different branches), the graph extraction produces node sets for each. The server compares the **set of (node_type, qualified_name) tuples** — if the symmetric difference exceeds 3 nodes (configurable, `GYRE_DIVERGENCE_THRESHOLD`), it flags a divergence Inbox item showing both implementations side-by-side. | Review both, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected post-merge by the knowledge graph: when two MRs referencing the same `spec_path` merge in sequence, the graph extraction runs after each merge. The server compares the **set of (node_type, qualified_name) tuples** linked to that `spec_path` before and after each merge. If two merges produce significantly different structural patterns for the same spec (symmetric difference exceeds `GYRE_DIVERGENCE_THRESHOLD`, default 3 nodes), it flags a divergence Inbox item. This uses post-merge graph extraction (M30b) — no per-branch extraction needed. | Review both implementations, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
@@ -815,13 +820,13 @@ These are architectural constraints, not implementation work. They ensure we don
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`) and `message` (attributes: `workspace_id`, `to_agent_id`) to the resource type list. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
-| `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent). |
+| `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent), `message.send` (scope: workspace), `message.poll` (scope: agent), `message.ack` (scope: agent) — per `message-bus.md` MCP tools section. |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
 | `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. Clarify that `{workspace}` segment uses **slug** (not name). |
 | `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |
 | `message-bus.md` `WsMessage` enum | Add `UserPresence` variant (bidirectional, payload: user_id, workspace_id, view, timestamp). |
 | `platform-model.md` §1 `Workspace` struct | Add `trust_level: TrustLevel` field (enum: Supervised, Guided, Autonomous, Custom). |
-| `hierarchy-enforcement.md` §4 built-in policies | Rename `system-access` → `system-full-access` (or vice versa — name must be consistent). Document priority (must be > 1000 to override immutable policies, or use a separate non-overridable flag). Define ABAC identity mechanism for internal server processes (merge processor, stale agent detector). |
+| `hierarchy-enforcement.md` §4 built-in policies | Rename `system-access` → `system-full-access` (or vice versa). Add `immutable: bool` flag to `Policy` struct — immutable policies cannot be overridden regardless of priority. `system-full-access` at priority 1000 must carve out spec approval (cannot approve specs even as superuser). Define ABAC identity mechanism for internal server processes. |
 | `platform-model.md` §1 Repository | Add unique constraint on `(workspace_id, name)` — repo names must be unique within a workspace for cross-workspace spec link resolution. |
 | `message-bus.md` §Scoping Rules | Document that Users (not just Agents) can send Directed messages to agents — required for human→agent steering (Pause, inline chat). |
 
