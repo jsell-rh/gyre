@@ -54,7 +54,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 |---|---|---|---|
 | **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
 | **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
-| **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **list view**, not a graph canvas — click a workspace to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
+| **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **card grid**, not a graph canvas — click a workspace card to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
 | **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
@@ -71,7 +71,7 @@ A **status bar** at the bottom of the application shows trust level, budget usag
 
 **Entrypoint:** First visit lands on Explorer at tenant scope (workspace cards). After workspace selection, redirects to Inbox at workspace scope — the default landing view. Subsequent visits restore the last-used workspace and land on the Inbox. See `ui-layout.md` §1 for full entrypoint flow.
 
-**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored on the user profile (existing `UserPreferences` or a new `user_workspace_state` table). The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
+**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored in a new `user_workspace_state` table (`user_id, workspace_id, last_seen_at`) — per-workspace tracking requires its own table, not the single-value `UserPreferences`. The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
 
 Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
@@ -485,7 +485,7 @@ MR #52: Payment retry endpoint
   [Diff] [Gates] [Attestation] [Ask Why]
 ```
 
-Clicking "Ask why" calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field (extending the existing spawn endpoint). The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, loads the conversation context, and returns the agent ID. The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
+Clicking "Ask why" (disabled with tooltip "Conversation unavailable" when `conversation_sha` is null in the attestation) calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field (extending the existing spawn endpoint). The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, loads the conversation context, and returns the agent ID. The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
 - The original agent's conversation history (retrieved via `ConversationRepository::get(conversation_sha)` — the SHA is stored in the MR attestation bundle's `conversation_sha` field and in the `AgentCompleted` message payload)
 - The original agent's persona
 - The spec the task was implementing
@@ -566,7 +566,8 @@ pub trait ConversationRepository: Send + Sync {
     async fn store(&self, agent_id: &Id, workspace_id: &Id, conversation: &[u8]) -> Result<String>;
     /// Retrieve a conversation by SHA. Returns decompressed bytes.
     /// The adapter handles decryption and decompression internally.
-    async fn get(&self, conversation_sha: &str) -> Result<Option<Vec<u8>>>;
+    /// Retrieve a conversation by SHA. Verifies tenant_id matches the caller's tenant.
+    async fn get(&self, conversation_sha: &str, tenant_id: &Id) -> Result<Option<Vec<u8>>>;
     /// Record a turn-to-commit link (called from git push handler).
     async fn record_turn_link(&self, link: &TurnCommitLink) -> Result<()>;
     /// Get turn-commit links for a conversation (for "View conversation at this point").
@@ -704,7 +705,7 @@ Workspace: Payments
   Active: jsell (Specs view), maria (Explorer), bot-deploy (Agent)
 ```
 
-**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a `WsMessage` variant used **bidirectionally**: clients send `UserPresence` to the server (heartbeat with current view), and the server rebroadcasts to other workspace subscribers. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
+**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a `WsMessage` variant used **bidirectionally**: clients send `UserPresence` to the server (heartbeat with current view), and the server rebroadcasts to other workspace subscribers. **The server derives `user_id` from the authenticated WebSocket connection** — it does NOT trust the payload's `user_id` field. The client sends it for convenience but the server overwrites it with the verified identity. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
 
 The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 - **Payload schema:**
@@ -830,6 +831,8 @@ Example: "Tell me more about the auth refactor"
          "Why did worker-12 choose exponential backoff?"
          "What changed in idempotent-api.md?"
 ```
+
+**Endpoint:** `POST /api/v1/workspaces/:workspace_id/briefing/ask` — request: `{question: "..."}`, response: `{answer: "...", sources: [{spec_path, agent_id, ...}]}`. Requires workspace membership.
 
 The LLM answering this chat has read-only access to:
 - The briefing data (specs, tasks, MRs, completion summaries, deltas)
