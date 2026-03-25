@@ -281,6 +281,7 @@ Gyre ships with a set of built-in tenant-level policies that enforce fundamental
 | `agent-repo-scope` | Deny | Agents can't access resources outside their scoped repo |
 | `workspace-membership-required` | Deny | Users must be workspace members to access workspace resources |
 | `persona-human-approval` | Deny | Agents can't approve personas (human-only) |
+| `builtin:require-human-spec-approval` | Deny (immutable) | Non-user subjects cannot approve specs — spec approval is always human (priority 999, `immutable: true`) |
 | `default-deny` | Deny | Everything not explicitly allowed is denied |
 
 Built-in policies cannot be deleted. Non-immutable built-in policies can be overridden by higher-priority custom policies (with audit logging). Immutable built-in policies (where `immutable: true`) cannot be overridden regardless of priority — immutable Deny policies are evaluated before all priority-based evaluation (see `human-system-interface.md` §2).
