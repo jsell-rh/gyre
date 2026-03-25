@@ -12,6 +12,7 @@ use crate::schema::meta_spec_sets;
 #[diesel(table_name = meta_spec_sets)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 struct MetaSpecSetRow {
+    #[allow(dead_code)]
     workspace_id: String,
     json: String,
     #[allow(dead_code)]
