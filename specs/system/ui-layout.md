@@ -35,8 +35,9 @@ The application shell has three permanent zones that never change:
 
 **Sidebar** (240px width, collapsible to 48px icon-only via toggle):
 - Six nav items, always in this order, always present. Active item highlighted.
-- Below the nav items: workspace quick-switcher (dropdown showing workspaces the user is a member of). Selecting a workspace updates the breadcrumb and re-renders the content area.
 - At the bottom: server status indicator (WebSocket connection, version).
+
+Workspace switching is done exclusively via the breadcrumb (click workspace segment → dropdown of member workspaces). No duplicate switcher in the sidebar — one control, one location.
 
 **Content Area** (remaining space):
 - Adapts to the selected nav item and current scope.
@@ -46,7 +47,7 @@ The application shell has three permanent zones that never change:
 - Trust level indicator for the current workspace.
 - Budget usage percentage.
 - WebSocket connection status.
-- Presence: avatars of other active users in this workspace.
+- Presence: avatars of other active users in this workspace (active = heartbeat within last 60 seconds; clients send `UserPresence` every 30 seconds; the server evicts entries older than 60 seconds from the presence map).
 
 ### Entrypoint Flow
 
@@ -57,8 +58,8 @@ The application shell has three permanent zones that never change:
 
 **Subsequent visits:**
 1. Restore last-used workspace from `localStorage`.
-2. Land on Inbox at workspace scope.
-3. If the stored workspace no longer exists or the user lost membership, fall back to workspace cards.
+2. Land on **Inbox** at workspace scope. Inbox is the default active sidebar item.
+3. If the stored workspace no longer exists or the user lost membership, fall back to workspace cards (Explorer at tenant scope).
 
 **Switching workspace:**
 - Click workspace name in the breadcrumb → dropdown of member workspaces.
@@ -77,7 +78,7 @@ The content area uses one of four layout patterns depending on the view:
 
 ### Full-Width
 
-Used by: Inbox, Briefing, Specs (list), Meta-specs (catalog), Admin tabs.
+Used by: Inbox, Briefing, Specs (list), Meta-specs (catalog), Admin tabs. Note: full-width views can transition to Split layout when the user clicks an entity reference — the detail panel slides in over the full-width content. The view starts full-width but supports on-demand split.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -142,7 +143,9 @@ Used by: Explorer at workspace/repo scope.
 └──────────────────────────────────────────────────────┘
 ```
 
-The canvas fills most of the content area. Below it, a control bar with:
+The canvas fills most of the content area. An optional **in-view filter panel** (left side, 200px, collapsible) provides category filters from `system-explorer.md` (Boundaries, Interfaces, Data, Specs). This is inside the Explorer content area, NOT part of the app sidebar. It toggles via a filter icon in the control bar.
+
+Below the canvas, a control bar with:
 - Lens selector (Structural / Evaluative / Observable)
 - View selector (Boundary / Spec Realization / Change / saved views / LLM-generated)
 - Search input (`/` to focus — canvas-local search, highlights matching nodes)
@@ -336,10 +339,11 @@ Specifies what to pull from the knowledge graph.
 | `filter.visibility` | `Option<String>` | Only nodes with this visibility (`public`, `private`) |
 | `repo_id` | `Option<String>` | Scope to a single repo. Null = all repos in workspace. |
 
-The data layer maps to existing knowledge graph API endpoints:
-- `concept` → `GET /repos/:id/graph/concept/:name`
+The data layer maps to knowledge graph API endpoints:
+- `repo_id` set + `concept` → `GET /repos/:id/graph/concept/:name` (single repo)
+- `repo_id` null + `concept` → `GET /workspaces/:id/graph` (workspace-aggregated graph, client-side concept filtering)
 - `spec_path` → `GET /repos/:id/graph/spec/:path`
-- No concept/spec_path → `GET /repos/:id/graph` (full graph, client-side filtered)
+- No concept/spec_path → `GET /repos/:id/graph` or `GET /workspaces/:id/graph`
 - `node_types`/`edge_types` → client-side filtering on the response
 
 ### Layout Layer
@@ -382,7 +386,7 @@ Maps data attributes to visual properties.
 | Property | Accepted fields | Description |
 |---|---|---|
 | `color` | `node_type`, `spec_confidence`, `visibility`, any custom field | Node fill color. Categorical or ordinal scale. |
-| `size` | `churn_count_30d`, `complexity`, `fan_out`, `fan_in` | Node size. Linear scale with min/max range. |
+| `size` | `churn_count_30d`, `complexity` | Node size. Linear scale with min/max range. `fan_out` and `fan_in` are computed by the risks endpoint (`GET /repos/:id/graph/risks`) and available when the Evaluative lens is active. |
 | `border` | `spec_confidence`, any field | Node border color/style. |
 | `opacity` | `visibility`, `spec_confidence` | Node transparency. |
 | `label` | `name`, `qualified_name`, `file_path` | Text displayed on/below the node. |
