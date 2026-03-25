@@ -277,6 +277,7 @@ pub enum NotificationType {
     TrustSuggestion,            // priority 8
     SpecAssertionFailure,       // priority 9
     SuggestedSpecLink,          // priority 10
+    AbandonedBranch,            // priority 9 (alongside SpecAssertionFailure)
 }
 ```
 
@@ -1269,7 +1270,7 @@ Example: "Tell me more about the auth refactor"
          "What changed in idempotent-api.md?"
 ```
 
-**Briefing endpoint:** `GET /api/v1/workspaces/:workspace_id/briefing` — this spec is the **sole owner** of the response schema (supersedes `realized-model.md` §7's original narrative description). Response:
+**Briefing endpoint:** `GET /api/v1/workspaces/:workspace_id/briefing?repo_id=` — optional `repo_id` filter narrows the briefing to a single repo (for repo-scope Briefing). When omitted, returns workspace-wide briefing. — this spec is the **sole owner** of the response schema (supersedes `realized-model.md` §7's original narrative description). Response:
 ```json
 {
   "since": 1711324800,
@@ -1344,11 +1345,13 @@ This table is not exhaustive — it establishes the pattern. The REST API is the
 | Spec | Amendment Needed |
 |---|---|
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays are **Phase 1 priority** (fast structural prediction via `graph/predict` ships before the thorough Editor Split preview). The Editor Split preview in `ui-layout.md` §9 is Phase 2 — complements ghost overlays with certainty after prediction builds intuition. |
+| `hierarchy-enforcement.md` §4 ABAC-exempt additions | Add `GET /api/v1/trace-spans/:span_id/payload` to the ABAC-exempt list (per-handler auth — resolves MR → workspace from span's gate run). |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`. Add `user_workspace_state` to `check-tenant-filter.sh` skip list. |
 | `api-conventions.md` §6 | Acknowledge per-handler auth as a third authorization mechanism alongside "no auth (public)" and "ABAC middleware." Per-handler auth is used for endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4. |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
-| `abac-policy-engine.md` §"Action attributes" | Add `generate` action (used by `explorer-views/generate` and `specs/assist` endpoints — distinct from `write` to allow policies that permit LLM generation while restricting CRUD). Applies to resource types: `explorer_view`, `spec`. |
+| `abac-policy-engine.md` §"Action attributes" | Add `generate` action (used by `explorer-views/generate`, `specs/assist`, and `prompts/save` endpoints — distinct from `write` to allow policies that permit LLM generation while restricting CRUD). Applies to resource types: `explorer_view`, `spec`. |
+| `abac-policy-engine.md` §"Built-In Policies" or `hierarchy-enforcement.md` §"Built-In Policies" | Add `developer-generate-access` (Allow, priority 800): Developer and Admin roles can perform `generate` action on `explorer_view` and `spec` resource types. Without this policy, `default-deny` blocks all LLM generation and prompt editing. |
 | `abac-policy-engine.md` §"Built-In Policies" | Add `builtin:require-human-spec-approval` (immutable Deny, priority 999, denies `approve` on `spec` when `subject.type != "user"`) to the built-in policy table. This policy is defined in HSI §2 and seeded at server startup. |
 | `abac-policy-engine.md` §CRUD API | Add `?scope_id=` query parameter to `GET /api/v1/policies` for filtering policies by their scope target (e.g., `?scope=Workspace&scope_id=<workspace_id>` returns only policies scoped to that workspace). Required for the Admin Policies tab. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
