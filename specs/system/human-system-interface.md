@@ -397,6 +397,48 @@ Since your last visit:
     Spec: (none — cleanup task)
 ```
 
+#### System Trace View
+
+What actually happened — the dynamic counterpart to the static architecture views. Inspired by trace-driven development: understanding comes from seeing real behavior through real structure, not from seeing structure alone.
+
+```
+MR #52: Payment retry endpoint
+  Author: worker-12 | Spec: payment-retry.md
+
+  TIMELINE
+  ├─ 10:14  Spec lifecycle: task auto-created (TASK-42)
+  ├─ 10:15  Orchestrator: assigned to worker-12
+  ├─ 10:15  Agent spawned (persona: backend-dev v4, JWT: 2h)
+  ├─ 10:16  Turn 1: Read spec, planned approach
+  ├─ 10:18  Turn 3: Created RetryPolicy type
+  ├─ 10:22  Turn 7: git push (3 files changed) → gates triggered
+  │         ├─ cargo test: PASS (142 tests, 0.8s)
+  │         ├─ cargo clippy: PASS
+  │         └─ spec-binding: PASS (payment-retry.md@abc123)
+  ├─ 10:23  Graph extraction: +RetryPolicy, +should_retry, ~PaymentPort
+  ├─ 10:24  Turn 8: Completion summary (2 decisions, 1 uncertainty)
+  ├─ 10:24  MR enqueued → merge queue position #3
+  ├─ 10:25  Speculative merge: clean
+  ├─ 10:26  Merged to main
+  └─ 10:26  Post-merge gate: PASS
+
+  [View Conversation] [View Diff] [View Attestation]
+```
+
+Each row links to the underlying data: clicking a gate result opens the gate detail, clicking a turn opens the conversation at that point, clicking the graph extraction shows the architectural delta. The trace is assembled from existing data — no new storage needed:
+
+| Trace Event | Data Source |
+|---|---|
+| Spec lifecycle triggers | `SpecChanged` Event-tier messages |
+| Agent spawn/complete | `AgentCreated`/`AgentCompleted` messages |
+| Conversation turns | `TurnCommitLink` records (§5) |
+| Gate execution | Gate result records (`agent-gates.md`) |
+| Graph extraction | `ArchitecturalDelta` records (`realized-model.md`) |
+| Merge queue events | `QueueUpdated` messages |
+| Notifications created | `Notification` records |
+
+**Access:** The System Trace view is a detail panel tab ("Trace") available on MR and agent entities. It can also be accessed from the Explorer's Change View by clicking any change entry. Data endpoint: `GET /api/v1/merge-requests/:id/trace` — returns the assembled timeline (new endpoint, ABAC `resource_type: "mr"`, `action: "read"`).
+
 ### Saved Views (Curated, Shared)
 
 Views are serializable specs that can be saved to the workspace and shared:
@@ -1006,13 +1048,34 @@ These are architectural constraints, not implementation work. They ensure we don
 
 ---
 
+## 11. CLI/MCP Parity Constraint
+
+**Every data surface in the UI must be consumable outside the browser.** If understanding requires the Gyre platform UI to be running, we've created the same lock-in that killed Dark's proprietary editor. The knowledge graph, the briefing narrative, the notification inbox, and the system traces are valuable to developers working in terminals, CI pipelines, and LLM-powered editors.
+
+**Principle:** The UI is a view layer over REST APIs. Every API that the UI consumes is available to the CLI and MCP clients. Specifically:
+
+| UI Surface | CLI Equivalent | MCP Equivalent |
+|---|---|---|
+| Briefing | `gyre briefing [--workspace <slug>] [--since <epoch>]` | Resource: `briefing://` |
+| Inbox | `gyre inbox [--workspace <slug>] [--priority <min>-<max>]` | Resource: `notifications://` |
+| Explorer (concept search) | `gyre explore <concept> [--repo <name>]` | Tool: `graph.concept` |
+| System Trace | `gyre trace <mr-id>` | Resource: `trace://<mr-id>` |
+| Spec editing assist | `gyre spec assist <path> "<instruction>"` | Tool: `spec.assist` |
+| Divergence alerts | `gyre divergence [--workspace <slug>]` | (via notifications) |
+
+This table is not exhaustive — it establishes the pattern. The REST API is the single source of truth; the UI, CLI, and MCP are all consumers. No data surface should be UI-only.
+
+**Why this matters:** When LLMs work through Cursor/VSCode/CLI (not Gyre's Explorer), the developer still needs the briefing, the traces, and the structural understanding. The system's value is in the data and the analysis, not in the rendering.
+
+---
+
 ## Relationship to Existing Specs
 
 **Upstream Amendments Applied** (all amendments from this spec have been applied to the listed specs in this PR):
 
 | Spec | Amendment Needed |
 |---|---|
-| `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays and structural prediction are deferred — the meta-specs preview loop (Editor Split in `ui-layout.md` §8) replaces inline ghost overlays with a dedicated preview workflow. |
+| `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays are **Phase 1 priority** (fast structural prediction via `graph/predict` ships before the thorough Editor Split preview). The Editor Split preview in `ui-layout.md` §9 is Phase 2 — complements ghost overlays with certainty after prediction builds intuition. |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`. Add `user_workspace_state` to `check-tenant-filter.sh` skip list. |
 | `api-conventions.md` §6 | Acknowledge per-handler auth as a third authorization mechanism alongside "no auth (public)" and "ABAC middleware." Per-handler auth is used for endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4. |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |

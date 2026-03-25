@@ -284,7 +284,7 @@ When you click a spec linkage badge anywhere in the explorer, the spec opens **i
 
 ### 3. Inline Spec Editing with Progressive Preview
 
-> **Note:** The ghost overlay UX (§3.2-3.3 below — real-time canvas overlays as user types) is **deferred**. The replacement workflow is the Editor Split preview in `ui-layout.md` §9: edit a spec/meta-spec → click Preview → agent implements on throwaway branch → view architectural diff. The `POST /repos/{id}/graph/predict` endpoint remains in scope — it powers the preview's architectural impact analysis. The ghost overlay visual language and real-time canvas updates below are retained as future design direction but are NOT part of the current milestone.
+> **Note:** The ghost overlay UX (§3.2-3.3 below) is **Phase 1 priority** — the fast, probabilistic feedback loop (2-5 seconds via `POST /repos/{id}/graph/predict`) is more valuable for understanding than the thorough preview (minutes via agent implementation on throwaway branches). Lesson from Dark: instant/fast structural prediction creates the tight feedback loop that makes editing feel transformative; the slow-but-perfect preview is Phase 2. Both ship, but ghost overlays first. The Editor Split preview in `ui-layout.md` §9 complements ghost overlays — it provides certainty after the fast prediction builds intuition.
 
 This is the core interaction. The human sees the realized architecture, clicks a spec, edits it, and sees the projected impact — all in one view.
 

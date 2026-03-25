@@ -122,6 +122,7 @@ The detail panel slides in from the right when the user clicks an entity (node, 
 | **Diff** | When viewing an MR | Side-by-side code diff |
 | **Gates** | When viewing an MR | Gate execution results |
 | **Attestation** | When viewing a merged MR | Merge attestation bundle + conversation provenance |
+| **Trace** | When viewing an MR or agent | System trace timeline — what actually happened (per HSI §3 System Trace View) |
 | **Ask Why** | When entity has an author agent with `conversation_sha` | Tab content: initially shows a "Start interrogation" button. Clicking it spawns the interrogation agent (per HSI §4) and the tab becomes an inline chat with the spawned agent. Disabled with tooltip "Conversation unavailable" when `conversation_sha` is null. |
 
 Note: The tab set is contextual per entity type. An MR shows Info/Diff/Gates/Attestation/Ask Why. A graph node shows Info/Spec/Chat/History. An agent shows Info/Chat/History. A spec entity (opened from the Specs view §6) replaces the generic Info/Spec tabs with the richer set: Content/Edit/Progress/Links/History — the "Info" tab is subsumed by "Content" which includes metadata. The tabs listed above are the superset — only applicable tabs appear.
