@@ -374,6 +374,26 @@ impl TelemetryBuffer {
                 .collect(),
         }
     }
+
+    /// Returns messages across all workspaces with created_at > since_ms, up to `limit` entries.
+    /// Used by the global activity endpoint for backward compatibility.
+    pub fn list_all_since(&self, since_ms: u64, limit: usize) -> Vec<Message> {
+        let mut all: Vec<Message> = self
+            .buffers
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .value()
+                    .iter()
+                    .filter(|m| m.created_at > since_ms)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        all.sort_by_key(|m| m.created_at);
+        all.truncate(limit);
+        all
+    }
 }
 
 impl Default for TelemetryBuffer {

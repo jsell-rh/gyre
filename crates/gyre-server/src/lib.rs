@@ -1,6 +1,5 @@
 pub(crate) mod abac;
 pub mod abac_middleware;
-pub(crate) mod activity;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -45,8 +44,9 @@ pub mod workload_attestation;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
-use domain_events::DomainEvent;
-use gyre_common::ActivityEventData;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
+use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
@@ -172,10 +172,10 @@ pub struct AppState {
     pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
-    pub activity_store: activity::ActivityStore,
-    pub broadcast_tx: broadcast::Sender<ActivityEventData>,
-    /// Domain event bus: broadcasts structured domain events to all WS clients.
-    pub event_tx: broadcast::Sender<DomainEvent>,
+    /// In-memory ring buffer for Telemetry-tier messages (replaces ActivityStore).
+    pub telemetry_buffer: Arc<TelemetryBuffer>,
+    /// Unified broadcast channel for WebSocket message delivery (replaces broadcast_tx + event_tx).
+    pub message_broadcast_tx: broadcast::Sender<Message>,
     /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
     /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
     /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
@@ -298,6 +298,129 @@ pub struct AppState {
     pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
     /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
     pub agent_inbox_max: u64,
+}
+
+/// Helper: sign a bus message and return (base64_signature, key_id).
+fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, String) {
+    use sha2::{Digest, Sha256};
+
+    let (from_type, from_id) = match &msg.from {
+        MessageOrigin::Server => ("server", "".to_string()),
+        MessageOrigin::Agent(id) => ("agent", id.as_str().to_string()),
+        MessageOrigin::User(id) => ("user", id.as_str().to_string()),
+    };
+    let (to_type, to_id) = match &msg.to {
+        Destination::Agent(id) => ("agent", id.as_str().to_string()),
+        Destination::Workspace(id) => ("workspace", id.as_str().to_string()),
+        Destination::Broadcast => ("broadcast", "".to_string()),
+    };
+    let ws_id = msg
+        .workspace_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_default();
+    let payload_json = msg
+        .payload
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    let payload_hash = format!("{:x}", hasher.finalize());
+    let sign_input = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        msg.id.as_str(),
+        from_type,
+        from_id,
+        ws_id,
+        to_type,
+        to_id,
+        msg.kind.as_str(),
+        payload_hash,
+        msg.created_at,
+    );
+    let sig_bytes = key.sign_bytes(sign_input.as_bytes());
+    let sig_b64 = B64.encode(&sig_bytes);
+    (sig_b64, key.kid.clone())
+}
+
+impl AppState {
+    /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
+    /// and dispatch to consumers. Best-effort: logs errors, never panics.
+    pub async fn emit_event(
+        &self,
+        workspace_id: Option<Id>,
+        to: Destination,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let id = Id::new(uuid::Uuid::new_v4().to_string());
+
+        let mut msg = Message {
+            id,
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id,
+            to,
+            kind,
+            payload,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+
+        let (sig, kid) = sign_bus_message(&self.agent_signing_key, &msg);
+        msg.signature = Some(sig);
+        msg.key_id = Some(kid);
+
+        // Persist (not Broadcast — those are never stored).
+        if !matches!(msg.to, Destination::Broadcast) {
+            if let Err(e) = self.messages.store(&msg).await {
+                tracing::warn!("emit_event: failed to persist message: {e}");
+            }
+        }
+        // Broadcast to WebSocket clients.
+        let _ = self.message_broadcast_tx.send(msg.clone());
+        // Dispatch to consumers (notification system, etc.).
+        let _ = self.message_dispatch_tx.try_send(msg);
+    }
+
+    /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
+    /// Unsigned and not persisted.
+    pub fn emit_telemetry(
+        &self,
+        workspace_id: Id,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let id = Id::new(uuid::Uuid::new_v4().to_string());
+        let msg = Message {
+            id,
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(workspace_id.clone()),
+            to: Destination::Workspace(workspace_id),
+            kind,
+            payload,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        self.telemetry_buffer.push(msg.clone());
+        let _ = self.message_broadcast_tx.send(msg);
+    }
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -493,9 +616,18 @@ pub fn build_state(
     base_url: &str,
     jwt_config: Option<Arc<JwtConfig>>,
 ) -> Arc<AppState> {
-    let (broadcast_tx, _) = broadcast::channel(256);
-    let (event_tx, _) = broadcast::channel(256);
+    let (message_broadcast_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
+    let telemetry_buffer = Arc::new(TelemetryBuffer::new(
+        std::env::var("GYRE_TELEMETRY_BUFFER_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000),
+        std::env::var("GYRE_TELEMETRY_MAX_WORKSPACES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100),
+    ));
     let metrics = Arc::new(metrics::Metrics::new().expect("failed to create Prometheus metrics"));
     let started_at_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -562,9 +694,8 @@ pub fn build_state(
             dyn WorktreeRepository,
             mem::MemWorktreeRepository::default()
         ),
-        activity_store: activity::ActivityStore::new(),
-        broadcast_tx,
-        event_tx,
+        telemetry_buffer,
+        message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
         agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
         // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
@@ -684,7 +815,19 @@ pub fn build_state(
             mem::MemMetaSpecSetRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
-        message_dispatch_tx: tokio::sync::mpsc::channel(256).0,
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            // Spawn a background consumer so the receiver is not immediately dropped.
+            // This drains the channel; a full notification consumer can replace this later.
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while let Some(_msg) = rx.recv().await {
+                    // No-op drain: notifications system not yet wired.
+                    // A proper MessageConsumer implementation can plug in here.
+                }
+            });
+            tx
+        },
         agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
             .ok()
             .and_then(|v| v.parse().ok())

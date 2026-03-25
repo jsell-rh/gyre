@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::instrument;
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -158,9 +157,14 @@ pub async fn create_task(
             facets,
         })
         .await;
-    let _ = state.event_tx.send(DomainEvent::TaskCreated {
-        id: task.id.to_string(),
-    });
+    state
+        .emit_event(
+            Some(task.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
+            gyre_common::message::MessageKind::TaskCreated,
+            Some(serde_json::json!({"task_id": task.id.to_string()})),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(TaskResponse::from(task))))
 }
 
@@ -262,10 +266,14 @@ pub async fn transition_task_status(
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
-    let _ = state.event_tx.send(DomainEvent::TaskTransitioned {
-        id: task.id.to_string(),
-        status: req.status.clone(),
-    });
+    state
+        .emit_event(
+            Some(task.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
+            gyre_common::message::MessageKind::TaskTransitioned,
+            Some(serde_json::json!({"task_id": task.id.to_string(), "status": req.status})),
+        )
+        .await;
 
     // Auto-track status transition as analytics event
     let event = AnalyticsEvent::new(
