@@ -148,7 +148,7 @@ Colors indicate spec coverage (green = governed by spec, amber = suggested link,
 
 **Drag** the timeline scrubber → The canvas updates to show the architecture at that point in time. Ghost outlines show where things were added or removed since.
 
-**Search** (Cmd+K) → Find any entity by name, type, or spec. Results highlight on the canvas.
+**Search** (`/`) → Find any entity by name, type, or spec within the canvas. Results highlight on the canvas. (Note: `Cmd+K` is now global search per `human-system-interface.md` §1.)
 
 ### 2. Moldable Views
 
