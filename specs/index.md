@@ -47,6 +47,7 @@ What Gyre does - the product.
 | System Explorer | [`system/system-explorer.md`](system/system-explorer.md) | GT-inspired live architecture viewer: moldable views per entity, inline spec editing, progressive preview (instant/fast/thorough), ghost overlays, flow traces, conversational exploration |
 | UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | (Superseded by Human-System Interface) Journey-oriented navigation |
 | **Human-System Interface** | [`system/human-system-interface.md`](system/human-system-interface.md) | **How humans interact with autonomous development:** trust gradient, progressive Explorer (C4 + LLM views), agent interrogation, conversation-to-code provenance, scoped chat, cross-workspace spec links, completion summaries |
+| UI Layout & Interactions | [`system/ui-layout.md`](system/ui-layout.md) | Spatial structure, view specification grammar (data/layout/encoding), interaction patterns (scope transitions, drill-down, inline chat), rendering technology (SVG + ELK/dagre) |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
