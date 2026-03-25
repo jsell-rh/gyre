@@ -73,7 +73,7 @@ A **status bar** at the bottom of the application shows trust level, budget usag
 
 **Entrypoint:** First visit lands on Explorer at tenant scope (workspace cards). After workspace selection, redirects to Inbox at workspace scope — the default landing view. Subsequent visits restore the last-used workspace and land on the Inbox. See `ui-layout.md` §1 for full entrypoint flow.
 
-**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored in a new `user_workspace_state` table — per-workspace tracking requires its own table:
+**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. **Mechanism:** an Axum middleware layer (placed after auth, before handlers) extracts `user_id` from the auth context and `workspace_id` from the route params or resolved entity. It fires an async upsert to `user_workspace_state` (debounced to at most once per 60 seconds per user-workspace pair to avoid write amplification). The Briefing's "since your last visit" default uses this timestamp. Stored in a new `user_workspace_state` table — per-workspace tracking requires its own table:
 ```sql
 CREATE TABLE user_workspace_state (
     user_id TEXT NOT NULL,
@@ -256,7 +256,7 @@ The `dismissed_at` field tracks user dismissals (used by trust suggestions to su
 pub trait NotificationRepository: Send + Sync {
     async fn create(&self, notification: &Notification) -> Result<()>;
     async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>>;
-    async fn list_for_user(&self, user_id: &Id, workspace_id: &Id, min_priority: Option<u8>, max_priority: Option<u8>) -> Result<Vec<Notification>>;
+    async fn list_for_user(&self, user_id: &Id, workspace_id: Option<&Id>, min_priority: Option<u8>, max_priority: Option<u8>, limit: u32, offset: u32) -> Result<Vec<Notification>>;
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()>;
     async fn resolve(&self, id: &Id, user_id: &Id, action_taken: Option<&str>) -> Result<()>;
     async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
