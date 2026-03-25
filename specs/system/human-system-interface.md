@@ -155,7 +155,7 @@ All trust level transitions (workspace `trust_level` field update AND policy del
 |---|---|---|---|
 | **MR merge** | Human approval required | Autonomous if all gates pass | Autonomous if all gates pass |
 | **Spec approval** | Human approval required | Human approval required | Human approval required (always) |
-| **Inbox shows** | Every MR, every gate result, every agent decision | Priorities 1-9 (per row below) | Priorities 1-9 (per row below) |
+| **Inbox shows** | Priorities 1-10 (everything in the priority table) | Priorities 1-9 (per row below) | Priorities 1-9 (per row below) |
 | **Briefing detail** | Per-agent activity, per-MR status | Per-spec progress, exceptions | Spec-level summaries, exceptions only |
 | **Notifications** | Every state change | Failures and approvals | Exceptions only |
 | **Agent completion summaries** | Full decision log visible | Uncertainties highlighted | Only low-confidence decisions surfaced |
@@ -228,7 +228,7 @@ Consider increasing trust level to Autonomous.
 
 This appears as an Inbox item (priority 8). The human decides.
 
-**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results and MR reverts for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, and the user has not dismissed this suggestion in the last 30 days, it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs.
+**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results (from the gate evaluation records) and MR reverts (MRs with status `Reverted` — the revert flow in `platform-model.md` §6 must set this status on the original MR when a revert commit is created) for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, and the user has not dismissed this suggestion in the last 30 days, it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs.
 
 **Notification entity:** Notifications used throughout this spec (Inbox items) share a common schema:
 ```sql
