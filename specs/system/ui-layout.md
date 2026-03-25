@@ -444,7 +444,7 @@ Specifies spatial arrangement.
 
 This enables the LLM to compose visualizations from primitives — a graph next to a table, a timeline with embedded lists, a spec alongside its realization graph.
 
-**Nesting depth limit:** `side-by-side` sub-views cannot themselves contain `side-by-side` layouts. Maximum composition depth is 1. Validated **both** server-side (the `/explorer-views` CRUD and `/generate` endpoints reject invalid specs with 400) and client-side (the Svelte renderer checks before rendering and shows an error message instead of crashing).
+**Nesting depth limit:** `side-by-side` sub-views cannot themselves contain `side-by-side` layouts. Maximum composition depth is 1. Sub-views support `data`, `layout`, and `encoding` fields only — `annotations`, `explanation`, `name`, and `description` are top-level-only. Validated **both** server-side (the `/explorer-views` CRUD and `/generate` endpoints reject invalid specs with 400) and client-side (the Svelte renderer checks before rendering and shows an error message instead of crashing).
 
 ### Encoding Layer
 
@@ -617,7 +617,7 @@ Expanded (accordion):
 | 5 | Conflicting interpretations | View Both, Pick A / Pick B, Reconcile |
 | 6 | Meta-spec drift | View Results, Adjust Meta-spec |
 | 7 | Budget warning | Increase Limit, Pause Work |
-| 8 | Trust suggestion | Increase Trust, Dismiss |
+| 8 | Trust suggestion | Increase Trust, Dismiss. **Dismissed items** are hidden from the default Inbox view but visible via a "Show Dismissed" toggle at the top of the Inbox (default: off). |
 | 9 | Spec assertion failure | View Code, Update Spec |
 | 10 | Suggested link | Confirm, Dismiss |
 
