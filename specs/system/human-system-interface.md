@@ -257,7 +257,8 @@ pub trait NotificationRepository: Send + Sync {
     async fn list_for_user(&self, user_id: &Id, workspace_id: &Id, min_priority: Option<u8>, max_priority: Option<u8>) -> Result<Vec<Notification>>;
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()>;
     async fn resolve(&self, id: &Id, user_id: &Id, action_taken: Option<&str>) -> Result<()>;
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: &Id) -> Result<u64>;
+    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+    // workspace_id=None counts across all workspaces (tenant-scope Inbox badge)
 }
 ```
 
