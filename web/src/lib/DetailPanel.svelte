@@ -105,10 +105,18 @@
   }
 
   // Reset active tab when entity changes, defaulting to the first tab.
+  // Also keep the URL's `detail` param in sync for deep-linking (spec §2 Pop Out).
   $effect(() => {
     if (entity) {
       const first = tabs[0];
       if (first) activeTab = first.id;
+      // Add detail query param so the split-mode state is deep-linkable.
+      const url = new URL(window.location.href);
+      const expected = `${entity.type}:${entity.id}`;
+      if (url.searchParams.get('detail') !== expected) {
+        url.searchParams.set('detail', expected);
+        window.history.pushState({}, '', url.toString());
+      }
     }
   });
 

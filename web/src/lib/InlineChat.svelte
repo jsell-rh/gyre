@@ -122,22 +122,22 @@
             // Determine event type: use SSE event: line if present,
             // otherwise fall back to JSON `type` field (backwards compat).
             let evType = currentEventType;
-            let text = raw;
+            let payload = raw;
             try {
               const parsed = JSON.parse(raw);
               if (!evType) evType = parsed.type ?? '';
-              text = parsed.text ?? parsed.message ?? raw;
+              payload = parsed.text ?? parsed.message ?? raw;
 
               if (evType === 'partial') {
-                streamBuffer += text;
+                streamBuffer += payload;
               } else if (evType === 'complete') {
-                const final = text || streamBuffer;
+                const final = payload || streamBuffer;
                 messages = [...messages, { role: 'assistant', content: final }];
                 streamBuffer = '';
                 done = true;
                 break;
               } else if (evType === 'error') {
-                error = text || 'Streaming error';
+                error = payload || 'Streaming error';
                 done = true;
                 break;
               }
@@ -145,7 +145,8 @@
               // Plain text chunk — append to stream buffer.
               streamBuffer += raw;
             }
-            currentEventType = '';
+            // Per SSE spec: event type persists until a blank line dispatches
+            // the event and resets it. Do NOT reset here — only reset on blank line.
           }
         }
       }

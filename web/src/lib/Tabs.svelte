@@ -49,6 +49,7 @@
       onclick={() => select(tab.id)}
       onkeydown={(e) => onkeydown(e, tab.id, i)}
       disabled={tab.disabled}
+      title={tab.title}
     >
       {#if tab.icon}
         <span class="tab-icon" aria-hidden="true">{@html tab.icon}</span>
