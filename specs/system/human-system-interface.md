@@ -65,7 +65,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server caps at 5 sessions per user (oldest evicted first) to prevent presence map flooding. Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted"}` WebSocket message — the client stops sending heartbeats for that tab. Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
 
 ### Deep Links
 
@@ -203,7 +203,7 @@ The Custom trust editor grays out immutable policies with tooltip: "This policy 
 
 Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
-**Custom:** opens the ABAC policy editor for direct manipulation.
+**Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor shows the full `abac-policy-engine.md` UI: visual condition builder, dry-run simulator, policy list with `trust:` / `builtin:` / user-created grouping.
 
 ### Trust Suggestions
 
@@ -217,7 +217,7 @@ Consider increasing trust level to Autonomous.
 
 This appears as an Inbox item (priority 8). The human decides.
 
-**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results and MR reverts for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs (stale agent detector, budget reset, etc.).
+**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results and MR reverts for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, and the user has not dismissed this suggestion in the last 30 days (tracked via a `dismissed_at` timestamp on the notification), it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs.
 
 ---
 
@@ -604,7 +604,8 @@ CREATE TABLE turn_commit_links (
     commit_sha TEXT NOT NULL,
     files_changed TEXT NOT NULL, -- JSON array
     conversation_sha TEXT,      -- NULL until back-filled at completion
-    timestamp INTEGER NOT NULL
+    timestamp INTEGER NOT NULL,
+    tenant_id TEXT NOT NULL
 );
 CREATE INDEX idx_turn_links_agent ON turn_commit_links (agent_id);
 CREATE INDEX idx_turn_links_conversation ON turn_commit_links (conversation_sha);
@@ -876,7 +877,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | Spec | Amendment Needed |
 |---|---|
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays and structural prediction are deferred — the meta-specs preview loop (Editor Split in `ui-layout.md` §8) replaces inline ghost overlays with a dedicated preview workflow. |
-| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. |
+| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add `GET /api/v1/conversations/:sha` to the ABAC-exempt endpoint list (per-handler auth, like git HTTP). |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |

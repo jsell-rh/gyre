@@ -258,7 +258,7 @@ Different recipients have different capabilities:
 In the Spec tab of any detail panel, or in the Editor Split layout:
 
 1. Human types a change request in the chat input: "Add a section on error handling for the timeout case"
-2. LLM reads the current spec + knowledge graph context (what code exists for this spec)
+2. Frontend calls `POST /api/v1/repos/:repo_id/specs/assist` — request: `{spec_path, instruction}`, response: `{diff: [{op, content}], explanation}`. The LLM reads the current spec + knowledge graph context
 3. LLM produces a draft revision shown as an inline diff block in the editor:
    ```
    ┌─ Suggested Change ──────────────────────────┐
