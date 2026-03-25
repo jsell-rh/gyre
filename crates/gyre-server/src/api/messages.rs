@@ -227,6 +227,20 @@ pub async fn send_message(
             }
         }
 
+        // User-to-agent: verify workspace membership.
+        if let MessageOrigin::User(ref user_id) = from {
+            let membership = state
+                .workspace_memberships
+                .find_by_user_and_workspace(user_id, &ws_id)
+                .await
+                .map_err(ApiError::Internal)?;
+            if membership.is_none() {
+                return Err(ApiError::Forbidden(
+                    "not a member of this workspace".to_string(),
+                ));
+            }
+        }
+
         // Queue depth check for Directed tier.
         if effective_tier == MessageTier::Directed {
             let unacked = state
