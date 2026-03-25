@@ -283,6 +283,7 @@ ABAC ships with built-in policies seeded at startup (cannot be deleted):
 | `agent-scoped-access` | Allow | 700 | Agent role allows read + write in scoped repo |
 | `readonly-get-only` | Allow | 600 | ReadOnly role allows only read |
 | `tenant-isolation` | Deny | 500 | Cross-tenant access denied |
+| `developer-generate-access` | Allow | 800 | Developer and Admin roles can perform `generate` action on `explorer_view` and `spec` |
 | `persona-human-approval` | Deny | 450 | Agents can't approve personas (human-only) |
 | `workspace-membership-required` | Deny | 400 | Non-members denied access to workspace resources |
 | `default-deny` | Deny | 0 | Everything not explicitly allowed is denied (lowest priority) |

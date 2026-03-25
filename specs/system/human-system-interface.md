@@ -771,6 +771,8 @@ LLM generates:
 
 The LLM selects `"flow"` layout when the question implies data movement ("how does X flow", "what happens when Y calls Z", "show me the request path for W"). For structural questions ("what is X made of", "what depends on Y"), it uses `"graph"` or `"hierarchical"`.
 
+**MR ID discovery for `trace_source`:** The LLM prompt template injects a list of recent MRs with trace data (from `GET /workspaces/:id/merge-requests?has_trace=true&limit=10`). The LLM matches the user's question to the relevant MR by spec_ref or title. If no matching MR has trace data, the LLM responds with a `"graph"` layout instead and explains that no trace data is available for this concept.
+
 **Important constraint:** The LLM has access only to the knowledge graph API (read-only). It cannot modify code, create tasks, or trigger agent actions. It is a *query translator*, not an agent.
 
 ### Three Lenses

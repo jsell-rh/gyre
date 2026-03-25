@@ -386,6 +386,8 @@ The Explorer renders views from a declarative JSON specification. This grammar i
     {"node_name": "AuthenticatedAgent", "text": "Resolves caller identity from JWT"}
   ],
 
+  "highlight": {"spec_path": "specs/system/identity-security.md"},
+
   "explanation": "Authentication flows through require_auth_middleware which validates..."
 }
 ```
@@ -484,6 +486,18 @@ When `"flow"` is the active layout, the Explorer control bar gains playback cont
 This enables the LLM to compose visualizations from primitives — a graph next to a table, a timeline with embedded lists, a spec alongside its realization graph.
 
 **Nesting depth limit:** `side-by-side` sub-views cannot themselves contain `side-by-side` layouts. Maximum composition depth is 1. Sub-views support `data`, `layout`, and `encoding` fields only — `annotations`, `explanation`, `name`, and `description` are top-level-only. **No field inheritance:** sub-views do not inherit `data` fields from the parent. Each sub-view must declare its own `repo_id` if needed (e.g., when using `filter.spec_path`). The server validates each sub-view independently. Validated **both** server-side (the `/explorer-views` CRUD and `/generate` endpoints reject invalid specs with 400) and client-side (the Svelte renderer checks before rendering and shows an error message instead of crashing).
+
+### Highlight Layer
+
+Optional. Visually emphasizes nodes related to a specific context:
+
+| Field | Type | Description |
+|---|---|---|
+| `highlight.spec_path` | `Option<String>` | Highlight all nodes governed by this spec (glowing border). |
+| `highlight.node_ids` | `Option<Vec<String>>` | Highlight specific nodes by ID. |
+| `highlight.edge_types` | `Option<Vec<String>>` | Highlight edges of these types. |
+
+Highlighted nodes get a distinct visual treatment (brighter border, slight scale-up) without changing the encoding. The LLM uses `highlight` to focus attention on the relevant part of a larger view.
 
 ### Encoding Layer
 
