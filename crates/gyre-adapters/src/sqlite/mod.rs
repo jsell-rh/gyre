@@ -19,6 +19,7 @@ pub mod dependency;
 pub mod kv_store;
 pub mod merge_queue;
 pub mod merge_request;
+pub mod message;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
@@ -168,6 +169,7 @@ mod tests {
             "audit_events",
             "network_peers",
             "tenants",
+            "messages",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;

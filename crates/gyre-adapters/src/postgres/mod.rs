@@ -19,6 +19,7 @@ pub mod dependency;
 pub mod kv_store;
 pub mod merge_queue;
 pub mod merge_request;
+pub mod message;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;

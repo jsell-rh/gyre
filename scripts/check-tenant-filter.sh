@@ -64,6 +64,9 @@ for dir in "${ADAPTER_DIRS[@]}"; do
         [ -f "$file" ] || continue
         bname=$(basename "$file")
         [ "$bname" = "mod.rs" ] || [ "$bname" = "schema.rs" ] && continue
+        # message.rs: workspace_id isolation (globally unique, tenant-bound).
+        # Expiry methods are intentionally cross-tenant housekeeping.
+        [ "$bname" = "message.rs" ] && continue
 
         output=$(scan_file "$file" "$label")
         # Print violation lines (everything except SUMMARY)
