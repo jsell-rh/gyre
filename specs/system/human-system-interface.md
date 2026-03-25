@@ -52,7 +52,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 | Nav Item | Tenant Scope | Workspace Scope | Repo Scope |
 |---|---|---|---|
-| **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo (filtered by `entity_ref` matching the repo — notifications that reference specs, MRs, agents, or tasks in this repo) |
+| **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo (filtered by `repo_id` on notifications). Workspace-scoped notifications with `repo_id: NULL` (e.g., trust suggestions, meta-spec drift) are only visible at workspace scope, not repo scope. |
 | **Briefing** | Narrative across all workspaces (client-side aggregation: calls `GET /workspaces/:id/briefing` per workspace, merges sections) | Narrative for this workspace | Narrative for this repo |
 | **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **card grid**, not a graph canvas — click a workspace card to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
@@ -67,7 +67,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent **immediately on page load** (so the user appears present to others without waiting for the first timer tick), then on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. **Graceful disconnect:** The client sends a `UserPresence` with `view: "disconnected"` on `beforeunload` (browser tab close) so the server can evict the session immediately without waiting for the 60-second timeout. The server evicts entries after 60 seconds without an update. **Multi-tab:** Each browser tab opens its own WebSocket connection (connections are NOT shared across tabs). The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server maps `session_id` to the specific WebSocket connection via the `Subscribe` message, enabling targeted `PresenceEvicted` delivery to the correct tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted", "session_id": "<evicted-uuid>"}` WebSocket message — the client checks if the session_id matches its own tab and stops heartbeating only for that tab. The server maps `session_id` to WebSocket connections by including `session_id` in the initial `Subscribe` message (amending `message-bus.md`'s `Subscribe` payload with a required `session_id` field — required for user connections that send `UserPresence`, optional for agent connections that don't use presence). Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent **immediately after WebSocket connection is established** (so the user appears present to others without waiting for the first timer tick), then on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. **Graceful disconnect:** The client sends a `UserPresence` with `view: "disconnected"` on `beforeunload` (browser tab close) so the server can evict the session immediately without waiting for the 60-second timeout. The server evicts entries after 60 seconds without an update. **Multi-tab:** Each browser tab opens its own WebSocket connection (connections are NOT shared across tabs). The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server maps `session_id` to the specific WebSocket connection via the `Subscribe` message, enabling targeted `PresenceEvicted` delivery to the correct tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted", "session_id": "<evicted-uuid>"}` WebSocket message — the client checks if the session_id matches its own tab and stops heartbeating only for that tab. The server maps `session_id` to WebSocket connections by including `session_id` in the initial `Subscribe` message (amending `message-bus.md`'s `Subscribe` payload with a required `session_id` field — required for user connections that send `UserPresence`, optional for agent connections that don't use presence). Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
 
 ### Deep Links
 
@@ -249,7 +249,7 @@ CREATE TABLE notifications (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,          -- recipient
-    notification_type TEXT NOT NULL, -- e.g. "AgentNeedsClarification", "TrustSuggestion"
+    notification_type TEXT NOT NULL, -- constrained to NotificationType enum values (see below)
     priority INTEGER NOT NULL,      -- 1-10 per §8 table
     title TEXT NOT NULL,
     body TEXT,                       -- JSON payload with type-specific data
@@ -264,6 +264,22 @@ CREATE TABLE notifications (
 );
 CREATE INDEX idx_notifications_user_ws ON notifications (user_id, workspace_id, resolved_at);
 ```
+**NotificationType enum** (in `gyre-common`):
+```rust
+pub enum NotificationType {
+    AgentNeedsClarification,    // priority 1
+    SpecPendingApproval,        // priority 2
+    GateFailure,                // priority 3
+    CrossWorkspaceSpecChange,   // priority 4
+    ConflictingInterpretations, // priority 5
+    MetaSpecDrift,              // priority 6
+    BudgetWarning,              // priority 7
+    TrustSuggestion,            // priority 8
+    SpecAssertionFailure,       // priority 9
+    SuggestedSpecLink,          // priority 10
+}
+```
+
 The `dismissed_at` field tracks user dismissals (used by trust suggestions to suppress re-creation for 30 days). The `resolved_at` field tracks resolution (action taken). The Inbox badge count is the count of notifications where `resolved_at IS NULL AND dismissed_at IS NULL`.
 
 **Crate placement:** The `Notification` struct lives in `gyre-common` (shared wire type, like `Message` and `Id`). `NotificationRepository` lives in `gyre-ports`.
@@ -778,7 +794,7 @@ specs:
         # repo_name must be unique within a workspace (enforced by DB constraint)
 ```
 
-The server resolves the composite path to a specific spec in a specific repo. Resolution is always scoped to the **calling user's tenant** (the server uses the authenticated user's `tenant_id` to scope the workspace slug lookup, preventing cross-tenant resolution). For UI navigation of cross-workspace links, the client resolves slugs via `GET /api/v1/workspaces?slug=<slug>` (returns the workspace matching the slug within the caller's tenant — the existing workspace list endpoint with a slug filter, no new endpoint needed). The first segment is the **workspace slug** (URL-safe identifier, unique per tenant, as defined in `platform-model.md`'s Workspace struct). Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`.
+The server resolves the composite path to a specific spec in a specific repo. Resolution is always scoped to the **caller's tenant** (the server uses the authenticated caller's `tenant_id` to scope the workspace slug lookup, preventing cross-tenant resolution). For agent-pushed manifests, the server performs the cross-workspace slug resolution using an internal service context (not the agent's repo-scoped JWT) since agents cannot read across workspaces. For UI navigation of cross-workspace links, the client resolves slugs via `GET /api/v1/workspaces?slug=<slug>` (returns the workspace matching the slug within the caller's tenant — the existing workspace list endpoint with a slug filter, no new endpoint needed). The first segment is the **workspace slug** (URL-safe identifier, unique per tenant, as defined in `platform-model.md`'s Workspace struct). Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`.
 
 Note: `spec-links.md` uses `{workspace}` in its format description without specifying whether this is name or slug. This spec clarifies: **always use slug** (unique, URL-safe). The server resolves slug → workspace ID internally.
 
