@@ -334,7 +334,7 @@ In the Spec tab of any detail panel, or in the Editor Split layout:
    │  [Accept] [Edit] [Dismiss]                   │
    └──────────────────────────────────────────────┘
    ```
-4. **Accept:** applies the change to the spec editor content (in-memory). The edit is NOT committed to git yet — the human must explicitly save. **Save workflow:** clicking Save commits the spec change to a feature branch named `spec-edit/<spec_path_slug>-<short_uuid>` (e.g., `spec-edit/system-payment-retry-a1b2`). The slug is derived from the spec path by replacing `/` with `-`, stripping the `.md` extension, and lowercasing (e.g., `system/payment-retry.md` → `system-payment-retry`). The server creates the branch, commits the change, and auto-creates an MR targeting the default branch. The MR itself creates a priority-2 "Spec pending approval" notification (directly, not via spec lifecycle — spec lifecycle triggers on default-branch pushes, but the human needs to see the pending approval before merging). After approval (via Inbox "Approve" action or spec approval endpoint), the MR is automatically enqueued into the merge queue (same path as agent MRs — the merge processor handles it). Merging the MR triggers spec lifecycle automation (approval invalidation, task creation). This ensures spec edits always require approval before taking effect. The save endpoint: `POST /api/v1/repos/:repo_id/specs/save` — request: `{spec_path, content, message}`, response: `{branch, mr_id}`. If the user has an existing open `spec-edit/*` MR for the same `spec_path` (matched by querying open MRs where the branch matches `spec-edit/<spec_path_slug>-*` and the MR author is the current user), the save appends a commit to the existing branch rather than creating a new one. **Branch cleanup:** `spec-edit/*` branches are deleted when their MR is merged or closed (standard MR branch cleanup). Abandoned branches (no commits for 7 days, MR still open) are flagged in the Inbox as priority-10 suggested cleanup items. ABAC: `RouteResourceMapping` with `resource_type: "spec"`, `repo_param: "repo_id"`, `action: "write"`.
+4. **Accept:** applies the change to the spec editor content (in-memory). The edit is NOT committed to git yet — the human must explicitly save. **Save workflow:** clicking Save commits the spec change to a feature branch named `spec-edit/<spec_path_slug>-<short_uuid>` (e.g., `spec-edit/system-payment-retry-a1b2`). The slug is derived from the spec path by replacing `/` with `-`, stripping the `.md` extension, and lowercasing (e.g., `system/payment-retry.md` → `system-payment-retry`). The server creates the branch, commits the change, and auto-creates an MR targeting the default branch. The MR itself creates a priority-2 "Spec pending approval" notification (directly, not via spec lifecycle — spec lifecycle triggers on default-branch pushes, but the human needs to see the pending approval before merging). After approval (via Inbox "Approve" action or spec approval endpoint), the MR is automatically enqueued into the merge queue. The linkage: the `specs/save` handler stores the `mr_id` on the notification entity's `entity_ref` field; the spec approval handler reads `entity_ref` from the notification to find the associated MR and enqueues it. Merging the MR triggers spec lifecycle automation (approval invalidation, task creation). This ensures spec edits always require approval before taking effect. The save endpoint: `POST /api/v1/repos/:repo_id/specs/save` — request: `{spec_path, content, message}`, response: `{branch, mr_id}`. If the user has an existing open `spec-edit/*` MR for the same `spec_path` (matched by querying open MRs where the branch matches `spec-edit/<spec_path_slug>-*` and the MR author is the current user), the save appends a commit to the existing branch rather than creating a new one. **Branch cleanup:** `spec-edit/*` branches are deleted when their MR is merged or closed (standard MR branch cleanup). Abandoned branches (no commits for 7 days, MR still open) are flagged in the Inbox as priority-10 suggested cleanup items. ABAC: `RouteResourceMapping` with `resource_type: "spec"`, `repo_param: "repo_id"`, `action: "write"`.
 5. **Edit:** copies the suggested text into the editor for manual refinement.
 6. **Dismiss:** removes the suggestion.
 
@@ -405,7 +405,7 @@ Specifies what to pull from the knowledge graph.
 | `repo_id` | `Option<String>` | Scope to a single repo. Null = all repos in workspace. **Validated:** the server rejects saved views where `repo_id` does not belong to the workspace in the URL (prevents cross-workspace data leakage). |
 
 The data layer maps to knowledge graph API endpoints:
-- `repo_id` set + `concept` → `GET /repos/:id/graph/concept/:name` (single repo)
+- `repo_id` set + `concept` → `GET /repos/:id/graph?concept=:name` (single repo, substring search via query param — distinct from `GET /repos/:id/graph/concept/:name` which serves manifest-based concept projections)
 - `repo_id` null + `concept` → `GET /workspaces/:id/graph` (workspace-aggregated graph, client-side concept filtering). This is the specified behavior; the workspace-scoped concept endpoint in the HSI upstream amendments table is an optimization, not a prerequisite.
 - `spec_path` → `GET /repos/:id/graph/spec/:path`
 - No concept/spec_path → `GET /repos/:id/graph` or `GET /workspaces/:id/graph`
@@ -574,11 +574,11 @@ Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path?re
 
 ### Item Structure
 
-Each Inbox item is a card with consistent structure:
+Each Inbox item is a card with consistent structure. At tenant scope, each card shows the workspace name in brackets (e.g., `[Payments]`) for context:
 
 ```
 ┌─ Priority Badge ─────────────────────────────────────────┐
-│ [!] Agent needs clarification                      2m ago │
+│ [!] Agent needs clarification          [Payments]  2m ago │
 │     worker-8 on auth-refactor (spec: identity-security)   │
 │                                                           │
 │  ▼ Expand for details                                     │
