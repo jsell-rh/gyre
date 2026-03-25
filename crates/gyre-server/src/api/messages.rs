@@ -40,12 +40,17 @@ fn new_id() -> String {
 }
 
 /// Derive MessageOrigin from the authenticated caller.
+///
+/// Uses role-based check (Admin → Server) rather than magic-string comparison
+/// on `agent_id`. The string "system" is NOT a reliable signal: API key and
+/// OIDC paths set agent_id from user.display_name / preferred_username, which
+/// an attacker could set to "system" without holding Admin role.
 fn origin_from_auth(auth: &AuthenticatedAgent) -> MessageOrigin {
-    if auth.agent_id == "system" {
-        // Global dev token → Server
+    if auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        // Admin callers (global token, Admin-role users) → Server origin.
         MessageOrigin::Server
     } else if let Some(user_id) = &auth.user_id {
-        // API key or Keycloak JWT → User
+        // API key or Keycloak JWT with non-Admin role → User
         MessageOrigin::User(user_id.clone())
     } else {
         // Per-agent token → Agent
@@ -377,8 +382,10 @@ pub async fn poll_messages(
     Path(agent_id): Path<String>,
     Query(params): Query<PollQuery>,
 ) -> Result<Json<Vec<Message>>, ApiError> {
-    // Agent must be the authenticated caller.
-    if auth.agent_id != "system" && auth.agent_id != agent_id {
+    // Agent must be the authenticated caller. Admin callers (role-based, not
+    // magic-string) may read any inbox for operational/debugging purposes.
+    let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+    if !is_admin && auth.agent_id != agent_id {
         return Err(ApiError::Forbidden(
             "agents can only read their own inbox".to_string(),
         ));
@@ -424,8 +431,10 @@ pub async fn ack_message(
     auth: AuthenticatedAgent,
     Path((agent_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    // Agent must be the authenticated caller.
-    if auth.agent_id != "system" && auth.agent_id != agent_id {
+    // Agent must be the authenticated caller. Admin callers may ack on behalf
+    // of any agent (role-based check, not magic-string).
+    let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+    if !is_admin && auth.agent_id != agent_id {
         return Err(ApiError::Forbidden(
             "agents can only ack messages in their own inbox".to_string(),
         ));
@@ -464,8 +473,8 @@ pub async fn list_workspace_messages(
 ) -> Result<Json<Vec<Message>>, ApiError> {
     let ws_id = Id::new(&workspace_id);
 
-    // Verify workspace membership (non-system callers).
-    if auth.agent_id != "system" {
+    // Verify workspace membership for non-Admin callers (role-based, not magic-string).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
         let is_member = if let Some(ref user_id) = auth.user_id {
             state
                 .workspace_memberships
@@ -608,8 +617,8 @@ mod tests {
     #[tokio::test]
     async fn server_only_kind_rejected_for_non_server() {
         // agent_created is server_only — a non-server caller should get 403.
-        // With global token (system), agent_id == "system" → Server origin.
-        // So this test uses the global token and expects success for server origin.
+        // Global token has Admin role → Server origin → server_only is allowed.
+        // See also: server_only_kind_rejected_for_agent_caller for the reject path.
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
 
@@ -632,6 +641,40 @@ mod tests {
             .unwrap();
         // System token → Server origin → server_only is allowed
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    /// MB-2: non-Admin agent token attempting a server_only kind must be rejected 403.
+    /// This is the complementary rejection test for server_only_kind_rejected_for_non_server.
+    #[tokio::test]
+    async fn server_only_kind_rejected_for_agent_caller() {
+        let state = test_state();
+        // Register a regular agent token (Agent role, not Admin).
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-mb2", "agent-tok-mb2".to_string())
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "to": {"workspace": "ws-mb2"},
+            "kind": "agent_created",
+            "payload": {"agent_id": "some-agent"}
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-mb2/messages")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer agent-tok-mb2") // Agent role, not Admin
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Agent origin → server_only check fires → 403
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
