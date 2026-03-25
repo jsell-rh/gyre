@@ -125,6 +125,7 @@ One click. No ABAC knowledge required.
 | **Briefing detail** | Per-agent activity, per-MR status | Per-spec progress, exceptions | Spec-level summaries, exceptions only |
 | **Notifications** | Every state change | Failures and approvals | Exceptions only |
 | **Agent completion summaries** | Full decision log visible | Uncertainties highlighted | Only low-confidence decisions surfaced |
+| **Inbox priorities shown** | 1-10 (everything) | 1-9 (excludes suggested links) | 1-9 (excludes suggested links) |
 
 **Spec approval is always human.** This is a hard rule from `platform-model.md` — specs encode intent, and intent is a human decision. Trust level never bypasses spec approval.
 
@@ -145,9 +146,12 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
   description: "Block autonomous merge processor — require human MR approval first"
 ```
 
-The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table which lists `merge` as a distinct action). Under Supervised, this policy blocks the merge processor (`subject.type: system`) from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
+The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` for ABAC evaluation, because system tokens bypass ABAC entirely (`hierarchy-enforcement.md` §4). Instead, the merge processor authenticates as a dedicated internal service identity (`subject.type: "system"`, `subject.id: "merge-processor"`) that is subject to ABAC evaluation. Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
 
-**Guided:** removes the `require-human-mr-review` policy. The merge processor proceeds autonomously when all gates pass. Gate failures still surface in the Inbox.
+**Guided** policy set:
+- `require-human-spec-approval` (immutable, always present)
+- Gate failures surface in the Inbox (no additional policy — this is the default behavior from `default-deny` + `developer-write-access`)
+- `require-human-mr-review` is NOT present — merge processor proceeds autonomously when all gates pass
 
 **Autonomous:** removes most notification policies. Keeps two policies:
 
@@ -375,13 +379,17 @@ The human can interrupt an agent immediately:
 Agent Detail Panel:
   [Pause] [Stop] [Message]
 
-  Pause: Agent completes current tool call, then polls for messages before continuing.
-         The human's message is waiting in the inbox.
+  Pause: Sends a Directed-tier message with kind `StatusUpdate` and payload
+         `{status: "pause_requested", summary: "Human requested pause"}` to the agent.
+         Agent picks up on next `message.poll` and pauses after current tool call.
+         No new API endpoint — uses existing message bus.
 
-  Stop:  Agent is killed. Work preserved in worktree and branch.
+  Stop:  Calls existing `POST /api/v1/admin/agents/:id/kill` (per `api-reference.md`).
+         Agent process terminated, work preserved in worktree and branch.
          Task marked as blocked with reason.
 
-  Message: Opens inline chat. Agent picks up message on next poll cycle.
+  Message: Opens inline chat. Sends Directed-tier message to agent's inbox.
+           Agent picks up on next `message.poll` cycle.
 ```
 
 **Pause** is the preferred interrupt — it's non-destructive. The agent finishes its current action, sees the human's message, and can adjust. **Stop** is for emergencies.
@@ -467,10 +475,10 @@ Clicking "Ask why" spawns an interrogation agent with:
   conditions:
     - attribute: subject.id
       operator: equals
-      value: "agent:<interrogation-agent-id>"
+      value: "agent:INTERROGATION_AGENT_UUID"  # actual UUID, no angle brackets
   description: "Interrogation agent is read-only + message to requesting human"
 
-- name: interrogation-allow-message-<agent-id>
+- name: interrogation-allow-message-INTERROGATION_AGENT_UUID
   scope: tenant
   priority: 201
   effect: allow
@@ -479,7 +487,7 @@ Clicking "Ask why" spawns an interrogation agent with:
   conditions:
     - attribute: subject.id
       operator: equals
-      value: "agent:<interrogation-agent-id>"
+      value: "agent:INTERROGATION_AGENT_UUID"
 ```
 
 The policies use `subject.id` conditions (not a new `Agent` scope variant) to target the specific interrogation agent, staying within `abac-policy-engine.md`'s existing `PolicyScope` enum (Tenant, Workspace, Repo). The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes). The scoped policies are deleted when the interrogation session ends.
@@ -498,7 +506,7 @@ When an agent writes code, the reasoning behind each decision is locked in the a
 
 Each agent's conversation with its LLM is hashed and stored as a provenance artifact.
 
-**Crate placement:** `ConversationProvenance` and `TurnCommitLink` live in `gyre-common` (shared wire types, like `Message`). `ConversationRepository` lives in `gyre-ports`. The turn-to-commit linking is performed by the server layer (`gyre-server`) in the git push handler — it reads the current agent's conversation state from request context and records the link. This is server-layer orchestration, not domain logic.
+**Crate placement:** `ConversationProvenance` and `TurnCommitLink` both live in `gyre-common` (shared wire types, like `Message` and `Id`). `ConversationRepository` lives in `gyre-ports`. The turn-to-commit linking is performed by the server layer (`gyre-server`) in the git push handler — it reads the current agent's conversation state from request context and records the link. This is server-layer orchestration, not domain logic.
 
 Storage requires a new port trait:
 
@@ -622,7 +630,13 @@ Presence is tracked via Telemetry-tier messages through the message bus. This re
   | `user_id` | Id | yes |
   | `workspace_id` | Id | yes |
   | `view` | String | yes — e.g., "inbox", "explorer", "specs" |
-  | `timestamp` | u64 | yes — epoch ms | Presence is **best-effort** — lost on server restart or buffer pressure. The server maintains a separate lightweight presence map (user_id → last_seen_workspace, last_seen_timestamp) in memory, updated on every WebSocket message. This map is the source of truth for "who is active," not the TelemetryBuffer. The TelemetryBuffer carries the presence *events* for real-time push to other clients.
+  | `timestamp` | u64 | yes — epoch ms |
+
+`UserPresence` messages go through two paths:
+1. **Real-time push:** through the broadcast channel to WebSocket subscribers (same as all Telemetry)
+2. **Presence map:** the server maintains a lightweight in-memory map (`user_id → {workspace_id, view, timestamp}`) updated on every `UserPresence` message. This is the source of truth for "who is active" — queryable synchronously, survives TelemetryBuffer eviction.
+
+`UserPresence` messages do NOT go into the `TelemetryBuffer` (not returned by `GET /activity`). They use a separate presence map storage model.
 
 ### Conflict Prevention
 
@@ -669,13 +683,7 @@ Saved Views:
 - **Conflicting spec interpretations** (#5) — the system detects that two agents implemented the same spec differently and asks the human to arbitrate.
 - **Trust level suggestion** (#8) — the system suggests the human can relax oversight based on track record.
 
-### Inbox Filtering by Trust Level
-
-| Trust Level | Shows items at priority... |
-|---|---|
-| Supervised | 1-10 (everything) |
-| Guided | 1-7 (skip trust suggestions and low-confidence links) |
-| Autonomous | 1-9 (all judgment + safety items; excludes only #10 suggested spec links) |
+Inbox filtering by trust level is defined in the Trust Level table (§2, "Inbox priorities shown" row) as the single source of truth.
 
 ---
 
