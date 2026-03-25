@@ -1309,45 +1309,16 @@ async fn activity_log_query() {
     assert!(j.is_array());
 }
 
-// ── 23. Spec approvals ────────────────────────────────────────────────────────
+// ── 23. Spec approvals (M34 Slice 5: legacy endpoints removed) ───────────────
 
 #[tokio::test]
-async fn spec_approvals_lifecycle() {
+async fn spec_approvals_list_is_accessible() {
+    // GET /api/v1/specs/approvals still works (list endpoint retained).
+    // POST /api/v1/specs/approve and POST /api/v1/specs/revoke removed;
+    // callers should use POST /api/v1/specs/:path/approve instead.
     let ctx = Ctx::new().await;
-    let agent_id = create_agent(&ctx).await;
-
-    // Approve a spec (fields: path, sha [40-char hex], approver_id, signature)
-    let resp = ctx
-        .post(
-            "/api/v1/specs/approve",
-            json!({
-                "path": "specs/system/my-feature.md",
-                "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-                "approver_id": format!("agent:{agent_id}")
-            }),
-        )
-        .await;
-    assert!(resp.status().is_success());
-    let approval: serde_json::Value = resp.json().await.unwrap();
-    let approval_id = approval["id"].as_str().unwrap().to_string();
-
-    // List approvals
     let list = ctx.get_json("/api/v1/specs/approvals").await;
-    let arr = list.as_array().unwrap();
-    assert!(arr.iter().any(|a| a["id"] == approval_id));
-
-    // Revoke (fields: approval_id, revoked_by, reason)
-    let revoke_resp = ctx
-        .post(
-            "/api/v1/specs/revoke",
-            json!({
-                "approval_id": approval_id,
-                "revoked_by": format!("agent:{agent_id}"),
-                "reason": "superseded by new spec version"
-            }),
-        )
-        .await;
-    assert!(revoke_resp.status().is_success());
+    assert!(list.is_array());
 }
 
 // ── 24. Release automation ────────────────────────────────────────────────────

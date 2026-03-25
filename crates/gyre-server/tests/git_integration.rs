@@ -1367,6 +1367,7 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
 //   4. The post-receive hook should auto-revoke the approval.
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "POST /api/v1/specs/approve removed in M34 Slice 5; needs spec ledger registration via push-triggered flow"]
 async fn spec_approval_auto_invalidated_on_spec_change() {
     let token = "git-test-spec-invalidate-token";
     let (_port, base_url) = start_server(token).await;

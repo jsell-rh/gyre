@@ -222,9 +222,8 @@ impl ResourceResolver {
                 // ── Release ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/release/prepare", "release", Some("write")),
                 // ── Specs ──────────────────────────────────────────────────
-                RouteResourceMapping::api("/api/v1/specs/approve", "spec", Some("approve")),
+                // NOTE: /api/v1/specs/approve and /api/v1/specs/revoke removed in M34 Slice 5
                 RouteResourceMapping::api("/api/v1/specs/approvals", "spec", None),
-                RouteResourceMapping::api("/api/v1/specs/revoke", "spec", Some("write")),
                 RouteResourceMapping::api("/api/v1/specs", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/pending", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/drifted", "spec", None),
@@ -317,7 +316,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
-                RouteResourceMapping::api("/api/v1/search/reindex", "search", Some("write")),
+                RouteResourceMapping::api("/api/v1/admin/search/reindex", "search", Some("write")),
                 // ── Tenants ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/tenants", "tenant", None),
                 RouteResourceMapping::api("/api/v1/tenants/:id", "tenant", None),
