@@ -140,7 +140,7 @@ One click. No ABAC knowledge required.
 - **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
 - **Custom → Preset:** Server deletes all `trust:` prefixed policies, then creates the preset's policies. Built-in policies (`builtin:` prefix) and user-created policies (no prefix) are preserved.
 
-All trust level transitions are performed in a **single database transaction** — if creating the new policies fails, the old policies are preserved. This prevents a crash from leaving the workspace in a policy-less state.
+All trust level transitions (workspace `trust_level` field update AND policy delete+create) are performed in a **single database transaction** — if creating the new policies fails, the workspace field is not updated either. This prevents a crash from leaving the workspace in a state where `trust_level` says one thing but the active policies say another.
 
 **Policy naming conventions:**
 - `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions
@@ -530,6 +530,22 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
      | `uncertainties` | `[String]` | yes |
      | `conversation_sha` | Option\<String\> | no |
 3. The `agent.complete` handler directly creates Inbox notifications for **all workspace members with Admin or Developer workspace role** when the completion summary contains non-empty `uncertainties`. This is NOT routed through the `MessageConsumer` bounded channel (which can drop messages under backpressure). Priority-1 Inbox items are too critical to be fire-and-forget — they are created synchronously in the completion handler alongside the MR attestation write.
+
+**Notification creation paths by priority:**
+| Priority | Type | Creation Path |
+|---|---|---|
+| 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
+| 2 | Spec pending approval | Synchronous in spec lifecycle push handler |
+| 3 | Gate failure | Synchronous in gate evaluation handler |
+| 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler |
+| 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
+| 6 | Meta-spec drift | Via `MessageConsumer` consuming `ReconciliationCompleted` events |
+| 7 | Budget warning | Synchronous in budget check middleware |
+| 8 | Trust suggestion | Background job (`trust_suggestion_check`) |
+| 9 | Spec assertion failure | Synchronous in post-extraction assertion check |
+| 10 | Suggested spec link | Synchronous in post-extraction link suggestion |
+
+Most notifications are created synchronously by the handler that detects the condition. The `MessageConsumer` path is used only when the notification source is an async event from another subsystem.
 4. The Briefing consumes `AgentCompleted` messages for the "Completed" section
 
 One LLM call at completion time, not continuous overhead. The summary is also used as seed context for interrogation agents.

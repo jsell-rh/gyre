@@ -189,8 +189,9 @@ Every endpoint handler must declare its authorization requirements via one of:
 |---|---|
 | No auth (public) | Health checks, OIDC discovery, version |
 | ABAC middleware evaluation | All authenticated endpoints — subject/resource/action evaluated against built-in + custom policies |
+| Per-handler auth (ABAC-exempt) | Endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt list in `hierarchy-enforcement.md` §4 and perform authorization checks directly in the handler. |
 
-ABAC is the sole authorization layer (`hierarchy-enforcement.md` §4). There are no per-handler RBAC extractors. Every route (GET/POST/PUT/DELETE) must have a `RouteResourceMapping` entry in the ABAC `ResourceResolver` — workspace-membership enforcement requires resource resolution on reads too. This is enforced by `scripts/check-api-auth.sh`.
+ABAC is the primary authorization layer (`hierarchy-enforcement.md` §4). There are no per-handler RBAC extractors. Most routes must have a `RouteResourceMapping` entry in the ABAC `ResourceResolver`. The small set of ABAC-exempt endpoints (git HTTP, conversations by SHA, `/users/me/*`) use per-handler auth instead — these are listed explicitly in `hierarchy-enforcement.md` §4 and `scripts/check-api-auth.sh` knows to skip them.
 
 ---
 

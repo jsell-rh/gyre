@@ -231,7 +231,7 @@ struct RouteResourceMapping {
 }
 ```
 
-For routes with an entity ID (`:id`), the middleware does a single lookup to get the entity's `workspace_id`. This lookup is cached in the request extensions so the handler doesn't repeat it.
+For routes with an entity ID (`:id`), the middleware does a single lookup to get the entity's `workspace_id`. This lookup is cached in the request extensions so the handler doesn't repeat it. For repo-scoped routes (e.g., `POST /repos/:repo_id/specs/assist`), the middleware resolves the repo's `workspace_id` via the same entity lookup mechanism — the `id_param` points to the repo ID, and the entity lookup returns the repo's workspace.
 
 For routes without an entity ID (collection/create endpoints), the middleware resolves workspace context from the URL path (e.g., `POST /api/v1/workspaces/:workspace_id/tasks`). Per `api-conventions.md` §1.1, create endpoints use the workspace-scoped route form — there are no flat `POST /api/v1/tasks` create routes. Admin-only endpoints (no workspace context) fall back to tenant-level scoping.
 
