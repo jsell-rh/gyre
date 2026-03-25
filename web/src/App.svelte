@@ -3,67 +3,225 @@
   import { isLoading } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import Sidebar from './components/Sidebar.svelte';
-  import DashboardHome from './components/DashboardHome.svelte';
-  import ActivityFeed from './components/ActivityFeed.svelte';
-  import AgentList from './components/AgentList.svelte';
-  import TaskBoard from './components/TaskBoard.svelte';
-  import RepoList from './components/RepoList.svelte';
-  import Settings from './components/Settings.svelte';
-  import RepoDetail from './components/RepoDetail.svelte';
-  import MergeRequestDetail from './components/MergeRequestDetail.svelte';
-  import MergeQueueView from './components/MergeQueueView.svelte';
-  import AdminPanel from './components/AdminPanel.svelte';
-  import McpCatalog from './components/McpCatalog.svelte';
-  import ComposeView from './components/ComposeView.svelte';
-  import AnalyticsView from './components/AnalyticsView.svelte';
-  import CostView from './components/CostView.svelte';
-  import TaskDetail from './components/TaskDetail.svelte';
-  import SpecApprovalsView from './components/SpecApprovalsView.svelte';
-  import SpecDashboard from './components/SpecDashboard.svelte';
-  import AuditView from './components/AuditView.svelte';
-  import TenantList from './components/TenantList.svelte';
-  import WorkspaceList from './components/WorkspaceList.svelte';
-  import WorkspaceDetail from './components/WorkspaceDetail.svelte';
-  import PersonaCatalog from './components/PersonaCatalog.svelte';
-  import BudgetDashboard from './components/BudgetDashboard.svelte';
-  import DependencyGraph from './components/DependencyGraph.svelte';
-  import SpecGraph from './components/SpecGraph.svelte';
-  import MetaSpecs from './components/MetaSpecs.svelte';
-  import UserProfile from './components/UserProfile.svelte';
+  import ContentArea from './lib/ContentArea.svelte';
   import Inbox from './components/Inbox.svelte';
   import Briefing from './components/Briefing.svelte';
   import ExplorerView from './components/ExplorerView.svelte';
+  import SpecDashboard from './components/SpecDashboard.svelte';
+  import MetaSpecs from './components/MetaSpecs.svelte';
+  import AdminPanel from './components/AdminPanel.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
   import { onMount, setContext } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
 
-  const savedWorkspace = localStorage.getItem('gyre_workspace_id');
-  let currentView = $state(savedWorkspace ? 'explorer' : 'inbox');
-  let selectedRepo = $state(null);
-  let selectedMr = $state(null);
-  let selectedTask = $state(null);
-  let selectedWorkspace = $state(null);
+  // ── Primary navigation state ─────────────────────────────────────────
+  // One of: 'inbox' | 'briefing' | 'explorer' | 'specs' | 'meta-specs' | 'admin'
+  let currentNav = $state('explorer');
+
+  // ── Scope: which tenant/workspace/repo we're viewing ─────────────────
+  // { type: 'tenant' | 'workspace' | 'repo', tenantId?, workspaceId?, repoId? }
+  let scope = $state({ type: 'tenant' });
+
+  // ── Global detail panel ──────────────────────────────────────────────
+  // Opened by clicking any entity reference (agent, spec, MR, task, node)
+  let detailPanel = $state({ open: false, entity: null });
+
+  // ── WebSocket ────────────────────────────────────────────────────────
   let wsStatus = $state('disconnected');
-  let wsStore = $state(null);
+
+  $effect(() => {
+    const store = createWsStore();
+    const unsub = store.onStatus((s) => (wsStatus = s));
+    return () => {
+      unsub();
+      store.destroy();
+    };
+  });
+
+  // ── UI state ─────────────────────────────────────────────────────────
+  let searchOpen = $state(false);
+  let shortcutsOpen = $state(false);
+  let wsDropdownOpen = $state(false);
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
   let tokenInfo = $state(null);
-  let searchOpen = $state(false);
 
-  // Tenant selector state
-  let tenants = $state([]);
-  let selectedTenantId = $state(localStorage.getItem('gyre_tenant_id') || '');
-  let selectedTenant = $state(null);
+  // Content cross-fade key (increment to trigger fade transition)
+  let contentVisible = $state(true);
 
-  // Workspace selector state
+  function fadeContent() {
+    contentVisible = false;
+    setTimeout(() => { contentVisible = true; }, 150);
+  }
+
+  // ── Data ─────────────────────────────────────────────────────────────
   let workspaces = $state([]);
-  let selectedWorkspaceId = $state(localStorage.getItem('gyre_workspace_id') || '');
+  let currentWorkspace = $state(null);
+  let workspaceBudget = $state(null);
+  let inboxBadge = $state(0);
+
+  async function loadWorkspaceData(workspaceId) {
+    try { workspaceBudget = await api.workspaceBudget(workspaceId); } catch { workspaceBudget = null; }
+  }
+
+  async function loadInboxBadge() {
+    try {
+      const [mrs, specs] = await Promise.allSettled([
+        api.mergeRequests({ status: 'review' }),
+        api.getPendingSpecs(),
+      ]);
+      const mrCount = mrs.status === 'fulfilled' ? (mrs.value || []).length : 0;
+      const specCount = specs.status === 'fulfilled' ? (specs.value || []).length : 0;
+      inboxBadge = mrCount + specCount;
+    } catch { /* ignore */ }
+  }
+
+  // ── URL routing ───────────────────────────────────────────────────────
+  const NAV_ITEMS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin'];
+
+  export function parseUrl(pathname) {
+    const parts = pathname.split('/').filter(Boolean);
+    if (parts.length === 0) return null;
+
+    if (parts.length === 1) {
+      const [nav] = parts;
+      if (NAV_ITEMS.includes(nav)) return { nav, scope: { type: 'tenant' } };
+    }
+
+    if (parts.length >= 3) {
+      const [seg, id, navRaw] = parts;
+      const nav = navRaw || 'inbox';
+      if (!NAV_ITEMS.includes(nav)) return null;
+
+      if (seg === 'workspaces') {
+        return { nav, scope: { type: 'workspace', workspaceId: id } };
+      }
+      if (seg === 'repos') {
+        return { nav, scope: { type: 'repo', repoId: id } };
+      }
+    }
+
+    return null;
+  }
+
+  export function urlFor(nav, s) {
+    if (!s || s.type === 'tenant') return `/${nav}`;
+    if (s.type === 'workspace') return `/workspaces/${s.workspaceId}/${nav}`;
+    if (s.type === 'repo') return `/repos/${s.repoId}/${nav}`;
+    return `/${nav}`;
+  }
+
+  function pushUrl(nav, s) {
+    window.history.pushState({ nav, scope: s }, '', urlFor(nav, s));
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────
+  function navigate(nav, scopeOverride) {
+    const newScope = scopeOverride ?? scope;
+    currentNav = nav;
+    if (scopeOverride) {
+      scope = scopeOverride;
+      fadeContent();
+    }
+    pushUrl(nav, newScope);
+    if (newScope.type === 'workspace') loadWorkspaceData(newScope.workspaceId);
+  }
+
+  function setScope(newScope, nav) {
+    scope = newScope;
+    if (nav) currentNav = nav;
+    fadeContent();
+    pushUrl(currentNav, newScope);
+    if (newScope.type === 'workspace') loadWorkspaceData(newScope.workspaceId);
+  }
+
+  // Expose navigate and scope accessor via context (no prop drilling)
+  setContext('navigate', navigate);
+  setContext('getScope', () => scope);
+  setContext('openDetailPanel', openDetailPanel);
+
+  // ── Workspace switching (breadcrumb dropdown) ─────────────────────────
+  function selectWorkspace(ws) {
+    currentWorkspace = ws;
+    wsDropdownOpen = false;
+    localStorage.setItem('gyre_workspace_id', ws.id);
+    setScope({ type: 'workspace', workspaceId: ws.id }, 'inbox');
+  }
+
+  // ── Detail panel ──────────────────────────────────────────────────────
+  function openDetailPanel(entity) {
+    detailPanel = { open: true, entity };
+  }
+
+  function closeDetailPanel() {
+    detailPanel = { open: false, entity: null };
+  }
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────
+  const NAV_SHORTCUTS = {
+    '1': 'inbox', '2': 'briefing', '3': 'explorer',
+    '4': 'specs', '5': 'meta-specs', '6': 'admin',
+  };
+
+  function handleKeydown(e) {
+    const inInput = e.target.tagName === 'INPUT'
+      || e.target.tagName === 'TEXTAREA'
+      || e.target.isContentEditable;
+
+    // Cmd+K: global search
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      searchOpen = true;
+      return;
+    }
+
+    // Cmd+1-6: nav shortcuts
+    if ((e.metaKey || e.ctrlKey) && NAV_SHORTCUTS[e.key]) {
+      e.preventDefault();
+      navigate(NAV_SHORTCUTS[e.key]);
+      return;
+    }
+
+    // Esc: close detail panel or go up one scope level
+    if (e.key === 'Escape') {
+      if (shortcutsOpen) { shortcutsOpen = false; return; }
+      if (wsDropdownOpen) { wsDropdownOpen = false; return; }
+      if (detailPanel.open) { closeDetailPanel(); return; }
+      if (scope.type === 'repo') {
+        setScope({ type: 'workspace', workspaceId: scope.workspaceId });
+      } else if (scope.type === 'workspace') {
+        setScope({ type: 'tenant' });
+      }
+      return;
+    }
+
+    // /: focus search in current view (suppressed in text inputs)
+    if (e.key === '/' && !inInput) {
+      e.preventDefault();
+      searchOpen = true;
+      return;
+    }
+
+    // ?: keyboard shortcut overlay (suppressed in text inputs)
+    if (e.key === '?' && !inInput) {
+      e.preventDefault();
+      shortcutsOpen = !shortcutsOpen;
+    }
+  }
+
+  // ── Token modal ───────────────────────────────────────────────────────
+  const TOKEN_KIND_LABELS = {
+    global:     'Global admin token',
+    agent_jwt:  'Agent JWT (EdDSA, scoped)',
+    uuid_token: 'Per-agent UUID token (legacy)',
+    api_key:    'API key',
+  };
 
   async function openTokenModal() {
-    tokenInput = localStorage.getItem('gyre_auth_token') || 'test-token';
+    tokenInput = localStorage.getItem('gyre_auth_token') || 'gyre-dev-token';
     tokenModalOpen = true;
     tokenInfo = null;
     try { tokenInfo = await api.tokenInfo(); } catch { /* ignore */ }
@@ -76,240 +234,125 @@
     hasToken = true;
     tokenModalOpen = false;
     tokenInfo = null;
-    // Reconnect WS with new token — capture local ref so we own the lifecycle
-    if (wsStore) {
-      const old = wsStore;
-      wsStore = createWsStore();
-      wsStore.onStatus((s) => (wsStatus = s));
-      old.destroy();
-    }
   }
 
-  $effect(() => {
-    // Capture the store in a local variable so the cleanup closes over this
-    // specific instance rather than the reactive proxy (which may point to a
-    // newer store after saveToken() runs).
-    const store = createWsStore();
-    wsStore = store;
-    const unsub = store.onStatus((s) => (wsStatus = s));
-    return () => {
-      unsub();
-      store.destroy();
-    };
+  // ── Computed ──────────────────────────────────────────────────────────
+  let budgetPct = $derived.by(() => {
+    if (!workspaceBudget) return null;
+    const used = workspaceBudget.used_credits ?? 0;
+    const total = workspaceBudget.total_credits ?? 0;
+    if (!total) return null;
+    return Math.round((used / total) * 100);
   });
 
-  // Token kind → human-readable label
-  const TOKEN_KIND_LABELS = {
-    global:      'Global admin token',
-    agent_jwt:   'Agent JWT (EdDSA, scoped)',
-    uuid_token:  'Per-agent UUID token (legacy)',
-    api_key:     'API key',
-  };
+  let trustLevel = $derived(currentWorkspace?.trust_level ?? null);
 
-  // Generate a pretty URL for a view + context
-  function urlFor(view, ctx) {
-    const repo = ctx.repo ?? selectedRepo;
-    const mr = ctx.mr ?? selectedMr;
-    const task = ctx.task ?? selectedTask;
-    const workspace = ctx.workspace ?? selectedWorkspace;
-    if (view === 'repo-detail' && repo?.id) return `/repos/${repo.id}`;
-    if (view === 'task-detail' && task?.id) return `/tasks/${task.id}`;
-    if (view === 'mr-detail' && mr?.id) return `/merge-requests/${mr.id}`;
-    if (view === 'workspace-detail' && workspace?.id) return `/workspaces/${workspace.id}`;
-    return '/' + view;
-  }
+  let currentLayout = $derived.by(() => {
+    if (detailPanel.open) return 'split';
+    if (currentNav === 'explorer' && scope.type !== 'tenant') return 'canvas-controls';
+    return 'full-width';
+  });
 
-  function navigate(view, ctx = {}) {
-    currentView = view;
-    if (ctx.repo !== undefined) selectedRepo = ctx.repo;
-    if (ctx.mr !== undefined) selectedMr = ctx.mr;
-    if (ctx.task !== undefined) selectedTask = ctx.task;
-    if (ctx.workspace !== undefined) selectedWorkspace = ctx.workspace;
-    // Push plain (non-proxy) objects — history.pushState uses structuredClone
-    // which cannot serialize Svelte 5 reactive Proxy objects.
-    const snap = (o) => { try { return JSON.parse(JSON.stringify(o ?? null)); } catch { return null; } };
-    const url = urlFor(view, ctx);
-    window.history.pushState(
-      { view, selectedRepo: snap(selectedRepo), selectedMr: snap(selectedMr), selectedTask: snap(selectedTask), selectedWorkspace: snap(selectedWorkspace) },
-      '',
-      url,
-    );
-  }
+  // Breadcrumb segments
+  let scopeCrumbs = $derived.by(() => {
+    const crumbs = [{ label: 'Gyre', action: () => setScope({ type: 'tenant' }, 'explorer') }];
+    if (scope.type !== 'tenant' && currentWorkspace) {
+      crumbs.push({
+        label: currentWorkspace.name,
+        action: null, // workspace segment handled by dropdown
+        isWorkspace: true,
+      });
+    }
+    if (scope.type === 'repo' && scope.repoId) {
+      crumbs.push({ label: scope.repoId, action: null });
+    }
+    return crumbs;
+  });
 
-  // Expose navigate via context so child components can navigate without prop drilling
-  setContext('navigate', navigate);
-
-  // Sync browser history ↔ app state using onMount to avoid reactive loops
+  // ── Mount: entrypoint flow + URL routing ──────────────────────────────
   onMount(async () => {
-    // Fetch tenants and workspaces for selectors
-    try { tenants = await api.tenants(); } catch { /* ignore */ }
+    // 1. Load all workspaces
     try { workspaces = await api.workspaces(); } catch { /* ignore */ }
 
-    // Support both path-based URLs and legacy hash-based URLs
-    const path = window.location.pathname;
-    const parts = path.split('/').filter(Boolean);
-    const hashView = window.location.hash.slice(1);
+    // 2. Determine initial scope from URL or entrypoint flow
+    const fromUrl = parseUrl(window.location.pathname);
 
-    let initView = null;
-    let initCtx = {};
+    if (fromUrl) {
+      // URL-driven navigation
+      currentNav = fromUrl.nav;
+      scope = fromUrl.scope;
 
-    if (parts.length === 2) {
-      // Detail view URLs: /repos/:id, /tasks/:id, /merge-requests/:id, /workspaces/:id
-      const [segment, id] = parts;
-      if (segment === 'repos') {
-        initView = 'repo-detail';
-        try {
-          const allRepos = await api.allRepos();
-          const repo = allRepos.find(r => r.id === id);
-          if (repo) initCtx = { repo };
-        } catch { /* fallback to repos view */ initView = 'repos'; }
-      } else if (segment === 'tasks') {
-        initView = 'task-detail';
-        try {
-          const task = await api.task(id);
-          initCtx = { task };
-        } catch { initView = 'tasks'; }
-      } else if (segment === 'merge-requests') {
-        initView = 'mr-detail';
-        try {
-          const mr = await api.mergeRequest(id);
-          initCtx = { mr };
-        } catch { initView = 'projects'; }
-      } else if (segment === 'workspaces') {
-        initView = 'workspace-detail';
-        try {
-          const workspace = await api.workspace(id);
-          initCtx = { workspace };
-          // Update the workspace in selector too
-          if (workspace) {
-            selectedWorkspace = workspace;
-            selectedWorkspaceId = workspace.id;
-            localStorage.setItem('gyre_workspace_id', workspace.id);
-          }
-        } catch { initView = 'workspaces'; }
-      } else if (segment === 'agents') {
-        initView = 'agents';
+      if (fromUrl.scope.type === 'workspace') {
+        const ws = workspaces.find(w => w.id === fromUrl.scope.workspaceId) ?? null;
+        currentWorkspace = ws;
+        if (ws) {
+          localStorage.setItem('gyre_workspace_id', ws.id);
+          loadWorkspaceData(ws.id);
+        }
       }
-    } else if (parts.length === 1) {
-      const pathView = parts[0];
-      initView = (pathView && pathView in viewTitles) ? pathView : null;
-    }
-
-    // Fall back to hash-based for legacy support
-    if (!initView && hashView && hashView in viewTitles) {
-      initView = hashView;
-    }
-
-    if (initView) {
-      currentView = initView;
-      if (initCtx.repo !== undefined) selectedRepo = initCtx.repo;
-      if (initCtx.mr !== undefined) selectedMr = initCtx.mr;
-      if (initCtx.task !== undefined) selectedTask = initCtx.task;
-      if (initCtx.workspace !== undefined) selectedWorkspace = initCtx.workspace;
-    }
-
-    // Restore selected workspace from localStorage (if not set by URL)
-    if (!selectedWorkspace && selectedWorkspaceId && workspaces.length > 0) {
-      const ws = workspaces.find(w => w.id === selectedWorkspaceId);
-      if (ws) selectedWorkspace = ws;
-    }
-
-    const snap = (o) => { try { return JSON.parse(JSON.stringify(o ?? null)); } catch { return null; } };
-    window.history.replaceState(
-      { view: currentView, selectedRepo: snap(selectedRepo), selectedMr: snap(selectedMr), selectedTask: snap(selectedTask), selectedWorkspace: snap(selectedWorkspace) },
-      '',
-      urlFor(currentView, {}),
-    );
-
-    function handlePopstate(e) {
-      if (e.state?.view) {
-        currentView       = e.state.view;
-        selectedRepo      = e.state.selectedRepo      ?? null;
-        selectedMr        = e.state.selectedMr        ?? null;
-        selectedTask      = e.state.selectedTask       ?? null;
-        selectedWorkspace = e.state.selectedWorkspace  ?? null;
+    } else {
+      // Entrypoint flow
+      const savedWsId = localStorage.getItem('gyre_workspace_id');
+      if (savedWsId) {
+        const ws = workspaces.find(w => w.id === savedWsId);
+        if (ws) {
+          // Subsequent visit: restore workspace, land on inbox
+          currentWorkspace = ws;
+          scope = { type: 'workspace', workspaceId: ws.id };
+          currentNav = 'inbox';
+          loadWorkspaceData(ws.id);
+        } else {
+          // Stored workspace not found: fall back to tenant explorer
+          localStorage.removeItem('gyre_workspace_id');
+          scope = { type: 'tenant' };
+          currentNav = 'explorer';
+        }
       } else {
-        currentView = 'dashboard';
+        // First visit: tenant explorer (workspace cards)
+        scope = { type: 'tenant' };
+        currentNav = 'explorer';
       }
     }
-    window.addEventListener('popstate', handlePopstate);
 
-    function handleJourneyKeys(e) {
-      if (e.metaKey || e.ctrlKey) {
-        if (e.key === 'i') { e.preventDefault(); navigate('inbox'); }
-        if (e.key === 'b') { e.preventDefault(); navigate('briefing'); }
+    // Replace history state with canonical URL
+    window.history.replaceState({ nav: currentNav, scope }, '', urlFor(currentNav, scope));
+
+    // 3. Load inbox badge, refresh every 60s
+    loadInboxBadge();
+    const inboxInterval = setInterval(loadInboxBadge, 60_000);
+
+    // 4. Popstate (browser back/forward)
+    function handlePopstate(e) {
+      if (e.state?.nav) {
+        currentNav = e.state.nav;
+        scope = e.state.scope ?? { type: 'tenant' };
+        fadeContent();
+        if (scope.type === 'workspace') {
+          currentWorkspace = workspaces.find(w => w.id === scope.workspaceId) ?? null;
+          if (currentWorkspace) loadWorkspaceData(scope.workspaceId);
+        } else if (scope.type === 'tenant') {
+          currentWorkspace = null;
+        }
       }
     }
-    window.addEventListener('keydown', handleJourneyKeys);
+
+    window.addEventListener('popstate', handlePopstate);
+    window.addEventListener('keydown', handleKeydown);
+
+    // Close workspace dropdown on outside click
+    function handleOutsideClick(e) {
+      if (!e.target.closest('.ws-dropdown-wrap')) {
+        wsDropdownOpen = false;
+      }
+    }
+    window.addEventListener('click', handleOutsideClick, true);
 
     return () => {
       window.removeEventListener('popstate', handlePopstate);
-      window.removeEventListener('keydown', handleJourneyKeys);
+      window.removeEventListener('keydown', handleKeydown);
+      window.removeEventListener('click', handleOutsideClick, true);
+      clearInterval(inboxInterval);
     };
-  });
-
-  function onTenantChange(e) {
-    const id = e.target.value;
-    selectedTenantId = id;
-    localStorage.setItem('gyre_tenant_id', id);
-    selectedTenant = id ? (tenants.find(t => t.id === id) ?? null) : null;
-  }
-
-  function onWorkspaceChange(e) {
-    const id = e.target.value;
-    selectedWorkspaceId = id;
-    localStorage.setItem('gyre_workspace_id', id);
-    if (id) {
-      const ws = workspaces.find(w => w.id === id);
-      selectedWorkspace = ws ?? null;
-    } else {
-      selectedWorkspace = null;
-    }
-  }
-
-  const viewTitles = {
-    inbox:              'Inbox',
-    briefing:           'Briefing',
-    dashboard:          'Dashboard',
-    activity:           'Activity Feed',
-    agents:             'Agents',
-    tasks:              'Task Board',
-    'task-detail':      'Task Detail',
-    repos:              'Repositories',
-    'repo-detail':      'Repository',
-    'mr-detail':        'Merge Request',
-    'merge-queue':      'Merge Queue',
-    'mcp-catalog':      'MCP Tool Catalog',
-    compose:            'Agent Compose',
-    analytics:          'Analytics',
-    costs:              'Cost Tracking',
-    audit:              'Audit Events',
-    'spec-approvals':   'Spec Approvals',
-    specs:              'Spec Registry',
-    'spec-graph':       'Spec Link Graph',
-    'meta-specs':       'Meta-Specs',
-    admin:              'Admin Panel',
-    settings:           'Settings',
-    tenants:            'Tenants',
-    workspaces:         'Workspaces',
-    'workspace-detail': 'Workspace',
-    personas:           'Persona Catalog',
-    budget:             'Budget Dashboard',
-    dependencies:       'Dependency Graph',
-    profile:            'My Profile',
-    explorer:           'System Explorer',
-  };
-
-  // Scope breadcrumb: Gyre › Workspace › Repo (shown in topbar)
-  let scopeCrumbs = $derived(() => {
-    const crumbs = [{ label: 'Gyre', view: 'dashboard' }];
-    if (selectedWorkspace) {
-      crumbs.push({ label: selectedWorkspace.name, view: 'workspace-detail', ctx: { workspace: selectedWorkspace } });
-    }
-    if ((currentView === 'repo-detail' || currentView === 'mr-detail') && selectedRepo) {
-      crumbs.push({ label: selectedRepo.name ?? 'Repository', view: 'repo-detail', ctx: { repo: selectedRepo } });
-    }
-    return crumbs;
   });
 </script>
 
@@ -317,196 +360,230 @@
 
 {#if !$isLoading}
 <div class="app">
-  <Sidebar bind:current={currentView} onnavigate={(v) => navigate(v)} {selectedWorkspace} {selectedRepo} />
+  <!-- Sidebar: 6 fixed nav items, always present -->
+  <Sidebar bind:currentNav onnavigate={(v) => navigate(v)} {inboxBadge} />
 
+  <!-- Main area: topbar + content + status bar -->
   <div class="main">
+    <!-- Topbar (48px) -->
     <header class="topbar">
-      <div class="topbar-left">
-        <span class="topbar-title" aria-live="polite" aria-atomic="true">{viewTitles[currentView] ?? 'Gyre'}</span>
-        <nav class="scope-crumb" aria-label="Scope breadcrumb">
-          {#each scopeCrumbs() as crumb, i}
-            {#if i > 0}<span class="scope-sep" aria-hidden="true">›</span>{/if}
-            {#if i < scopeCrumbs().length - 1}
-              <button class="scope-crumb-link" onclick={() => navigate(crumb.view, crumb.ctx ?? {})}>
-                {crumb.label}
-              </button>
-            {:else}
-              <span class="scope-crumb-current">{crumb.label}</span>
-            {/if}
-          {/each}
-        </nav>
-      </div>
-      <div class="topbar-right">
-        <!-- Tenant selector -->
-        {#if tenants.length > 1}
-          <div class="ws-selector-wrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" class="ws-icon" aria-hidden="true">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
-            </svg>
-            <select
-              class="ws-selector"
-              value={selectedTenantId}
-              onchange={onTenantChange}
-              aria-label="Select tenant"
-            >
-              <option value="">All Tenants</option>
-              {#each tenants as t}
-                <option value={t.id}>{t.name}</option>
-              {/each}
-            </select>
-          </div>
-        {/if}
-        <!-- Workspace selector -->
-        {#if workspaces.length > 0}
-          <div class="ws-selector-wrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" class="ws-icon" aria-hidden="true">
-              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
-            </svg>
-            <select
-              class="ws-selector"
-              value={selectedWorkspaceId}
-              onchange={onWorkspaceChange}
-              aria-label="Select workspace"
-            >
-              <option value="">All Workspaces</option>
-              {#each workspaces as ws}
-                <option value={ws.id}>{ws.name}</option>
-              {/each}
-            </select>
-          </div>
-        {:else if selectedWorkspace}
-          <button
-            class="scope-chip"
-            onclick={() => navigate('workspace-detail', { workspace: selectedWorkspace })}
-            aria-label="Current workspace: {selectedWorkspace.name}"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
-              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
-            </svg>
-            <span>{selectedWorkspace.name}</span>
-          </button>
-        {/if}
+      <!-- Left: scope breadcrumb -->
+      <nav class="breadcrumb" aria-label="Scope breadcrumb">
+        {#each scopeCrumbs as crumb, i}
+          {#if i > 0}
+            <span class="breadcrumb-sep" aria-hidden="true">›</span>
+          {/if}
 
-        <button class="search-trigger" onclick={() => (searchOpen = true)} aria-label="Open search (Ctrl+K)">
+          {#if crumb.isWorkspace}
+            <!-- Workspace segment: click opens dropdown -->
+            <div class="ws-dropdown-wrap">
+              <button
+                class="breadcrumb-btn"
+                class:active={wsDropdownOpen}
+                onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
+                aria-haspopup="listbox"
+                aria-expanded={wsDropdownOpen}
+                aria-label="Switch workspace: {crumb.label}"
+              >
+                {crumb.label}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+
+              {#if wsDropdownOpen}
+                <ul class="ws-dropdown" role="listbox" aria-label="Select workspace">
+                  {#each workspaces as ws}
+                    <li role="option" aria-selected={ws.id === scope.workspaceId}>
+                      <button
+                        class="ws-dropdown-item"
+                        class:selected={ws.id === scope.workspaceId}
+                        onclick={() => selectWorkspace(ws)}
+                      >
+                        {ws.name}
+                      </button>
+                    </li>
+                  {/each}
+                  {#if workspaces.length === 0}
+                    <li class="ws-dropdown-empty">No workspaces</li>
+                  {/if}
+                </ul>
+              {/if}
+            </div>
+
+          {:else if crumb.action}
+            <button class="breadcrumb-btn" onclick={crumb.action}>
+              {crumb.label}
+            </button>
+          {:else}
+            <span class="breadcrumb-current">{crumb.label}</span>
+          {/if}
+        {/each}
+      </nav>
+
+      <!-- Center: Cmd+K search trigger -->
+      <div class="topbar-center">
+        <button
+          class="search-trigger"
+          onclick={() => (searchOpen = true)}
+          aria-label="Open search (Ctrl+K)"
+        >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
           </svg>
           <span>Search</span>
           <kbd aria-hidden="true">⌘K</kbd>
         </button>
+      </div>
 
-        <div
-          class="ws-indicator"
-          class:connected={wsStatus === 'connected'}
-          class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
-          role="status"
-          aria-label="WebSocket status: {wsStatus}"
-        >
-          <span class="ws-dot" aria-hidden="true"></span>
-          <span class="ws-label">{wsStatus}</span>
-        </div>
-
+      <!-- Right: inbox badge + user avatar -->
+      <div class="topbar-right">
+        <!-- Inbox badge shortcut -->
         <button
-          class="auth-btn"
+          class="inbox-badge-btn"
+          onclick={() => navigate('inbox')}
+          aria-label="{inboxBadge} unresolved inbox items"
+          title="Inbox"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
+            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+            <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
+          </svg>
+          {#if inboxBadge > 0}
+            <span class="inbox-count" aria-hidden="true">{inboxBadge > 99 ? '99+' : inboxBadge}</span>
+          {/if}
+        </button>
+
+        <!-- User avatar / token button -->
+        <button
+          class="user-btn"
           class:auth-active={hasToken}
           onclick={openTokenModal}
           aria-label={hasToken ? 'Authenticated — configure API token' : 'No token — configure API token'}
         >
+          <div class="user-avatar" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16">
+              <circle cx="12" cy="8" r="4"/>
+              <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+            </svg>
+          </div>
           <span class="auth-dot" aria-hidden="true"></span>
-          <span aria-hidden="true">{hasToken ? 'Authenticated' : 'No Token'}</span>
         </button>
-
-        <span class="version" aria-label="Version 0.1.0">v0.1.0</span>
       </div>
     </header>
 
+    <!-- Content area (adapts to nav + scope) -->
     <main class="content" id="main-content" tabindex="-1">
-      {#if currentView === 'inbox'}
-        <Inbox />
-      {:else if currentView === 'briefing'}
-        <Briefing />
-      {:else if currentView === 'dashboard'}
-        <DashboardHome {wsStore} onnavigate={(v) => navigate(v)} />
-      {:else if currentView === 'activity'}
-        <ActivityFeed {wsStore} />
-      {:else if currentView === 'agents'}
-        <AgentList workspaceId={selectedWorkspaceId} />
-      {:else if currentView === 'tasks'}
-        <TaskBoard workspaceId={selectedWorkspaceId} onSelectTask={(task) => navigate('task-detail', { task })} />
-      {:else if currentView === 'task-detail' && selectedTask}
-        <TaskDetail
-          task={selectedTask}
-          onBack={() => navigate('tasks')}
-        />
-      {:else if currentView === 'repos'}
-        <RepoList workspaceId={selectedWorkspaceId} onSelectRepo={(repo) => navigate('repo-detail', { repo })} />
-      {:else if currentView === 'repo-detail' && selectedRepo}
-        <RepoDetail
-          repo={selectedRepo}
-          onBack={() => navigate('repos')}
-          onSelectMr={(mr) => navigate('mr-detail', { mr })}
-        />
-      {:else if currentView === 'mr-detail' && selectedMr}
-        <MergeRequestDetail
-          mr={selectedMr}
-          repo={selectedRepo}
-          onBack={() => navigate('repo-detail')}
-        />
-      {:else if currentView === 'merge-queue'}
-        <MergeQueueView />
-      {:else if currentView === 'mcp-catalog'}
-        <McpCatalog />
-      {:else if currentView === 'compose'}
-        <ComposeView />
-      {:else if currentView === 'analytics'}
-        <AnalyticsView />
-      {:else if currentView === 'costs'}
-        <CostView />
-      {:else if currentView === 'audit'}
-        <AuditView />
-      {:else if currentView === 'spec-approvals'}
-        <SpecApprovalsView />
-      {:else if currentView === 'specs'}
-        <SpecDashboard />
-      {:else if currentView === 'spec-graph'}
-        <SpecGraph />
-      {:else if currentView === 'meta-specs'}
-        <MetaSpecs />
-      {:else if currentView === 'tenants'}
-        <TenantList />
-      {:else if currentView === 'workspaces'}
-        <WorkspaceList onSelect={(ws) => navigate('workspace-detail', { workspace: ws })} />
-      {:else if currentView === 'workspace-detail' && selectedWorkspace}
-        <WorkspaceDetail
-          workspace={selectedWorkspace}
-          onBack={() => navigate('workspaces')}
-        />
-      {:else if currentView === 'personas'}
-        <PersonaCatalog />
-      {:else if currentView === 'budget'}
-        <BudgetDashboard />
-      {:else if currentView === 'dependencies'}
-        <DependencyGraph />
-      {:else if currentView === 'profile'}
-        <UserProfile />
-      {:else if currentView === 'explorer'}
-        <ExplorerView />
-      {:else if currentView === 'admin'}
-        <AdminPanel />
-      {:else}
-        <Settings {wsStatus} />
-      {/if}
+      <ContentArea layout={currentLayout} {detailPanel} onclosePanel={closeDetailPanel}>
+        <div class="content-inner" class:faded={!contentVisible}>
+          {#if currentNav === 'inbox'}
+            <Inbox workspaceId={scope.workspaceId} />
+          {:else if currentNav === 'briefing'}
+            <Briefing workspaceId={scope.workspaceId} />
+          {:else if currentNav === 'explorer'}
+            <ExplorerView {scope} />
+          {:else if currentNav === 'specs'}
+            <SpecDashboard {scope} />
+          {:else if currentNav === 'meta-specs'}
+            <MetaSpecs {scope} />
+          {:else if currentNav === 'admin'}
+            <AdminPanel {scope} />
+          {/if}
+        </div>
+      </ContentArea>
     </main>
+
+    <!-- Status bar (24px) -->
+    <footer class="status-bar" aria-label="Status bar">
+      <!-- Trust level -->
+      {#if trustLevel}
+        <span class="status-item status-trust" title="Workspace trust level">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          Trust: {trustLevel}
+        </span>
+      {/if}
+
+      <!-- Budget usage -->
+      {#if budgetPct !== null}
+        <span class="status-item status-budget" title="Budget usage">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
+            <rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
+          </svg>
+          Budget: {budgetPct}%
+          <span
+            class="budget-bar-track"
+            role="progressbar"
+            aria-valuenow={budgetPct}
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-label="Budget {budgetPct}%"
+          >
+            <span class="budget-bar-fill" style="width: {budgetPct}%; background: {budgetPct > 90 ? 'var(--color-danger)' : budgetPct > 70 ? 'var(--color-warning)' : 'var(--color-success)'}"></span>
+          </span>
+        </span>
+      {/if}
+
+      <!-- Spacer -->
+      <span class="status-spacer"></span>
+
+      <!-- Presence avatars stub (replaced by S4.8) -->
+      <span class="status-item status-presence" aria-hidden="true" title="Active users (S4.8 pending)">
+        <span class="presence-stub"></span>
+      </span>
+
+      <!-- WebSocket status -->
+      <span
+        class="status-item status-ws"
+        class:connected={wsStatus === 'connected'}
+        class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
+        role="status"
+        aria-label="WebSocket: {wsStatus}"
+        title="WebSocket: {wsStatus}"
+      >
+        <span class="ws-dot" aria-hidden="true"></span>
+        WS
+      </span>
+    </footer>
   </div>
 </div>
 {/if}
 
+<!-- Global overlays -->
 <SearchBar bind:open={searchOpen} onnavigate={(v) => navigate(v)} />
 <Toast />
 
+<!-- Keyboard shortcut overlay -->
+{#if shortcutsOpen}
+  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="shortcuts-modal">
+      <div class="shortcuts-header">
+        <h2>Keyboard Shortcuts</h2>
+        <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
+      </div>
+      <div class="shortcuts-body">
+        <dl class="shortcuts-list">
+          <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>Global search</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘1</kbd></dt><dd>Inbox</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘2</kbd></dt><dd>Briefing</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘3</kbd></dt><dd>Explorer</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘4</kbd></dt><dd>Specs</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘5</kbd></dt><dd>Meta-specs</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘6</kbd></dt><dd>Admin</dd></div>
+          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / go up scope</dd></div>
+          <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>Focus search</dd></div>
+          <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd></div>
+        </dl>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Token configuration modal -->
 <Modal bind:open={tokenModalOpen} title="API Token" size="sm">
   <div class="token-modal">
-    <p class="token-desc">Set the Bearer token used for all API and WebSocket requests. Leave blank to use the default <code>test-token</code>.</p>
+    <p class="token-desc">Set the Bearer token for all API and WebSocket requests.</p>
     {#if tokenInfo}
       <div class="token-info-box">
         <div class="token-info-row">
@@ -517,18 +594,6 @@
           <div class="token-info-row">
             <span class="token-info-label">Agent ID</span>
             <span class="token-info-val mono">{tokenInfo.agent_id}</span>
-          </div>
-        {/if}
-        {#if tokenInfo.task_id}
-          <div class="token-info-row">
-            <span class="token-info-label">Task ID</span>
-            <span class="token-info-val mono">{tokenInfo.task_id}</span>
-          </div>
-        {/if}
-        {#if tokenInfo.scope}
-          <div class="token-info-row">
-            <span class="token-info-label">Scope</span>
-            <span class="token-info-val">{tokenInfo.scope}</span>
           </div>
         {/if}
         {#if tokenInfo.exp}
@@ -545,7 +610,7 @@
       class="token-input"
       type="text"
       bind:value={tokenInput}
-      placeholder="test-token"
+      placeholder="gyre-dev-token"
       onkeydown={(e) => e.key === 'Enter' && saveToken()}
     />
     <div class="token-actions">
@@ -560,8 +625,10 @@
     display: flex;
     height: 100vh;
     overflow: hidden;
+    background: var(--color-bg);
   }
 
+  /* Main column: topbar + content + status bar */
   .main {
     flex: 1;
     display: flex;
@@ -570,117 +637,126 @@
     overflow: hidden;
   }
 
-  /* Top bar */
+  /* Topbar (48px) */
   .topbar {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 var(--space-6);
-    height: var(--topbar-height);
+    height: 48px;
+    padding: 0 var(--space-4);
     background: var(--color-surface);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
     gap: var(--space-4);
   }
 
-  .topbar-left {
+  /* Breadcrumb */
+  .breadcrumb {
     display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
-    overflow: hidden;
+    align-items: center;
+    gap: var(--space-1);
+    flex: 0 0 auto;
   }
 
-  .topbar-title {
-    font-family: var(--font-display);
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: var(--color-text);
+  .breadcrumb-sep {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    user-select: none;
+  }
+
+  .breadcrumb-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    transition: color var(--transition-fast), background var(--transition-fast);
     white-space: nowrap;
   }
 
-  .topbar-right {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    flex-shrink: 0;
+  .breadcrumb-btn:hover, .breadcrumb-btn.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
   }
 
-  /* Scope breadcrumb: Gyre › Workspace › Repo */
-  .scope-crumb {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--text-xs);
-  }
-
-  .scope-sep {
-    color: var(--color-text-muted);
-    user-select: none;
-    font-size: var(--text-xs);
-  }
-
-  .scope-crumb-link {
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    font-family: var(--font-body);
-    padding: 0;
-    transition: color var(--transition-fast);
-  }
-
-  .scope-crumb-link:hover {
-    color: var(--color-text-secondary);
-  }
-
-  .scope-crumb-current {
-    color: var(--color-text-secondary);
+  .breadcrumb-current {
+    font-size: var(--text-sm);
     font-weight: 500;
-  }
-
-  /* Workspace selector */
-  .ws-selector-wrap {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
+    color: var(--color-text);
     padding: var(--space-1) var(--space-2);
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+  }
+
+  /* Workspace dropdown */
+  .ws-dropdown-wrap {
+    position: relative;
+  }
+
+  .ws-dropdown {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    left: 0;
+    z-index: 100;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    list-style: none;
+    margin: 0;
+    padding: var(--space-1) 0;
+    min-width: 180px;
+    max-height: 280px;
+    overflow-y: auto;
   }
 
-  .ws-icon {
-    color: var(--color-primary);
-    flex-shrink: 0;
-  }
-
-  .ws-selector {
+  .ws-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
     background: transparent;
     border: none;
-    color: var(--color-primary);
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    font-weight: 500;
+    color: var(--color-text-secondary);
     cursor: pointer;
-    padding: 0;
-    max-width: 140px;
-    appearance: none;
-    outline: none;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    text-align: left;
+    transition: background var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
   }
 
-  .ws-selector option {
-    background: var(--color-surface);
+  .ws-dropdown-item:hover {
+    background: var(--color-border);
     color: var(--color-text);
   }
 
-  /* Search trigger button */
+  .ws-dropdown-item.selected {
+    color: var(--color-primary);
+    font-weight: 500;
+  }
+
+  .ws-dropdown-empty {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  /* Center search trigger */
+  .topbar-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+  }
+
   .search-trigger {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-1) var(--space-3);
+    padding: var(--space-1) var(--space-4);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
@@ -689,6 +765,8 @@
     font-family: var(--font-body);
     font-size: var(--text-xs);
     transition: border-color var(--transition-fast), color var(--transition-fast);
+    max-width: 320px;
+    width: 100%;
   }
 
   .search-trigger:hover {
@@ -704,110 +782,289 @@
     font-size: 0.65rem;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
+    margin-left: auto;
   }
 
-  /* Workspace scope chip (fallback when dropdown not shown) */
-  .scope-chip {
+  /* Topbar right */
+  .topbar-right {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
-    padding: var(--space-1) var(--space-3);
-    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
-    border-radius: var(--radius);
-    color: var(--color-primary);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    font-weight: 500;
-    transition: background var(--transition-fast), border-color var(--transition-fast);
-    white-space: nowrap;
-    max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .scope-chip:hover {
-    background: color-mix(in srgb, var(--color-primary) 20%, transparent);
-    border-color: var(--color-primary);
-  }
-
-  .scope-chip span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* WS indicator */
-  .ws-indicator {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-  }
-
-  .ws-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--color-text-muted);
+    gap: var(--space-2);
     flex-shrink: 0;
-    transition: background var(--transition-fast);
   }
 
-  .ws-indicator.connected .ws-dot {
-    background: var(--color-success);
-    box-shadow: 0 0 5px rgba(99, 153, 61, 0.5);
-  }
-
-  .ws-indicator.error .ws-dot {
-    background: var(--color-danger);
-  }
-
-  .ws-label {
-    display: none;
-  }
-
-  .version {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-  }
-
-  /* Auth indicator button */
-  .auth-btn {
+  .inbox-badge-btn {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: var(--space-1);
-    padding: var(--space-1) var(--space-3);
+    justify-content: center;
+    width: 32px;
+    height: 32px;
     background: transparent;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text-muted);
+    border: none;
+    color: var(--color-text-secondary);
     cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    transition: border-color var(--transition-fast), color var(--transition-fast);
+    border-radius: var(--radius);
+    transition: color var(--transition-fast), background var(--transition-fast);
   }
 
-  .auth-btn:hover {
-    border-color: var(--color-text-muted);
+  .inbox-badge-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .inbox-count {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 999px;
+    font-size: 0.55rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+
+  .user-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: 50%;
     color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .user-btn:hover {
+    color: var(--color-text);
+    border-color: var(--color-text-muted);
   }
 
   .auth-dot {
-    width: 7px;
-    height: 7px;
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     background: var(--color-danger);
-    flex-shrink: 0;
+    border: 2px solid var(--color-surface);
     transition: background var(--transition-fast);
   }
 
-  .auth-btn.auth-active .auth-dot {
+  .user-btn.auth-active .auth-dot {
     background: var(--color-success);
-    box-shadow: 0 0 5px rgba(99, 153, 61, 0.5);
+  }
+
+  /* Content area */
+  .content {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  main:focus {
+    outline: none;
+  }
+
+  .content-inner {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+    transition: opacity 150ms ease;
+  }
+
+  .content-inner.faded {
+    opacity: 0;
+  }
+
+  /* Status bar (24px) */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    height: 24px;
+    padding: 0 var(--space-4);
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+    gap: var(--space-4);
+    font-size: 0.65rem;
+    color: var(--color-text-muted);
+  }
+
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+  }
+
+  .status-spacer {
+    flex: 1;
+  }
+
+  /* Budget bar */
+  .budget-bar-track {
+    display: inline-block;
+    width: 40px;
+    height: 4px;
+    background: var(--color-border-strong);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .budget-bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    transition: width var(--transition-normal);
+  }
+
+  /* Presence stub */
+  .presence-stub {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--color-surface-elevated);
+    border: 1px dashed var(--color-border-strong);
+    opacity: 0.5;
+  }
+
+  /* WebSocket status */
+  .ws-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+    transition: background var(--transition-fast);
+  }
+
+  .status-ws.connected .ws-dot {
+    background: var(--color-success);
+    box-shadow: 0 0 4px rgba(99, 153, 61, 0.5);
+  }
+
+  .status-ws.error .ws-dot {
+    background: var(--color-danger);
+  }
+
+  /* Skip to content */
+  .skip-to-content {
+    position: fixed;
+    top: -100%;
+    left: var(--space-4);
+    z-index: 9999;
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 0 0 var(--radius) var(--radius);
+    font-size: var(--text-sm);
+    text-decoration: none;
+    transition: top var(--transition-fast);
+  }
+
+  .skip-to-content:focus {
+    top: 0;
+  }
+
+  /* Keyboard shortcuts overlay */
+  .shortcuts-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .shortcuts-modal {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    width: 340px;
+    max-width: 90vw;
+  }
+
+  .shortcuts-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .shortcuts-header h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .shortcuts-header button {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-base);
+    padding: 0;
+  }
+
+  .shortcuts-body {
+    padding: var(--space-4) var(--space-6);
+  }
+
+  .shortcuts-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: 0;
+  }
+
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+
+  .shortcut-row dt {
+    flex-shrink: 0;
+  }
+
+  .shortcut-row dd {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    text-align: right;
+  }
+
+  .shortcut-row kbd {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text);
   }
 
   /* Token modal */
@@ -823,11 +1080,40 @@
     margin: 0;
   }
 
-  .token-desc code {
-    font-family: var(--font-mono);
+  .token-info-box {
     background: var(--color-surface-elevated);
-    padding: 1px 4px;
-    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .token-info-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .token-info-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    width: 70px;
+    flex-shrink: 0;
+  }
+
+  .token-info-val {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .token-info-val.mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    word-break: break-all;
   }
 
   .token-label {
@@ -886,54 +1172,4 @@
   }
 
   .btn-secondary:hover { border-color: var(--color-text-muted); }
-
-  /* Token info box */
-  .token-info-box {
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .token-info-row {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-  }
-
-  .token-info-label {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    width: 70px;
-    flex-shrink: 0;
-  }
-
-  .token-info-val {
-    font-size: var(--text-sm);
-    color: var(--color-text);
-  }
-
-  .token-info-val.mono {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    word-break: break-all;
-  }
-
-  /* Content area */
-  .content {
-    flex: 1;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-
-  /* Remove default outline on main — focus is only programmatic (skip link) */
-  main:focus {
-    outline: none;
-  }
 </style>
