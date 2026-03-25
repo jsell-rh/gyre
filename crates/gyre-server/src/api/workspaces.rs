@@ -130,6 +130,7 @@ pub async fn list_workspaces(
 
 pub async fn get_workspace(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<Json<WorkspaceResponse>, ApiError> {
     let ws = state
@@ -137,11 +138,16 @@ pub async fn get_workspace(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    // Enforce tenant ownership — non-Admin callers can only access their own tenant's workspaces.
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
     Ok(Json(WorkspaceResponse::from(ws)))
 }
 
 pub async fn update_workspace(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceResponse>, ApiError> {
@@ -150,6 +156,9 @@ pub async fn update_workspace(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
     if let Some(name) = req.name {
         ws.name = name;
     }
@@ -171,27 +180,35 @@ pub async fn update_workspace(
 
 pub async fn delete_workspace(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let ws = state
         .workspaces
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
     state.workspaces.delete(&Id::new(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn add_repo_to_workspace(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(ws_id): Path<String>,
     Json(req): Json<AddRepoRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let ws = state
         .workspaces
         .find_by_id(&Id::new(&ws_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {ws_id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {ws_id} not found")));
+    }
     let mut repo = state
         .repos
         .find_by_id(&Id::new(&req.repo_id))
@@ -219,13 +236,17 @@ pub async fn add_repo_to_workspace(
 
 pub async fn list_workspace_repos(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(ws_id): Path<String>,
 ) -> Result<Json<Vec<WorkspaceRepoEntry>>, ApiError> {
-    state
+    let ws = state
         .workspaces
         .find_by_id(&Id::new(&ws_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {ws_id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {ws_id} not found")));
+    }
     let repo_ids: Vec<String> = state
         .kv_store
         .kv_get("workspace_repos", &ws_id)
@@ -308,6 +329,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/workspaces/nonexistent")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -477,5 +499,114 @@ mod tests {
         let list = body_json(list_resp).await;
         // Should be empty — the agent is scoped to "default", not "other-tenant".
         assert_eq!(list.as_array().unwrap().len(), 0);
+    }
+
+    // -- Tenant-isolation security tests (NEW-18) -----------------------------
+
+    /// Non-admin callers cannot read a workspace belonging to another tenant via UUID.
+    /// get_workspace must return 404 (not leak existence) for cross-tenant access.
+    #[tokio::test]
+    async fn get_workspace_cross_tenant_returns_404() {
+        let state = test_state();
+        // Register a non-admin agent token (tenant "default").
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-new18-1",
+                "agent-tok-new18-1".to_string(),
+            )
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        // Admin creates a workspace in "other-tenant".
+        let body = serde_json::json!({
+            "tenant_id": "other-tenant",
+            "name": "OtherWs",
+            "slug": "other-ws"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token") // Admin
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let other_id = created["id"].as_str().unwrap().to_string();
+
+        // Non-admin agent (tenant "default") tries to GET the other-tenant workspace by UUID.
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{other_id}"))
+                    .header("authorization", "Bearer agent-tok-new18-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Must return 404, not 200 — cross-tenant UUID access denied.
+        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Non-admin callers cannot delete a workspace belonging to another tenant.
+    #[tokio::test]
+    async fn delete_workspace_cross_tenant_returns_404() {
+        let state = test_state();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-new18-2",
+                "agent-tok-new18-2".to_string(),
+            )
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "tenant_id": "victim-tenant",
+            "name": "VictimWs",
+            "slug": "victim-ws"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let victim_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let del_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{victim_id}"))
+                    .header("authorization", "Bearer agent-tok-new18-2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NOT_FOUND);
     }
 }
