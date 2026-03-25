@@ -70,6 +70,7 @@ async fn full_ralph_loop_via_gyre() {
         .post(format!("{api}/workspaces"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
+            "tenant_id": "default",
             "name": "E2E Workspace",
             "slug": ws_slug,
         }))
