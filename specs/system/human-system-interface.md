@@ -171,7 +171,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
   description: "Spec approval is always human, regardless of trust level"
 ```
 
-This policy is **immutable** — it exists at every trust level, including Custom. Per `platform-model.md` §2, spec approval is human-only. Agents cannot approve specs that define their own behavior.
+This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy (like `default-deny`), not created by any trust preset. Trust presets only manage the `require-human-mr-review` policy and notification filtering. The Custom trust editor must prevent deletion of this policy (grayed out with tooltip: "Spec approval is always human — this policy cannot be removed"). Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
 Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
@@ -298,7 +298,7 @@ Views are serializable specs that can be saved to the workspace and shared:
 
 Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_slug`, ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
-- `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view
+- `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view. Response (201): `{view_id: "<uuid>", name: "...", query: {...}, ...}`
 - `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a UUID, not a slug — avoids name collision issues. The human-readable name is a display field, not a key.)
 
 Built-in saved views shipped with every workspace:
@@ -793,6 +793,21 @@ These are architectural constraints, not implementation work. They ensure we don
 ---
 
 ## Relationship to Existing Specs
+
+**Upstream Amendments Required** (these existing specs need updates to align with this spec):
+
+| Spec | Amendment Needed |
+|---|---|
+| `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" is an in-view panel, not the app sidebar. |
+| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. |
+| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). |
+| `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` and `message` to the resource type list. |
+| `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
+| `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent). |
+| `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
+| `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. |
+
+These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.
 
 **Supersedes:**
 - `ui-journeys.md` — this spec replaces it entirely with refined journeys, trust gradient, and communication model
