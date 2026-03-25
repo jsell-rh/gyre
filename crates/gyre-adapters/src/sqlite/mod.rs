@@ -170,7 +170,6 @@ mod tests {
             "audit_events",
             "network_peers",
             "tenants",
-<<<<<<< HEAD
             "messages",
             "meta_spec_sets",
         ];

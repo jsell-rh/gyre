@@ -521,5 +521,4 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 0);
     }
-
 }

@@ -99,7 +99,9 @@ mod tests {
     #[tokio::test]
     async fn get_missing_returns_none() {
         let (_tmp, s) = setup();
-        let result = MetaSpecSetRepository::get(&s, &Id::new("ws-1")).await.unwrap();
+        let result = MetaSpecSetRepository::get(&s, &Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -107,26 +109,44 @@ mod tests {
     async fn upsert_and_get() {
         let (_tmp, s) = setup();
         let json = r#"{"workspace_id":"ws-1","personas":{},"principles":[]}"#;
-        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), json).await.unwrap();
-        let got = MetaSpecSetRepository::get(&s, &Id::new("ws-1")).await.unwrap().unwrap();
+        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), json)
+            .await
+            .unwrap();
+        let got = MetaSpecSetRepository::get(&s, &Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got, json);
     }
 
     #[tokio::test]
     async fn upsert_overwrites() {
         let (_tmp, s) = setup();
-        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), r#"{"v":1}"#).await.unwrap();
-        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), r#"{"v":2}"#).await.unwrap();
-        let got = MetaSpecSetRepository::get(&s, &Id::new("ws-1")).await.unwrap().unwrap();
+        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), r#"{"v":1}"#)
+            .await
+            .unwrap();
+        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), r#"{"v":2}"#)
+            .await
+            .unwrap();
+        let got = MetaSpecSetRepository::get(&s, &Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got, r#"{"v":2}"#);
     }
 
     #[tokio::test]
     async fn delete_removes() {
         let (_tmp, s) = setup();
-        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), r#"{"v":1}"#).await.unwrap();
-        MetaSpecSetRepository::delete(&s, &Id::new("ws-1")).await.unwrap();
-        let got = MetaSpecSetRepository::get(&s, &Id::new("ws-1")).await.unwrap();
+        MetaSpecSetRepository::upsert(&s, &Id::new("ws-1"), r#"{"v":1}"#)
+            .await
+            .unwrap();
+        MetaSpecSetRepository::delete(&s, &Id::new("ws-1"))
+            .await
+            .unwrap();
+        let got = MetaSpecSetRepository::get(&s, &Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(got.is_none());
     }
 }

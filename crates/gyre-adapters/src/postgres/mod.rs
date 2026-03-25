@@ -19,11 +19,8 @@ pub mod dependency;
 pub mod kv_store;
 pub mod merge_queue;
 pub mod merge_request;
-<<<<<<< HEAD
 pub mod message;
-=======
 pub mod meta_spec_set;
->>>>>>> 6c650a2 (feat(m34-slice5): tenant filtering + legacy cleanup + MetaSpecSet persistence)
 pub mod network_peer;
 pub mod notification;
 pub mod policy;

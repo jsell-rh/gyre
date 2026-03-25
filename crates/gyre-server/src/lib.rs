@@ -672,7 +672,10 @@ pub fn build_state(
         notifications: Arc::new(mem::MemNotificationRepository::default()),
         wg_config: WireGuardConfig::from_env(),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
-        meta_spec_sets: store!(dyn MetaSpecSetRepository, mem::MemMetaSpecSetRepository::default()),
+        meta_spec_sets: store!(
+            dyn MetaSpecSetRepository,
+            mem::MemMetaSpecSetRepository::default()
+        ),
     })
 }
 

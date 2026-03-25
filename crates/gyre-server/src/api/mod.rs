@@ -362,7 +362,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Seed data
         .route("/api/v1/admin/seed", post(admin::admin_seed))
         // Search reindex (moved from /api/v1/search/reindex in M34 Slice 5)
-        .route("/api/v1/admin/search/reindex", post(search::reindex_handler))
+        .route(
+            "/api/v1/admin/search/reindex",
+            post(search::reindex_handler),
+        )
         // Data Export
         .route("/api/v1/admin/export", get(admin::admin_export))
         // Retention Policies
