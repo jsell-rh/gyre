@@ -119,9 +119,12 @@ One click. No ABAC knowledge required.
 
 - **Preset → Preset:** Server deletes trust-managed policies from the old preset, creates policies for the new preset.
 - **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
-- **Custom → Preset:** Server deletes ALL trust-managed policies (identified by a `trust_managed: true` metadata tag on the policy), then creates the preset's policies. User-created non-trust policies are preserved.
+- **Custom → Preset:** Server deletes all `trust:` prefixed policies, then creates the preset's policies. Built-in policies (`builtin:` prefix) and user-created policies (no prefix) are preserved.
 
-Trust-managed policies are identified by a naming convention: all trust-preset policies use the prefix `trust:` (e.g., `trust:require-human-mr-review`). The server distinguishes trust-managed from user-created policies by name prefix during transitions — no metadata field needed on the `Policy` struct.
+**Policy naming conventions:**
+- `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions
+- `builtin:` prefix — immutable server-seeded policies, never deleted by trust transitions
+- No prefix — user-created custom policies, preserved across transitions
 
 ### What Each Level Controls
 
@@ -164,7 +167,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
 **Autonomous:** removes most notification policies. Keeps two policies:
 
 ```yaml
-- name: "trust:require-human-spec-approval"
+- name: "builtin:require-human-spec-approval"    # builtin: prefix, NOT trust: — immune to trust transitions
   scope: tenant
   priority: 999
   immutable: true        # ABAC engine skips priority override for immutable policies
@@ -614,6 +617,7 @@ specs:
     links:
       - type: depends_on
         target: "@platform-core/idempotent-service/system/idempotent-api.md"
+        target_sha: "abc123..."    # SHA-pinned, per spec-links.md link format
         #        ^@workspace_slug/repo_name/spec_path
         # repo_name must be unique within a workspace (enforced by DB constraint)
 ```
@@ -708,7 +712,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Detected post-merge by comparing `ArchitecturalDelta` records (already produced by M30b extraction on every push). When two MRs referencing the same `spec_path` merge in sequence, the server compares the deltas: each delta records which nodes were added/modified/removed. If two deltas for the same spec produce contradictory structural changes (adding different types for the same concept, or different interface shapes), the server flags a divergence. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed, only the diff records already captured. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected post-merge by the push-triggered graph extraction background job (M30b). After extraction completes, a **divergence check step** runs: it queries `ArchitecturalDelta` records for the merged MR's `spec_path`, comparing the latest delta against previous deltas from other agents for the same spec. If two deltas produce contradictory structural changes (adding different types for the same concept, or different interface shapes), the server creates a `Notification` (not a message bus event) for workspace Admin/Developer members. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
