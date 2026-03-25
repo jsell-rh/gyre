@@ -52,7 +52,7 @@ Every access decision considers four categories of attributes:
 
 | Attribute | Example |
 |---|---|
-| `action` | `read`, `write`, `delete`, `approve`, `spawn`, `push`, `merge`, `escalate` |
+| `action` | `read`, `write`, `delete`, `approve`, `spawn`, `push`, `merge`, `escalate`, `generate` |
 
 **Environment attributes (context):**
 
