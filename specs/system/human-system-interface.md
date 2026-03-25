@@ -662,7 +662,7 @@ The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 
 `UserPresence` messages do NOT go into the `TelemetryBuffer` (not returned by `GET /activity`). They use a separate presence map.
 
-**Presence query:** `GET /api/v1/workspaces/:workspace_id/presence` returns the current presence map for a workspace: `[{user_id, view, last_seen}]`. This is a simple read from the in-memory map, not a message bus query. On WebSocket reconnection, the client fetches this endpoint to populate the initial presence state.
+**Presence query:** `GET /api/v1/workspaces/:workspace_id/presence` returns the current presence map for a workspace: `[{user_id, view, last_seen}]`. This is a simple read from the in-memory map, not a message bus query. ABAC resource resolution: `resource_type: "workspace"`, `workspace_param: "workspace_id"` — uses the existing workspace resource type, no new type needed. On WebSocket reconnection, the client fetches this endpoint to populate the initial presence state.
 
 ### Conflict Prevention
 
@@ -693,7 +693,7 @@ Saved Views:
 
 | Priority | Action Type | Source | Inline Action |
 |---|---|---|---|
-| 1 | **Agent needs clarification** | In-flight: agent sends `Escalation` message to workspace orchestrator, which creates an Inbox item. Post-completion: from `AgentCompleted` summary uncertainties. | Respond inline or spawn interrogation |
+| 1 | **Agent needs clarification** | In-flight: agent sends `Escalation` Directed message to workspace orchestrator. The orchestrator's Ralph loop processes the escalation and creates a `Notification` (via `NotificationRepository`) for workspace Admin/Developer members with the escalation content. Post-completion: `agent.complete` handler creates Inbox items directly from `AgentCompleted` summary uncertainties. | Respond inline or spawn interrogation |
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
@@ -811,7 +811,11 @@ These are architectural constraints, not implementation work. They ensure we don
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent). |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
-| `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. |
+| `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. Clarify that `{workspace}` segment uses **slug** (not name). |
+| `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |
+| `message-bus.md` `WsMessage` enum | Add `UserPresence` variant (bidirectional, payload: user_id, workspace_id, view, timestamp). |
+| `platform-model.md` §1 `Workspace` struct | Add `trust_level: TrustLevel` field (enum: Supervised, Guided, Autonomous, Custom). |
+| `hierarchy-enforcement.md` §4 built-in policies | Document `system-full-access` policy priority (must be > 250 to override `require-human-spec-approval`). Define ABAC identity mechanism for internal server processes (merge processor, stale agent detector) — these present subject attributes via an internal ABAC context, not via JWT/API key. |
 
 These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.
 
