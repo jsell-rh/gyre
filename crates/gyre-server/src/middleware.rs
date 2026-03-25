@@ -174,6 +174,9 @@ mod tests {
             graph_store: base.graph_store.clone(),
             wg_config: base.wg_config.clone(),
             meta_spec_sets: base.meta_spec_sets.clone(),
+            messages: base.messages.clone(),
+            message_dispatch_tx: base.message_dispatch_tx.clone(),
+            agent_inbox_max: base.agent_inbox_max,
         });
         crate::build_router(state)
     }

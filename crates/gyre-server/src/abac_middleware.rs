@@ -169,6 +169,16 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/agents/:id/complete", "agent", Some("complete")),
                 RouteResourceMapping::api("/api/v1/agents/:id/card", "agent", Some("write")),
                 RouteResourceMapping::api("/api/v1/agents/:id/messages", "message", None),
+                RouteResourceMapping::api(
+                    "/api/v1/agents/:id/messages/:message_id/ack",
+                    "message",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:workspace_id/messages",
+                    "message",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/agents/:id/touched-paths", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/logs", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/logs/stream", "agent", None),
