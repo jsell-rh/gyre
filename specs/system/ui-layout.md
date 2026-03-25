@@ -357,14 +357,14 @@ Specifies spatial arrangement.
 | `"layered"` | Horizontal layers (ELK layered). Nodes in columns by depth. | Data flow, request pipelines |
 | `"list"` | Sortable, filterable table. One row per node. Columns from encoding. | Flat collections, search results |
 | `"timeline"` | Nodes on a horizontal time axis by `last_modified` or delta timestamp. | Change history, evolution |
-| `"split"` | Two sub-views side by side. Used for spec realization and diffs. | Comparison, before/after |
+| `"side-by-side"` | Two sub-views side by side. Used for spec realization and diffs. Not to be confused with the Split content area layout (§2) which is the main+detail panel pattern. | Comparison, before/after |
 | `"diff"` | Structural diff — added/modified/removed nodes between two graph snapshots. | Preview impact, change review |
 
-**Composability:** A `"split"` layout contains two sub-view specs:
+**Composability:** A `"side-by-side"` layout contains two sub-view specs:
 
 ```json
 {
-  "layout": "split",
+  "layout": "side-by-side",
   "left": {
     "data": {"spec_path": "system/payment-retry.md"},
     "layout": "list",
@@ -642,7 +642,7 @@ For views exceeding ~1000 nodes, the Explorer shows a warning and suggests apply
 | `layered` | ELK (elkjs, WASM) | Left-to-right layered layout |
 | `list` | Native Svelte `{#each}` | Sortable table with virtual scroll |
 | `timeline` | d3-scale (time axis) + Svelte | Nodes positioned on time axis |
-| `split` | CSS Grid (50/50 or 60/40) | Two sub-views rendered independently |
+| `side-by-side` | CSS Grid (50/50 or 60/40) | Two sub-views rendered independently |
 | `diff` | Custom Svelte component | Added/modified/removed node cards |
 
 ### Interaction Events

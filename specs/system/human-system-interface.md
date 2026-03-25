@@ -833,6 +833,8 @@ These are architectural constraints, not implementation work. They ensure we don
 | `hierarchy-enforcement.md` §4 built-in policies | Rename `system-access` → `system-full-access` (or vice versa). Add `immutable: bool` flag to `Policy` struct — immutable policies cannot be overridden regardless of priority. `system-full-access` at priority 1000 must carve out spec approval (cannot approve specs even as superuser). Define ABAC identity mechanism for internal server processes. |
 | `platform-model.md` §1 Repository | Add unique constraint on `(workspace_id, name)` — repo names must be unique within a workspace for cross-workspace spec link resolution. |
 | `message-bus.md` §Scoping Rules | Document that Users (not just Agents) can send Directed messages to agents — required for human→agent steering (Pause, inline chat). |
+| `realized-model.md` `GraphNode` struct | Add `spec_confidence` field (already in DB schema but missing from Rust struct). Required by Explorer encoding layer. |
+| `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. |
 
 These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.
 
