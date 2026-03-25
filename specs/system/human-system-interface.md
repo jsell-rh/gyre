@@ -1,0 +1,700 @@
+# Human-System Interface
+
+> This spec defines how humans interact with a fully autonomous software development system. It supersedes `ui-journeys.md` and extends `system-explorer.md` with concrete interaction patterns for trust calibration, agent interrogation, scoped communication, and LLM-driven architectural exploration.
+
+## The Novel Problem
+
+No tool has addressed the interaction model for a system where agents write all code. GitHub, JIRA, Linear — every developer tool assumes humans write code and review each other's work. When agents do both, the human's role changes fundamentally:
+
+- **You didn't write the code.** You can't reason about it from memory.
+- **You didn't review the code.** Gates and agent reviewers did.
+- **You don't track tasks.** The orchestrator decomposes specs into tasks automatically.
+- **You don't manage branches.** The merge queue handles ordering and conflicts.
+
+What remains: deciding what to build (specs), setting direction on how to build it (meta-specs), maintaining understanding of what exists (exploration), handling exceptions (escalation), and steering agents in-flight (communication).
+
+Every surface in this spec exists to serve one of those five activities. If it doesn't, it shouldn't exist.
+
+---
+
+## 1. Navigation Model
+
+### Stable Sidebar, Adaptive Content
+
+The sidebar is **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
+
+```
+Sidebar (always visible, always these items):
+  Inbox
+  Briefing
+  Explorer
+  Specs
+  Admin
+```
+
+Five items. That's it.
+
+**Why not scope-dependent sidebar?** Changing the sidebar when the user navigates between scopes is disorienting — the same navigation item moves position or disappears. Notion, Backstage, and VS Code all keep the primary nav stable. The content area is where scope manifests.
+
+### Scope Indicator (Breadcrumb)
+
+A persistent breadcrumb in the topbar shows the current scope:
+
+```
+Acme Corp  >  Payments  >  payment-api
+[tenant]      [workspace]   [repo]
+```
+
+Each segment is clickable — click "Payments" to zoom out to workspace scope. The breadcrumb is always present. Narrowing scope (clicking a workspace or repo in any view) updates the breadcrumb and the content area re-renders for that scope.
+
+### What Each Nav Item Shows at Each Scope
+
+| Nav Item | Tenant Scope | Workspace Scope | Repo Scope |
+|---|---|---|---|
+| **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
+| **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
+| **Explorer** | Workspace overview cards | Realized architecture (C4 progressive) | Repo-level architecture detail |
+| **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
+| **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
+
+The content adapts. The sidebar doesn't.
+
+### Deep Links
+
+Every view state is URL-addressable:
+- `/inbox` — tenant-scoped inbox
+- `/workspaces/:id/inbox` — workspace-scoped inbox
+- `/repos/:id/explorer` — repo-scoped explorer
+- `/repos/:id/specs/system/vision.md` — specific spec in a repo
+
+### Keyboard Navigation
+
+| Shortcut | Action |
+|---|---|
+| `Cmd+K` | Global search (specs, types, concepts, agents) |
+| `i` | Jump to Inbox |
+| `b` | Jump to Briefing |
+| `e` | Jump to Explorer |
+| `s` | Jump to Specs |
+| `Esc` | Close detail panel / go up one scope level |
+| `/` | Focus search within current view |
+| `?` | Show keyboard shortcut reference |
+
+---
+
+## 2. Trust Gradient
+
+### The Problem
+
+When you first deploy Gyre, you don't trust the agents. You want to see everything — every MR, every agent decision, every gate result. Over time, trust builds. You stop reviewing MRs. You check the Briefing once a day. You only react to exceptions.
+
+No current tool models this trust progression because no current tool has fully autonomous agents. The UI must adapt to the human's confidence level.
+
+### Trust Levels
+
+Trust is a **workspace-level setting**. Different workspaces can have different trust levels. A new experimental workspace starts at Supervised. The core platform workspace that's been running for months is at Autonomous.
+
+```
+Workspace Settings > Trust Level
+
+  ○ Supervised    — I review everything before it merges
+  ○ Guided        — Agents merge if gates pass, alert me on failures
+  ● Autonomous    — Only interrupt me for exceptions
+  ○ Custom        — Configure policies manually
+```
+
+One click. No ABAC knowledge required.
+
+### What Each Level Controls
+
+| Aspect | Supervised | Guided | Autonomous |
+|---|---|---|---|
+| **MR merge** | Human approval required | Autonomous if all gates pass | Autonomous if all gates pass |
+| **Spec approval** | Human approval required | Human approval required | Human approval required (always) |
+| **Inbox shows** | Every MR, every gate result, every agent decision | Gate failures, spec approvals, budget warnings | Spec approvals, spec assertion failures only |
+| **Briefing detail** | Per-agent activity, per-MR status | Per-spec progress, exceptions | Spec-level summaries, exceptions only |
+| **Notifications** | Every state change | Failures and approvals | Exceptions only |
+| **Agent completion summaries** | Full decision log visible | Uncertainties highlighted | Only low-confidence decisions surfaced |
+
+**Spec approval is always human.** This is a hard rule from `platform-model.md` — specs encode intent, and intent is a human decision. Trust level never bypasses spec approval.
+
+### Mechanical Implementation
+
+Each trust preset maps to a set of ABAC policies applied to the workspace:
+
+**Supervised:**
+```yaml
+- name: require-human-mr-approval
+  effect: deny
+  actions: ["merge"]
+  conditions:
+    - attribute: resource.type
+      operator: equals
+      value: "mr"
+    - attribute: subject.type
+      operator: not_equals
+      value: "user"
+```
+
+**Guided:** removes the `require-human-mr-approval` policy, keeps `alert-on-gate-failure`.
+
+**Autonomous:** removes most alert policies, keeps `require-human-spec-approval` and `alert-on-assertion-failure`.
+
+**Custom:** opens the ABAC policy editor for direct manipulation.
+
+### Trust Suggestions
+
+The system can suggest increasing trust based on track record:
+
+```
+This workspace has had 0 gate failures and 0 reverted MRs in 30 days.
+Consider increasing trust level to Autonomous.
+[Increase Trust] [Dismiss]
+```
+
+This appears as an Inbox item. The human decides.
+
+---
+
+## 3. The Explorer: Progressive Architecture Discovery
+
+### The Zero-Knowledge Problem
+
+The human didn't write the code. They can't reason about it from memory. Traditional tools assume familiarity — file trees, grep, code search. These are useless when you have zero knowledge of what exists.
+
+The Explorer solves this with **progressive disclosure starting from boundaries** — the same technique architects use when onboarding onto a new system.
+
+### Default Views (Automatic, No LLM)
+
+#### Boundary View (C4 Progressive Drill-Down)
+
+The default Explorer view. Each level answers "what is this made of?"
+
+**Level 1 — Context (Workspace scope):** Repos and their external dependencies.
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ payment-api  │────▸│ ledger-svc  │────▸│ billing-gw  │
+│ 12 types     │     │ 8 types     │     │ 5 types     │
+│ 3 endpoints  │     │ 4 endpoints │     │ 2 endpoints │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │
+       ▼
+  [external: stripe-rs]
+```
+
+**Level 2 — Container (Repo scope):** Crates/packages within a repo.
+```
+payment-api
+  ├── payment-common    (shared types, no deps)
+  ├── payment-ports     (interfaces)
+  ├── payment-domain    (business logic) ──▸ ports + common
+  ├── payment-adapters  (DB, HTTP) ──▸ ports
+  └── payment-server    (HTTP server) ──▸ domain + adapters
+```
+
+**Level 3 — Component (Crate scope):** Modules and their public interfaces.
+```
+payment-domain
+  ├── mod retry         ──▸ pub struct RetryPolicy, pub fn should_retry()
+  ├── mod charge        ──▸ pub struct Charge, pub enum ChargeStatus
+  ├── mod refund        ──▸ pub struct Refund, pub trait RefundPort
+  └── mod reconcile     ──▸ pub fn reconcile_ledger()
+```
+
+**Level 4 — Code (Module scope):** Types, functions, fields, methods.
+```
+retry::RetryPolicy
+  ├── max_attempts: u32
+  ├── backoff_ms: u64
+  ├── fn should_retry(&self, attempt: u32) -> bool
+  └── spec: specs/system/payment-retry.md (confidence: high)
+      └── last modified by: worker-12, 2 hours ago, churn: 3/30d
+```
+
+Each level is generated automatically from the knowledge graph. No LLM needed. Click to drill down, breadcrumb to drill up.
+
+#### Spec Realization View
+
+Specs on the left, their linked graph nodes on the right. Shows "what implements this spec?"
+
+```
+┌─ Spec ────────────────────────┐  ┌─ Realization ─────────────────┐
+│ payment-retry.md              │  │ RetryPolicy (type)            │
+│ Status: Approved ✓            │  │ should_retry (function)       │
+│ Implementation: 4/5 tasks     │  │ POST /payments/retry (endpoint)│
+│                               │  │ retry_tests (module)          │
+│ [Read Spec] [Edit Spec]       │  │                               │
+└───────────────────────────────┘  └───────────────────────────────┘
+```
+
+#### Change View
+
+What changed since last visit, at the structural level. Powered by architectural deltas.
+
+```
+Since your last visit:
+
+  + Added: RetryPolicy (type in payment-domain)
+    Spec: payment-retry.md | Agent: worker-12
+
+  ~ Modified: ChargeService (3 new methods)
+    Spec: charge-processing.md | Agent: worker-8
+
+  - Removed: LegacyPaymentHandler
+    Spec: (none — cleanup task)
+```
+
+### Saved Views (Curated, Shared)
+
+Views are serializable specs that can be saved to the workspace and shared:
+
+```json
+{
+  "name": "API surface",
+  "query": {
+    "node_types": ["Endpoint"],
+    "include_edges": ["RoutesTo"],
+    "depth": 1
+  },
+  "layout": "list",
+  "columns": ["name", "qualified_name", "spec_path", "last_modified_by"]
+}
+```
+
+Built-in saved views shipped with every workspace:
+- **API Surface** — all endpoints with their handlers
+- **Domain Model** — types and interfaces in the domain crate
+- **Security Boundary** — auth, ABAC, token validation paths
+- **Test Coverage** — modules with/without test modules
+
+### Generated Views (LLM-Powered, On-Demand)
+
+The user asks a question in natural language. The LLM translates it to a graph query + layout, producing a focused view.
+
+```
+User: "How does authentication work?"
+
+LLM generates view definition:
+{
+  "name": "How auth works",
+  "query": {
+    "concept": "auth",
+    "node_types": ["Module", "Function", "Type", "Endpoint"],
+    "depth": 2
+  },
+  "layout": "hierarchical",
+  "highlight": {"spec_path": "specs/system/identity-security.md"},
+  "explanation": "Authentication flows through require_auth_middleware (validates tokens),
+    then AuthenticatedAgent extractor (resolves identity), with four token types..."
+}
+```
+
+The view renders with the LLM's explanation as a sidebar annotation. The user can save the view for reuse or refine the question.
+
+**Important constraint:** The LLM has access only to the knowledge graph API (read-only). It cannot modify code, create tasks, or trigger agent actions. It is a *query translator*, not an agent.
+
+### Three Lenses
+
+Every Explorer view can be overlaid with one of three lenses:
+
+| Lens | What It Shows | Data Source |
+|---|---|---|
+| **Structural** (default) | Interfaces, boundaries, data shapes, dependencies | Knowledge graph nodes + edges |
+| **Evaluative** | Test results, gate outcomes, spec assertion status | Gate results, spec approval ledger |
+| **Observable** (future) | SLIs, error rates, latency per endpoint | Production telemetry (not yet implemented — design must not preclude it) |
+
+The lenses compose — you can view the domain model (structural) with test coverage overlay (evaluative) to see "which types have tests?"
+
+---
+
+## 4. Agent Communication
+
+### The Problem
+
+The human needs to communicate with agents at three levels:
+1. **Direction** — "build this" (specs, async, before agent starts)
+2. **Steering** — "change approach" (in-flight, while agent is working)
+3. **Interrogation** — "why did you do this?" (post-hoc, after agent completes)
+
+Current tools have direction (JIRA tickets) but not steering or interrogation. In a fully autonomous system, all three are essential.
+
+### Scoped Inline Chat
+
+Chat is not a global interface. It is **scoped to a context** — you always know what you're talking to and where the message goes.
+
+| Context | Recipient | Where It Appears | Use Case |
+|---|---|---|---|
+| Agent detail panel | Specific agent | Inline chat in agent's activity view | Steering: "try a different approach" |
+| Workspace orchestrator | Workspace orchestrator agent | Inline chat in workspace overview | Priority: "pause search work, focus on payments" |
+| Briefing view | LLM (read-only, grounded in briefing data) | Inline Q&A below the briefing | Follow-up: "tell me more about the auth refactor" |
+| MR detail view | Author agent (or interrogation agent) | Inline chat in MR panel | Feedback: "naming convention is wrong" |
+
+**Visual indicator:** The chat input shows the recipient: `Message to worker-12 ▸` or `Ask about this briefing ▸`. The user always knows where their message is going.
+
+**Message delivery:** Human messages are Directed-tier messages via the message bus. They are signed, persisted, and attestable. The agent receives them via MCP `message.poll` tool.
+
+### Hard Interrupt
+
+The human can interrupt an agent immediately:
+
+```
+Agent Detail Panel:
+  [Pause] [Stop] [Message]
+
+  Pause: Agent completes current tool call, then polls for messages before continuing.
+         The human's message is waiting in the inbox.
+
+  Stop:  Agent is killed. Work preserved in worktree and branch.
+         Task marked as blocked with reason.
+
+  Message: Opens inline chat. Agent picks up message on next poll cycle.
+```
+
+**Pause** is the preferred interrupt — it's non-destructive. The agent finishes its current action, sees the human's message, and can adjust. **Stop** is for emergencies.
+
+### Agent Completion Summaries
+
+When an agent completes a task (`agent.complete`), it produces a structured summary as part of completion:
+
+```json
+{
+  "task_id": "TASK-42",
+  "spec_ref": "specs/system/payment-retry.md",
+  "decisions": [
+    {
+      "what": "Used exponential backoff for retry",
+      "why": "Spec mentions idempotency requirement",
+      "confidence": "high",
+      "alternatives_considered": ["fixed interval", "fibonacci backoff"]
+    },
+    {
+      "what": "Split RetryPolicy into separate module",
+      "why": "No explicit guidance in spec, followed hexagonal boundary pattern from meta-specs",
+      "confidence": "medium"
+    }
+  ],
+  "uncertainties": [
+    "Spec doesn't cover timeout behavior for the 4th retry attempt — used 30s default"
+  ],
+  "conversation_sha": "<sha256 of full conversation history>"
+}
+```
+
+This summary is:
+- Stored as part of the MR attestation bundle
+- Surfaced in the Briefing (uncertainties become Inbox items at Supervised/Guided trust)
+- Used as seed context for interrogation agents
+- One LLM call at completion time, not continuous overhead
+
+### Interrogation Agents
+
+When the human wants to understand *why* an agent made a decision, they can spawn an **interrogation agent** — a restricted agent that has the original agent's full context but can only communicate with the requesting human.
+
+**UX:** In any agent-produced artifact (MR, code in Explorer, completion summary), a button: **"Ask why"**.
+
+```
+MR #52: Payment retry endpoint
+  Author: worker-12 | Persona: backend-dev v4
+
+  [Diff] [Gates] [Attestation] [Ask Why]
+```
+
+Clicking "Ask why" spawns an interrogation agent with:
+- The original agent's conversation history (from `conversation_sha`)
+- The original agent's persona
+- The spec the task was implementing
+- The MR diff
+
+**ABAC restrictions on interrogation agents:**
+- Can only send messages to the requesting human
+- Cannot create tasks, MRs, or push code
+- Cannot message other agents
+- Cannot access repos or worktrees
+- Read-only access to the knowledge graph
+- Session auto-terminates after 30 minutes of inactivity
+
+The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
+
+---
+
+## 5. Conversation-to-Code Provenance
+
+### The Problem
+
+When an agent writes code, the reasoning behind each decision is locked in the agent's conversation history. Today, `git blame` tells you *who* wrote a line and *when*. In an autonomous system, you also need to know *why* — and the "why" is in the conversation.
+
+### Design
+
+Each agent's conversation with its LLM is hashed and stored as a provenance artifact:
+
+```rust
+pub struct ConversationProvenance {
+    pub agent_id: Id,
+    pub task_id: Id,
+    pub conversation_sha: String,       // SHA-256 of the full conversation
+    pub turn_index: Vec<TurnCommitLink>, // Maps conversation turns to commits
+}
+
+pub struct TurnCommitLink {
+    pub turn_number: u32,               // Which conversation turn
+    pub commit_sha: String,             // The commit produced during/after this turn
+    pub files_changed: Vec<String>,     // Which files were modified
+    pub timestamp: u64,
+}
+```
+
+**How it works:**
+
+1. The agent runtime tracks which conversation turn is active when a `git push` occurs.
+2. On push, the server records a `TurnCommitLink`: "turn 7 of agent worker-12's conversation produced commit abc123 modifying `src/retry.rs`."
+3. The full conversation is stored (encrypted at rest) and referenced by `conversation_sha` in the MR attestation.
+
+**UI integration:**
+
+In the Explorer, when viewing a specific code element (type, function, endpoint):
+```
+RetryPolicy (type)
+  File: src/retry.rs:15-42
+  Last modified: commit abc123 by worker-12
+  Conversation turn: 7 of 23
+  [View conversation at this point]
+```
+
+Clicking "View conversation at this point" opens the agent's conversation scrolled to turn 7, where the human can read the reasoning that led to this code. This is `git blame` extended to *reasoning blame*.
+
+**Alternatively:** Clicking "Ask why" on this element spawns an interrogation agent loaded with the conversation up to turn 7, allowing interactive questioning.
+
+---
+
+## 6. Cross-Workspace Spec Dependencies
+
+### The Problem
+
+Specs live in repos. Repos belong to workspaces. But real systems have cross-workspace dependencies: Workspace A's payment-retry spec depends on Workspace B's idempotent-api spec. Today, spec links only work within a repo's manifest. Cross-workspace dependencies are invisible.
+
+### Design
+
+Spec links gain a `workspace_id` + `repo_id` qualifier:
+
+```yaml
+# In payment-api repo (Workspace: Payments)
+specs:
+  - path: system/payment-retry.md
+    links:
+      - type: depends_on
+        target: system/idempotent-api.md
+        target_repo: idempotent-service     # repo name
+        target_workspace: platform-core     # workspace slug
+```
+
+The server resolves `target_workspace` + `target_repo` + `target` path to a specific spec in a specific repo. This creates a cross-workspace edge in the spec graph.
+
+### What the System Does With Cross-Workspace Links
+
+1. **Inbox notification:** When a linked spec in another workspace changes, the dependent workspace's human gets an Inbox item: "idempotent-api.md changed in platform-core. Your payment-retry.md depends on it. Review impact."
+
+2. **Briefing integration:** The Briefing surfaces cross-workspace activity: "platform-core updated idempotent-api.md. 3 specs in your workspace depend on it."
+
+3. **Explorer visualization:** The workspace-level Explorer shows cross-workspace dependency edges as dashed lines crossing workspace boundaries.
+
+4. **Orchestrator awareness:** Workspace orchestrators receive Event-tier messages when cross-linked specs change, enabling them to create coordination tasks automatically.
+
+### Approval Gates
+
+When a spec with inbound cross-workspace links changes, the system can optionally require approval from the dependent workspaces before the change merges. This is configured per-link:
+
+```yaml
+links:
+  - type: depends_on
+    target: system/idempotent-api.md
+    target_workspace: platform-core
+    gate: require_approval    # block merge until dependent workspace approves
+```
+
+This is a mechanical enforcement of the "cross-repo spec escalation protocol" from `platform-model.md` §3.
+
+---
+
+## 7. Multi-Human Collaboration
+
+### Presence Awareness
+
+Multiple humans may use Gyre simultaneously. The UI shows who else is active:
+
+```
+Workspace: Payments
+  Active: jsell (Specs view), maria (Explorer), bot-deploy (Agent)
+```
+
+Presence is tracked via Telemetry-tier messages (`UserPresence` kind) through the message bus. WebSocket subscriptions deliver presence updates in real-time.
+
+### Conflict Prevention
+
+When two humans edit the same spec simultaneously:
+1. The second editor sees a warning: "jsell is also editing this spec"
+2. Edits are not merged automatically — the second save gets a conflict notification
+3. The conflict appears in both users' Inboxes with a diff view
+
+This is optimistic concurrency, not real-time co-editing (CRDT-based co-editing is future work). Specs are markdown in git — conflict resolution uses standard git merge semantics.
+
+### Shared Views
+
+Explorer views created by one human are visible to all workspace members. The saved view catalog is shared:
+
+```
+Saved Views:
+  API Surface (created by jsell, 3 days ago)
+  Domain Model (built-in)
+  Auth Flow (created by maria, shared yesterday)
+  [+ New View]
+```
+
+---
+
+## 8. Inbox Detail
+
+### Action Types (Priority Order)
+
+| Priority | Action Type | Source | Inline Action |
+|---|---|---|---|
+| 1 | **Agent needs clarification** | Agent completion summary (uncertainty) | Respond inline or spawn interrogation |
+| 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
+| 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
+| 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
+| 5 | **Conflicting spec interpretations** | Divergence detection (two agents, same spec, different implementations) | Review both, pick one or request reconciliation |
+| 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
+| 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
+| 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
+| 9 | **Spec assertion failure** | Knowledge graph + assertions | Fix code or update spec |
+| 10 | **Suggested spec link** | Knowledge graph (low confidence) | Confirm / Dismiss linkage |
+
+**Novel types not in any existing tool:**
+- **Agent needs clarification** (#1) — the agent is stuck and explicitly says what it's uncertain about. This is the most important escalation.
+- **Conflicting spec interpretations** (#5) — the system detects that two agents implemented the same spec differently and asks the human to arbitrate.
+- **Trust level suggestion** (#8) — the system suggests the human can relax oversight based on track record.
+
+### Inbox Filtering by Trust Level
+
+| Trust Level | Shows items at priority... |
+|---|---|
+| Supervised | 1-10 (everything) |
+| Guided | 1-7 (skip trust suggestions and low-confidence links) |
+| Autonomous | 1-2, 4-5 (spec approvals, cross-workspace, conflicts — judgment-only items) |
+
+---
+
+## 9. Briefing Detail
+
+### Structure
+
+```
+Since your last visit (14 hours ago):             [Workspace: Payments]
+
+COMPLETED
+  ✓ Payment retry logic (spec: payment-retry.md)
+    3 MRs merged. All gates passed. Agent: worker-12.
+    Decision: used exponential backoff (confidence: high)
+
+  ✓ Persona reconciliation: backend-dev v3 → v4
+    8 specs evaluated. 2 needed changes (merged). 6 compliant.
+
+IN PROGRESS
+  ◐ Auth refactor (spec: identity-security.md)
+    3 of 5 sub-specs complete. 2 agents active.
+    ⚠ worker-8 flagged uncertainty: "token refresh for offline clients not covered by spec"
+    → [Respond to worker-8] [View spec]
+
+CROSS-WORKSPACE
+  ↔ platform-core updated idempotent-api.md
+    Your payment-retry.md depends on it.
+    → [Review changes] [Dismiss]
+
+EXCEPTIONS
+  ✗ Gate failure: billing-service MR #47
+    cargo test failed (3 tests). Agent retried once, still failing.
+    → [View Diff] [View Test Output] [Override] [Close MR]
+
+METRICS
+  12 MRs merged | 47 agent runs | $23.40 compute cost
+  Budget: 67% of daily limit | Trust level: Guided
+```
+
+### Data Sources
+
+| Section | Data Source |
+|---|---|
+| Completed | Spec registry + task rollup + agent completion summaries |
+| In Progress | Task status + agent activity + completion summary uncertainties |
+| Cross-Workspace | Cross-workspace spec link watcher |
+| Exceptions | Gate results + spec assertion failures |
+| Metrics | Budget usage + analytics |
+
+### Briefing Q&A
+
+Below the briefing, an inline chat grounded in the briefing data:
+
+```
+Ask about this briefing ▸ [                                        ]
+
+Example: "Tell me more about the auth refactor"
+         "Why did worker-12 choose exponential backoff?"
+         "What changed in idempotent-api.md?"
+```
+
+The LLM answering this chat has read-only access to:
+- The briefing data (specs, tasks, MRs, completion summaries, deltas)
+- The knowledge graph (for structural context)
+- The agent completion summaries (for decision reasoning)
+
+It cannot modify anything or trigger actions.
+
+---
+
+## 10. Observable Lens (Future-Proofing)
+
+The Observable lens (production telemetry overlaid on architecture) is not implemented in this milestone but the design must not preclude it.
+
+### Design Constraints
+
+1. **Graph nodes must support metadata extension.** The `GraphNode` struct should accept arbitrary key-value metadata so that production metrics (p99 latency, error rate, throughput) can be attached to Endpoint and Function nodes without schema changes.
+
+2. **The Explorer's lens system must be pluggable.** Adding a new lens should not require modifying the Explorer core — it's a new data source that maps onto existing graph nodes.
+
+3. **The Briefing should support external data sections.** A "Production Health" section can be added when production telemetry is available, using the same template/LLM-synthesized approach.
+
+4. **The message bus should accept external event sources.** Production alerting systems should be able to push events into the bus as Event-tier messages with a `ProductionAlert` kind.
+
+These are architectural constraints, not implementation work. They ensure we don't build ourselves into a corner.
+
+---
+
+## Relationship to Existing Specs
+
+**Supersedes:**
+- `ui-journeys.md` — this spec replaces it entirely with refined journeys, trust gradient, and communication model
+- Sidebar navigation model in `docs/ui.md` — replaced by stable sidebar + adaptive content
+
+**Extends:**
+- `system-explorer.md` — adds progressive C4 drill-down, saved/generated views, three lenses
+- `message-bus.md` — adds `UserPresence`, agent completion summaries, interrogation agent messages
+- `platform-model.md` §3 — mechanizes cross-workspace spec escalation via spec links
+- `abac-policy-engine.md` — trust level presets as ABAC policy bundles
+- `agent-gates.md` — spec approval remains human-only regardless of trust level
+- `spec-links.md` — cross-workspace spec link support
+
+**Depends on:**
+- `hierarchy-enforcement.md` — workspace scoping, ABAC middleware
+- `message-bus.md` — all real-time communication flows through the bus
+- `realized-model.md` — knowledge graph provides Explorer data
+- `meta-spec-reconciliation.md` — preview loop for meta-spec editing
+- `spec-registry.md` — spec approval flow and ledger
+
+**New concepts introduced:**
+- Trust gradient (workspace-level, backed by ABAC policies)
+- Agent completion summaries (structured decision log)
+- Interrogation agents (restricted ABAC, post-hoc reasoning exploration)
+- Conversation-to-code provenance (turn-to-commit linking)
+- Cross-workspace spec links (with optional approval gates)
+- LLM-generated Explorer views (question → graph query → visualization)
+- Scoped inline chat (per-agent, per-orchestrator, per-briefing)
+- Presence awareness (multi-human collaboration)
