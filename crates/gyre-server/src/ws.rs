@@ -77,14 +77,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
                                     for ws_id in &subscribed_workspaces {
                                         let since_ms = last_seen.unwrap_or(0);
-                                        if let Ok(messages) = state.messages.list_by_workspace(
+                                        if let Ok(mut messages) = state.messages.list_by_workspace(
                                             ws_id,
                                             None,
                                             Some(since_ms),
                                             None,
                                             None,
-                                            Some(replay_limit + 1 - replayed),
+                                            Some(replay_limit + 1),
                                         ).await {
+                                            // list_by_workspace returns newest-first; reverse to oldest-first.
+                                            messages.reverse();
                                             for m in messages {
                                                 if replayed >= replay_limit {
                                                     truncated = true;

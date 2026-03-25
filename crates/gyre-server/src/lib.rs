@@ -815,7 +815,19 @@ pub fn build_state(
             mem::MemMetaSpecSetRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
-        message_dispatch_tx: tokio::sync::mpsc::channel(256).0,
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            // Spawn a background consumer so the receiver is not immediately dropped.
+            // This drains the channel; a full notification consumer can replace this later.
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while let Some(_msg) = rx.recv().await {
+                    // No-op drain: notifications system not yet wired.
+                    // A proper MessageConsumer implementation can plug in here.
+                }
+            });
+            tx
+        },
         agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
