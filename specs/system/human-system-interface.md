@@ -57,7 +57,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 | **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **card grid**, not a graph canvas — click a workspace card to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
-| **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams, **Policies** (ABAC editor for Custom trust) | Repo settings, gates, policies |
+| **Admin** | Users, compute, tenant budget, audit, **workspace creation** (+ New Workspace button) | Workspace settings, budget, trust level, teams, **Policies** (ABAC editor for Custom trust) | Repo settings, gates, policies |
 
 **Meta-specs at workspace scope** is the primary location for the preview loop from `meta-spec-reconciliation.md`: edit a persona → select target specs → preview agents implement on throwaway branches → view diff → iterate → publish. Reconciliation progress tracking also lives here. At tenant scope, Meta-specs shows a catalog of all personas/principles/standards across workspaces. At repo scope, it redirects to the workspace scope (meta-specs are workspace-scoped, not repo-scoped).
 
@@ -214,7 +214,7 @@ The Custom trust editor grays out immutable policies with tooltip: "This policy 
 
 Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
-**Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor shows the full `abac-policy-engine.md` UI: visual condition builder, dry-run simulator, policy list with `trust:` / `builtin:` / user-created grouping.
+**Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor uses the Full-Width layout (per `ui-layout.md` §2) with three sections: (1) a policy list table grouped by prefix (`builtin:` / `trust:` / user-created), (2) a visual condition builder panel (form-based, not raw YAML) for creating/editing policies, (3) a dry-run simulator panel where users can test "would this request be allowed?" against the current policy set. Immutable policies are grayed out with tooltip. Layout details follow the standard Full-Width pattern — no custom layout needed.
 
 ### Trust Suggestions
 
