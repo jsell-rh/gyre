@@ -52,7 +52,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 | Nav Item | Tenant Scope | Workspace Scope | Repo Scope |
 |---|---|---|---|
-| **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
+| **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo (filtered by `entity_ref` matching the repo — notifications that reference specs, MRs, agents, or tasks in this repo) |
 | **Briefing** | Narrative across all workspaces (client-side aggregation: calls `GET /workspaces/:id/briefing` per workspace, merges sections) | Narrative for this workspace | Narrative for this repo |
 | **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **card grid**, not a graph canvas — click a workspace card to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
@@ -254,6 +254,7 @@ CREATE TABLE notifications (
     title TEXT NOT NULL,
     body TEXT,                       -- JSON payload with type-specific data
     entity_ref TEXT,                 -- optional reference (spec_path, agent_id, mr_id)
+    repo_id TEXT,                    -- optional, for repo-scope Inbox filtering
     resolved_at INTEGER,            -- epoch seconds, NULL if unresolved
     dismissed_at INTEGER,           -- epoch seconds, NULL if not dismissed
     created_at INTEGER NOT NULL,
