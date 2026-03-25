@@ -130,7 +130,7 @@ The adapter layer (`SqliteStorage`) has a `tenant_id: String` field set once at 
 
 ### The Fix
 
-**Every query method on every Diesel adapter must filter by `tenant_id`.** Exception: adapters that enforce tenant isolation structurally (e.g., `MessageRepository` queries by globally-unique `workspace_id`, which is tenant-bound) may be exempted from the lint with a documented rationale in `check-tenant-filter.sh`'s skip list.
+**Every query method on every Diesel adapter must filter by `tenant_id`.** Exception: adapters that enforce tenant isolation structurally (e.g., `MessageRepository` and `UserWorkspaceStateRepository` query by globally-unique `workspace_id`, which is tenant-bound) may be exempted from the lint with a documented rationale in `check-tenant-filter.sh`'s skip list.
 
 This includes `find_by_id()` — looking up an entity by UUID must still verify it belongs to the current tenant. This prevents horizontal privilege escalation where a user with a valid token guesses another tenant's entity UUIDs.
 
@@ -303,6 +303,11 @@ These endpoints are exempt from ABAC evaluation (handled before the middleware):
 | `/mcp`, `/mcp/sse` | MCP (per-handler auth + ABAC, existing) |
 | `/scim/v2/*` | SCIM (separate `GYRE_SCIM_TOKEN` auth) |
 | `GET /api/v1/conversations/:sha` | Conversation provenance (per-handler auth — resolves workspace from metadata) |
+| `GET /api/v1/users/me/notifications` | User's own notifications (per-handler auth — scoped to authenticated user) |
+| `POST /api/v1/notifications/:id/dismiss` | Notification dismissal (per-handler auth — verifies notification belongs to user) |
+| `POST /api/v1/notifications/:id/resolve` | Notification resolution (per-handler auth — verifies notification belongs to user) |
+| `GET /api/v1/specs/:path/history` | Spec approval history (per-handler auth — resolves workspace from spec's repo) |
+| `GET /api/v1/specs/:path/progress` | Spec task rollup (per-handler auth — resolves workspace from spec's repo) |
 | `GET /*` | SPA static files |
 
 ---

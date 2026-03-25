@@ -124,7 +124,7 @@ The detail panel slides in from the right when the user clicks an entity (node, 
 | **Attestation** | When viewing a merged MR | Merge attestation bundle + conversation provenance |
 | **Ask Why** | When entity has an author agent with `conversation_sha` | Tab content: initially shows a "Start interrogation" button. Clicking it spawns the interrogation agent (per HSI §4) and the tab becomes an inline chat with the spawned agent. Disabled with tooltip "Conversation unavailable" when `conversation_sha` is null. |
 
-Note: The tab set is contextual per entity type. An MR shows Info/Diff/Gates/Attestation/Ask Why. A graph node shows Info/Spec/Chat/History. An agent shows Info/Chat/History. The tabs listed above are the superset — only applicable tabs appear.
+Note: The tab set is contextual per entity type. An MR shows Info/Diff/Gates/Attestation/Ask Why. A graph node shows Info/Spec/Chat/History. An agent shows Info/Chat/History. A spec entity (opened from the Specs view §6) replaces the generic Info/Spec tabs with the richer set: Content/Edit/Progress/Links/History — the "Info" tab is subsumed by "Content" which includes metadata. The tabs listed above are the superset — only applicable tabs appear.
 
 **Pop Out:** Expands the detail panel to full-width (replaces the main content temporarily). The sidebar and breadcrumb remain — the user is still in the same nav context. The URL updates to include the entity ID as a query param (e.g., `/workspaces/:id/explorer?detail=agent:uuid&expanded=true`) so the state is deep-linkable and shareable. Back button or Esc returns to the split layout. Entity views from `platform-model.md` §9 (Task Board, Agent List, etc.) are accessed exclusively through this drill-down pattern, never as primary navigation items.
 
