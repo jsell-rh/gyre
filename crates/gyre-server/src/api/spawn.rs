@@ -248,8 +248,17 @@ pub async fn spawn_agent(
     task.updated_at = now;
     state.tasks.update(&task).await?;
 
-    // Build clone URL: {base_url}/git/{repo_id}/{repo_name}
-    let clone_url = format!("{}/git/{}/{}", state.base_url, repo.id, repo.name);
+    // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
+    // Resolve workspace slug for the new URL format; fall back to workspace_id if not found.
+    let ws_slug = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.slug)
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
 
     // M19.1: Resolve the effective compute target.
     // Priority: compute_target_id from request → GYRE_DEFAULT_COMPUTE_TARGET env → local.
@@ -1076,8 +1085,8 @@ mod tests {
             "clone_url should contain /git/: {clone_url}"
         );
         assert!(
-            clone_url.contains(&repo_id),
-            "clone_url should contain repo id: {clone_url}"
+            clone_url.contains("ws-1"),
+            "clone_url should contain workspace slug/id: {clone_url}"
         );
         assert!(
             clone_url.contains("test-repo"),

@@ -402,16 +402,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
+        // M34 Slice 6: workspace-slug/repo-name URL format.
         .route(
-            "/git/:repo_id/:repo/info/refs",
+            "/git/:workspace_slug/:repo_name/info/refs",
             get(git_http::git_info_refs),
         )
         .route(
-            "/git/:repo_id/:repo/git-upload-pack",
+            "/git/:workspace_slug/:repo_name/git-upload-pack",
             post(git_http::git_upload_pack),
         )
         .route(
-            "/git/:repo_id/:repo/git-receive-pack",
+            "/git/:workspace_slug/:repo_name/git-receive-pack",
             post(git_http::git_receive_pack),
         )
         // MCP (Model Context Protocol) endpoints
