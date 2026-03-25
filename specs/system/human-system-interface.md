@@ -123,7 +123,7 @@ One click. No ABAC knowledge required.
 |---|---|---|---|
 | **MR merge** | Human approval required | Autonomous if all gates pass | Autonomous if all gates pass |
 | **Spec approval** | Human approval required | Human approval required | Human approval required (always) |
-| **Inbox shows** | Every MR, every gate result, every agent decision | Gate failures, spec approvals, budget warnings | Spec approvals, spec assertion failures only |
+| **Inbox shows** | Every MR, every gate result, every agent decision | Gate failures, spec approvals, budget warnings | All judgment + safety items (priorities 1-9, per "Inbox priorities shown" below) |
 | **Briefing detail** | Per-agent activity, per-MR status | Per-spec progress, exceptions | Spec-level summaries, exceptions only |
 | **Notifications** | Every state change | Failures and approvals | Exceptions only |
 | **Agent completion summaries** | Full decision log visible | Uncertainties highlighted | Only low-confidence decisions surfaced |
@@ -299,7 +299,7 @@ Views are serializable specs that can be saved to the workspace and shared:
 Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_slug`, ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
 - `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view
-- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a URL-safe slug auto-generated from the view name, e.g., "api-surface")
+- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a UUID, not a slug — avoids name collision issues. The human-readable name is a display field, not a key.)
 
 Built-in saved views shipped with every workspace:
 - **API Surface** — all endpoints with their handlers
@@ -525,8 +525,14 @@ Storage requires a new port trait:
 // gyre-ports
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
-    async fn store(&self, agent_id: &Id, conversation: &[u8]) -> Result<String>; // returns SHA
+    /// Store a conversation blob. Returns the SHA-256 hash.
+    async fn store(&self, agent_id: &Id, conversation: &[u8]) -> Result<String>;
+    /// Retrieve a conversation by SHA.
     async fn get(&self, conversation_sha: &str) -> Result<Option<Vec<u8>>>;
+    /// Record a turn-to-commit link (called from git push handler).
+    async fn record_turn_link(&self, link: &TurnCommitLink) -> Result<()>;
+    /// Get turn-commit links for a conversation (for "View conversation at this point").
+    async fn get_turn_links(&self, conversation_sha: &str) -> Result<Vec<TurnCommitLink>>;
 }
 ```
 
@@ -591,15 +597,15 @@ specs:
   - path: system/payment-retry.md
     links:
       - type: depends_on
-        target: platform-core/idempotent-service/system/idempotent-api.md
-        #       ^workspace_slug/repo_name/spec_path
+        target: "@platform-core/idempotent-service/system/idempotent-api.md"
+        #        ^@workspace_slug/repo_name/spec_path
 ```
 
 The server resolves the composite path to a specific spec in a specific repo. The first segment is the **workspace slug** (URL-safe identifier, unique per tenant, as defined in `platform-model.md`'s Workspace struct). Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`.
 
 Note: `spec-links.md` uses `{workspace}` in its format description without specifying whether this is name or slug. This spec clarifies: **always use slug** (unique, URL-safe). The server resolves slug → workspace ID internally.
 
-**Path disambiguation:** Since spec paths contain slashes (e.g., `system/vision.md`), the server distinguishes same-repo links from cross-repo links by checking the first segment against known repo names in the current workspace, then against known workspace slugs in the tenant. If neither matches, it's treated as a same-repo spec path. This is deterministic because workspace slugs and repo names occupy different namespaces (slugs are tenant-unique, repo names are workspace-unique).
+**Path disambiguation:** To avoid ambiguity between same-repo spec paths and cross-repo references (e.g., a repo named `system` colliding with spec path `system/vision.md`), cross-workspace and cross-repo links use an explicit `@` prefix: `@workspace_slug/repo_name/spec_path` for cross-workspace, `@repo_name/spec_path` for cross-repo same-workspace. Paths without `@` are always same-repo. This is unambiguous and requires no heuristic resolution.
 
 ### What the System Does With Cross-Workspace Links
 
@@ -633,7 +639,7 @@ Workspace: Payments
   Active: jsell (Specs view), maria (Explorer), bot-deploy (Agent)
 ```
 
-**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
+**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a `WsMessage` variant used **bidirectionally**: clients send `UserPresence` to the server (heartbeat with current view), and the server rebroadcasts to other workspace subscribers. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
 
 The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 - **Payload schema:**
