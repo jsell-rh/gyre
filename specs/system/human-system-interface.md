@@ -98,6 +98,7 @@ Every view state is URL-addressable:
 - `/workspaces/:id/inbox` — workspace-scoped inbox
 - `/repos/:id/explorer` — repo-scoped explorer
 - `/repos/:id/specs?path=system/vision.md` — specific spec in a repo (path as query param for clean URL structure; note: UI routes are not bound by `api-conventions.md` §4 which governs API endpoints, but the query param pattern is cleaner regardless)
+- `/repos/:id/explorer?filters=Boundaries,Interfaces&lens=evaluative` — Explorer with active filter panel categories and lens as query params (filter panel state is URL-addressable for sharing)
 
 ### Keyboard Navigation
 
@@ -144,7 +145,7 @@ One click. No ABAC knowledge required.
 **Storage:** The trust level is a field on the `Workspace` entity: `trust_level: TrustLevel` (enum: `Supervised`, `Guided`, `Autonomous`, `Custom`). Changing trust level is a `PUT /api/v1/workspaces/:id` update (existing endpoint, `resource_type: "workspace"`, `action: "write"` — requires Admin workspace role). The ABAC policy replacement is a **server-internal side effect** of the workspace update:
 
 - **Preset → Preset:** Server deletes trust-managed policies from the old preset, creates policies for the new preset.
-- **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
+- **Preset → Custom:** Server preserves the current preset's `trust:` policies as the starting point (they keep their `trust:` prefix so the user can see which were preset-managed). The user can then rename, edit, or delete them via the policy editor. Renaming a `trust:` policy to remove the prefix converts it to a user-created policy that is preserved on future transitions.
 - **Custom → Preset:** Server deletes all `trust:` prefixed policies, then creates the preset's policies. Built-in policies (`builtin:` prefix) and user-created policies (no prefix) are preserved.
 
 All trust level transitions (workspace `trust_level` field update AND policy delete+create) are performed in a **single database transaction** — if creating the new policies fails, the workspace field is not updated either. On rollback, the endpoint returns `409 Conflict` with `{"error": "Trust level transition failed — policies could not be created"}` so the UI can display an actionable error. The ABAC policy cache (`abac-policy-engine.md` §Performance) is invalidated **after** the transaction commits — not on each individual policy write — to prevent intermediate states from being visible to concurrent requests.
