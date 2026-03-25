@@ -513,7 +513,7 @@ Data from existing endpoints: `GET /api/v1/workspaces` + `GET /api/v1/workspaces
 
 ### Workspace Scope — Realized Architecture
 
-Default view: Boundary View. Graph canvas showing repos as nodes, cross-repo dependencies as edges. (This maps to C4 "Container" level — repos are containers within the workspace system. We skip C4 "Context" level because the workspace boundary IS the context.) Click a repo node → detail panel shows repo metadata. Double-click → drill down to crate level (scope changes to repo).
+Default view: Boundary View. Graph canvas showing repos as nodes, cross-repo dependencies as edges. **Empty state:** If the workspace has zero repos, the canvas shows a centered message: "No repos in this workspace yet. Create a repo to start." with a link to Admin. (This maps to C4 "Container" level — repos are containers within the workspace system. We skip C4 "Context" level because the workspace boundary IS the context.) Click a repo node → detail panel shows repo metadata. Double-click → drill down to crate level (scope changes to repo).
 
 The lens selector, view selector, search, and ask input are in the control bar below the canvas.
 
@@ -609,7 +609,7 @@ Expanded (accordion):
 | Priority | Item Type | Primary Actions |
 |---|---|---|
 | 1 | Agent clarification | Respond to Agent (opens Split layout — agent detail panel with Chat tab focused), View Spec, Dismiss (accept decision) |
-| 2 | Spec approval | Approve, Reject, Open Spec |
+| 2 | Spec approval | Approve, Reject, Open Spec. The expanded accordion shows the spec diff (changes from the `spec-edit/*` branch) and a "View Full Spec" link that opens the detail panel Content tab. The human reviews the diff inline before approving. |
 | 3 | Gate failure | View Diff, View Output, Retry, Override, Close MR |
 | 4 | Cross-workspace change | Review Changes, Dismiss |
 | 5 | Conflicting interpretations | View Both, Pick A / Pick B, Reconcile |
