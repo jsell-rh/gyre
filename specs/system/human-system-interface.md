@@ -61,7 +61,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 **Meta-specs at workspace scope** is the primary location for the preview loop from `meta-spec-reconciliation.md`: edit a persona → select target specs → preview agents implement on throwaway branches → view diff → iterate → publish. Reconciliation progress tracking also lives here. At tenant scope, Meta-specs shows a catalog of all personas/principles/standards across workspaces. At repo scope, it redirects to the workspace scope (meta-specs are workspace-scoped, not repo-scoped).
 
-**Where old views live:** Task Board, Merge Queue, Agent List, MR Detail, Repo Detail, Persona Management, Activity Feed, and other entity views from `platform-model.md` are **contextual drill-downs**. The Activity Feed (chronological event timeline) is accessible as the Explorer's Change View at repo scope, or via the Briefing's "since your last visit" time range selector — there is no separate Activity nav item. For raw event debugging, the Admin view's Audit tab provides the unfiltered event stream. Other entity views — accessed by clicking an entity reference anywhere in the UI (agent name → slide-in panel, MR link → detail view, etc.). They are not primary navigation items. The Code tab (branches, commits, MRs, merge queue) is accessed via the Explorer at repo scope, not as a separate nav item.
+**Where old views live:** Task Board, Merge Queue, Agent List, MR Detail, Repo Detail, Persona Management, Activity Feed, and other entity views from `platform-model.md` are **contextual drill-downs**. The Activity Feed is accessible via the Explorer's Change View or Admin's Audit tab. **Agent discovery:** At workspace scope, the Explorer's Boundary View shows active agent count per repo on each node card. Clicking the agent count opens a filtered agent list in the detail panel. This ensures agents are always discoverable even when no Inbox items or Briefing sections reference them. Other entity views — accessed by clicking an entity reference anywhere in the UI (agent name → slide-in panel, MR link → detail view, etc.). They are not primary navigation items. The Code tab (branches, commits, MRs, merge queue) is accessed via the Explorer at repo scope, not as a separate nav item.
 
 The content adapts. The sidebar doesn't.
 
@@ -71,7 +71,7 @@ A **status bar** at the bottom of the application shows trust level, budget usag
 
 **Entrypoint:** First visit lands on Explorer at tenant scope (workspace cards). After workspace selection, redirects to Inbox at workspace scope — the default landing view. Subsequent visits restore the last-used workspace and land on the Inbox. See `ui-layout.md` §1 for full entrypoint flow.
 
-**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored on the user profile (existing `UserPreferences` or a new `user_workspace_state` table). The Briefing time range dropdown options: `Since last visit` (default, uses `last_seen_at`), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. Selecting any option overrides the `?since=<epoch>` parameter on the briefing API call.
+**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored on the user profile (existing `UserPreferences` or a new `user_workspace_state` table). The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
 
 Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
@@ -227,7 +227,7 @@ The Explorer solves this with **progressive disclosure starting from boundaries*
 
 The default Explorer view. Each level answers "what is this made of?"
 
-**Level 1 — Context (Workspace scope):** Repos and their external dependencies.
+**Level 1 — Workspace scope (C4 "Container" level):** Repos and their external dependencies. We start at C4 Container (repos are containers within the workspace system) and skip C4 Context (the workspace boundary IS the context — the user already selected it).
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │ payment-api  │────▸│ ledger-svc  │────▸│ billing-gw  │
@@ -485,7 +485,7 @@ MR #52: Payment retry endpoint
   [Diff] [Gates] [Attestation] [Ask Why]
 ```
 
-Clicking "Ask why" spawns an interrogation agent with:
+Clicking "Ask why" calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field (extending the existing spawn endpoint). The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, loads the conversation context, and returns the agent ID. The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
 - The original agent's conversation history (retrieved via `ConversationRepository::get(conversation_sha)` — the SHA is stored in the MR attestation bundle's `conversation_sha` field and in the `AgentCompleted` message payload)
 - The original agent's persona
 - The spec the task was implementing
@@ -574,7 +574,7 @@ pub trait ConversationRepository: Send + Sync {
 }
 ```
 
-**REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). Authorization: the `ConversationRepository::store` method records `(sha, agent_id, workspace_id)` as metadata alongside the blob. The retrieval endpoint looks up `workspace_id` from this metadata and verifies the caller has workspace membership — no cross-repository join needed. The adapter stores conversations encrypted at rest; large conversations (>1MB) are stored as files on disk with the SHA as filename.
+**REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). **ABAC:** This endpoint uses a custom resource resolution strategy (not the standard `RouteResourceMapping` pattern, since `:sha` is not a UUID and workspace_id is not in the URL). The handler looks up `workspace_id` from `ConversationRepository` metadata, then calls the ABAC evaluator directly with the resolved context. This is one of the ABAC-exempt-from-middleware endpoints (like git HTTP), with authorization handled per-handler. The adapter stores conversations encrypted at rest; large conversations (>1MB) are stored as files on disk with the SHA as filename.
 
 **DB schema** (new migration):
 ```sql
@@ -711,6 +711,7 @@ The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
   | Field | Type | Required |
   |---|---|---|
   | `user_id` | Id | yes |
+  | `session_id` | String | yes — random UUID per browser tab |
   | `workspace_id` | Id | yes |
   | `view` | String | yes — e.g., "inbox", "explorer", "specs" |
   | `timestamp` | u64 | yes — epoch ms |

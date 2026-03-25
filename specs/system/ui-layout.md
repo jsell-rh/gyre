@@ -346,7 +346,7 @@ Specifies what to pull from the knowledge graph.
 
 The data layer maps to knowledge graph API endpoints:
 - `repo_id` set + `concept` → `GET /repos/:id/graph/concept/:name` (single repo)
-- `repo_id` null + `concept` → `GET /workspaces/:id/graph` (workspace-aggregated graph, client-side concept filtering)
+- `repo_id` null + `concept` → `GET /workspaces/:id/graph` (workspace-aggregated graph, client-side concept filtering). This is the specified behavior; the workspace-scoped concept endpoint in the HSI upstream amendments table is an optimization, not a prerequisite.
 - `spec_path` → `GET /repos/:id/graph/spec/:path`
 - No concept/spec_path → `GET /repos/:id/graph` or `GET /workspaces/:id/graph`
 - `node_types`/`edge_types` → client-side filtering on the response
