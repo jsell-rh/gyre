@@ -65,7 +65,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence heartbeat: every 30 seconds, evict after 60 seconds staleness.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on every view change (sidebar nav click or scope transition). The server evicts entries after 60 seconds without an update.
 
 ### Deep Links
 
@@ -187,7 +187,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
 
 This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy.
 
-**Priority and override behavior:** The `require-human-spec-approval` policy uses `priority: 999` and is marked as `immutable: true` (a new boolean flag on `Policy` — requires amending `abac-policy-engine.md`). Immutable policies cannot be overridden regardless of priority — the ABAC evaluation engine skips priority-based override logic for immutable policies. The `system-full-access` policy (which enables server-internal operations) operates at `priority: 1000` but only applies to `subject.id == "gyre-system-token"`, not to spec approval — spec approval actions are carved out from `system-full-access` via an explicit condition: `actions: ["*"] EXCEPT approve ON spec`. This means even the superuser token cannot approve specs programmatically.
+**Priority and override behavior:** The `require-human-spec-approval` policy uses `priority: 999` and is marked as `immutable: true` (a new boolean flag on `Policy` — requires amending `abac-policy-engine.md`). Immutable policies cannot be overridden regardless of priority — the ABAC evaluation engine processes immutable Deny policies FIRST, before any priority-based evaluation. This amends `abac-policy-engine.md` §"Policy Composition" rule 2 ("higher priority always wins") by adding a precondition: "immutable Deny policies are evaluated before all others and cannot be overridden by any Allow policy regardless of priority." The `system-full-access` policy (which enables server-internal operations) operates at `priority: 1000` but only applies to `subject.id == "gyre-system-token"`, not to spec approval — spec approval actions are carved out from `system-full-access` via an explicit condition: `actions: ["*"] EXCEPT approve ON spec`. This means even the superuser token cannot approve specs programmatically.
 
 The Custom trust editor grays out immutable policies with tooltip: "This policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
@@ -205,7 +205,9 @@ Consider increasing trust level to Autonomous.
 [Increase Trust] [Dismiss]
 ```
 
-This appears as an Inbox item. The human decides.
+This appears as an Inbox item (priority 8). The human decides.
+
+**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results and MR reverts for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs (stale agent detector, budget reset, etc.).
 
 ---
 
@@ -716,7 +718,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Detected post-merge by the push-triggered graph extraction background job (M30b). After extraction completes, a **divergence check step** runs: it queries `ArchitecturalDelta` records for the merged MR's `spec_path`, comparing the latest delta against previous deltas from other agents for the same spec. If two deltas produce contradictory structural changes (adding different types for the same concept, or different interface shapes), the server creates a `Notification` (not a message bus event) for workspace Admin/Developer members. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected post-merge by the push-triggered graph extraction background job (M30b). After extraction completes, a **divergence check step** runs: it queries `ArchitecturalDelta` records for the merged MR's `spec_path`, comparing the latest delta against previous deltas from other agents for the same spec. A "conflicting node change" is defined as: two deltas for the same `spec_path` that add nodes with the same `name` but different `node_type`, different field sets (for types), or different method signatures (for interfaces). The comparison is on `(name, node_type, field_names_sorted)` tuples. If the symmetric difference of these tuples across the two deltas exceeds the threshold, the server creates a `Notification` (not a message bus event) for workspace Admin/Developer members. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
@@ -823,7 +825,7 @@ These are architectural constraints, not implementation work. They ensure we don
 
 | Spec | Amendment Needed |
 |---|---|
-| `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" is an in-view panel, not the app sidebar. |
+| `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`) and `message` (attributes: `workspace_id`, `to_agent_id`) to the resource type list. |
@@ -838,7 +840,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `platform-model.md` §1 Repository | Add unique constraint on `(workspace_id, name)` — repo names must be unique within a workspace for cross-workspace spec link resolution. |
 | `message-bus.md` §Scoping Rules | Document that Users (not just Agents) can send Directed messages to agents — required for human→agent steering (Pause, inline chat). |
 | `realized-model.md` `GraphNode` struct | Add `spec_confidence` field (already in DB schema but missing from Rust struct). Required by Explorer encoding layer. |
-| `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. |
+| `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. Also verify `GraphNode` struct has `test_coverage` field (present in struct but missing from DB schema per realized-model.md §8). |
 
 These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.
 

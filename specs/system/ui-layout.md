@@ -121,7 +121,7 @@ The detail panel slides in from the right when the user clicks an entity (node, 
 | **History** | When entity has modification history | Timeline of changes, conversation turn links |
 | **Diff** | When viewing an MR or preview | Side-by-side diff |
 
-**Pop Out:** Opens the entity in a full-width view (replaces content area entirely). Used for complex content that needs more space (large diffs, long specs). Back button returns to the previous layout.
+**Pop Out:** Expands the detail panel to full-width (replaces the main content temporarily). The sidebar and breadcrumb remain — the user is still in the same nav context, just viewing the entity detail at full width. This is NOT a standalone routable page — it's a panel expansion. Back button or Esc returns to the split layout. Entity views from `platform-model.md` §9 (Task Board, Agent List, etc.) are accessed exclusively through this drill-down pattern, never as primary navigation items.
 
 ### Canvas + Controls
 
@@ -149,7 +149,7 @@ Below the canvas, a control bar with:
 - Lens selector (Structural / Evaluative / Observable)
 - View selector (Boundary / Spec Realization / Change / saved views / LLM-generated)
 - Search input (`/` to focus — canvas-local search, highlights matching nodes)
-- Ask input (natural language → LLM generates a view)
+- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate` — sends the question + current graph context to the server, which calls the LLM and returns a view spec JSON. The frontend renders the returned spec. Requires workspace membership.)
 
 When a node is clicked, the Split layout activates (canvas compresses to 60%, detail panel at 40%).
 
@@ -212,7 +212,7 @@ Click any entity reference (agent name, MR title, task ID, spec path, graph node
 4. Clicking another entity replaces the panel content (no stacking).
 5. Esc or ✕ closes the panel, main content returns to full-width.
 
-**Double-click** on a graph node in the Explorer: drill down to the next C4 level (workspace → repo → crate → module). This changes the canvas content, not the panel.
+**Double-click** on a graph node in the Explorer: drill down to the next C4 level. This **changes scope** — double-clicking a repo node at workspace scope transitions to repo scope (breadcrumb updates, sidebar stays). The canvas re-renders for the new scope level. This is a scope transition, not a panel action. Single-click opens the detail panel without changing scope.
 
 ### Inline Expansion (Inbox/Briefing)
 
