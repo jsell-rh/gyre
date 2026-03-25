@@ -329,16 +329,8 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces/:id", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/repos", "repo", None),
                 // Workspace-scoped entity lists (M34 Slice 6 — primary access patterns)
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:workspace_id/tasks",
-                    "task",
-                    None,
-                ),
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:workspace_id/agents",
-                    "agent",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/tasks", "task", None),
+                RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/agents", "agent", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:workspace_id/merge-requests",
                     "merge_request",

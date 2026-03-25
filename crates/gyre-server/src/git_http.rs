@@ -153,8 +153,7 @@ pub async fn git_info_refs(
     let content_type = format!("application/x-{service}-advertisement");
 
     let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name)
-            .await
+        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
         {
             Ok(p) => p,
             Err(r) => return r,
@@ -208,8 +207,7 @@ pub async fn git_upload_pack(
     req: Request,
 ) -> Response {
     let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name)
-            .await
+        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
         {
             Ok(p) => p,
             Err(r) => return r,
@@ -1341,8 +1339,14 @@ mod tests {
     ///
     /// M34 Slice 6: Routes use workspace_slug/repo_name format.
     /// Returns (router, state, tmp_dir, workspace_slug, repo_name, repo_path).
-    async fn git_app_with_repo() -> (Router, Arc<crate::AppState>, TempDir, String, String, String)
-    {
+    async fn git_app_with_repo() -> (
+        Router,
+        Arc<crate::AppState>,
+        TempDir,
+        String,
+        String,
+        String,
+    ) {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("test-proj").join("my-repo.git");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -1521,9 +1525,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     // nonexistent workspace-slug → 404
-                    .uri(
-                        "/git/no-such-workspace/no-such-repo/info/refs?service=git-upload-pack",
-                    )
+                    .uri("/git/no-such-workspace/no-such-repo/info/refs?service=git-upload-pack")
                     .header("Authorization", auth_header())
                     .body(Body::empty())
                     .unwrap(),

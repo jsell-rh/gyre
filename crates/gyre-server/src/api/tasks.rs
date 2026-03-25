@@ -190,7 +190,10 @@ pub async fn list_workspace_tasks(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiError> {
-    let tasks = state.tasks.list_by_workspace(&Id::new(workspace_id)).await?;
+    let tasks = state
+        .tasks
+        .list_by_workspace(&Id::new(workspace_id))
+        .await?;
     Ok(Json(tasks.into_iter().map(TaskResponse::from).collect()))
 }
 
