@@ -4,10 +4,11 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{BudgetConfig, Workspace};
+use gyre_domain::{BudgetConfig, UserRole, Workspace};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -15,7 +16,9 @@ use super::{new_id, now_secs};
 
 #[derive(Deserialize)]
 pub struct CreateWorkspaceRequest {
-    pub tenant_id: String,
+    /// Optional override for system callers only. Non-system callers have
+    /// tenant_id derived from their auth context and this field is ignored.
+    pub tenant_id: Option<String>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -79,10 +82,19 @@ pub struct WorkspaceRepoEntry {
 
 pub async fn create_workspace(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceResponse>), ApiError> {
+    // Derive tenant_id from auth context. System callers may supply an
+    // override in the request body; all other callers are bound to their
+    // authenticated tenant scope.
+    let tenant_id = if auth.agent_id == "system" {
+        req.tenant_id.unwrap_or(auth.tenant_id)
+    } else {
+        auth.tenant_id
+    };
     let now = now_secs();
-    let mut ws = Workspace::new(new_id(), Id::new(&req.tenant_id), req.name, req.slug, now);
+    let mut ws = Workspace::new(new_id(), Id::new(&tenant_id), req.name, req.slug, now);
     ws.description = req.description;
     ws.budget = req.budget;
     ws.max_repos = req.max_repos;
@@ -93,13 +105,20 @@ pub async fn create_workspace(
 
 pub async fn list_workspaces(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Query(q): Query<ListWorkspacesQuery>,
 ) -> Result<Json<Vec<WorkspaceResponse>>, ApiError> {
-    let workspaces = if let Some(tid) = q.tenant_id {
-        state.workspaces.list_by_tenant(&Id::new(tid)).await?
+    // Admin callers may filter by an explicit tenant_id query param.
+    // All other callers are restricted to their own tenant scope.
+    let tenant_id = if auth.roles.contains(&UserRole::Admin) {
+        q.tenant_id.unwrap_or(auth.tenant_id)
     } else {
-        state.workspaces.list().await?
+        auth.tenant_id
     };
+    let workspaces = state
+        .workspaces
+        .list_by_tenant(&Id::new(&tenant_id))
+        .await?;
     Ok(Json(
         workspaces
             .into_iter()
@@ -271,6 +290,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/workspaces?tenant_id=t1")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
