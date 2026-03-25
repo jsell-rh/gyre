@@ -59,6 +59,13 @@ The extraction pipeline is pluggable per language. Each language extractor maps 
 Every node carries metadata:
 
 ```rust
+pub enum SpecConfidence {
+    None,    // no governing spec linked
+    Low,     // auto-suggested link, not confirmed
+    Medium,  // linked by agent, not human-verified
+    High,    // human-confirmed or spec-manifest-declared
+}
+
 pub struct GraphNode {
     pub id: Id,
     pub repo_id: Id,
@@ -71,6 +78,7 @@ pub struct GraphNode {
     pub visibility: Visibility,     // pub, pub(crate), private
     pub doc_comment: Option<String>,
     pub spec_path: Option<String>,  // governing spec, if linked
+    pub spec_confidence: SpecConfidence, // None, Low, Medium, High
     pub last_modified_sha: String,
     pub last_modified_by: Option<Id>,  // agent ID
     pub last_modified_at: u64,
@@ -153,9 +161,15 @@ pub struct ArchitecturalDelta {
     pub agent_id: Option<Id>,
     pub nodes_added: Vec<GraphNode>,
     pub nodes_removed: Vec<GraphNode>,
-    pub nodes_modified: Vec<(GraphNode, Vec<FieldChange>)>,
+    pub nodes_modified: Vec<(GraphNode, Vec<FieldChange>)>, // FieldChange defined below
     pub edges_added: Vec<GraphEdge>,
     pub edges_removed: Vec<GraphEdge>,
+}
+
+pub struct FieldChange {
+    pub field: String,           // e.g., "visibility", "doc_comment", "spec_path"
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
 }
 ```
 
@@ -227,7 +241,7 @@ Both are grounded in the knowledge graph — the LLM is summarizing structured d
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /api/v1/repos/{id}/graph` | GET | Full knowledge graph for a repo (nodes + edges) |
+| `GET /api/v1/repos/{id}/graph` | GET | Full knowledge graph for a repo (nodes + edges). Optional `?concept=` query param for case-insensitive substring filtering on node name/qualified_name (distinct from manifest-based `/graph/concept/:name`). |
 | `GET /api/v1/repos/{id}/graph/types` | GET | All types with relationships |
 | `GET /api/v1/repos/{id}/graph/modules` | GET | Module tree with containment |
 | `GET /api/v1/repos/{id}/graph/node/{node_id}` | GET | Single node with all edges |
@@ -237,9 +251,10 @@ Both are grounded in the knowledge graph — the LLM is summarizing structured d
 | `GET /api/v1/repos/{id}/graph/risks` | GET | Risk metrics per module |
 | `GET /api/v1/repos/{id}/graph/diff` | GET | Graph diff between two commits (`?from=&to=`) |
 | `GET /api/v1/workspaces/{id}/graph` | GET | Cross-repo knowledge graph for a workspace |
-| `GET /api/v1/workspaces/{id}/briefing` | GET | Narrative summary of changes (`?since=`) |
+| `GET /api/v1/workspaces/{id}/graph/concept/{name}` | GET | Workspace-scoped concept search (avoids downloading full workspace graph for concept queries) |
+| `GET /api/v1/workspaces/{id}/briefing` | GET | Briefing endpoint (`?since=`). **Response schema owned by `human-system-interface.md` §9** (this spec does not define the response shape). Knowledge graph narratives (§6 above) feed the briefing's `summary` string fields. |
 | `POST /api/v1/repos/{id}/graph/link` | POST | Manually link a node to a spec (human confirmation of suggested links) |
-| `GET /api/v1/repos/{id}/graph/predict` | GET | Structural prediction for a spec diff (`?spec_path=&draft=`) |
+| `POST /api/v1/repos/{id}/graph/predict` | POST | Structural prediction for a spec diff (request body: `{spec_path, draft_content}`) |
 
 ### 8. Storage
 
@@ -265,7 +280,8 @@ CREATE TABLE graph_nodes (
     created_sha TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
     complexity  INTEGER,
-    churn_count_30d INTEGER DEFAULT 0
+    churn_count_30d INTEGER DEFAULT 0,
+    test_coverage REAL              -- 0.0-1.0, NULL if unavailable
 );
 
 CREATE TABLE graph_edges (
@@ -303,4 +319,4 @@ CREATE TABLE graph_deltas (
 
 **Enables:**
 - **system-explorer.md** — the knowledge graph is the data layer for the explorer UI
-- **ui-journeys.md** — the briefing narrative is generated from architectural deltas
+- **human-system-interface.md** — the briefing narrative is generated from architectural deltas (supersedes `ui-journeys.md`)

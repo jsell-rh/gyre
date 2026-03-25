@@ -460,7 +460,7 @@ The sweep is cheap (database queries only, no agent spawns). It ensures the syst
 | `MetaSpecChanged` | Meta-spec content updated in spec registry |
 | `MetaSpecSetUpdated` | Workspace meta-spec set binding changed |
 | `ReconciliationStarted` | Reconciliation controller created tasks for a workspace |
-| `ReconciliationCompleted` | All reconciliation tasks for a workspace are done |
+| `ReconciliationCompleted` | All reconciliation tasks for a workspace are done (emitted as `MessageKind::ReconciliationCompleted` Event-tier message per `message-bus.md`) |
 | `MetaSpecDriftDetected` | MR or conformance sweep found code under superseded meta-spec |
 | `MetaSpecDriftResolved` | Reconciliation MR merged, provenance updated |
 

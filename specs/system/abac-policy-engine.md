@@ -38,7 +38,7 @@ Every access decision considers four categories of attributes:
 
 | Attribute | Source | Example |
 |---|---|---|
-| `resource.type` | Request context | `spec`, `task`, `mr`, `repo`, `agent`, `persona` |
+| `resource.type` | Request context | `spec`, `task`, `mr`, `repo`, `agent`, `persona`, `explorer_view`, `message`, `conversation` |
 | `resource.id` | Request path | `system/identity-security.md` |
 | `resource.tenant_id` | Entity lookup | `tenant-acme` |
 | `resource.workspace_id` | Entity lookup | `ws-platform` |
@@ -52,7 +52,7 @@ Every access decision considers four categories of attributes:
 
 | Attribute | Example |
 |---|---|
-| `action` | `read`, `write`, `delete`, `approve`, `spawn`, `push`, `merge`, `escalate` |
+| `action` | `read`, `write`, `delete`, `approve`, `spawn`, `push`, `merge`, `escalate`, `generate` |
 
 **Environment attributes (context):**
 
@@ -82,6 +82,9 @@ pub struct Policy {
     pub actions: Vec<String>,     // Actions this policy applies to
     pub resource_types: Vec<String>, // Resource types this policy applies to
     pub enabled: bool,
+    pub immutable: bool,         // Immutable Deny policies are evaluated before all others
+                                 // and cannot be overridden by any Allow regardless of priority.
+                                 // See human-system-interface.md §2.
     pub created_by: Id,
     pub created_at: u64,
     pub updated_at: u64,
@@ -233,7 +236,13 @@ Collect applicable policies:
   3. Tenant-scoped policies
   |
   v
-Sort by priority (highest first)
+Check immutable Deny policies first:
+  - Evaluate all policies where immutable == true && effect == Deny
+  - Each immutable Deny is evaluated against request attributes (conditions must match)
+  - If ANY immutable Deny's conditions match → Deny (cannot be overridden by any Allow)
+  |
+  v
+Sort remaining policies by priority (highest first)
   |
   v
 Evaluate each policy's conditions:
@@ -267,14 +276,15 @@ Gyre ships with a set of built-in tenant-level policies that enforce fundamental
 
 | Policy | Effect | Purpose |
 |---|---|---|
-| `system-access` | Allow | System token gets full access |
+| `system-full-access` | Allow | Global `GYRE_AUTH_TOKEN` identity gets full access (matched by `subject.id == "gyre-system-token"`, not by `subject.type`) |
 | `tenant-isolation` | Deny | Users/agents can't access other tenants |
 | `agent-repo-scope` | Deny | Agents can't access resources outside their scoped repo |
 | `workspace-membership-required` | Deny | Users must be workspace members to access workspace resources |
 | `persona-human-approval` | Deny | Agents can't approve personas (human-only) |
+| `builtin:require-human-spec-approval` | Deny (immutable) | Non-user subjects cannot approve specs — spec approval is always human (priority 999, `immutable: true`) |
 | `default-deny` | Deny | Everything not explicitly allowed is denied |
 
-Built-in policies cannot be deleted. They can be overridden by higher-priority custom policies (with audit logging).
+Built-in policies cannot be deleted. Non-immutable built-in policies can be overridden by higher-priority custom policies (with audit logging). Immutable built-in policies (where `immutable: true`) cannot be overridden regardless of priority — immutable Deny policies are evaluated before all priority-based evaluation (see `human-system-interface.md` §2).
 
 ### Performance
 
@@ -311,7 +321,7 @@ For compliance: "show me every time someone was denied access to specs in worksp
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /api/v1/policies` | GET | List policies (filtered by scope) |
+| `GET /api/v1/policies` | GET | List policies (filtered by `?scope=` and optional `?scope_id=` for workspace/repo-specific filtering) |
 | `POST /api/v1/policies` | POST | Create policy (Admin only) |
 | `GET /api/v1/policies/{id}` | GET | Get policy details |
 | `PUT /api/v1/policies/{id}` | PUT | Update policy |

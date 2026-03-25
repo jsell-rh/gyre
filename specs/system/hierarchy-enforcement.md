@@ -130,7 +130,7 @@ The adapter layer (`SqliteStorage`) has a `tenant_id: String` field set once at 
 
 ### The Fix
 
-**Every query method on every Diesel adapter must filter by `tenant_id`.** Exception: adapters that enforce tenant isolation structurally (e.g., `MessageRepository` queries by globally-unique `workspace_id`, which is tenant-bound) may be exempted from the lint with a documented rationale in `check-tenant-filter.sh`'s skip list.
+**Every query method on every Diesel adapter must filter by `tenant_id`.** Exception: adapters that enforce tenant isolation structurally (e.g., `MessageRepository` and `UserWorkspaceStateRepository` query by globally-unique `workspace_id`, which is tenant-bound) may be exempted from the lint with a documented rationale in `check-tenant-filter.sh`'s skip list.
 
 This includes `find_by_id()` — looking up an entity by UUID must still verify it belongs to the current tenant. This prevents horizontal privilege escalation where a user with a valid token guesses another tenant's entity UUIDs.
 
@@ -201,7 +201,7 @@ The `require_auth_middleware` already validates the token. The ABAC middleware e
 | `subject.persona` | Agent's persona (from JWT claim) |
 | `subject.attestation_level` | Agent's attestation level (from JWT claim) |
 
-System tokens (global `GYRE_AUTH_TOKEN`) bypass ABAC entirely — they are the superuser escape hatch for bootstrap and emergency access.
+The global `GYRE_AUTH_TOKEN` identity (`subject.id: "gyre-system-token"`) bypasses ABAC entirely — it is the superuser escape hatch for bootstrap and emergency access. The bypass is matched by `subject.id`, NOT by `subject.type`. Internal server processes (merge processor, stale agent detector, budget reset) use `subject.type: "system"` with distinct `subject.id` values (e.g., `"merge-processor"`, `"stale-agent-detector"`) and ARE subject to ABAC evaluation — they do not bypass. This enables the trust gradient (`human-system-interface.md` §2) to block the merge processor via ABAC policies at Supervised trust level.
 
 #### Resource Resolution
 
@@ -228,10 +228,12 @@ struct RouteResourceMapping {
     id_param: Option<&'static str>,
     /// Which path param holds the parent workspace ID (if any)
     workspace_param: Option<&'static str>,
+    /// Override the default HTTP-method-to-action mapping (e.g., POST→"generate" instead of POST→"write")
+    action_override: Option<&'static str>,
 }
 ```
 
-For routes with an entity ID (`:id`), the middleware does a single lookup to get the entity's `workspace_id`. This lookup is cached in the request extensions so the handler doesn't repeat it.
+For routes with an entity ID (`:id`), the middleware does a single lookup to get the entity's `workspace_id`. This lookup is cached in the request extensions so the handler doesn't repeat it. For repo-scoped routes (e.g., `POST /repos/:repo_id/specs/assist`), the middleware resolves the repo's `workspace_id` via the same entity lookup mechanism — the `id_param` points to the repo ID, and the entity lookup returns the repo's workspace.
 
 For routes without an entity ID (collection/create endpoints), the middleware resolves workspace context from the URL path (e.g., `POST /api/v1/workspaces/:workspace_id/tasks`). Per `api-conventions.md` §1.1, create endpoints use the workspace-scoped route form — there are no flat `POST /api/v1/tasks` create routes. Admin-only endpoints (no workspace context) fall back to tenant-level scoping.
 
@@ -272,16 +274,19 @@ On Allow: request proceeds to handler.
 
 ABAC ships with built-in policies seeded at startup (cannot be deleted):
 
-| Policy | Effect | Purpose |
-|---|---|---|
-| `system-full-access` | Allow | Global `GYRE_AUTH_TOKEN` gets full access |
-| `admin-all-operations` | Allow | Admin role allows all actions |
-| `developer-write-access` | Allow | Developer role allows read + write |
-| `agent-scoped-access` | Allow | Agent role allows read + write in scoped repo |
-| `readonly-get-only` | Allow | ReadOnly role allows only read |
-| `tenant-isolation` | Deny | Cross-tenant access denied |
-| `workspace-membership-required` | Deny | Non-members denied access to workspace resources |
-| `default-deny` | Deny | Everything not explicitly allowed is denied (lowest priority) |
+| Policy | Effect | Priority | Purpose |
+|---|---|---|---|
+| `system-full-access` | Allow | 1000 | Global `GYRE_AUTH_TOKEN` gets full access |
+| `builtin:require-human-spec-approval` | Deny (immutable) | 999 | Non-user subjects cannot approve specs |
+| `admin-all-operations` | Allow | 900 | Admin role allows all actions |
+| `developer-write-access` | Allow | 800 | Developer role allows read + write |
+| `agent-scoped-access` | Allow | 700 | Agent role allows read + write in scoped repo |
+| `readonly-get-only` | Allow | 600 | ReadOnly role allows only read |
+| `tenant-isolation` | Deny | 500 | Cross-tenant access denied |
+| `developer-generate-access` | Allow | 800 | Developer and Admin roles can perform `generate` action on `explorer_view` and `spec` |
+| `persona-human-approval` | Deny | 450 | Agents can't approve personas (human-only) |
+| `workspace-membership-required` | Deny | 400 | Non-members denied access to workspace resources |
+| `default-deny` | Deny | 0 | Everything not explicitly allowed is denied (lowest priority) |
 
 These replace the current RBAC extractors (`AdminOnly`, `RequireDeveloper`, etc.). Since this is greenfield, ABAC is the authorization layer from the start — there is no RBAC-to-ABAC migration. The old extractors are removed entirely.
 
@@ -302,6 +307,15 @@ These endpoints are exempt from ABAC evaluation (handled before the middleware):
 | `/git/*` | Git smart HTTP (per-handler auth + ABAC, existing) |
 | `/mcp`, `/mcp/sse` | MCP (per-handler auth + ABAC, existing) |
 | `/scim/v2/*` | SCIM (separate `GYRE_SCIM_TOKEN` auth) |
+| `GET /api/v1/conversations/:sha` | Conversation provenance (per-handler auth — resolves workspace from metadata) |
+| `GET /api/v1/users/me/notifications` | User's own notifications (per-handler auth — scoped to authenticated user) |
+| `POST /api/v1/notifications/:id/dismiss` | Notification dismissal (per-handler auth — verifies notification belongs to user) |
+| `POST /api/v1/notifications/:id/resolve` | Notification resolution (per-handler auth — verifies notification belongs to user) |
+| `GET /api/v1/specs/:path/links` | Spec link graph (per-handler auth — `:path` is not a UUID, resolves workspace from `?repo_id=`) |
+| `POST /api/v1/specs/:path/approve?repo_id=` | Spec approval (per-handler auth — `:path` is not a UUID, resolves workspace from `?repo_id=`) |
+| `POST /api/v1/specs/:path/reject?repo_id=` | Spec rejection (per-handler auth — `:path` is not a UUID, resolves workspace from `?repo_id=`) |
+| `GET /api/v1/specs/:path/history` | Spec approval history (per-handler auth — resolves workspace from spec's repo via `?repo_id=`) |
+| `GET /api/v1/specs/:path/progress` | Spec task rollup (per-handler auth — resolves workspace from spec's repo via `?repo_id=`) |
 | `GET /*` | SPA static files |
 
 ---

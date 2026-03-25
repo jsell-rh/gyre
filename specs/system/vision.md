@@ -141,10 +141,10 @@ This spec is the **root**. All other specs should be traceable to a principle he
 
 | Principle | Specs It Governs |
 |---|---|
-| Judgment, not generation | system-explorer.md, ui-journeys.md (Inbox, Briefing) |
-| Right context, not more | ui-journeys.md (Briefing narrative, action queue), system-explorer.md (moldable views, three lenses) |
+| Judgment, not generation | human-system-interface.md (Inbox, Briefing, trust gradient), system-explorer.md |
+| Right context, not more | human-system-interface.md (Briefing narrative, action queue, agent completion summaries), system-explorer.md (saved/generated views, three lenses) |
 | Specs as primary artifact | spec-registry.md, spec-lifecycle.md, spec-links.md, agent-gates.md |
-| Structure is discovered | meta-spec-reconciliation.md (preview loop, reconciliation), realized-model.md (knowledge graph), system-explorer.md (ghost overlays) |
-| Feedback loop is everything | meta-spec-reconciliation.md (discover → encode → enforce), system-explorer.md (inline editing + preview) |
+| Structure is discovered | meta-spec-reconciliation.md (preview loop, reconciliation), realized-model.md (knowledge graph), human-system-interface.md (Explorer progressive C4 drill-down, LLM-generated views) |
+| Feedback loop is everything | meta-spec-reconciliation.md (discover → encode → enforce), human-system-interface.md (Editor Split preview, interrogation agents) |
 | Challenge every ceremony | sdlc.md (expanded here), forge-advantages.md |
-| Human differentiation compounds | meta-spec-reconciliation.md (meta-spec corpus as moat), platform-model.md (persona model) |
+| Human differentiation compounds | meta-spec-reconciliation.md (meta-spec corpus as moat), platform-model.md (persona model), human-system-interface.md (conversation-to-code provenance) |
