@@ -75,11 +75,15 @@ A **status bar** at the bottom of the application shows trust level, budget usag
 ```sql
 CREATE TABLE user_workspace_state (
     user_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,  -- globally unique, provides structural tenant isolation
     last_seen_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, workspace_id)
 );
-``` The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
+-- No tenant_id column: workspace_id is globally unique and tenant-bound
+-- (same exemption rationale as MessageRepository — see message-bus.md)
+```
+
+The Briefing time range dropdown options: `Since last visit` (default), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. The "Since last visit" option calls the briefing endpoint with no `?since=` parameter — the server uses the stored `last_seen_at` as the default when `since` is omitted. Other options pass `?since=<epoch>`. No separate endpoint needed to read `last_seen_at` — the server handles it internally.
 
 Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
@@ -493,7 +497,7 @@ MR #52: Payment retry endpoint
   [Diff] [Gates] [Attestation] [Ask Why]
 ```
 
-Clicking "Ask why" (disabled with tooltip "Conversation unavailable" when `conversation_sha` is null in the attestation) calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field (extending the existing spawn endpoint). The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, loads the conversation context, and returns the agent ID. The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
+Clicking "Ask why" (disabled with tooltip "Conversation unavailable" when `conversation_sha` is null in the attestation) calls `POST /api/v1/agents/spawn` with a new `agent_type: "interrogation"` field and `conversation_sha` in the request body. The server: creates the agent record, mints a short-lived JWT (30 min), creates the scoped ABAC policies, retrieves the conversation via `ConversationRepository::get`, and **injects the conversation into the agent's system prompt** via `platform-model.md` §8's protocol injection mechanism (the `system://context` prompt includes the conversation history as context). The UI opens an inline chat panel to this agent. The interrogation agent is spawned with:
 - The original agent's conversation history (retrieved via `ConversationRepository::get(conversation_sha)` — the SHA is stored in the MR attestation bundle's `conversation_sha` field and in the `AgentCompleted` message payload)
 - The original agent's persona
 - The spec the task was implementing
@@ -571,7 +575,7 @@ Storage requires a new port trait:
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
     /// Store a conversation blob with metadata. Returns the SHA-256 hash.
-    async fn store(&self, agent_id: &Id, workspace_id: &Id, conversation: &[u8]) -> Result<String>;
+    async fn store(&self, agent_id: &Id, workspace_id: &Id, tenant_id: &Id, conversation: &[u8]) -> Result<String>;
     /// Retrieve a conversation by SHA. Returns decompressed bytes.
     /// The adapter handles decryption and decompression internally.
     /// Retrieve a conversation by SHA. Verifies tenant_id matches the caller's tenant.
@@ -767,7 +771,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Detected post-merge by the push-triggered graph extraction background job (M30b). After extraction completes, a **divergence check step** runs: it queries `ArchitecturalDelta` records for the merged MR's `spec_path`, comparing the latest delta against previous deltas from other agents for the same spec. A "conflicting node change" is defined as: two deltas for the same `spec_path` that add nodes with the same `name` but different `node_type`, different field sets (for types), or different method signatures (for interfaces). The comparison is on `(name, node_type, field_names_sorted)` tuples. If the symmetric difference of these tuples across the two deltas exceeds the threshold, the server creates a `Notification` (not a message bus event) for workspace Admin/Developer members. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected post-merge by the push-triggered graph extraction background job (M30b). After extraction completes, a **divergence check step** runs: it queries `ArchitecturalDelta` records for the merged MR's `spec_path`, comparing the latest delta against previous deltas from other agents for the same spec. A "conflicting node change" is defined as: two deltas **from different agents within the last 7 days** for the same `spec_path` that add nodes with the same `name` but different `node_type`, different field sets (for types), or different method signatures (for interfaces). The 7-day lookback window prevents old deltas from triggering false positives on iterative work. The comparison is on `(name, node_type, field_names_sorted)` tuples. If the symmetric difference of these tuples across the two deltas exceeds the threshold, the server creates a `Notification` (not a message bus event) for workspace Admin/Developer members. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
@@ -885,7 +889,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
 | `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. Clarify that `{workspace}` segment uses **slug** (not name). |
 | `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |
-| `message-bus.md` `WsMessage` enum | Add `UserPresence` variant (bidirectional, payload: user_id, workspace_id, view, timestamp). |
+| `message-bus.md` `WsMessage` enum | Add `UserPresence` variant (bidirectional, payload: user_id, session_id, workspace_id, view, timestamp) and `PresenceEvicted` variant (server→client, signals tab should stop heartbeating). |
 | `platform-model.md` §1 `Workspace` struct | Add `trust_level: TrustLevel` field (enum: Supervised, Guided, Autonomous, Custom). |
 | `hierarchy-enforcement.md` §4 built-in policies | Rename `system-access` → `system-full-access` (or vice versa). Add `immutable: bool` flag to `Policy` struct — immutable Deny policies evaluated before all others. `system-full-access` at priority 1000 must carve out spec approval. Define ABAC identity for internal server processes: each internal process (merge processor, stale agent detector, budget reset) creates an internal `SubjectContext` with `subject.type: "system"` and `subject.id: "<process-name>"` — no JWT needed, constructed in-process. Only the global `GYRE_AUTH_TOKEN` identity (`subject.id: "gyre-system-token"`) bypasses ABAC. |
 | `platform-model.md` §1 Repository | Add unique constraint on `(workspace_id, name)` — repo names must be unique within a workspace for cross-workspace spec link resolution. |
