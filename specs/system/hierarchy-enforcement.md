@@ -201,7 +201,7 @@ The `require_auth_middleware` already validates the token. The ABAC middleware e
 | `subject.persona` | Agent's persona (from JWT claim) |
 | `subject.attestation_level` | Agent's attestation level (from JWT claim) |
 
-System tokens (global `GYRE_AUTH_TOKEN`) bypass ABAC entirely — they are the superuser escape hatch for bootstrap and emergency access.
+The global `GYRE_AUTH_TOKEN` identity (`subject.id: "gyre-system-token"`) bypasses ABAC entirely — it is the superuser escape hatch for bootstrap and emergency access. The bypass is matched by `subject.id`, NOT by `subject.type`. Internal server processes (merge processor, stale agent detector, budget reset) use `subject.type: "system"` with distinct `subject.id` values (e.g., `"merge-processor"`, `"stale-agent-detector"`) and ARE subject to ABAC evaluation — they do not bypass. This enables the trust gradient (`human-system-interface.md` §2) to block the merge processor via ABAC policies at Supervised trust level.
 
 #### Resource Resolution
 
@@ -302,6 +302,7 @@ These endpoints are exempt from ABAC evaluation (handled before the middleware):
 | `/git/*` | Git smart HTTP (per-handler auth + ABAC, existing) |
 | `/mcp`, `/mcp/sse` | MCP (per-handler auth + ABAC, existing) |
 | `/scim/v2/*` | SCIM (separate `GYRE_SCIM_TOKEN` auth) |
+| `GET /api/v1/conversations/:sha` | Conversation provenance (per-handler auth — resolves workspace from metadata) |
 | `GET /*` | SPA static files |
 
 ---

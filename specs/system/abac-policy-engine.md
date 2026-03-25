@@ -38,7 +38,7 @@ Every access decision considers four categories of attributes:
 
 | Attribute | Source | Example |
 |---|---|---|
-| `resource.type` | Request context | `spec`, `task`, `mr`, `repo`, `agent`, `persona` |
+| `resource.type` | Request context | `spec`, `task`, `mr`, `repo`, `agent`, `persona`, `explorer_view`, `message`, `conversation` |
 | `resource.id` | Request path | `system/identity-security.md` |
 | `resource.tenant_id` | Entity lookup | `tenant-acme` |
 | `resource.workspace_id` | Entity lookup | `ws-platform` |
@@ -82,6 +82,9 @@ pub struct Policy {
     pub actions: Vec<String>,     // Actions this policy applies to
     pub resource_types: Vec<String>, // Resource types this policy applies to
     pub enabled: bool,
+    pub immutable: bool,         // Immutable Deny policies are evaluated before all others
+                                 // and cannot be overridden by any Allow regardless of priority.
+                                 // See human-system-interface.md §2.
     pub created_by: Id,
     pub created_at: u64,
     pub updated_at: u64,
@@ -267,7 +270,7 @@ Gyre ships with a set of built-in tenant-level policies that enforce fundamental
 
 | Policy | Effect | Purpose |
 |---|---|---|
-| `system-access` | Allow | System token gets full access |
+| `system-full-access` | Allow | Global `GYRE_AUTH_TOKEN` identity gets full access (matched by `subject.id == "gyre-system-token"`, not by `subject.type`) |
 | `tenant-isolation` | Deny | Users/agents can't access other tenants |
 | `agent-repo-scope` | Deny | Agents can't access resources outside their scoped repo |
 | `workspace-membership-required` | Deny | Users must be workspace members to access workspace resources |

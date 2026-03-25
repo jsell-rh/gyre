@@ -67,7 +67,15 @@ pub struct Workspace {
     pub budget: BudgetConfig,       // Inherited from tenant, overridable
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
+    pub trust_level: TrustLevel,    // Supervised, Guided, Autonomous, Custom
     pub created_at: u64,
+}
+
+pub enum TrustLevel {
+    Supervised,   // Human reviews everything before merge
+    Guided,       // Agents merge if gates pass, alert on failures
+    Autonomous,   // Only interrupt for exceptions
+    Custom,       // Direct ABAC policy manipulation
 }
 ```
 
@@ -88,7 +96,7 @@ The unit of work. Where specs, code, agents, tasks, and MRs live. Self-contained
 pub struct Repository {
     pub id: Id,
     pub workspace_id: Id,
-    pub name: String,
+    pub name: String,               // Unique within workspace: (workspace_id, name) constraint
     pub path: String,               // Filesystem path to bare repo
     pub default_branch: String,
     pub budget: BudgetConfig,       // Inherited from workspace
@@ -334,6 +342,10 @@ Gyre exposes an MCP server per repo. Agents connect with their scoped OIDC token
 | `git.status` | repo | Current branch, dirty state |
 | `worktree.create` | repo | Create isolated worktree for task |
 | `worktree.cleanup` | repo | Remove worktree after completion |
+| `message.send` | workspace | Send a Directed or Custom message to an agent |
+| `message.poll` | agent | Poll own inbox for new Directed messages |
+| `message.ack` | agent | Acknowledge a received message |
+| `conversation.upload` | agent | Upload conversation history at completion (base64 zstd blob) |
 
 ### MCP Resources (Read-Only Context)
 
@@ -765,6 +777,8 @@ gyre
 ```
 
 ### UI Pages
+
+> **Note:** Per `human-system-interface.md`, these pages are **contextual drill-downs** accessed by clicking entity references, not primary navigation items. The application has a stable 6-item sidebar (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin). The pages below are rendered in the detail panel or as full-width pop-outs within those nav contexts.
 
 | Page | Scope | Purpose |
 |---|---|---|

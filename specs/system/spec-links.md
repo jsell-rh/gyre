@@ -69,14 +69,18 @@ Links are declared in the spec's manifest entry:
 
 At enterprise scale, specs in different repos and workspaces reference each other. A platform team's spec might be `depended_on` by 30 application team specs.
 
-Cross-repo links use a fully qualified target:
+Cross-repo links use a fully qualified target with an `@` prefix for disambiguation:
 
 ```yaml
 links:
   - type: depends_on
-    target: platform-workspace/core-services/system/api-contract.md
+    target: "@platform-team/core-services/system/api-contract.md"
     target_sha: abc123
-    # Format: {workspace}/{repo}/{spec_path}
+    # Format: @{workspace_slug}/{repo_name}/{spec_path}
+    # The @ prefix distinguishes cross-repo paths from same-repo spec paths.
+    # {workspace_slug} is the workspace's URL-safe slug (not display name).
+    # Same-workspace cross-repo: @{repo_name}/{spec_path} (no workspace prefix)
+    # Same-repo: just the spec_path (no @ prefix)
 ```
 
 The forge resolves cross-repo links by querying the tenant-wide spec graph. The link is validated:

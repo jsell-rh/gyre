@@ -71,6 +71,7 @@ pub struct GraphNode {
     pub visibility: Visibility,     // pub, pub(crate), private
     pub doc_comment: Option<String>,
     pub spec_path: Option<String>,  // governing spec, if linked
+    pub spec_confidence: SpecConfidence, // None, Low, Medium, High
     pub last_modified_sha: String,
     pub last_modified_by: Option<Id>,  // agent ID
     pub last_modified_at: u64,
@@ -239,7 +240,7 @@ Both are grounded in the knowledge graph — the LLM is summarizing structured d
 | `GET /api/v1/workspaces/{id}/graph` | GET | Cross-repo knowledge graph for a workspace |
 | `GET /api/v1/workspaces/{id}/briefing` | GET | Narrative summary of changes (`?since=`) |
 | `POST /api/v1/repos/{id}/graph/link` | POST | Manually link a node to a spec (human confirmation of suggested links) |
-| `GET /api/v1/repos/{id}/graph/predict` | GET | Structural prediction for a spec diff (`?spec_path=&draft=`) |
+| `POST /api/v1/repos/{id}/graph/predict` | POST | Structural prediction for a spec diff (request body: `{spec_path, draft_content}`) |
 
 ### 8. Storage
 

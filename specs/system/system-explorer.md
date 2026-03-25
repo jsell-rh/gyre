@@ -1,6 +1,13 @@
 # System Explorer
 
-> **Status: Draft.** This spec defines the primary UI for Gyre: a live, navigable model of the realized system where every element links to its spec, specs are editable inline, and changes preview non-destructively.
+> **Status: Draft.** Extended by [`human-system-interface.md`](human-system-interface.md) (trust gradient, interrogation, conversation provenance) and [`ui-layout.md`](ui-layout.md) (spatial layout, view spec grammar). Key amendments from those specs:
+>
+> - **`Cmd+K`** is now global search (not canvas-scoped). Canvas-local search uses `/`.
+> - The **Sidebar** layout (Boundaries/Interfaces/Data/Specs) is an **in-view filter panel** (200px, collapsible) inside the Explorer content area, NOT part of the application sidebar.
+> - **Ghost overlays** (§3 structural prediction) are deferred — replaced by the Editor Split preview workflow in `ui-layout.md` §9.
+> - The Explorer is accessed via a stable 6-item app sidebar (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin).
+>
+> This spec defines the primary UI for Gyre: a live, navigable model of the realized system where every element links to its spec, specs are editable inline, and changes preview non-destructively.
 
 ## Problem
 

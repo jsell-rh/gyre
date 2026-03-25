@@ -196,7 +196,8 @@ When all gates pass and a merge executes, the forge produces a **merge attestati
     "agent_id": "worker-42",
     "oidc_sub": "agent:worker-42",
     "stack_attestation": "sha256:stack-fingerprint...",
-    "attestation_level": 3
+    "attestation_level": 3,
+    "conversation_sha": "sha256:..."
   },
   "gates": [
     {

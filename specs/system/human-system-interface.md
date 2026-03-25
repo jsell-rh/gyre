@@ -883,7 +883,7 @@ These are architectural constraints, not implementation work. They ensure we don
 
 ## Relationship to Existing Specs
 
-**Upstream Amendments Required** (these existing specs need updates to align with this spec):
+**Upstream Amendments Applied** (all amendments from this spec have been applied to the listed specs in this PR):
 
 | Spec | Amendment Needed |
 |---|---|
@@ -905,7 +905,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `realized-model.md` predict endpoint | Reconcile HTTP method: `system-explorer.md` §3 uses POST, `realized-model.md` §7 uses GET. Recommend POST (sends draft content in body). |
 | `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. Also verify `GraphNode` struct has `test_coverage` field (present in struct but missing from DB schema per realized-model.md §8). |
 
-These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.
+All amendments have been applied inline to the upstream specs in this PR. The table above serves as a cross-reference of what was changed and why.
 
 **Supersedes:**
 - `ui-journeys.md` — this spec replaces it entirely with refined journeys, trust gradient, and communication model
