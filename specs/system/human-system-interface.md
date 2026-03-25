@@ -1,6 +1,6 @@
 # Human-System Interface
 
-> This spec defines how humans interact with a fully autonomous software development system. It supersedes `ui-journeys.md` and extends `system-explorer.md` with concrete interaction patterns for trust calibration, agent interrogation, scoped communication, and LLM-driven architectural exploration.
+> This spec defines how humans interact with a fully autonomous software development system. It **supersedes `ui-journeys.md`** (which is deprecated — its navigation model, journeys, and keyboard shortcuts are replaced by this spec). It extends `system-explorer.md` with concrete interaction patterns for trust calibration, agent interrogation, scoped communication, and LLM-driven architectural exploration.
 
 ## The Novel Problem
 
@@ -54,7 +54,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 |---|---|---|---|
 | **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
 | **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
-| **Explorer** | Workspace overview cards | Realized architecture (C4 progressive) | Repo-level architecture detail |
+| **Explorer** | Workspace list with summary stats (repos, agents, budget — from existing workspace/budget APIs, not the knowledge graph) | Realized architecture (C4 progressive) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
 | **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
@@ -140,12 +140,12 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
   resource_types: ["mr"]
   conditions:
     - attribute: subject.type
-      operator: not_equals
-      value: "user"
-  description: "MR status transitions (including merge) require human action"
+      operator: equals
+      value: "system"
+  description: "Block autonomous merge processor — require human MR approval first"
 ```
 
-The merge processor checks: before processing a queued MR, it evaluates ABAC with `action: "write"` on the MR resource. Under Supervised, this policy blocks the merge processor (which acts as `Server` origin, not `user`) unless a human has explicitly approved the MR via status transition.
+The merge processor acts as `subject.type: system` (per `abac-policy-engine.md` attribute table). Under Supervised, this policy blocks the merge processor from autonomously merging. The human must first transition the MR status to `approved` (which is a `user`-type action, not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy which has higher priority, so they are not blocked.
 
 **Guided:** removes the `require-human-mr-review` policy. The merge processor proceeds autonomously when all gates pass. Gate failures still surface in the Inbox.
 
@@ -393,7 +393,12 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 
 **Delivery path:** The completion summary is submitted as part of the `agent.complete` MCP tool call (extends the existing tool with a `summary` field). The server:
 1. Stores the summary in the MR attestation bundle
-2. Emits an `AgentCompleted` Event-tier message via the message bus with the summary as payload (requires adding `AgentCompleted` to `MessageKind` in `message-bus.md`)
+2. Emits an `AgentCompleted` **Event-tier, server-only** message via the message bus (requires adding to `message-bus.md`):
+   - Kind: `AgentCompleted`
+   - Tier: Event (signed, persisted with TTL)
+   - Destination: `Workspace(agent's workspace)`
+   - Payload: `{ agent_id, task_id, spec_ref, decisions: [...], uncertainties: [...], conversation_sha }`
+   - Server-only: yes (emitted by the server on `agent.complete`, not by agents directly)
 3. The Inbox consumes `AgentCompleted` messages and surfaces uncertainties as action items (at Supervised/Guided trust levels)
 4. The Briefing consumes `AgentCompleted` messages for the "Completed" section
 
@@ -418,21 +423,32 @@ Clicking "Ask why" spawns an interrogation agent with:
 - The spec the task was implementing
 - The MR diff
 
-**Restrictions on interrogation agents** are enforced via JWT scope claims (not ABAC policies, since ABAC operates on resource types and these restrictions are capability-level):
+**Restrictions on interrogation agents** are enforced via ABAC (the sole authorization layer per `hierarchy-enforcement.md` §4). When an interrogation agent is spawned, the server creates an `interrogation-only` ABAC policy scoped to that agent:
 
-The interrogation agent's JWT is minted with narrow scope claims:
-```json
-{
-  "sub": "agent:interrogation-<uuid>",
-  "scope": ["message:send:user:<requesting-user-id>", "graph:read"],
-  "max_lifetime_secs": 1800
-}
+```yaml
+- name: interrogation-restrict-<agent-id>
+  scope: agent
+  scope_id: <interrogation-agent-id>
+  priority: 200       # highest, overrides all other policies
+  effect: deny
+  actions: ["write", "delete", "spawn", "approve"]
+  resource_types: ["*"]
+  description: "Interrogation agents are read-only + message to requesting human"
+
+- name: interrogation-allow-message-<agent-id>
+  scope: agent
+  scope_id: <interrogation-agent-id>
+  priority: 201
+  effect: allow
+  actions: ["write"]
+  resource_types: ["message"]
+  conditions:
+    - attribute: resource.to_user_id
+      operator: equals
+      value: "<requesting-user-id>"
 ```
 
-- `message:send:user:<id>` — can only send messages to the requesting human (MCP server validates scope on `message.send`)
-- `graph:read` — read-only access to knowledge graph (MCP server validates scope on graph queries)
-- No `task:*`, `mr:*`, `worktree:*`, `git:*` scopes — these MCP tools reject the call
-- `max_lifetime_secs: 1800` — agent runtime kills the process after 30 minutes
+The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes). The agent runtime kills the process on expiry. The scoped ABAC policies are deleted when the interrogation session ends.
 
 The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
 
@@ -446,7 +462,11 @@ When an agent writes code, the reasoning behind each decision is locked in the a
 
 ### Design
 
-Each agent's conversation with its LLM is hashed and stored as a provenance artifact. Storage requires a new port trait:
+Each agent's conversation with its LLM is hashed and stored as a provenance artifact.
+
+**Crate placement:** `ConversationProvenance` and `TurnCommitLink` live in `gyre-common` (shared wire types, like `Message`). `ConversationRepository` lives in `gyre-ports`. The turn-to-commit linking is performed by the server layer (`gyre-server`) in the git push handler — it reads the current agent's conversation state from request context and records the link. This is server-layer orchestration, not domain logic.
+
+Storage requires a new port trait:
 
 ```rust
 // gyre-ports
@@ -457,7 +477,7 @@ pub trait ConversationRepository: Send + Sync {
 }
 ```
 
-The agent runtime captures the conversation via a new MCP tool `conversation.upload` called at `agent.complete` time. The conversation is transmitted as a compressed binary blob, encrypted at rest by the adapter. The upload is part of the completion flow — if it fails, completion still succeeds but the conversation is marked as unavailable.
+The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a compressed binary blob, encrypted at rest by the adapter. The upload is part of the completion flow — called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
 
 ```rust
 pub struct ConversationProvenance {
@@ -530,19 +550,14 @@ The server resolves the composite path `workspace_slug/repo_name/spec_path` to a
 
 4. **Orchestrator awareness:** Workspace orchestrators receive Event-tier messages when cross-linked specs change, enabling them to create coordination tasks automatically.
 
-### Approval Gates
+### Cross-Workspace Change Notification
 
-When a spec with inbound cross-workspace links changes, the system can optionally require approval from the dependent workspaces before the change merges. This is configured per-link:
+When a spec with inbound cross-workspace links changes, the system notifies the dependent workspaces:
 
-```yaml
-links:
-  - type: depends_on
-    target: system/idempotent-api.md
-    target_workspace: platform-core
-    gate: require_approval    # block merge until dependent workspace approves
-```
+1. An Inbox item appears for the dependent workspace's human: "idempotent-api.md changed. Your payment-retry.md depends on it."
+2. The workspace orchestrator receives an Event-tier `SpecChanged` message and can create coordination tasks.
 
-This is a mechanical enforcement of the "cross-repo spec escalation protocol" from `platform-model.md` §3.
+**Merge blocking** for cross-workspace spec changes is handled by the existing spec approval flow (`agent-gates.md`), not by a new gate type. If the dependent workspace's spec policy requires `require_approved_spec`, and the upstream spec change invalidates the approval (per `spec-lifecycle.md` approval invalidation rules), the dependent MRs are blocked until the spec is re-approved. This leverages existing mechanisms rather than introducing a new `gate` field on spec links.
 
 ---
 
@@ -564,7 +579,7 @@ Presence is tracked via Telemetry-tier messages through the message bus. This re
 UserPresence,  // payload: { user_id, workspace_id, view, timestamp }
 ```
 
-`UserPresence` is Telemetry tier (unsigned, in-memory only, `Destination::Workspace`). The TelemetryBuffer stores the latest presence per user per workspace. WebSocket subscriptions deliver presence updates in real-time.
+`UserPresence` is Telemetry tier (unsigned, in-memory only, `Destination::Workspace`). Presence is **best-effort** — lost on server restart or buffer pressure. The server maintains a separate lightweight presence map (user_id → last_seen_workspace, last_seen_timestamp) in memory, updated on every WebSocket message. This map is the source of truth for "who is active," not the TelemetryBuffer. The TelemetryBuffer carries the presence *events* for real-time push to other clients.
 
 ### Conflict Prevention
 
@@ -617,7 +632,7 @@ Saved Views:
 |---|---|
 | Supervised | 1-10 (everything) |
 | Guided | 1-7 (skip trust suggestions and low-confidence links) |
-| Autonomous | 1-2, 4-5 (spec approvals, cross-workspace, conflicts — judgment-only items) |
+| Autonomous | 1-5 (spec approvals, gate failures, cross-workspace, conflicts — judgment items only, not suggestions or budget) |
 
 ---
 
