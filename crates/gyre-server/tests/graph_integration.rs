@@ -585,20 +585,32 @@ async fn test_push_triggers_graph_extraction() {
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
 
-    // Create a repo (no project needed in M33+).
-    let repo_resp: Value = client
-        .post(format!("{api}/repos"))
+    // Create workspace (needed for git URL slug resolution).
+    let ws_resp: Value = client
+        .post(format!("{api}/workspaces"))
         .header("Authorization", &auth)
-        .json(&json!({ "workspace_id": &ws_id, "name": "rust-repo" }))
+        .json(&json!({ "tenant_id": "default", "name": &ws_id, "slug": &ws_id }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let repo_id = repo_resp["id"].as_str().unwrap().to_string();
-    // Git URLs use repo_id directly.
-    let clone_url = format!("{base_url}/git/{repo_id}/rust-repo.git");
+    let workspace_id = ws_resp["id"].as_str().unwrap().to_string();
+
+    // Create a repo in the workspace.
+    let _repo_resp: Value = client
+        .post(format!("{api}/repos"))
+        .header("Authorization", &auth)
+        .json(&json!({ "workspace_id": &workspace_id, "name": "rust-repo" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Git URLs use workspace slug + repo name.
+    let clone_url = format!("{base_url}/git/{ws_id}/rust-repo.git");
     let token_owned = token.to_string();
     let clone_url_owned = clone_url.clone();
 
