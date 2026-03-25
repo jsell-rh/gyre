@@ -121,7 +121,7 @@ One click. No ABAC knowledge required.
 - **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
 - **Custom → Preset:** Server deletes ALL trust-managed policies (identified by a `trust_managed: true` metadata tag on the policy), then creates the preset's policies. User-created non-trust policies are preserved.
 
-Trust-managed policies are tagged with `trust_managed: true` in their metadata so the server can distinguish them from user-created policies during transitions.
+Trust-managed policies are identified by a naming convention: all trust-preset policies use the prefix `trust:` (e.g., `trust:require-human-mr-review`). The server distinguishes trust-managed from user-created policies by name prefix during transitions — no metadata field needed on the `Policy` struct.
 
 ### What Each Level Controls
 
@@ -549,7 +549,7 @@ pub trait ConversationRepository: Send + Sync {
 
 **REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). Authorization: the `ConversationRepository::store` method records `(sha, agent_id, workspace_id)` as metadata alongside the blob. The retrieval endpoint looks up `workspace_id` from this metadata and verifies the caller has workspace membership — no cross-repository join needed. The adapter stores conversations encrypted at rest; large conversations (>1MB) are stored as files on disk with the SHA as filename.
 
-The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a compressed binary blob, encrypted at rest by the adapter. The upload is part of the completion flow — called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
+The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a zstd-compressed binary blob, max **10MB** compressed (configurable, `GYRE_MAX_CONVERSATION_SIZE`). The server computes SHA-256 on receipt and stores the blob encrypted at rest. If the caller-provided `conversation_sha` (if any) doesn't match the computed SHA, the server rejects with 400. The upload is called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
 
 ```rust
 pub struct ConversationProvenance {
@@ -703,7 +703,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Detected by the knowledge graph: when two agents push implementations for the same spec, the graph extraction produces different node sets for the same spec_path. The server compares structural fingerprints (node types + names) from each agent's implementation and flags divergence as an Inbox item if the fingerprints differ significantly. | Review both, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected by the knowledge graph: when two agents push implementations for the same spec (same `spec_path`, different branches), the graph extraction produces node sets for each. The server compares the **set of (node_type, qualified_name) tuples** — if the symmetric difference exceeds 3 nodes (configurable, `GYRE_DIVERGENCE_THRESHOLD`), it flags a divergence Inbox item showing both implementations side-by-side. | Review both, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
