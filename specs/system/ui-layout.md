@@ -379,6 +379,8 @@ Specifies spatial arrangement.
 
 This enables the LLM to compose visualizations from primitives — a graph next to a table, a timeline with embedded lists, a spec alongside its realization graph.
 
+**Nesting depth limit:** `side-by-side` sub-views cannot themselves contain `side-by-side` layouts. Maximum composition depth is 1 (a `side-by-side` of two non-composite layouts). The Explorer rejects deeper nesting with a validation error.
+
 ### Encoding Layer
 
 Maps data attributes to visual properties.
@@ -386,7 +388,7 @@ Maps data attributes to visual properties.
 | Property | Accepted fields | Description |
 |---|---|---|
 | `color` | `node_type`, `spec_confidence`, `visibility`, any custom field | Node fill color. Categorical or ordinal scale. |
-| `size` | `churn_count_30d`, `complexity` | Node size. Linear scale with min/max range. `fan_out` and `fan_in` are computed by the risks endpoint (`GET /repos/:id/graph/risks`) and available when the Evaluative lens is active. |
+| `size` | `churn_count_30d`, `complexity`, `fan_out`, `fan_in` | Node size. Linear scale with min/max range. |
 | `border` | `spec_confidence`, any field | Node border color/style. |
 | `opacity` | `visibility`, `spec_confidence` | Node transparency. |
 | `label` | `name`, `qualified_name`, `file_path` | Text displayed on/below the node. |
@@ -394,7 +396,9 @@ Maps data attributes to visual properties.
 | `edge_color` | `edge_type` | Edge stroke color by type. |
 | `edge_style` | `edge_type` | Edge stroke style (solid, dashed, dotted). |
 
-All encoding fields reference `GraphNode` or `GraphEdge` attributes from `realized-model.md`. The Explorer renderer reads the encoding spec and maps graph data to visual properties. No arbitrary code execution.
+All encoding fields reference `GraphNode` or `GraphEdge` attributes from `realized-model.md`.
+
+**Lens-driven data enrichment:** When the Evaluative lens is active, the Explorer automatically fetches supplementary data from `GET /repos/:id/graph/risks` and merges `fan_out`, `fan_in`, and `spec_covered` into the node objects before applying the encoding. This fetch is triggered by lens selection, not by the view spec — the view spec references these fields, and the Explorer renderer ensures the data is available when the lens is active. If a view spec references `fan_out` without the Evaluative lens, the field is `null` and the encoding falls back to a default value. The Explorer renderer reads the encoding spec and maps graph data to visual properties. No arbitrary code execution.
 
 ### Extensibility
 
