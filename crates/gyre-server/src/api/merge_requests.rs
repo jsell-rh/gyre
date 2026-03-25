@@ -434,6 +434,19 @@ pub async fn list_mrs(
     Ok(Json(mrs.into_iter().map(MrResponse::from).collect()))
 }
 
+/// GET /api/v1/workspaces/:workspace_id/merge-requests — list MRs scoped to a workspace.
+/// Primary access pattern per api-conventions.md §1.1.
+pub async fn list_workspace_mrs(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Vec<MrResponse>>, ApiError> {
+    let mrs = state
+        .merge_requests
+        .list_by_workspace(&Id::new(workspace_id))
+        .await?;
+    Ok(Json(mrs.into_iter().map(MrResponse::from).collect()))
+}
+
 pub async fn get_mr(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

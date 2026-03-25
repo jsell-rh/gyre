@@ -113,7 +113,11 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/agent-commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/worktrees", "worktree", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/worktrees/:wt_id", "worktree", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/worktrees/:worktree_id",
+                    "worktree",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/gates/:gate_id", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
@@ -134,7 +138,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
                 RouteResourceMapping::api(
-                    "/api/v1/repos/:id/dependencies/:dep_id",
+                    "/api/v1/repos/:id/dependencies/:dependency_id",
                     "dependency",
                     None,
                 ),
@@ -210,7 +214,7 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/dependencies/:dep_id",
+                    "/api/v1/merge-requests/:id/dependencies/:dependency_id",
                     "dependency",
                     None,
                 ),
@@ -324,6 +328,14 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/repos", "repo", None),
+                // Workspace-scoped entity lists (M34 Slice 6 — primary access patterns)
+                RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/tasks", "task", None),
+                RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/agents", "agent", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:workspace_id/merge-requests",
+                    "merge_request",
+                    None,
+                ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-spec-set",
                     "meta_spec",
@@ -871,6 +883,14 @@ pub mod tests {
             "/api/v1/admin/health",
             "/api/v1/policies/evaluate",
             "/api/v1/tenants/:id",
+            // M34 Slice 6: workspace-scoped routes
+            "/api/v1/workspaces/:workspace_id/tasks",
+            "/api/v1/workspaces/:workspace_id/agents",
+            "/api/v1/workspaces/:workspace_id/merge-requests",
+            // M34 Slice 6: renamed params
+            "/api/v1/repos/:id/worktrees/:worktree_id",
+            "/api/v1/repos/:id/dependencies/:dependency_id",
+            "/api/v1/merge-requests/:id/dependencies/:dependency_id",
         ];
         for pattern in &required {
             assert!(

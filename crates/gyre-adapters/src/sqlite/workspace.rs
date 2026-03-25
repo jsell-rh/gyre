@@ -101,6 +101,23 @@ impl WorkspaceRepository for SqliteStorage {
         .await?
     }
 
+    async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>> {
+        let pool = Arc::clone(&self.pool);
+        let tid = tenant_id.clone();
+        let slug = slug.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Workspace>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let result = workspaces::table
+                .filter(workspaces::tenant_id.eq(tid.as_str()))
+                .filter(workspaces::slug.eq(&slug))
+                .first::<WorkspaceRow>(&mut *conn)
+                .optional()
+                .context("find workspace by slug")?;
+            result.map(WorkspaceRow::into_workspace).transpose()
+        })
+        .await?
+    }
+
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
