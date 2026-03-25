@@ -115,7 +115,7 @@ Workspace Settings > Trust Level
 
 One click. No ABAC knowledge required.
 
-**Storage:** The trust level is a field on the `Workspace` entity: `trust_level: TrustLevel` (enum: `Supervised`, `Guided`, `Autonomous`, `Custom`). Changing trust level is a `PUT /api/v1/workspaces/:id` update (existing endpoint). The server atomically replaces the workspace's trust-related ABAC policies when the trust level changes. ABAC resource resolution for this action: `resource_type: "workspace"`, `action: "write"` — requires Admin workspace role.
+**Storage:** The trust level is a field on the `Workspace` entity: `trust_level: TrustLevel` (enum: `Supervised`, `Guided`, `Autonomous`, `Custom`). Changing trust level is a `PUT /api/v1/workspaces/:id` update (existing endpoint, `resource_type: "workspace"`, `action: "write"` — requires Admin workspace role). The ABAC policy replacement is a **server-internal side effect** of the workspace update, not a separate policy-write action. The handler updates the workspace entity, then atomically creates/deletes the trust-related ABAC policies. The human doesn't interact with policies directly — they set a trust level, and the server manages the policies.
 
 ### What Each Level Controls
 
@@ -296,7 +296,7 @@ Views are serializable specs that can be saved to the workspace and shared:
 }
 ```
 
-Saved views are stored as JSON documents in the workspace's configuration (via `KvJsonStore` with namespace `explorer_views` and key `workspace_id:view_name`). API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
+Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_slug`, ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
 - `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view
 - `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a URL-safe slug auto-generated from the view name, e.g., "api-surface")
@@ -496,7 +496,12 @@ Clicking "Ask why" spawns an interrogation agent with:
 
 The policies use `subject.id` conditions (not a new `Agent` scope variant) to target the specific interrogation agent, staying within `abac-policy-engine.md`'s existing `PolicyScope` enum (Tenant, Workspace, Repo). The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes).
 
-**Policy cleanup:** When the interrogation agent completes or its JWT expires, the stale agent detector marks it Dead and the `agent.complete` handler (or kill handler) deletes the interrogation-specific ABAC policies by name pattern (`interrogation-*-<agent-id>`). This is deterministic — no session-end signal needed; the policies are cleaned up on the same code path as any agent termination.
+**Policy cleanup:** Interrogation-specific ABAC policies are deleted on any of these paths:
+1. Agent calls `agent.complete` → completion handler deletes policies by name pattern `interrogation-*-<agent-id>`
+2. Admin kills agent → kill handler deletes policies by same pattern
+3. JWT expires → stale agent detector marks the agent Dead → the detector's cleanup logic deletes policies by pattern (the stale agent detector must be extended to check for `interrogation-*` prefixed policies on any Dead agent)
+
+All three paths are deterministic. No orphaned policies possible as long as the stale agent detector runs (which it does as a background job).
 
 The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
 
@@ -524,6 +529,8 @@ pub trait ConversationRepository: Send + Sync {
     async fn get(&self, conversation_sha: &str) -> Result<Option<Vec<u8>>>;
 }
 ```
+
+**REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). Requires workspace membership for the workspace of the agent that produced the conversation (looked up via the MR attestation or `AgentCompleted` message). The adapter implementation (`gyre-adapters`) stores conversations encrypted at rest in the same database as other entities; large conversations (>1MB) are stored as files on disk with the SHA as filename.
 
 The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a compressed binary blob, encrypted at rest by the adapter. The upload is part of the completion flow — called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
 
@@ -592,6 +599,8 @@ The server resolves the composite path to a specific spec in a specific repo. Th
 
 Note: `spec-links.md` uses `{workspace}` in its format description without specifying whether this is name or slug. This spec clarifies: **always use slug** (unique, URL-safe). The server resolves slug → workspace ID internally.
 
+**Path disambiguation:** Since spec paths contain slashes (e.g., `system/vision.md`), the server distinguishes same-repo links from cross-repo links by checking the first segment against known repo names in the current workspace, then against known workspace slugs in the tenant. If neither matches, it's treated as a same-repo spec path. This is deterministic because workspace slugs and repo names occupy different namespaces (slugs are tenant-unique, repo names are workspace-unique).
+
 ### What the System Does With Cross-Workspace Links
 
 1. **Inbox notification:** When a linked spec in another workspace changes, the dependent workspace's human gets an Inbox item: "idempotent-api.md changed in platform-core. Your payment-retry.md depends on it. Review impact."
@@ -639,7 +648,9 @@ The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 1. **Real-time push:** through the broadcast channel to WebSocket subscribers (same as all Telemetry)
 2. **Presence map:** the server maintains a lightweight in-memory map (`user_id → {workspace_id, view, timestamp}`) updated on every `UserPresence` message. This is the source of truth for "who is active" — queryable synchronously, survives TelemetryBuffer eviction.
 
-`UserPresence` messages do NOT go into the `TelemetryBuffer` (not returned by `GET /activity`). They use a separate presence map storage model.
+`UserPresence` messages do NOT go into the `TelemetryBuffer` (not returned by `GET /activity`). They use a separate presence map.
+
+**Presence query:** `GET /api/v1/workspaces/:workspace_id/presence` returns the current presence map for a workspace: `[{user_id, view, last_seen}]`. This is a simple read from the in-memory map, not a message bus query. On WebSocket reconnection, the client fetches this endpoint to populate the initial presence state.
 
 ### Conflict Prevention
 
