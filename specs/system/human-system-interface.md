@@ -364,7 +364,7 @@ Specs on the left, their linked graph nodes on the right. Shows "what implements
 
 #### Change View
 
-What changed since last visit, at the structural level. Powered by architectural deltas. The "since last visit" timestamp is obtained from the briefing response's `since` field (which reflects `last_seen_at` in epoch seconds). The client caches this value and passes it to `GET /repos/:id/graph/timeline?since=<last_seen_at>` for the Change View query. Note: the `graph/timeline` endpoint uses epoch seconds (consistent with domain entity timestamps), not epoch milliseconds (which is used only by the message bus).
+What changed since last visit, at the structural level. Powered by architectural deltas. The "since last visit" timestamp is obtained from the `last_seen_at` middleware's response header `X-Gyre-Last-Seen: <epoch_seconds>` (set on every workspace-scoped response). The client caches this value and passes it to `GET /repos/:id/graph/timeline?since=<last_seen_at>` for the Change View query. This header is also the source for the Briefing's `since` field, ensuring consistency without requiring a separate endpoint or Briefing dependency. Note: the `graph/timeline` endpoint uses epoch seconds (consistent with domain entity timestamps), not epoch milliseconds (which is used only by the message bus).
 
 ```
 Since your last visit:
@@ -1019,7 +1019,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `platform-model.md` §9 or API endpoints | Add `?slug=` query parameter to `GET /api/v1/workspaces` for workspace slug lookup (used by cross-workspace link UI navigation). |
 | `platform-model.md` §6 MR status | Formally define `Reverted` as a variant in the MR status enum (set on the original MR when a revert commit is created). Required by the trust suggestion job's MR revert query. |
 | `platform-model.md` §5 `BudgetUsage` | Make `repo_id` and `agent_id` optional (`Option<Id>`) — user-initiated LLM queries (briefing/ask, explorer-views/generate, specs/assist) have no agent and may have no repo context. Add `usage_type: String` field (e.g., `"llm_query"`, `"agent_run"`) to distinguish cost entry sources. |
-| `platform-model.md` §3 Task status | Add `Cancelled` as a formal variant in the task status enum. Used when a spec is rejected and in-flight tasks referencing it are cancelled (per HSI §8 priority-2 rejection flow). |
+| `platform-model.md` §3 Task status | Add `Cancelled` as a formal variant in the task status enum. Reachable from `Backlog` or `InProgress` (any non-terminal status). Terminal — cancelled tasks cannot be re-opened (create a new task instead). Used when a spec is rejected and in-flight tasks referencing it are cancelled (per HSI §8 priority-2 rejection flow). |
 | `realized-model.md` §3 `ArchitecturalDelta` | Define `FieldChange` struct: `{field: String, old_value: Option<String>, new_value: Option<String>}` — used in `nodes_modified: Vec<(GraphNode, Vec<FieldChange>)>`. |
 | `message-bus.md` §Scoping Rules | Document that Users (not just Agents) can send Directed messages to agents — required for human→agent steering (Pause, inline chat). |
 | `realized-model.md` `GraphNode` struct | Add `spec_confidence` field (already in DB schema but missing from Rust struct). Required by Explorer encoding layer. Define `SpecConfidence` enum variants: `None`, `Low`, `Medium`, `High` (maps to DB TEXT values `"none"`, `"low"`, `"medium"`, `"high"`). |
