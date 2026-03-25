@@ -166,7 +166,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
 ```yaml
 - name: require-human-spec-approval
   scope: tenant
-  priority: 250         # very high, not overridable
+  priority: 1000        # maximum — cannot be overridden by custom policies
   effect: deny
   actions: ["approve"]
   resource_types: ["spec"]
@@ -305,7 +305,11 @@ Views are serializable specs that can be saved to the workspace and shared:
 Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_id` (UUID), ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
 - `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view. Response (201): `{view_id: "<uuid>", name: "...", query: {...}, ...}`
-- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a UUID, not a slug — avoids name collision issues. The human-readable name is a display field, not a key.)
+- `GET /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — load a specific saved view (for deep links and sharing)
+- `PUT /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — update a saved view
+- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view
+
+`:view_id` is a UUID, not a slug — avoids name collision issues. The human-readable name is a display field, not a key.
 
 Built-in saved views shipped with every workspace:
 - **API Surface** — all endpoints with their handlers
@@ -533,7 +537,8 @@ Storage requires a new port trait:
 pub trait ConversationRepository: Send + Sync {
     /// Store a conversation blob with metadata. Returns the SHA-256 hash.
     async fn store(&self, agent_id: &Id, workspace_id: &Id, conversation: &[u8]) -> Result<String>;
-    /// Retrieve a conversation by SHA.
+    /// Retrieve a conversation by SHA. Returns decompressed bytes.
+    /// The adapter handles decryption and decompression internally.
     async fn get(&self, conversation_sha: &str) -> Result<Option<Vec<u8>>>;
     /// Record a turn-to-commit link (called from git push handler).
     async fn record_turn_link(&self, link: &TurnCommitLink) -> Result<()>;
@@ -698,7 +703,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Divergence detection (two agents, same spec, different implementations) | Review both, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected by the knowledge graph: when two agents push implementations for the same spec, the graph extraction produces different node sets for the same spec_path. The server compares structural fingerprints (node types + names) from each agent's implementation and flags divergence as an Inbox item if the fingerprints differ significantly. | Review both, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
