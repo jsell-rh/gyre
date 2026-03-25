@@ -196,7 +196,8 @@ When all gates pass and a merge executes, the forge produces a **merge attestati
     "agent_id": "worker-42",
     "oidc_sub": "agent:worker-42",
     "stack_attestation": "sha256:stack-fingerprint...",
-    "attestation_level": 3
+    "attestation_level": 3,
+    "conversation_sha": "sha256:..."
   },
   "gates": [
     {
@@ -389,14 +390,29 @@ spec_approvals table:
   spec_sha        TEXT NOT NULL        -- git blob SHA at approval time
   approver_id     TEXT NOT NULL        -- user or agent who approved
   signature       TEXT                 -- Sigstore signature (optional but recommended)
-  approved_at     INTEGER NOT NULL
+  approved_at     INTEGER             -- NULL when status is Pending
   revoked_at      INTEGER             -- NULL unless revoked
   revoked_by      TEXT
   revocation_reason TEXT
+  rejected_at     INTEGER             -- NULL unless rejected (per human-system-interface.md §8)
+  rejected_by     TEXT
+  rejected_reason TEXT
 ```
 
-- Approvals are **immutable** - once recorded, they can be revoked but not modified.
+**ApprovalStatus enum:**
+```rust
+pub enum ApprovalStatus {
+    Pending,    // no timestamp columns set
+    Approved,   // approved_at is set
+    Revoked,    // revoked_at is set (post-merge withdrawal)
+    Rejected,   // rejected_at is set (pre-merge decline)
+}
+```
+Status is derived from which timestamp column is non-null. Mutual exclusivity: the handler clears all other timestamp columns when setting a new status. Only one timestamp is non-null at any time.
+
+- Approval records support status transitions (Pending → Approved → Revoked, or Pending → Rejected). The handler clears other timestamp columns on transition to maintain mutual exclusivity. The *audit trail* of who approved/rejected and when is preserved via the timestamp values.
 - Revocation requires a reason and is audited.
+- Rejection closes the associated MR (per `human-system-interface.md` §8).
 - Multiple approvals can exist for the same spec (different versions).
 
 ### Forge Enforcement Policies

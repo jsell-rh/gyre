@@ -67,7 +67,16 @@ pub struct Workspace {
     pub budget: BudgetConfig,       // Inherited from tenant, overridable
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
+    pub trust_level: TrustLevel,    // Supervised, Guided, Autonomous, Custom
+    pub llm_model: Option<String>,  // LLM model for workspace queries (default: GYRE_LLM_MODEL env)
     pub created_at: u64,
+}
+
+pub enum TrustLevel {
+    Supervised,   // Human reviews everything before merge
+    Guided,       // Agents merge if gates pass, alert on failures
+    Autonomous,   // Only interrupt for exceptions
+    Custom,       // Direct ABAC policy manipulation
 }
 ```
 
@@ -75,6 +84,8 @@ pub struct Workspace {
 - Cross-repo work is coordinated at the workspace level
 - Budget is inherited from tenant; workspace can set lower limits but never higher
 - The Workspace Orchestrator agent runs at this level
+
+**Slug uniqueness:** `(tenant_id, slug)` is unique — enforced by DB constraint (see `hierarchy-enforcement.md` §6). The `GET /api/v1/workspaces` endpoint supports `?slug=<slug>` filtering for cross-workspace spec link resolution (see `human-system-interface.md` §6).
 
 **CLI:** `gyre workspace create`, `gyre workspace list`, `gyre workspace add-repo`, `gyre workspace set-budget`
 
@@ -88,7 +99,7 @@ The unit of work. Where specs, code, agents, tasks, and MRs live. Self-contained
 pub struct Repository {
     pub id: Id,
     pub workspace_id: Id,
-    pub name: String,
+    pub name: String,               // Unique within workspace: (workspace_id, name) constraint
     pub path: String,               // Filesystem path to bare repo
     pub default_branch: String,
     pub budget: BudgetConfig,       // Inherited from workspace
@@ -334,6 +345,10 @@ Gyre exposes an MCP server per repo. Agents connect with their scoped OIDC token
 | `git.status` | repo | Current branch, dirty state |
 | `worktree.create` | repo | Create isolated worktree for task |
 | `worktree.cleanup` | repo | Remove worktree after completion |
+| `message.send` | workspace | Send a Directed or Custom message to an agent |
+| `message.poll` | agent | Poll own inbox for new Directed messages |
+| `message.ack` | agent | Acknowledge a received message |
+| `conversation.upload` | agent | Upload conversation history at completion (base64 zstd blob) |
 
 ### MCP Resources (Read-Only Context)
 
@@ -344,6 +359,7 @@ Gyre exposes an MCP server per repo. Agents connect with their scoped OIDC token
 | `budget://` | repo | Current budget status (used/remaining/limit) |
 | `agents://` | repo | List of active agents in this repo |
 | `queue://` | repo | Current merge queue state |
+| `conversation://context` | agent | Original agent's conversation history (read-only, for interrogation agents — per `human-system-interface.md` §4) |
 
 ### MCP Prompts (Injected at Agent Startup)
 
@@ -425,9 +441,10 @@ Every MCP tool call that invokes an LLM records token usage:
 pub struct BudgetUsage {
     pub tenant_id: Id,
     pub workspace_id: Id,
-    pub repo_id: Id,
-    pub agent_id: Id,
+    pub repo_id: Option<Id>,       // None for user-initiated LLM queries (briefing/ask, explorer-views/generate)
+    pub agent_id: Option<Id>,      // None for user-initiated LLM queries
     pub task_id: Option<Id>,
+    pub usage_type: String,        // "agent_run", "llm_query", etc.
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
@@ -491,10 +508,31 @@ Post-merge gate runs (tests, build, optional smoke test)
         4. Post-merge gate re-runs on reverted HEAD
            ├── PASS: main is green again. Merge queue resumes.
            └── FAIL: escalate to human. Something else is wrong.
-        5. Original MR is re-opened with status "Reverted"
+        5. Original MR is re-opened with status `Reverted` (formal MR status variant — see below)
         6. Author agent receives RevertNotification via MCP
         7. Task created: "MR #{id} reverted: {failure reason}"
         8. The MR's gate results are invalidated (must re-run)
+```
+
+**MR Status Enum:**
+```rust
+pub enum MrStatus {
+    Open,       // MR is open, awaiting review/merge
+    Merged,     // MR has been merged
+    Closed,     // MR was closed without merging
+    Reverted,   // MR was merged then reverted (per recovery protocol above)
+}
+```
+
+**Task Status Enum:**
+```rust
+pub enum TaskStatus {
+    Backlog,     // Created, not yet assigned
+    InProgress,  // Assigned to an agent, work underway
+    Completed,   // Agent completed the task
+    Blocked,     // Waiting on external input (human, dependency)
+    Cancelled,   // Spec rejected or task no longer needed (terminal — cannot be re-opened)
+}
 ```
 
 ### Agent Behavior During Recovery
@@ -765,6 +803,8 @@ gyre
 ```
 
 ### UI Pages
+
+> **Note:** Per `human-system-interface.md`, these pages are **contextual drill-downs** accessed by clicking entity references, not primary navigation items. The application has a stable 6-item sidebar (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin). The pages below are rendered in the detail panel or as full-width pop-outs within those nav contexts.
 
 | Page | Scope | Purpose |
 |---|---|---|

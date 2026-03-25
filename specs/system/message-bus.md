@@ -142,6 +142,8 @@ pub enum MessageKind {
     BudgetWarning,
     BudgetExhausted,
     AgentError,
+    AgentCompleted,         // per human-system-interface.md §4 — completion summary
+    ReconciliationCompleted, // per meta-spec-reconciliation.md §11 — consumed for priority-6 notifications
 
     // ── Tier 3: Telemetry (unsigned + in-memory only) ─────────────────
     ToolCallStart,
@@ -169,7 +171,7 @@ pub enum MessageKind {
 - Telemetry tier requires `Destination::Workspace(id)`. Telemetry + Broadcast is rejected with 400 — there is no valid `TelemetryBuffer` key for `workspace_id: None`. Telemetry + Agent is rejected — telemetry is observability, not communication.
 - Event tier works with any destination.
 
-**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `AgentError`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
+**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `ReconciliationCompleted`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
 
 **Broadcast-only kinds:** `DataSeeded` and `QueueUpdated` use `Destination::Broadcast` with `workspace_id: None`. They are server-only AND storage-exempt — they flow through the in-memory broadcast channel only, never hitting `MessageRepository::store()`. The send path must short-circuit before attempting storage for these kinds.
 
@@ -205,7 +207,9 @@ Each `MessageKind` has a defined payload schema. The server validates payloads o
 | `MrMerged` | `mr_id: Id, merge_commit_sha: Option<String>` | `mr_id` |
 | `PushRejected` | `repo_id: Id, branch: String, agent_id: Id, reason: String` | all |
 | `PushAccepted` | `repo_id: Id, branch: String, agent_id: Id, commit_count: u64, task_id: Option<Id>, ralph_step: Option<String>` | `repo_id`, `branch`, `agent_id`. Note: `commit_count` is `u64` on the wire; migration maps from `usize` in `DomainEvent::PushAccepted`. |
-| `SpecChanged` | `repo_id: Id, spec_path: String, change_kind: String, task_id: Id` | all |
+| `SpecChanged` | `repo_id: Id, spec_path: String, change_kind: String, task_id: Option<Id>, dependent_workspace_id: Option<Id>, source_workspace_slug: Option<String>` | `repo_id`, `spec_path`, `change_kind`. `task_id` is `None` for human-authored spec changes (no associated task). Optional fields present for cross-workspace notifications. |
+| `AgentCompleted` | `agent_id: Id, task_id: Id, spec_ref: Option<String>, decisions: [{what, why, confidence, alternatives_considered?}], uncertainties: [String], conversation_sha: Option<String>` | `agent_id`, `task_id` |
+| `ReconciliationCompleted` | `workspace_id: Id, persona_id: Id, persona_name: String, specs_evaluated: u32, specs_changed: u32, preview_branch: Option<String>` | `workspace_id`, `persona_id` |
 | `GateFailure` | `mr_id: Id, gate_name: String, gate_type: String, status: String, output: String, spec_ref: Option<String>, gate_agent_id: Id` | `mr_id`, `gate_name` |
 | `StaleSpecWarning` | `mr_id: Id, repo_id: Id, spec_path: String, spec_sha: String, current_sha: String` | all |
 | `SpeculativeConflict` | `repo_id: Id, branch: String, conflicting_files: Vec<String>` | all |
@@ -265,10 +269,10 @@ This is consistent with the existing commit signature approach (`commit_signatur
 Clients connect to `GET /ws` and authenticate as today. After auth, the client sends a subscription message:
 
 ```json
-{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700000}
+{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700000, "session_id": "a1b2c3d4-uuid"}
 ```
 
-`last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen` **filtered to the subscribed workspaces only**, capped at 1000 messages total across all subscribed workspaces. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
+`session_id` is `Option<String>` — a random UUID per browser tab, required for user connections (used for presence tracking and `PresenceEvicted` delivery), optional for agent connections. `last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen` **filtered to the subscribed workspaces only**, capped at 1000 messages total across all subscribed workspaces. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
 
 The `Subscribe` variant is added to `gyre_common::WsMessage`. To avoid breaking old CLI versions, also add a catch-all `Unknown` variant with `#[serde(other)]` to `WsMessage` so unrecognized message types are silently ignored rather than causing deserialization errors.
 
@@ -317,15 +321,17 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 
 1. **All `Destination::Agent(id)` messages validate tenant isolation.** The target agent's `tenant_id` must match the message's `tenant_id`, regardless of origin (including `Server`). This prevents a server bug from leaking messages across tenants. For agent-originated messages, the sender must also be in the same workspace as the recipient (see below).
 
-2. **Agents can only send Directed messages to agents in the same workspace.** Enforced by looking up the sender's `workspace_id` from the agent record (the sender's JWT contains `agent_id`; the server looks up the agent to get its `workspace_id`) and comparing with the recipient agent's `workspace_id`. Returns 403 if mismatched. This requires two agent lookups per Directed send — acceptable given that Directed messages are low-frequency.
+2. **Agents can only send Directed messages to agents in the same workspace.** Enforced by looking up the sender's `workspace_id` from the agent record and comparing with the recipient's. Returns 403 if mismatched.
 
-3. **Cross-workspace messaging is server-mediated.** Workspace orchestrators do not message each other directly. Instead, cross-workspace coordination flows through server-originated events. When a Workspace Orchestrator creates a cross-repo task or MR dependency (via existing REST endpoints), the server emits the appropriate Event-tier messages (`TaskCreated`, `MrCreated`) into each affected workspace. The orchestrators observe these events in their own workspace's message stream. This avoids the need for cross-workspace agent messaging entirely.
+3. **Users can send Directed messages to agents in any workspace they are a member of.** When `MessageOrigin::User(id)`, the server verifies the user is a member of the recipient agent's workspace via `WorkspaceMembershipRepository`. This enables human→agent steering (Pause, inline chat) per `human-system-interface.md` §4.
 
-4. **Server-originated messages inherit the workspace of the entity they describe.** An `AgentCreated` event for an agent in workspace X has `workspace_id: Some(X)` and is only delivered to clients subscribed to workspace X.
+4. **Cross-workspace messaging is server-mediated.** Workspace orchestrators do not message each other directly. Instead, cross-workspace coordination flows through server-originated events. When a Workspace Orchestrator creates a cross-repo task or MR dependency (via existing REST endpoints), the server emits the appropriate Event-tier messages (`TaskCreated`, `MrCreated`) into each affected workspace. The orchestrators observe these events in their own workspace's message stream. This avoids the need for cross-workspace agent messaging entirely.
 
-5. **Broadcast destination requires Server origin or Admin role.** Agent JWTs cannot target Broadcast. API key callers with Admin role can target Broadcast for operational announcements.
+5. **Server-originated messages inherit the workspace of the entity they describe.** An `AgentCreated` event for an agent in workspace X has `workspace_id: Some(X)` and is only delivered to clients subscribed to workspace X.
 
-6. **Workspace fan-out requires workspace membership.** An agent can only send `Destination::Workspace(id)` if its `workspace_id` matches `id`. Users can target any workspace they are a member of (verified via `WorkspaceMembershipRepository`).
+6. **Broadcast destination requires Server origin or Admin role.** Agent JWTs cannot target Broadcast. API key callers with Admin role can target Broadcast for operational announcements.
+
+7. **Workspace fan-out requires workspace membership.** An agent can only send `Destination::Workspace(id)` if its `workspace_id` matches `id`. Users can target any workspace they are a member of (verified via `WorkspaceMembershipRepository`).
 
 ### Storage
 
@@ -607,6 +613,8 @@ Since this is a greenfield system with no production deployment, the unified mes
 **What gets added to `WsMessage`:**
 - `Subscribe` variant for workspace-scoped subscriptions
 - `ReplayCatchUp` variant for reconnection truncation signals
+- `UserPresence` variant (bidirectional — client sends heartbeat with `{user_id, session_id, workspace_id, view, timestamp}`; server derives `user_id` from auth, rebroadcasts to workspace subscribers)
+- `PresenceEvicted` variant (server→client — `{session_id}`, signals the tab should stop heartbeating)
 - Catch-all `Unknown` variant with custom deserialize for forward compatibility
 
 **Endpoint changes:**
