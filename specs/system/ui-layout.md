@@ -342,7 +342,7 @@ Specifies what to pull from the knowledge graph.
 | `filter.min_churn` | `Option<u32>` | Only nodes with `churn_count_30d >= min_churn` |
 | `filter.spec_path` | `Option<String>` | Only nodes linked to this spec |
 | `filter.visibility` | `Option<String>` | Only nodes with this visibility (`public`, `private`) |
-| `repo_id` | `Option<String>` | Scope to a single repo. Null = all repos in workspace. |
+| `repo_id` | `Option<String>` | Scope to a single repo. Null = all repos in workspace. **Validated:** the server rejects saved views where `repo_id` does not belong to the workspace in the URL (prevents cross-workspace data leakage). |
 
 The data layer maps to knowledge graph API endpoints:
 - `repo_id` set + `concept` → `GET /repos/:id/graph/concept/:name` (single repo)
@@ -644,7 +644,7 @@ The Explorer canvas uses **SVG** for graph/hierarchical/layered layouts (rendere
 - The node count per view is typically <500 (after C4 drill-down filtering)
 - CSS transitions work natively for visual state changes
 
-For views exceeding ~1000 nodes, the Explorer shows a warning and suggests applying filters or drilling down. Virtual scrolling is used for list layouts.
+For views exceeding ~500 nodes, the Explorer automatically applies a filter: only public nodes are shown, with a banner "Showing public API only — X private nodes hidden. [Show All]". For views exceeding ~1000 nodes even after filtering, the Explorer switches to list layout with virtual scrolling and a warning. This prevents Level 4 drill-down on large modules from overwhelming the SVG canvas.
 
 ### Layout Engines
 

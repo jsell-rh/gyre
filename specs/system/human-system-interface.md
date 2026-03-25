@@ -65,7 +65,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted"}` WebSocket message — the client stops sending heartbeats for that tab. Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted", "session_id": "<evicted-uuid>"}` WebSocket message — the client checks if the session_id matches its own tab and stops heartbeating only for that tab. Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
 
 ### Deep Links
 
@@ -584,6 +584,8 @@ pub trait ConversationRepository: Send + Sync {
     async fn record_turn_link(&self, link: &TurnCommitLink) -> Result<()>;
     /// Get turn-commit links for a conversation (for "View conversation at this point").
     async fn get_turn_links(&self, conversation_sha: &str) -> Result<Vec<TurnCommitLink>>;
+    /// List conversations for an agent (for Explorer detail panel provenance links).
+    async fn list_by_agent(&self, agent_id: &Id) -> Result<Vec<String>>; // returns SHAs
 }
 ```
 
