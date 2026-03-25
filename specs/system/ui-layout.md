@@ -541,7 +541,7 @@ The Code sub-view is accessed via a tab in the control bar. When Architecture is
 └──────────────────────────────────────────────────────────┘
 ```
 
-Three sub-tabs within Code: **Branches** (from `GET /repos/:id/branches` + `GET /repos/:id/commits`), **Merge Requests** (from `GET /merge-requests?repository_id=:id`), **Merge Queue** (from `GET /merge-queue?repository_id=:id`). Each sub-tab renders a sortable table. Clicking a row opens the detail panel with entity-specific tabs (MR detail: Diff/Gates/Attestation/Ask Why).
+Three sub-tabs within Code: **Branches** (from `GET /repos/:id/branches` + `GET /repos/:id/commits`), **Merge Requests** (from `GET /merge-requests?repository_id=:id`), **Merge Queue** (from `GET /merge-queue?repository_id=:id`). Each sub-tab renders a sortable table with a filter input at the top (text search on branch name, MR title, or queue entry — replaces the hidden canvas Search control). Clicking a row opens the detail panel with entity-specific tabs (MR detail: Diff/Gates/Attestation/Ask Why).
 
 ---
 
