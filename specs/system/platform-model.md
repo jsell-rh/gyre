@@ -68,6 +68,7 @@ pub struct Workspace {
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
     pub trust_level: TrustLevel,    // Supervised, Guided, Autonomous, Custom
+    pub llm_model: Option<String>,  // LLM model for workspace queries (default: GYRE_LLM_MODEL env)
     pub created_at: u64,
 }
 

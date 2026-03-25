@@ -177,7 +177,7 @@ specs/prompts/
 ```
 
 These prompt templates are:
-- **Versioned in git** alongside other specs — changes are tracked, diffable, and subject to spec approval
+- **Versioned in git** alongside other specs — changes are tracked and diffable. Prompt templates are in `specs/prompts/` which should be added to `spec-lifecycle.md`'s `ignored_paths` — prompt iteration should be fast and not require formal spec approval. The git SHA is recorded for audit, not for approval gating.
 - **Parameterized** with runtime context (workspace graph summary, current spec content, etc.) injected at call time
 - **Bound to the workspace's meta-spec-set** — if the workspace has custom principles or standards, those are injected into the prompt context
 - **Auditable** — the prompt template version (git SHA) is recorded in cost entries for reproducibility
@@ -793,4 +793,9 @@ The Explorer shell handles all events uniformly — `click` opens the detail pan
 - Presence query (defined in `human-system-interface.md` §7)
 - Conversation retrieval (defined in `human-system-interface.md` §5)
 
-No new API endpoints are introduced by this spec — all data flows use existing or `human-system-interface.md`-defined endpoints.
+**New API endpoints introduced by this spec:**
+- `POST /api/v1/workspaces/:workspace_id/explorer-views/generate` — LLM view generation (§2)
+- `POST /api/v1/repos/:repo_id/specs/assist` — LLM-assisted spec editing (§3)
+- `POST /api/v1/workspaces/:workspace_id/briefing/ask` — Briefing Q&A (defined in `human-system-interface.md` §9, layout in §8)
+
+All other data flows use existing endpoints.
