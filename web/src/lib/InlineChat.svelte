@@ -88,45 +88,70 @@
       return;
     }
     const decoder = new TextDecoder();
-    let partial = '';
+    // SSE state: the server sends `event:` lines followed by `data:` lines.
+    // Spec (ui-layout.md §2 LLM Endpoint Contract):
+    //   event: partial  — incremental text chunk
+    //   event: complete — final response
+    //   event: error    — error message
+    let buf = '';
+    let currentEventType = '';
     let done = false;
 
     while (!done) {
       const { value, done: streamDone } = await reader.read();
       done = streamDone;
       if (value) {
-        partial += decoder.decode(value, { stream: true });
-        const lines = partial.split('\n');
-        partial = lines.pop() ?? '';
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+
         for (const line of lines) {
+          if (line === '') {
+            // Blank line = dispatch event. Reset event type.
+            currentEventType = '';
+            continue;
+          }
+          if (line.startsWith('event: ')) {
+            currentEventType = line.slice(7).trim();
+            continue;
+          }
           if (line.startsWith('data: ')) {
             const raw = line.slice(6);
             if (raw === '[DONE]') { done = true; break; }
+
+            // Determine event type: use SSE event: line if present,
+            // otherwise fall back to JSON `type` field (backwards compat).
+            let evType = currentEventType;
+            let text = raw;
             try {
               const parsed = JSON.parse(raw);
-              if (parsed.type === 'partial') {
-                streamBuffer += parsed.text ?? '';
-              } else if (parsed.type === 'complete') {
-                const final = parsed.text ?? streamBuffer;
+              if (!evType) evType = parsed.type ?? '';
+              text = parsed.text ?? parsed.message ?? raw;
+
+              if (evType === 'partial') {
+                streamBuffer += text;
+              } else if (evType === 'complete') {
+                const final = text || streamBuffer;
                 messages = [...messages, { role: 'assistant', content: final }];
                 streamBuffer = '';
                 done = true;
                 break;
-              } else if (parsed.type === 'error') {
-                error = parsed.message ?? 'Streaming error';
+              } else if (evType === 'error') {
+                error = text || 'Streaming error';
                 done = true;
                 break;
               }
             } catch {
-              // Not JSON — raw text chunk
+              // Plain text chunk — append to stream buffer.
               streamBuffer += raw;
             }
+            currentEventType = '';
           }
         }
       }
     }
 
-    // If we got partial content but no complete event, commit what we have.
+    // Commit any remaining partial content without a complete event.
     if (streamBuffer) {
       messages = [...messages, { role: 'assistant', content: streamBuffer }];
       streamBuffer = '';

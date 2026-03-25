@@ -53,6 +53,8 @@
       if (data.status === 'merged') {
         result.push({ id: 'attestation', label: 'Attestation' });
       }
+      // Trace: spec §2 tab table says "When viewing an MR or agent"
+      result.push({ id: 'trace', label: 'Trace' });
       result.push({
         id: 'ask-why',
         label: 'Ask Why',
@@ -83,6 +85,15 @@
       if (data.spec_path) result.push({ id: 'spec', label: 'Spec' });
       if (data.author_agent_id) result.push({ id: 'chat', label: 'Chat' });
       result.push({ id: 'history', label: 'History' });
+      // Ask Why: spec §2 — "When entity has an author agent with conversation_sha"
+      if (data.author_agent_id) {
+        result.push({
+          id: 'ask-why',
+          label: 'Ask Why',
+          disabled: !data.conversation_sha,
+          title: data.conversation_sha ? undefined : 'Conversation unavailable',
+        });
+      }
       return result;
     }
 
@@ -111,6 +122,13 @@
 
   function close() {
     expanded = false;
+    // Clean up detail/expanded query params from URL.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('detail') || url.searchParams.has('expanded')) {
+      url.searchParams.delete('detail');
+      url.searchParams.delete('expanded');
+      window.history.pushState({}, '', url.toString());
+    }
     onclose?.();
   }
 

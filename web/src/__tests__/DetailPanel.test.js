@@ -63,11 +63,12 @@ describe('DetailPanel', () => {
   });
 
   describe('Tab routing by entity type', () => {
-    it('MR entity: shows Info, Diff, Gates, Ask Why tabs (no Attestation for open MR)', () => {
+    it('MR entity: shows Info, Diff, Gates, Trace, Ask Why tabs (no Attestation for open MR)', () => {
       render(DetailPanel, { props: { entity: mrEntity } });
       expect(screen.getByRole('tab', { name: /info/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /diff/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /gates/i })).toBeTruthy();
+      expect(screen.getByRole('tab', { name: /trace/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /ask why/i })).toBeTruthy();
       expect(screen.queryByRole('tab', { name: /attestation/i })).toBeNull();
     });
@@ -97,12 +98,14 @@ describe('DetailPanel', () => {
       expect(screen.getByRole('tab', { name: /trace/i })).toBeTruthy();
     });
 
-    it('graph node with spec_path + author: shows Info, Spec, Chat, History', () => {
+    it('graph node with spec_path + author: shows Info, Spec, Chat, History, Ask Why', () => {
       render(DetailPanel, { props: { entity: nodeEntity } });
       expect(screen.getByRole('tab', { name: /info/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /spec/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /chat/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /history/i })).toBeTruthy();
+      // Ask Why shown when node has author_agent_id (disabled because conversation_sha is undefined)
+      expect(screen.getByRole('tab', { name: /ask why/i })).toBeTruthy();
     });
 
     it('spec entity: shows Content, Edit, Progress, Links, History tabs', () => {
