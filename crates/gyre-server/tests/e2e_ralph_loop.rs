@@ -61,17 +61,32 @@ async fn full_ralph_loop_via_gyre() {
     let api = format!("{base_url}/api/v1");
     let auth_hdr = format!("Bearer {auth_token}");
 
-    // -- 2. Create repo (path computed server-side from GYRE_REPOS_PATH) --
-    // Use a UUID-derived project_id so each run uses a fresh bare repo on disk.
-    let project_id = format!(
-        "e2e-project-{}",
+    // -- 2. Create workspace + repo (workspace needed for git URL slug resolution) --
+    let ws_slug = format!(
+        "e2e-ws-{}",
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
+    let workspace: serde_json::Value = client
+        .post(format!("{api}/workspaces"))
+        .header("Authorization", &auth_hdr)
+        .json(&serde_json::json!({
+            "tenant_id": "default",
+            "name": "E2E Workspace",
+            "slug": ws_slug,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let workspace_id = workspace["id"].as_str().unwrap().to_string();
+
     let repo: serde_json::Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "workspace_id": project_id,
+            "workspace_id": workspace_id,
             "name": "gyre-e2e",
         }))
         .send()

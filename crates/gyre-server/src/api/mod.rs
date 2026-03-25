@@ -106,7 +106,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(agent_tracking::create_worktree).get(agent_tracking::list_worktrees),
         )
         .route(
-            "/api/v1/repos/:id/worktrees/:wt_id",
+            "/api/v1/repos/:id/worktrees/:worktree_id",
             delete(agent_tracking::delete_worktree),
         )
         // Quality gates
@@ -266,7 +266,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             put(merge_deps::set_dependencies).get(merge_deps::get_dependencies),
         )
         .route(
-            "/api/v1/merge-requests/:id/dependencies/:dep_id",
+            "/api/v1/merge-requests/:id/dependencies/:dependency_id",
             delete(merge_deps::remove_dependency),
         )
         .route(
@@ -420,7 +420,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(dependencies::list_dependencies).post(dependencies::add_dependency),
         )
         .route(
-            "/api/v1/repos/:id/dependencies/:dep_id",
+            "/api/v1/repos/:id/dependencies/:dependency_id",
             delete(dependencies::delete_dependency),
         )
         .route(
@@ -470,6 +470,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/repos",
             post(workspaces::add_repo_to_workspace).get(workspaces::list_workspace_repos),
+        )
+        // Workspace-scoped entity lists (M34 Slice 6 — primary access patterns per api-conventions.md §1.1)
+        .route(
+            "/api/v1/workspaces/:workspace_id/tasks",
+            get(tasks::list_workspace_tasks),
+        )
+        .route(
+            "/api/v1/workspaces/:workspace_id/agents",
+            get(agents::list_workspace_agents),
+        )
+        .route(
+            "/api/v1/workspaces/:workspace_id/merge-requests",
+            get(merge_requests::list_workspace_mrs),
         )
         // Meta-spec sets (M32)
         .route(

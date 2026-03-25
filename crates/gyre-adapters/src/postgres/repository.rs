@@ -185,4 +185,25 @@ impl RepoRepository for PgStorage {
         })
         .await?
     }
+
+    async fn find_by_name_and_workspace(
+        &self,
+        workspace_id: &Id,
+        name: &str,
+    ) -> Result<Option<Repository>> {
+        let pool = Arc::clone(&self.pool);
+        let workspace_id = workspace_id.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Repository>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let result = repositories::table
+                .filter(repositories::workspace_id.eq(workspace_id.as_str()))
+                .filter(repositories::name.eq(&name))
+                .first::<RepositoryRow>(&mut *conn)
+                .optional()
+                .context("find repository by name and workspace")?;
+            Ok(result.map(Repository::from))
+        })
+        .await?
+    }
 }

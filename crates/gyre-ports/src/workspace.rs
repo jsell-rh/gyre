@@ -7,6 +7,9 @@ use gyre_domain::{Persona, PersonaScope, Workspace};
 pub trait WorkspaceRepository: Send + Sync {
     async fn create(&self, workspace: &Workspace) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>>;
+    /// Find a workspace by slug within a specific tenant.
+    /// Required for git URL resolution: /git/:workspace_slug/:repo_name/*.
+    async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>>;
     async fn list(&self) -> Result<Vec<Workspace>>;
     async fn list_by_tenant(&self, tenant_id: &Id) -> Result<Vec<Workspace>>;
     async fn update(&self, workspace: &Workspace) -> Result<()>;

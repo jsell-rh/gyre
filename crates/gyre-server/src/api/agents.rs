@@ -134,6 +134,19 @@ pub async fn list_agents(
     Ok(Json(agents.into_iter().map(AgentResponse::from).collect()))
 }
 
+/// GET /api/v1/workspaces/:workspace_id/agents — list agents scoped to a workspace.
+/// Primary access pattern per api-conventions.md §1.1.
+pub async fn list_workspace_agents(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Vec<AgentResponse>>, ApiError> {
+    let agents = state
+        .agents
+        .list_by_workspace(&Id::new(workspace_id))
+        .await?;
+    Ok(Json(agents.into_iter().map(AgentResponse::from).collect()))
+}
+
 pub async fn get_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
