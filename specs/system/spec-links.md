@@ -100,9 +100,10 @@ CREATE TABLE spec_links (
     source_path     TEXT NOT NULL,
     source_sha      TEXT NOT NULL,
     link_type       TEXT NOT NULL,
-    target_repo_id  TEXT NOT NULL,
+    target_repo_id  TEXT,               -- NULL for unresolved cross-workspace links (resolved later by staleness checker)
     target_path     TEXT NOT NULL,
     target_sha      TEXT NOT NULL,
+    target_display  TEXT,               -- human-readable composite path (e.g., "@platform-core/api-svc/system/auth.md")
     reason          TEXT,
     status          TEXT NOT NULL DEFAULT 'active',
     created_at      INTEGER NOT NULL,

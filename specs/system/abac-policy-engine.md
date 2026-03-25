@@ -321,7 +321,7 @@ For compliance: "show me every time someone was denied access to specs in worksp
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /api/v1/policies` | GET | List policies (filtered by scope) |
+| `GET /api/v1/policies` | GET | List policies (filtered by `?scope=` and optional `?scope_id=` for workspace/repo-specific filtering) |
 | `POST /api/v1/policies` | POST | Create policy (Admin only) |
 | `GET /api/v1/policies/{id}` | GET | Get policy details |
 | `PUT /api/v1/policies/{id}` | PUT | Update policy |

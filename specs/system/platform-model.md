@@ -357,6 +357,7 @@ Gyre exposes an MCP server per repo. Agents connect with their scoped OIDC token
 | `budget://` | repo | Current budget status (used/remaining/limit) |
 | `agents://` | repo | List of active agents in this repo |
 | `queue://` | repo | Current merge queue state |
+| `conversation://context` | agent | Original agent's conversation history (read-only, for interrogation agents — per `human-system-interface.md` §4) |
 
 ### MCP Prompts (Injected at Agent Startup)
 
@@ -438,9 +439,10 @@ Every MCP tool call that invokes an LLM records token usage:
 pub struct BudgetUsage {
     pub tenant_id: Id,
     pub workspace_id: Id,
-    pub repo_id: Id,
-    pub agent_id: Id,
+    pub repo_id: Option<Id>,       // None for user-initiated LLM queries (briefing/ask, explorer-views/generate)
+    pub agent_id: Option<Id>,      // None for user-initiated LLM queries
     pub task_id: Option<Id>,
+    pub usage_type: String,        // "agent_run", "llm_query", etc.
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
@@ -504,10 +506,31 @@ Post-merge gate runs (tests, build, optional smoke test)
         4. Post-merge gate re-runs on reverted HEAD
            ├── PASS: main is green again. Merge queue resumes.
            └── FAIL: escalate to human. Something else is wrong.
-        5. Original MR is re-opened with status "Reverted"
+        5. Original MR is re-opened with status `Reverted` (formal MR status variant — see below)
         6. Author agent receives RevertNotification via MCP
         7. Task created: "MR #{id} reverted: {failure reason}"
         8. The MR's gate results are invalidated (must re-run)
+```
+
+**MR Status Enum:**
+```rust
+pub enum MrStatus {
+    Open,       // MR is open, awaiting review/merge
+    Merged,     // MR has been merged
+    Closed,     // MR was closed without merging
+    Reverted,   // MR was merged then reverted (per recovery protocol above)
+}
+```
+
+**Task Status Enum:**
+```rust
+pub enum TaskStatus {
+    Backlog,     // Created, not yet assigned
+    InProgress,  // Assigned to an agent, work underway
+    Completed,   // Agent completed the task
+    Blocked,     // Waiting on external input (human, dependency)
+    Cancelled,   // Spec rejected or task no longer needed (terminal — cannot be re-opened)
+}
 ```
 
 ### Agent Behavior During Recovery

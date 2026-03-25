@@ -274,16 +274,18 @@ On Allow: request proceeds to handler.
 
 ABAC ships with built-in policies seeded at startup (cannot be deleted):
 
-| Policy | Effect | Purpose |
-|---|---|---|
-| `system-full-access` | Allow | Global `GYRE_AUTH_TOKEN` gets full access |
-| `admin-all-operations` | Allow | Admin role allows all actions |
-| `developer-write-access` | Allow | Developer role allows read + write |
-| `agent-scoped-access` | Allow | Agent role allows read + write in scoped repo |
-| `readonly-get-only` | Allow | ReadOnly role allows only read |
-| `tenant-isolation` | Deny | Cross-tenant access denied |
-| `workspace-membership-required` | Deny | Non-members denied access to workspace resources |
-| `default-deny` | Deny | Everything not explicitly allowed is denied (lowest priority) |
+| Policy | Effect | Priority | Purpose |
+|---|---|---|---|
+| `system-full-access` | Allow | 1000 | Global `GYRE_AUTH_TOKEN` gets full access |
+| `builtin:require-human-spec-approval` | Deny (immutable) | 999 | Non-user subjects cannot approve specs |
+| `admin-all-operations` | Allow | 900 | Admin role allows all actions |
+| `developer-write-access` | Allow | 800 | Developer role allows read + write |
+| `agent-scoped-access` | Allow | 700 | Agent role allows read + write in scoped repo |
+| `readonly-get-only` | Allow | 600 | ReadOnly role allows only read |
+| `tenant-isolation` | Deny | 500 | Cross-tenant access denied |
+| `persona-human-approval` | Deny | 500 | Agents can't approve personas (human-only) |
+| `workspace-membership-required` | Deny | 400 | Non-members denied access to workspace resources |
+| `default-deny` | Deny | 0 | Everything not explicitly allowed is denied (lowest priority) |
 
 These replace the current RBAC extractors (`AdminOnly`, `RequireDeveloper`, etc.). Since this is greenfield, ABAC is the authorization layer from the start — there is no RBAC-to-ABAC migration. The old extractors are removed entirely.
 

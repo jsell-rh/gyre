@@ -399,8 +399,20 @@ spec_approvals table:
   rejected_reason TEXT
 ```
 
-- Approvals are **immutable** - once recorded, they can be revoked but not modified.
+**ApprovalStatus enum:**
+```rust
+pub enum ApprovalStatus {
+    Pending,    // no timestamp columns set
+    Approved,   // approved_at is set
+    Revoked,    // revoked_at is set (post-merge withdrawal)
+    Rejected,   // rejected_at is set (pre-merge decline)
+}
+```
+Status is derived from which timestamp column is non-null. Mutual exclusivity: the handler clears all other timestamp columns when setting a new status. Only one timestamp is non-null at any time.
+
+- Approvals are **immutable** - once recorded, they can be revoked or rejected but not modified.
 - Revocation requires a reason and is audited.
+- Rejection closes the associated MR (per `human-system-interface.md` §8).
 - Multiple approvals can exist for the same spec (different versions).
 
 ### Forge Enforcement Policies
