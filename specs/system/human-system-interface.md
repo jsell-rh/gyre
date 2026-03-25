@@ -142,7 +142,7 @@ One click. No ABAC knowledge required.
 - **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
 - **Custom → Preset:** Server deletes all `trust:` prefixed policies, then creates the preset's policies. Built-in policies (`builtin:` prefix) and user-created policies (no prefix) are preserved.
 
-All trust level transitions (workspace `trust_level` field update AND policy delete+create) are performed in a **single database transaction** — if creating the new policies fails, the workspace field is not updated either. This prevents a crash from leaving the workspace in a state where `trust_level` says one thing but the active policies say another. The ABAC policy cache (`abac-policy-engine.md` §Performance) is invalidated **after** the transaction commits — not on each individual policy write — to prevent intermediate states from being visible to concurrent requests.
+All trust level transitions (workspace `trust_level` field update AND policy delete+create) are performed in a **single database transaction** — if creating the new policies fails, the workspace field is not updated either. On rollback, the endpoint returns `409 Conflict` with `{"error": "Trust level transition failed — policies could not be created"}` so the UI can display an actionable error. The ABAC policy cache (`abac-policy-engine.md` §Performance) is invalidated **after** the transaction commits — not on each individual policy write — to prevent intermediate states from being visible to concurrent requests.
 
 **Policy naming conventions:**
 - `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions
@@ -627,7 +627,7 @@ The policies use `subject.id` conditions (not a new `Agent` scope variant) to ta
 
 All three paths are deterministic. No orphaned policies possible as long as the stale agent detector runs (which it does as a background job).
 
-The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
+The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR. The interrogation agent's MCP tool access includes `conversation.upload` (same as regular agents) — the ABAC allow-write policy on `message` resource type is sufficient for MCP tool calls since MCP tools use the agent's JWT for auth, not ABAC middleware.
 
 ---
 
