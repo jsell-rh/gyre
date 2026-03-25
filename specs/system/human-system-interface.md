@@ -628,7 +628,7 @@ The policies use `subject.id` conditions (not a new `Agent` scope variant) to ta
 **Policy cleanup:** Interrogation-specific ABAC policies are deleted on any of these paths:
 1. Agent calls `agent.complete` → completion handler deletes policies by name pattern `interrogation-*-<agent-id>`
 2. Admin kills agent → kill handler deletes policies by same pattern
-3. JWT expires → stale agent detector marks the agent Dead → the detector's cleanup logic deletes policies by pattern (the stale agent detector must be extended to check for `interrogation-*` prefixed policies on any Dead agent)
+3. JWT expires → stale agent detector (runs every 5 minutes) marks the agent Dead → the detector's cleanup logic deletes policies by pattern (the stale agent detector must be extended to check for `interrogation-*` prefixed policies on any Dead agent). Maximum orphan window: 35 minutes (30-min JWT + 5-min scan interval).
 
 All three paths are deterministic. No orphaned policies possible as long as the stale agent detector runs (which it does as a background job).
 
@@ -803,7 +803,7 @@ Workspace: Payments
   Active: jsell (Specs view), maria (Explorer), bot-deploy (Agent)
 ```
 
-**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a `WsMessage` variant used **bidirectionally**: clients send `UserPresence` to the server (heartbeat with current view), and the server rebroadcasts to other workspace subscribers. **The server derives `user_id` from the authenticated WebSocket connection** — it does NOT trust the payload's `user_id` field. The client sends it for convenience but the server overwrites it with the verified identity. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
+**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a `WsMessage` variant used **bidirectionally**: clients send `UserPresence` to the server (heartbeat with current view), and the server rebroadcasts to other workspace subscribers. **The server derives `user_id` from the authenticated WebSocket connection** — it does NOT trust the payload's `user_id` field. **WebSocket identity:** User WebSocket connections authenticate via JWT (the same token used for REST — passed as a query parameter on the WebSocket handshake `?token=<jwt>`). This provides per-user identity required for presence. Shared-token connections (e.g., `GYRE_AUTH_TOKEN`) are excluded from presence tracking since they have no user identity. The client sends it for convenience but the server overwrites it with the verified identity. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
 
 The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 - **Payload schema:**

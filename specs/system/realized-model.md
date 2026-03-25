@@ -59,6 +59,13 @@ The extraction pipeline is pluggable per language. Each language extractor maps 
 Every node carries metadata:
 
 ```rust
+pub enum SpecConfidence {
+    None,    // no governing spec linked
+    Low,     // auto-suggested link, not confirmed
+    Medium,  // linked by agent, not human-verified
+    High,    // human-confirmed or spec-manifest-declared
+}
+
 pub struct GraphNode {
     pub id: Id,
     pub repo_id: Id,
