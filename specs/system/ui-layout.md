@@ -404,6 +404,7 @@ Specifies what to pull from the knowledge graph.
 | `filter.spec_path` | `Option<String>` | Only nodes linked to this spec. **Requires `repo_id` to be set** — spec paths are repo-scoped. If `spec_path` is set without `repo_id`, the server returns 400. |
 | `filter.visibility` | `Option<String>` | Only nodes with this visibility (`public`, `private`) |
 | `repo_id` | `Option<String>` | Scope to a single repo. Null = all repos in workspace. **Validated:** the server rejects saved views where `repo_id` does not belong to the workspace in the URL (prevents cross-workspace data leakage). |
+| `trace_source` | `Option<{mr_id?: String, gate_run_id?: String}>` | Required for `"flow"` layout. Specifies which gate-time trace to animate. If `mr_id` is set, uses the most recent trace for that MR. If `gate_run_id` is set, uses that specific gate run. The server returns 400 if `layout: "flow"` and `trace_source` is null. |
 
 The data layer maps to knowledge graph API endpoints:
 - `repo_id` set + `concept` → `GET /repos/:id/graph?concept=:name` (single repo, substring search via query param — distinct from `GET /repos/:id/graph/concept/:name` which serves manifest-based concept projections)
@@ -425,6 +426,7 @@ Specifies spatial arrangement.
 | `"timeline"` | Nodes on a horizontal time axis by `last_modified` or delta timestamp. | Change history, evolution |
 | `"side-by-side"` | Two sub-views side by side. Used for spec realization and diffs. Not to be confused with the Split content area layout (§2) which is the main+detail panel pattern. | Comparison, before/after |
 | `"diff"` | Structural diff — added/modified/removed nodes between two graph snapshots. | Preview impact, change review |
+| `"flow"` | Animated particle flow (Vizceral-inspired). Nodes are services/modules; edges show data flow as animated particles. Each particle = one traced request. Node badges show aggregate metrics (RPS, error rate). Time-scrubbable. Requires `trace_source` in the data layer. | Request flow, data pipelines, understanding "what happens when X calls Y" |
 
 **Composability:** A `"side-by-side"` layout contains two sub-view specs:
 
@@ -461,6 +463,9 @@ Maps data attributes to visual properties.
 | `group_by` | `file_path`, `node_type`, `spec_path` | Visual grouping (background rectangle around group). |
 | `edge_color` | `edge_type` | Edge stroke color by type. |
 | `edge_style` | `edge_type` | Edge stroke style (solid, dashed, dotted). |
+| `particle_color` | `status`, `span_kind` | Particle fill color in `"flow"` layout. Success = blue, error = red. |
+| `particle_speed` | `duration_us` | Particle animation speed in `"flow"` layout. Faster spans = faster particles. |
+| `node_badge` | `rps`, `error_rate`, `latency_p99` | Aggregate metric badge on nodes in `"flow"` layout (Vizceral-style ring gauge). |
 
 All encoding fields reference `GraphNode` or `GraphEdge` attributes from `realized-model.md`.
 
@@ -761,6 +766,7 @@ For views exceeding ~500 nodes, the Explorer automatically applies a filter: onl
 | `timeline` | d3-scale (time axis) + Svelte | Nodes positioned on time axis |
 | `side-by-side` | CSS Grid (50/50 or 60/40) | Two sub-views rendered independently |
 | `diff` | Custom Svelte component | Added/modified/removed node cards |
+| `flow` | Custom Svelte + Canvas 2D (particle rendering) | Vizceral-inspired animated flow. SVG for nodes/edges, Canvas overlay for particles (performance). WebGL fallback for >100 concurrent particles. |
 
 ### Interaction Events
 

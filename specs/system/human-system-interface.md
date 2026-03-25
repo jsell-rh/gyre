@@ -633,6 +633,32 @@ LLM generates view definition:
 
 The view renders with the LLM's explanation as a sidebar annotation. The user can save the view for reuse or refine the question.
 
+**Flow layout example — LLM-generated animated trace view:**
+```
+User: "Show me how a payment retry request flows through the system"
+
+LLM generates:
+{
+  "name": "Payment retry flow",
+  "data": {
+    "concept": "retry",
+    "node_types": ["Endpoint", "Function", "Type"],
+    "depth": 3,
+    "repo_id": "<payment-api-repo-id>",
+    "trace_source": {"mr_id": "<latest-mr-touching-retry>"}
+  },
+  "layout": "flow",
+  "encoding": {
+    "particle_color": {"field": "status", "scale": {"ok": "#3b82f6", "error": "#ef4444"}},
+    "node_badge": "latency_p99",
+    "label": "name"
+  },
+  "explanation": "This shows the retry request path: POST /payments/retry → check_idempotency → PaymentGateway::charge → RecordResult::save. Particles represent test requests from the last gate run."
+}
+```
+
+The LLM selects `"flow"` layout when the question implies data movement ("how does X flow", "what happens when Y calls Z", "show me the request path for W"). For structural questions ("what is X made of", "what depends on Y"), it uses `"graph"` or `"hierarchical"`.
+
 **Important constraint:** The LLM has access only to the knowledge graph API (read-only). It cannot modify code, create tasks, or trigger agent actions. It is a *query translator*, not an agent.
 
 ### Three Lenses
