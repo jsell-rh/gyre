@@ -71,6 +71,8 @@ A **status bar** at the bottom of the application shows trust level, budget usag
 
 **Entrypoint:** First visit lands on Explorer at tenant scope (workspace cards). After workspace selection, redirects to Inbox at workspace scope — the default landing view. Subsequent visits restore the last-used workspace and land on the Inbox. See `ui-layout.md` §1 for full entrypoint flow.
 
+**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored on the user profile (existing `UserPreferences` or a new `user_workspace_state` table). The `[▾ 24h]` dropdown in the Briefing overrides `last_seen_at` with a fixed time range (`?since=<epoch>`).
+
 Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
 - `/workspaces/:id/inbox` — workspace-scoped inbox
@@ -187,7 +189,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
 
 This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy.
 
-**Priority and override behavior:** The `require-human-spec-approval` policy uses `priority: 999` and is marked as `immutable: true` (a new boolean flag on `Policy` — requires amending `abac-policy-engine.md`). Immutable policies cannot be overridden regardless of priority — the ABAC evaluation engine processes immutable Deny policies FIRST, before any priority-based evaluation. This amends `abac-policy-engine.md` §"Policy Composition" rule 2 ("higher priority always wins") by adding a precondition: "immutable Deny policies are evaluated before all others and cannot be overridden by any Allow policy regardless of priority." The `system-full-access` policy (which enables server-internal operations) operates at `priority: 1000` but only applies to `subject.id == "gyre-system-token"`, not to spec approval — spec approval actions are carved out from `system-full-access` via an explicit condition: `actions: ["*"] EXCEPT approve ON spec`. This means even the superuser token cannot approve specs programmatically.
+**Priority and override behavior:** The `require-human-spec-approval` policy uses `priority: 999` and is marked as `immutable: true` (a new boolean flag on `Policy` — requires amending `abac-policy-engine.md`). Immutable policies cannot be overridden regardless of priority — the ABAC evaluation engine processes immutable Deny policies FIRST, before any priority-based evaluation. This amends `abac-policy-engine.md` §"Policy Composition" rule 2 ("higher priority always wins") by adding a precondition: "immutable Deny policies are evaluated before all others and cannot be overridden by any Allow policy regardless of priority." The `system-full-access` policy operates at `priority: 1000` and applies only to `subject.id == "gyre-system-token"`. To carve out spec approval, a **separate** immutable deny policy is used (the `builtin:require-human-spec-approval` defined above at priority 999). Since immutable Deny policies are evaluated first (before any priority-based Allow), the `system-full-access` Allow at priority 1000 cannot override the immutable Deny at priority 999. No `EXCEPT` syntax needed — the carve-out is achieved through policy composition (two separate policies), not a single policy with exclusion syntax.
 
 The Custom trust editor grays out immutable policies with tooltip: "This policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
@@ -512,6 +514,17 @@ Clicking "Ask why" spawns an interrogation agent with:
   effect: allow
   actions: ["write"]
   resource_types: ["message"]
+  conditions:
+    - attribute: subject.id
+      operator: equals
+      value: "agent:INTERROGATION_AGENT_UUID"
+
+- name: interrogation-allow-read-INTERROGATION_AGENT_UUID
+  scope: tenant
+  priority: 202
+  effect: allow
+  actions: ["read"]
+  resource_types: ["conversation", "explorer_view"]
   conditions:
     - attribute: subject.id
       operator: equals
@@ -852,7 +865,7 @@ These are architectural constraints, not implementation work. They ensure we don
 |---|---|
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays and structural prediction are deferred — the meta-specs preview loop (Editor Split in `ui-layout.md` §8) replaces inline ghost overlays with a dedicated preview workflow. |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. |
-| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). |
+| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent), `message.send` (scope: workspace), `message.poll` (scope: agent), `message.ack` (scope: agent) — per `message-bus.md` MCP tools section. |
