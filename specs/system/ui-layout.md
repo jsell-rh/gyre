@@ -126,7 +126,7 @@ The detail panel slides in from the right when the user clicks an entity (node, 
 
 Note: The tab set is contextual per entity type. An MR shows Info/Diff/Gates/Attestation/Ask Why. A graph node shows Info/Spec/Chat/History. An agent shows Info/Chat/History. The tabs listed above are the superset — only applicable tabs appear.
 
-**Pop Out:** Expands the detail panel to full-width (replaces the main content temporarily). The sidebar and breadcrumb remain — the user is still in the same nav context, just viewing the entity detail at full width. This is NOT a standalone routable page — it's a panel expansion. Back button or Esc returns to the split layout. Entity views from `platform-model.md` §9 (Task Board, Agent List, etc.) are accessed exclusively through this drill-down pattern, never as primary navigation items.
+**Pop Out:** Expands the detail panel to full-width (replaces the main content temporarily). The sidebar and breadcrumb remain — the user is still in the same nav context. The URL updates to include the entity ID as a query param (e.g., `/workspaces/:id/explorer?detail=agent:uuid&expanded=true`) so the state is deep-linkable and shareable. Back button or Esc returns to the split layout. Entity views from `platform-model.md` §9 (Task Board, Agent List, etc.) are accessed exclusively through this drill-down pattern, never as primary navigation items.
 
 ### Canvas + Controls
 
@@ -154,7 +154,7 @@ Below the canvas, a control bar with:
 - Lens selector (Structural / Evaluative / Observable)
 - View selector (Boundary / Spec Realization / Change / saved views / LLM-generated)
 - Search input (`/` to focus — canvas-local search, highlights matching nodes)
-- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate`). Request: `{question: "How does auth work?", repo_id?: "<uuid>"}`. Response: `{view_spec: {...}, explanation: "..."}`. The server calls the LLM with the question + graph summary, returns a view spec JSON per the grammar in §4. The generated view is **ephemeral** (not auto-saved) — the user can save it explicitly via the saved views CRUD. Requires workspace membership. ABAC resource type: `explorer_view`.
+- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate`). Request: `{question: "How does auth work?", repo_id?: "<uuid>"}`. Response (200): `{view_spec: {...}, explanation: "..."}`. On error or unanswerable question: `{view_spec: null, explanation: "I cannot visualize that — here's why...", fallback: {layout: "list", ...}}` (200 with null view_spec and a fallback list view). The server sends the LLM: the question, the list of available node types and counts in the workspace, and the view spec grammar schema. The LLM produces a view spec or explains why it can't. The generated view is **ephemeral** (not auto-saved) — the user can save it explicitly via the saved views CRUD. Requires workspace membership. ABAC resource type: `explorer_view`.
 
 When a node is clicked, the Split layout activates (canvas compresses to 60%, detail panel at 40%).
 
@@ -384,7 +384,7 @@ Specifies spatial arrangement.
 
 This enables the LLM to compose visualizations from primitives — a graph next to a table, a timeline with embedded lists, a spec alongside its realization graph.
 
-**Nesting depth limit:** `side-by-side` sub-views cannot themselves contain `side-by-side` layouts. Maximum composition depth is 1 (a `side-by-side` of two non-composite layouts). The Explorer rejects deeper nesting with a validation error.
+**Nesting depth limit:** `side-by-side` sub-views cannot themselves contain `side-by-side` layouts. Maximum composition depth is 1. Validated **both** server-side (the `/explorer-views` CRUD and `/generate` endpoints reject invalid specs with 400) and client-side (the Svelte renderer checks before rendering and shows an error message instead of crashing).
 
 ### Encoding Layer
 
