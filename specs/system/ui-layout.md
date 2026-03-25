@@ -156,6 +156,66 @@ Below the canvas, a control bar with:
 - Search input (`/` to focus — canvas-local search, highlights matching nodes)
 - Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate`). Request: `{question: "How does auth work?", repo_id?: "<uuid>"}`. Response (200): `{view_spec: {...}, explanation: "..."}`. On error or unanswerable question: `{view_spec: null, explanation: "I cannot visualize that — here's why...", fallback: {layout: "list", ...}}` (200 with null view_spec and a fallback list view). The server sends the LLM: the question, the list of available node types and counts in the workspace, and the view spec grammar schema. The LLM produces a view spec or explains why it can't. The generated view is **ephemeral** (not auto-saved) — the user can save it explicitly via the saved views CRUD. Requires workspace membership. ABAC resource type: `explorer_view`. **Budget:** LLM calls from `generate`, `briefing/ask`, and `specs/assist` endpoints are charged to the workspace budget as `llm_query` cost entries (using the existing cost tracking from `analytics.md`). Rate limited to 10 requests/minute per user per workspace.
 
+### LLM Endpoint Contract
+
+All three LLM endpoints (`explorer-views/generate`, `briefing/ask`, `specs/assist`) share these behaviors:
+
+**Streaming:** All responses stream via Server-Sent Events (SSE). The client sends a POST, the server responds with `Content-Type: text/event-stream`. Events:
+- `event: partial` — incremental JSON chunks (for `explanation` and `answer` fields)
+- `event: complete` — final complete JSON response (view_spec, diff, or answer)
+- `event: error` — error message if the LLM fails
+
+The client renders incrementally as `partial` events arrive (explanation text appears progressively). The `complete` event carries the full response for client-side caching. If the connection drops before `complete`, the client retries with the same request (idempotent — same question produces same view).
+
+**Prompt storage and versioning:** Each endpoint uses a **system prompt template** stored in the repo as a versioned spec file:
+
+```
+specs/prompts/
+  explorer-generate.md    — system prompt for view generation
+  briefing-ask.md         — system prompt for briefing Q&A
+  specs-assist.md         — system prompt for spec editing
+```
+
+These prompt templates are:
+- **Versioned in git** alongside other specs — changes are tracked, diffable, and subject to spec approval
+- **Parameterized** with runtime context (workspace graph summary, current spec content, etc.) injected at call time
+- **Bound to the workspace's meta-spec-set** — if the workspace has custom principles or standards, those are injected into the prompt context
+- **Auditable** — the prompt template version (git SHA) is recorded in cost entries for reproducibility
+
+The prompt template format:
+
+```markdown
+# Explorer View Generation Prompt
+
+## Role
+You are an architecture visualization assistant for the Gyre platform.
+
+## Available Data
+You have access to the knowledge graph for workspace "{{workspace_name}}".
+Node types available: {{node_type_summary}}
+Total nodes: {{node_count}}
+
+## Output Format
+Produce a JSON view specification matching this grammar:
+{{view_spec_grammar}}
+
+## Constraints
+- Only reference node types that exist in the graph
+- Keep depth <= 3 to avoid overwhelming the canvas
+- Prefer hierarchical layout for containment questions, graph for relationships
+```
+
+Variables enclosed in `{{...}}` are substituted at runtime by the server. The template itself is static text committed to git.
+
+**Model selection:** The server selects the LLM model based on workspace configuration (stored on the Workspace entity as `llm_model: Option<String>`, defaulting to the server's `GYRE_LLM_MODEL` env var). This allows different workspaces to use different models (e.g., a cost-sensitive workspace uses a smaller model).
+
+**Token limits:** Each endpoint has a configurable max output token limit:
+- `explorer-views/generate`: 2,000 tokens (view specs are compact JSON)
+- `briefing/ask`: 4,000 tokens (narrative answers can be longer)
+- `specs/assist`: 4,000 tokens (spec diffs can be substantial)
+
+These are configurable via `GYRE_LLM_MAX_TOKENS_GENERATE`, `GYRE_LLM_MAX_TOKENS_ASK`, `GYRE_LLM_MAX_TOKENS_ASSIST`.
+
 When a node is clicked, the Split layout activates (canvas compresses to 60%, detail panel at 40%).
 
 ### Editor Split
