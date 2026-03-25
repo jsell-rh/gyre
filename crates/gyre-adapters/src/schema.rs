@@ -548,6 +548,14 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    meta_spec_sets (workspace_id) {
+        workspace_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
     agents,
@@ -589,4 +597,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     spec_approval_events,
     tenants,
     messages,
+    meta_spec_sets,
 );

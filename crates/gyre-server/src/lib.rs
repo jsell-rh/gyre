@@ -52,11 +52,12 @@ use gyre_ports::{
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
     ContainerAuditRepository, CostRepository, DependencyRepository, GateResultRepository,
     GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
-    PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository, RepoRepository,
-    ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository,
-    SpecLedgerRepository, SpecPolicyRepository, TaskRepository, TeamRepository, UserRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
+    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
+    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
+    TeamRepository, UserRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -289,8 +290,8 @@ pub struct AppState {
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
     pub graph_store: Arc<dyn GraphPort>,
-    /// Workspace meta-spec sets: workspace_id -> MetaSpecSet (M32).
-    pub meta_spec_sets: Arc<Mutex<HashMap<String, api::meta_specs::MetaSpecSet>>>,
+    /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
+    pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -671,7 +672,10 @@ pub fn build_state(
         notifications: Arc::new(mem::MemNotificationRepository::default()),
         wg_config: WireGuardConfig::from_env(),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
-        meta_spec_sets: Arc::new(Mutex::new(HashMap::new())),
+        meta_spec_sets: store!(
+            dyn MetaSpecSetRepository,
+            mem::MemMetaSpecSetRepository::default()
+        ),
     })
 }
 

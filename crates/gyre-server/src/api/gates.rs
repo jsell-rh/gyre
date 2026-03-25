@@ -114,17 +114,6 @@ fn gate_status_str(s: &GateStatus) -> String {
 // Spec Approval types
 // ---------------------------------------------------------------------------
 
-/// Request body for POST /api/v1/specs/approve.
-#[derive(Deserialize)]
-pub struct ApproveSpecRequest {
-    /// Relative spec path, e.g. "specs/system/agent-gates.md".
-    pub path: String,
-    /// Git blob SHA of the spec at approval time (must be 40-char hex).
-    pub sha: String,
-    /// Optional Sigstore signature.
-    pub signature: Option<String>,
-}
-
 #[derive(Serialize)]
 pub struct SpecApprovalResponse {
     pub id: String,
@@ -155,14 +144,6 @@ impl From<SpecApproval> for SpecApprovalResponse {
             active,
         }
     }
-}
-
-/// Request body for POST /api/v1/specs/revoke.
-#[derive(Deserialize)]
-pub struct RevokeSpecRequest {
-    /// Approval ID to revoke.
-    pub approval_id: String,
-    pub reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,46 +255,6 @@ pub async fn list_mr_gate_results(
 // Handlers — Spec Approval Ledger
 // ---------------------------------------------------------------------------
 
-/// POST /api/v1/specs/approve — record an approval of a spec at a specific SHA.
-///
-/// The SHA must be a 40-character hex string to prevent git argument injection.
-/// The approver identity is derived server-side from the authenticated caller.
-#[instrument(skip(state, req, auth))]
-pub async fn approve_spec(
-    State(state): State<Arc<AppState>>,
-    auth: crate::auth::AuthenticatedAgent,
-    Json(req): Json<ApproveSpecRequest>,
-) -> Result<(StatusCode, Json<SpecApprovalResponse>), ApiError> {
-    // Validate SHA is 40-char hex (security: prevents git argument injection).
-    if req.sha.len() != 40 || !req.sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(ApiError::InvalidInput(
-            "spec_sha must be a 40-character hex string".to_string(),
-        ));
-    }
-    if req.path.is_empty() {
-        return Err(ApiError::InvalidInput(
-            "spec path must not be empty".to_string(),
-        ));
-    }
-
-    // Derive approver_id server-side from authenticated caller — never trust client-supplied value.
-    let approver_id = auth
-        .user_id
-        .map(|id| format!("user:{id}"))
-        .unwrap_or_else(|| format!("agent:{}", auth.agent_id));
-
-    let now = now_secs();
-    let mut approval = SpecApproval::new(new_id(), req.path, req.sha, approver_id, now);
-    approval.signature = req.signature;
-
-    state.spec_approvals.create(&approval).await?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(SpecApprovalResponse::from(approval)),
-    ))
-}
-
 /// GET /api/v1/specs/approvals — list all spec approvals (optionally filter by ?path=).
 pub async fn list_spec_approvals(
     State(state): State<Arc<AppState>>,
@@ -329,58 +270,6 @@ pub async fn list_spec_approvals(
         all.into_iter().map(SpecApprovalResponse::from).collect();
     result.sort_by_key(|a| a.approved_at);
     Ok(Json(result))
-}
-
-/// POST /api/v1/specs/revoke — revoke an existing spec approval.
-///
-/// Only the original approver or an Admin may revoke an approval.
-#[instrument(skip(state, req, auth))]
-pub async fn revoke_spec_approval(
-    State(state): State<Arc<AppState>>,
-    auth: crate::auth::AuthenticatedAgent,
-    Json(req): Json<RevokeSpecRequest>,
-) -> Result<Json<SpecApprovalResponse>, ApiError> {
-    // Derive caller identity server-side.
-    let caller_id = auth
-        .user_id
-        .as_ref()
-        .map(|id| format!("user:{id}"))
-        .unwrap_or_else(|| format!("agent:{}", auth.agent_id));
-    let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
-
-    let approval = state
-        .spec_approvals
-        .find_by_id(&Id::new(&req.approval_id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("approval {} not found", req.approval_id)))?;
-
-    if approval.revoked_at.is_some() {
-        return Err(ApiError::InvalidInput(
-            "approval is already revoked".to_string(),
-        ));
-    }
-
-    // Authorization: caller must be the original approver or an Admin.
-    if !is_admin && approval.approver_id != caller_id {
-        return Err(ApiError::forbidden(
-            "only the original approver or an Admin may revoke this approval",
-        ));
-    }
-
-    let now = now_secs();
-    state
-        .spec_approvals
-        .revoke(&Id::new(&req.approval_id), &caller_id, &req.reason, now)
-        .await?;
-
-    // Return updated approval.
-    let updated = state
-        .spec_approvals
-        .find_by_id(&Id::new(&req.approval_id))
-        .await?
-        .unwrap_or(approval);
-
-    Ok(Json(SpecApprovalResponse::from(updated)))
 }
 
 /// Check that a spec_ref ("path@sha") has an active approval in the ledger.
@@ -631,159 +520,5 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 0);
-    }
-
-    // ---- Spec Approval tests ----
-
-    #[tokio::test]
-    async fn approve_spec_and_list() {
-        let app = app();
-        // Note: approver_id is NOT in the request body — it is derived server-side.
-        let body = serde_json::json!({
-            "path": "specs/system/agent-gates.md",
-            "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-        });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/specs/approve")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let json = body_json(resp).await;
-        assert_eq!(json["spec_path"], "specs/system/agent-gates.md");
-        assert_eq!(json["active"], true);
-        // Approver identity is derived from auth token, not the request body.
-        let approver_id = json["approver_id"].as_str().unwrap();
-        assert!(
-            approver_id.starts_with("agent:") || approver_id.starts_with("user:"),
-            "approver_id should be server-derived: {approver_id}"
-        );
-
-        // list all
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/specs/approvals")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert_eq!(json.as_array().unwrap().len(), 1);
-    }
-
-    /// Client-supplied approver_id in body must be ignored (not trusted).
-    #[tokio::test]
-    async fn approve_spec_ignores_client_supplied_approver_id() {
-        let app = app();
-        // Include approver_id in body — server should ignore it and use auth identity.
-        let body = serde_json::json!({
-            "path": "specs/system/agent-gates.md",
-            "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-            "approver_id": "user:attacker"
-        });
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/specs/approve")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let json = body_json(resp).await;
-        // Must NOT be the attacker-supplied value.
-        assert_ne!(json["approver_id"], "user:attacker");
-    }
-
-    #[tokio::test]
-    async fn approve_spec_invalid_sha_rejected() {
-        let app = app();
-        let body = serde_json::json!({
-            "path": "specs/system/agent-gates.md",
-            "sha": "not-a-sha"
-        });
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/specs/approve")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn revoke_spec_approval() {
-        let app = app();
-        // First approve (same token = same caller)
-        let body = serde_json::json!({
-            "path": "specs/system/agent-gates.md",
-            "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-        });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/specs/approve")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let json = body_json(resp).await;
-        let approval_id = json["id"].as_str().unwrap().to_string();
-
-        // Then revoke with the same caller — should succeed.
-        // Note: revoked_by is NOT in the request body — it is derived server-side.
-        let revoke_body = serde_json::json!({
-            "approval_id": approval_id,
-            "reason": "spec was superseded"
-        });
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/specs/revoke")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&revoke_body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert_eq!(json["active"], false);
-        assert_eq!(json["revocation_reason"], "spec was superseded");
-        // revoked_by must be set to server-derived caller identity.
-        let revoked_by = json["revoked_by"].as_str().unwrap();
-        assert!(
-            revoked_by.starts_with("agent:") || revoked_by.starts_with("user:"),
-            "revoked_by should be server-derived: {revoked_by}"
-        );
     }
 }
