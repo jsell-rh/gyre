@@ -260,7 +260,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
             |state| async move {
                 state
                     .retention_store
-                    .run_cleanup(&state.activity_store)
+                    .run_cleanup()
                     .await;
                 Ok(())
             },

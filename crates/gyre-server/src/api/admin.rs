@@ -177,7 +177,7 @@ pub async fn admin_export(
         state.agents.list(),
         state.tasks.list(),
         state.merge_requests.list(),
-        async { Ok::<_, anyhow::Error>(state.activity_store.query(None, Some(10_000))) },
+        async { Ok::<_, anyhow::Error>(state.telemetry_buffer.list_all_since(0, 10_000)) },
     )
     .map_err(ApiError::Internal)?;
 
@@ -226,9 +226,17 @@ pub async fn admin_audit(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AuditQuery>,
 ) -> Json<serde_json::Value> {
-    let events = state.activity_store.query(q.since, q.limit);
-    let filtered: Vec<_> = events
+    let since_ms = q.since.unwrap_or(0);
+    let lim = q.limit.unwrap_or(100);
+    let msgs = state.telemetry_buffer.list_all_since(since_ms, lim);
+    // Deserialize payload as ActivityEventData for backward-compatible response format.
+    let filtered: Vec<gyre_common::ActivityEventData> = msgs
         .into_iter()
+        .filter_map(|m| {
+            m.payload
+                .as_ref()
+                .and_then(|p| serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()).ok())
+        })
         .filter(|e| {
             q.agent_id.as_deref().is_none_or(|id| e.agent_id == id)
                 && q.event_type
@@ -297,13 +305,18 @@ pub async fn admin_kill_agent(
         }
     }
 
-    state.activity_store.record(gyre_common::ActivityEventData {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent.id.to_string(),
-        event_type: AgEventType::StateChanged,
-        description: format!("Agent {} force-killed by admin", agent.name),
-        timestamp: now,
-    });
+    let ws_id = agent.workspace_id.clone();
+    state.emit_telemetry(
+        ws_id,
+        gyre_common::message::MessageKind::AgentStatusChanged,
+        Some(serde_json::json!({
+            "event_id": uuid::Uuid::new_v4().to_string(),
+            "agent_id": agent.id.to_string(),
+            "status": "dead",
+            "description": format!("Agent {} force-killed by admin", agent.name),
+            "timestamp": now,
+        })),
+    );
 
     // M23: Emit container_crashed audit event if this agent had a container.
     if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
@@ -353,13 +366,15 @@ pub async fn admin_reassign_agent(
         state.tasks.update(&task).await?;
     }
 
-    state.activity_store.record(gyre_common::ActivityEventData {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent.id.to_string(),
-        event_type: AgEventType::StateChanged,
-        description: format!("Agent {} tasks reassigned to {}", agent.name, target.name),
-        timestamp: now,
-    });
+    let ws_id = agent.workspace_id.clone();
+    state.emit_telemetry(
+        ws_id,
+        gyre_common::message::MessageKind::AgentStatusChanged,
+        Some(serde_json::json!({
+            "agent_id": agent.id.to_string(),
+            "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
+        })),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -581,13 +596,17 @@ pub async fn admin_seed(
         ),
     ];
     for (event_id, agent_id, event_type, description, timestamp) in events {
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: event_id.to_string(),
-            agent_id: agent_id.to_string(),
-            event_type,
-            description: description.to_string(),
-            timestamp,
-        });
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": event_id,
+                "agent_id": agent_id,
+                "event_type": event_type,
+                "description": description,
+                "timestamp": timestamp,
+            })),
+        );
     }
 
     Ok(Json(SeedResponse {
@@ -817,13 +836,17 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: "test-event-1".to_string(),
-            agent_id: "agent-1".to_string(),
-            event_type: gyre_common::AgEventType::StateChanged,
-            description: "Test event".to_string(),
-            timestamp: 1000,
-        });
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": "test-event-1",
+                "agent_id": "agent-1",
+                "event_type": "state_changed",
+                "description": "Test event",
+                "timestamp": 1000u64,
+            })),
+        );
 
         let app = api_router().with_state(state);
         let resp = app
@@ -845,20 +868,28 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: "e1".to_string(),
-            agent_id: "agent-x".to_string(),
-            event_type: gyre_common::AgEventType::RunStarted,
-            description: "From agent-x".to_string(),
-            timestamp: 1000,
-        });
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: "e2".to_string(),
-            agent_id: "agent-y".to_string(),
-            event_type: gyre_common::AgEventType::RunStarted,
-            description: "From agent-y".to_string(),
-            timestamp: 2000,
-        });
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": "e1",
+                "agent_id": "agent-x",
+                "event_type": "run_started",
+                "description": "From agent-x",
+                "timestamp": 1000u64,
+            })),
+        );
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": "e2",
+                "agent_id": "agent-y",
+                "event_type": "run_started",
+                "description": "From agent-y",
+                "timestamp": 2000u64,
+            })),
+        );
 
         let app = api_router().with_state(state);
         let resp = app

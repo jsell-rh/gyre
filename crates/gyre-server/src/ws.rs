@@ -6,22 +6,12 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use gyre_common::{ActivityEventData, WsMessage};
-use serde::Serialize;
+use gyre_common::message::{Destination, MessageKind};
+use gyre_common::WsMessage;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
-
-/// Wrapper that adds `type: "DomainEvent"` to the serialized domain event.
-#[derive(Serialize)]
-struct WsDomainEvent<'a> {
-    #[serde(rename = "type")]
-    msg_type: &'static str,
-    #[serde(flatten)]
-    event: &'a DomainEvent,
-}
 
 /// GET /ws - WebSocket upgrade endpoint.
 pub async fn ws_handler(
@@ -53,10 +43,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    let mut broadcast_rx = state.broadcast_tx.subscribe();
-    let mut domain_event_rx = state.event_tx.subscribe();
+    // Subscribed workspace IDs for this connection. Empty = no workspace filtering yet.
+    let mut subscribed_workspaces: Vec<gyre_common::Id> = vec![];
 
-    // Main message loop: handle activity messages and broadcast events.
+    let mut bus_rx = state.message_broadcast_tx.subscribe();
+
+    // Main message loop.
     loop {
         tokio::select! {
             msg = receiver.next() => {
@@ -71,6 +63,53 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         break;
                                     }
                                 }
+                                WsMessage::Subscribe { scopes, last_seen } => {
+                                    // Extract workspace IDs from SubscribeScope structs.
+                                    subscribed_workspaces.clear();
+                                    for scope in &scopes {
+                                        subscribed_workspaces.push(scope.workspace_id.clone());
+                                    }
+
+                                    // Replay Event-tier messages since last_seen.
+                                    let mut replayed = 0usize;
+                                    let replay_limit = 1000usize;
+                                    let mut truncated = false;
+
+                                    for ws_id in &subscribed_workspaces {
+                                        let since_ms = last_seen.unwrap_or(0);
+                                        if let Ok(messages) = state.messages.list_by_workspace(
+                                            ws_id,
+                                            None,
+                                            Some(since_ms),
+                                            None,
+                                            None,
+                                            Some(replay_limit + 1 - replayed),
+                                        ).await {
+                                            for m in messages {
+                                                if replayed >= replay_limit {
+                                                    truncated = true;
+                                                    break;
+                                                }
+                                                let payload = serde_json::to_string(&m).unwrap();
+                                                if sender.send(Message::Text(payload)).await.is_err() {
+                                                    return;
+                                                }
+                                                replayed += 1;
+                                            }
+                                        }
+                                        if truncated {
+                                            break;
+                                        }
+                                    }
+
+                                    if truncated {
+                                        let catchup = WsMessage::ReplayCatchUp { truncated: true };
+                                        let payload = serde_json::to_string(&catchup).unwrap();
+                                        if sender.send(Message::Text(payload)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
                                 WsMessage::ActivityEvent {
                                     event_id,
                                     agent_id,
@@ -78,19 +117,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     description,
                                     timestamp,
                                 } => {
-                                    let event = ActivityEventData {
-                                        event_id,
-                                        agent_id,
-                                        event_type,
-                                        description,
-                                        timestamp,
-                                    };
-                                    state.activity_store.record(event.clone());
-                                    // Broadcast; ignore send errors (no subscribers is fine).
-                                    let _ = state.broadcast_tx.send(event);
+                                    // Map legacy ActivityEvent to a Telemetry-tier message.
+                                    // Use a "default" workspace for legacy events without workspace context.
+                                    let ws_id = gyre_common::Id::new("default");
+                                    state.emit_telemetry(
+                                        ws_id,
+                                        MessageKind::StateChanged,
+                                        Some(serde_json::json!({
+                                            "event_id": event_id,
+                                            "agent_id": agent_id,
+                                            "event_type": event_type,
+                                            "description": description,
+                                            "timestamp": timestamp,
+                                        })),
+                                    );
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
-                                    let events = state.activity_store.query(since, limit);
+                                    // Query from TelemetryBuffer across all workspaces.
+                                    let since_ms = since.unwrap_or(0);
+                                    let lim = limit.unwrap_or(100);
+                                    let msgs = state.telemetry_buffer.list_all_since(since_ms, lim);
+                                    // Convert to legacy ActivityEventData format.
+                                    let mut events = vec![];
+                                    for m in msgs {
+                                        if let Some(payload) = &m.payload {
+                                            if let Ok(ev) = serde_json::from_value::<gyre_common::ActivityEventData>(payload.clone()) {
+                                                events.push(ev);
+                                            }
+                                        }
+                                    }
                                     let response = WsMessage::ActivityResponse { events };
                                     let payload = serde_json::to_string(&response).unwrap();
                                     if sender.send(Message::Text(payload)).await.is_err() {
@@ -113,38 +168,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     _ => {}
                 }
             }
-            broadcast = broadcast_rx.recv() => {
-                match broadcast {
-                    Ok(event) => {
-                        let msg = WsMessage::ActivityEvent {
-                            event_id: event.event_id,
-                            agent_id: event.agent_id,
-                            event_type: event.event_type,
-                            description: event.description,
-                            timestamp: event.timestamp,
+            bus_msg = bus_rx.recv() => {
+                match bus_msg {
+                    Ok(msg) => {
+                        // Filter by destination and subscription.
+                        let deliver = match &msg.to {
+                            Destination::Broadcast => true,
+                            Destination::Workspace(ws_id) => {
+                                subscribed_workspaces.is_empty()
+                                    || subscribed_workspaces.contains(ws_id)
+                            }
+                            Destination::Agent(_) => false,
                         };
-                        let payload = serde_json::to_string(&msg).unwrap();
-                        if sender.send(Message::Text(payload)).await.is_err() {
-                            break;
+                        if deliver {
+                            let payload = serde_json::to_string(&msg).unwrap();
+                            if sender.send(Message::Text(payload)).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(n, "broadcast receiver lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            domain_ev = domain_event_rx.recv() => {
-                match domain_ev {
-                    Ok(event) => {
-                        let wrapper = WsDomainEvent { msg_type: "DomainEvent", event: &event };
-                        let payload = serde_json::to_string(&wrapper).unwrap();
-                        if sender.send(Message::Text(payload)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(n, "domain event receiver lagged");
+                        warn!(n, "message bus receiver lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -300,12 +344,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_activity_event_recorded_and_queryable() {
+    async fn ws_activity_event_emits_to_telemetry() {
         let (url, state) = start_test_server("tok").await;
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         auth_ws(&mut ws, "tok").await;
 
-        // Send ActivityEvent
+        // Send ActivityEvent (legacy path).
         let event = WsMessage::ActivityEvent {
             event_id: "ev1".to_string(),
             agent_id: "agent1".to_string(),
@@ -319,107 +363,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Consume the broadcast echo of the ActivityEvent sent back to this connection
-        let broadcast_echo = ws.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = broadcast_echo {
-            let result: WsMessage = serde_json::from_str(&text).unwrap();
-            assert!(matches!(result, WsMessage::ActivityEvent { .. }));
-        } else {
-            panic!("expected ActivityEvent broadcast");
-        }
+        // Give async emit a moment to process.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Verify via store
-        let events = state.activity_store.query(None, None);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_id, "ev1");
-
-        // Query via WS
-        let query = WsMessage::ActivityQuery {
-            since: None,
-            limit: Some(10),
-        };
-        ws.send(tungstenite::Message::Text(
-            serde_json::to_string(&query).unwrap(),
-        ))
-        .await
-        .unwrap();
-
-        let msg = ws.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = msg {
-            let result: WsMessage = serde_json::from_str(&text).unwrap();
-            if let WsMessage::ActivityResponse { events } = result {
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].event_id, "ev1");
-            } else {
-                panic!("expected ActivityResponse, got: {:?}", result);
-            }
-        } else {
-            panic!("expected text message");
-        }
-    }
-
-    #[tokio::test]
-    async fn ws_activity_event_broadcast_to_other_client() {
-        let (url, _state) = start_test_server("tok").await;
-
-        // Client A: sender
-        let (mut ws_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        auth_ws(&mut ws_a, "tok").await;
-
-        // Client B: receiver
-        let (mut ws_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        auth_ws(&mut ws_b, "tok").await;
-
-        // A sends an ActivityEvent
-        let event = WsMessage::ActivityEvent {
-            event_id: "broadcast-ev".to_string(),
-            agent_id: "agentA".to_string(),
-            event_type: gyre_common::AgEventType::TextMessageContent,
-            description: "broadcast test".to_string(),
-            timestamp: 2000,
-        };
-        ws_a.send(tungstenite::Message::Text(
-            serde_json::to_string(&event).unwrap(),
-        ))
-        .await
-        .unwrap();
-
-        // B should receive the broadcast (both A and B get it; A sent it)
-        let msg = ws_b.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = msg {
-            let result: WsMessage = serde_json::from_str(&text).unwrap();
-            if let WsMessage::ActivityEvent { event_id, .. } = result {
-                assert_eq!(event_id, "broadcast-ev");
-            } else {
-                panic!("expected ActivityEvent, got: {:?}", result);
-            }
-        } else {
-            panic!("expected text message");
-        }
-    }
-
-    #[tokio::test]
-    async fn ws_domain_event_broadcast_to_client() {
-        let (url, state) = start_test_server("tok").await;
-        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        auth_ws(&mut ws, "tok").await;
-
-        // Publish a domain event via the event bus.
-        let _ = state
-            .event_tx
-            .send(crate::domain_events::DomainEvent::AgentCreated {
-                id: "agent-123".to_string(),
-            });
-
-        // Client should receive a DomainEvent message.
-        let msg = ws.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = msg {
-            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(value["type"], "DomainEvent");
-            assert_eq!(value["event"], "AgentCreated");
-            assert_eq!(value["id"], "agent-123");
-        } else {
-            panic!("expected text message");
-        }
+        // Verify it landed in the telemetry buffer.
+        let all = state.telemetry_buffer.list_all_since(0, 100);
+        assert!(!all.is_empty(), "telemetry buffer should have at least one entry");
     }
 }

@@ -15,7 +15,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_common::{ActivityEventData, AgEventType, Id};
+use gyre_common::Id;
 use gyre_domain::{MergeRequest, Task, TaskPriority, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -522,16 +522,21 @@ async fn handle_record_activity(state: &AppState, args: &Value) -> Value {
         Some(d) => d.to_string(),
         None => return tool_error("missing required field: description"),
     };
-    let event = ActivityEventData {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id,
-        event_type: AgEventType::from(event_type_str),
-        description,
-        timestamp: now_secs(),
-    };
-    let event_id = event.event_id.clone();
-    state.activity_store.record(event.clone());
-    let _ = state.broadcast_tx.send(event);
+    let event_id = uuid::Uuid::new_v4().to_string();
+    // Emit as Telemetry-tier message via unified bus.
+    // Use a "default" workspace since MCP callers don't have workspace context here.
+    let ws_id = gyre_common::Id::new("default");
+    state.emit_telemetry(
+        ws_id,
+        gyre_common::message::MessageKind::StateChanged,
+        Some(serde_json::json!({
+            "event_id": event_id,
+            "agent_id": agent_id,
+            "event_type": event_type_str,
+            "description": description,
+            "timestamp": now_secs(),
+        })),
+    );
     tool_result(format!("Recorded activity event {event_id}"))
 }
 
@@ -564,16 +569,17 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
             if let Err(e) = agent.transition_status(AgentStatus::Idle) {
                 return tool_error(format!("Status transition failed: {e}"));
             }
-            // Record completion event
-            let event = ActivityEventData {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                agent_id: agent_id.clone(),
-                event_type: AgEventType::RunFinished,
-                description: format!("Agent {} completed task", agent.name),
-                timestamp: now_secs(),
-            };
-            state.activity_store.record(event.clone());
-            let _ = state.broadcast_tx.send(event);
+            // Record completion event via unified bus.
+            let ws_id = agent.workspace_id.clone();
+            state.emit_telemetry(
+                ws_id,
+                gyre_common::message::MessageKind::AgentStatusChanged,
+                Some(serde_json::json!({
+                    "agent_id": agent_id,
+                    "status": "idle",
+                    "reason": format!("Agent {} completed task", agent.name),
+                })),
+            );
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),
@@ -1027,20 +1033,14 @@ pub async fn mcp_sse_handler(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedAgent,
 ) -> impl IntoResponse {
-    let rx = state.broadcast_tx.subscribe();
+    let rx = state.message_broadcast_tx.subscribe();
     let event_stream = stream::unfold(rx, |mut rx| async move {
         loop {
             match rx.recv().await {
-                Ok(event) => {
-                    let data = serde_json::to_string(&json!({
-                        "event_id": event.event_id,
-                        "agent_id": event.agent_id,
-                        "event_type": event.event_type,
-                        "description": event.description,
-                        "timestamp": event.timestamp,
-                    }))
-                    .unwrap_or_default();
-                    let sse_event = Event::default().event("activity").data(data);
+                Ok(msg) => {
+                    let data = serde_json::to_string(&msg).unwrap_or_default();
+                    // Map all bus messages to SSE "message" events.
+                    let sse_event = Event::default().event("message").data(data);
                     return Some((Ok::<Event, std::convert::Infallible>(sse_event), rx));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
