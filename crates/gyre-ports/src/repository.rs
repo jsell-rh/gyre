@@ -11,4 +11,11 @@ pub trait RepoRepository: Send + Sync {
     async fn update(&self, repo: &Repository) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Repository>>;
+    /// Find a repository by name within a workspace.
+    /// Required for git URL resolution: /git/:workspace_slug/:repo_name/*.
+    async fn find_by_name_and_workspace(
+        &self,
+        workspace_id: &Id,
+        name: &str,
+    ) -> Result<Option<Repository>>;
 }

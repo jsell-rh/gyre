@@ -300,6 +300,20 @@ impl RepoRepository for MemRepoRepository {
             .cloned()
             .collect())
     }
+
+    async fn find_by_name_and_workspace(
+        &self,
+        workspace_id: &Id,
+        name: &str,
+    ) -> Result<Option<Repository>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|r| &r.workspace_id == workspace_id && r.name == name)
+            .cloned())
+    }
 }
 
 #[derive(Default)]
@@ -1211,6 +1225,16 @@ impl WorkspaceRepository for MemWorkspaceRepository {
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>> {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|ws| ws.tenant_id.as_str() == tenant_id.as_str() && ws.slug == slug)
+            .cloned())
     }
 
     async fn list(&self) -> Result<Vec<Workspace>> {
