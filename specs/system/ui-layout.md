@@ -318,7 +318,7 @@ Different recipients have different capabilities:
 In the Spec tab of any detail panel, or in the Editor Split layout:
 
 1. Human types a change request in the chat input: "Add a section on error handling for the timeout case"
-2. Frontend calls `POST /api/v1/repos/:repo_id/specs/assist` — request: `{spec_path, instruction}`, response: `{diff: [{op, content}], explanation}`. The LLM reads the current spec + knowledge graph context
+2. Frontend calls `POST /api/v1/repos/:repo_id/specs/assist` — request: `{spec_path, instruction}`, response: `{diff: [{op, content}], explanation}`. ABAC: `RouteResourceMapping` with `resource_type: "spec"`, `repo_param: "repo_id"`, `action: "write"`. The LLM reads the current spec + knowledge graph context
 3. LLM produces a draft revision shown as an inline diff block in the editor:
    ```
    ┌─ Suggested Change ──────────────────────────┐
@@ -566,7 +566,7 @@ Full-Width layout. Content adapts to scope:
 
 Click a spec → detail panel opens with tabs: **Content** (markdown viewer), **Edit** (markdown editor + LLM chat via `POST /repos/:id/specs/assist`), **Progress** (task list with status), **Links** (spec link graph for this spec), **History** (approval event timeline).
 
-Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path` (detail), `GET /api/v1/specs/:path/links` (links — defined in `spec-links.md`), `GET /api/v1/specs/:path/history` (history — approval event timeline, new endpoint), `GET /api/v1/specs/:path/progress` (task rollup, new endpoint). New sub-endpoints use `RouteResourceMapping` with `resource_type: "spec"`, `workspace_param` resolved from the spec's owning repo's workspace.
+Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path` (detail), `GET /api/v1/specs/:path/links` (links — defined in `spec-links.md`), `GET /api/v1/specs/:path/history` (approval event timeline — response: `[{event: "approved"|"invalidated"|"created", user_id, timestamp, sha}]`), `GET /api/v1/specs/:path/progress` (task rollup — response: `{total_tasks, completed_tasks, tasks: [{id, title, status, agent_id}]}`). New sub-endpoints use `RouteResourceMapping` with `resource_type: "spec"`, `workspace_param` resolved from the spec's owning repo's workspace.
 
 ---
 

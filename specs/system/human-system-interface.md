@@ -139,6 +139,8 @@ One click. No ABAC knowledge required.
 - **Preset → Custom:** Server preserves the current preset's policies as the starting point. The user can then add/edit/delete via the policy editor.
 - **Custom → Preset:** Server deletes all `trust:` prefixed policies, then creates the preset's policies. Built-in policies (`builtin:` prefix) and user-created policies (no prefix) are preserved.
 
+All trust level transitions are performed in a **single database transaction** — if creating the new policies fails, the old policies are preserved. This prevents a crash from leaving the workspace in a policy-less state.
+
 **Policy naming conventions:**
 - `trust:` prefix — trust-preset-managed, deleted and recreated on trust level transitions
 - `builtin:` prefix — immutable server-seeded policies, never deleted by trust transitions
@@ -242,6 +244,13 @@ CREATE TABLE notifications (
 CREATE INDEX idx_notifications_user_ws ON notifications (user_id, workspace_id, resolved_at);
 ```
 The `dismissed_at` field tracks user dismissals (used by trust suggestions to suppress re-creation for 30 days). The `resolved_at` field tracks resolution (action taken). The Inbox badge count is the count of notifications where `resolved_at IS NULL AND dismissed_at IS NULL`.
+
+**Notification endpoints:**
+- `GET /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=` — list notifications for the authenticated user (no ABAC resource type needed — `/users/me/*` endpoints are implicitly scoped to the authenticated user's identity)
+- `PUT /api/v1/notifications/:id/dismiss` — set `dismissed_at` to now. Response: 204.
+- `PUT /api/v1/notifications/:id/resolve` — set `resolved_at` to now. Request body: `{action_taken: "approved"}` (optional, for audit). Response: 204.
+
+Both mutation endpoints verify the notification belongs to the authenticated user (per-handler auth, not ABAC middleware).
 
 ---
 
@@ -941,7 +950,9 @@ These are architectural constraints, not implementation work. They ensure we don
 | `realized-model.md` briefing endpoint | `GET /workspaces/:id/briefing` should use `last_seen_at` from `user_workspace_state` as default `since` when `?since=` parameter is omitted. |
 | `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. Also verify `GraphNode` struct has `test_coverage` field (present in struct but missing from DB schema per realized-model.md §8). |
 | `spec-lifecycle.md` §Configuration | Add `"specs/prompts/"` to `ignored_paths` — prompt templates should iterate quickly without formal spec approval (per `ui-layout.md` §2). |
-| `realized-model.md` §7 briefing endpoint | The `GET /workspaces/:id/briefing` response schema is extended by `human-system-interface.md` §9 — the richer schema (completed/in_progress/cross_workspace/exceptions/metrics sections) supersedes `realized-model.md`'s original narrative-only format. The knowledge graph narrative generation (§6) feeds the briefing's structural change descriptions. |
+| `realized-model.md` §7 briefing endpoint | The `GET /workspaces/:id/briefing` response schema is extended by `human-system-interface.md` §9 — the richer schema (completed/in_progress/cross_workspace/exceptions/metrics sections) builds on `realized-model.md`'s narrative generation. The original narrative fields are preserved; new sections are additive. The knowledge graph narrative generation (§6) feeds the briefing's structural change descriptions. |
+| `realized-model.md` §7 API table | Add workspace-scoped concept search: `GET /workspaces/:id/graph/concept/:name`. |
+| `realized-model.md` §8 DB schema | Add `test_coverage REAL` column to `graph_nodes` table (present in Rust struct, was missing from DB schema). |
 
 All amendments have been applied inline to the upstream specs in this PR. The table above serves as a cross-reference of what was changed and why.
 
