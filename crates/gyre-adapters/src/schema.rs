@@ -529,6 +529,25 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    messages (id) {
+        id -> Text,
+        tenant_id -> Text,
+        from_type -> Text,
+        from_id -> Nullable<Text>,
+        workspace_id -> Text,
+        to_type -> Text,
+        to_id -> Nullable<Text>,
+        kind -> Text,
+        payload -> Nullable<Text>,
+        created_at -> BigInt,
+        signature -> Nullable<Text>,
+        key_id -> Nullable<Text>,
+        acknowledged -> Integer,
+        ack_reason -> Nullable<Text>,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
     agents,
@@ -569,4 +588,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     spec_ledger_entries,
     spec_approval_events,
     tenants,
+    messages,
 );
