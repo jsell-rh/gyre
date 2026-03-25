@@ -104,10 +104,12 @@ impl RepoRepository for SqliteStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<Repository>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Repository>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = repositories::table
-                .find(id.as_str())
+                .filter(repositories::tenant_id.eq(&tenant))
+                .filter(repositories::id.eq(id.as_str()))
                 .first::<RepositoryRow>(&mut *conn)
                 .optional()
                 .context("find repository by id")?;
@@ -118,9 +120,11 @@ impl RepoRepository for SqliteStorage {
 
     async fn list(&self) -> Result<Vec<Repository>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Repository>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = repositories::table
+                .filter(repositories::tenant_id.eq(&tenant))
                 .order(repositories::created_at.asc())
                 .load::<RepositoryRow>(&mut *conn)
                 .context("list repositories")?;
@@ -168,9 +172,11 @@ impl RepoRepository for SqliteStorage {
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Repository>> {
         let pool = Arc::clone(&self.pool);
         let workspace_id = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Repository>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = repositories::table
+                .filter(repositories::tenant_id.eq(&tenant))
                 .filter(repositories::workspace_id.eq(workspace_id.as_str()))
                 .order(repositories::created_at.asc())
                 .load::<RepositoryRow>(&mut *conn)
