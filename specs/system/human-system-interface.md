@@ -29,10 +29,11 @@ Sidebar (always visible, always these items):
   Briefing
   Explorer
   Specs
+  Meta-specs
   Admin
 ```
 
-Five items. That's it.
+Six items. That's it.
 
 **Why not scope-dependent sidebar?** Changing the sidebar when the user navigates between scopes is disorienting — the same navigation item moves position or disappears. Notion, Backstage, and VS Code all keep the primary nav stable. The content area is where scope manifests.
 
@@ -55,7 +56,12 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 | **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
 | **Explorer** | Workspace overview cards | Realized architecture (C4 progressive) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
+| **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
 | **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
+
+**Meta-specs at workspace scope** is the primary location for the preview loop from `meta-spec-reconciliation.md`: edit a persona → select target specs → preview agents implement on throwaway branches → view diff → iterate → publish. Reconciliation progress tracking also lives here. At tenant scope, Meta-specs shows a catalog of all personas/principles/standards across workspaces. At repo scope, it redirects to the workspace scope (meta-specs are workspace-scoped, not repo-scoped).
+
+**Where old views live:** Task Board, Merge Queue, Agent List, MR Detail, Repo Detail, Persona Management, and other entity views from `platform-model.md` are **contextual drill-downs** — accessed by clicking an entity reference anywhere in the UI (agent name → slide-in panel, MR link → detail view, etc.). They are not primary navigation items. The Code tab (branches, commits, MRs, merge queue) is accessed via the Explorer at repo scope, not as a separate nav item.
 
 The content adapts. The sidebar doesn't.
 
@@ -65,20 +71,24 @@ Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
 - `/workspaces/:id/inbox` — workspace-scoped inbox
 - `/repos/:id/explorer` — repo-scoped explorer
-- `/repos/:id/specs/system/vision.md` — specific spec in a repo
+- `/repos/:id/specs?path=system/vision.md` — specific spec in a repo (path as query param, not URL segment, to avoid nesting depth violation per `api-conventions.md` §4)
 
 ### Keyboard Navigation
 
 | Shortcut | Action |
 |---|---|
 | `Cmd+K` | Global search (specs, types, concepts, agents) |
-| `i` | Jump to Inbox |
-| `b` | Jump to Briefing |
-| `e` | Jump to Explorer |
-| `s` | Jump to Specs |
+| `Cmd+1` | Jump to Inbox |
+| `Cmd+2` | Jump to Briefing |
+| `Cmd+3` | Jump to Explorer |
+| `Cmd+4` | Jump to Specs |
+| `Cmd+5` | Jump to Meta-specs |
+| `Cmd+6` | Jump to Admin |
 | `Esc` | Close detail panel / go up one scope level |
-| `/` | Focus search within current view |
-| `?` | Show keyboard shortcut reference |
+| `/` | Focus search within current view (suppressed during text input) |
+| `?` | Show keyboard shortcut reference (suppressed during text input) |
+
+Cmd-prefixed shortcuts avoid conflicts with text input (spec editing, chat, search). `/` and `?` are bare keys suppressed when a text input is focused.
 
 ---
 
@@ -124,21 +134,22 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
 
 **Supervised:**
 ```yaml
-- name: require-human-mr-approval
+- name: require-human-mr-review
   effect: deny
-  actions: ["merge"]
+  actions: ["write"]
+  resource_types: ["mr"]
   conditions:
-    - attribute: resource.type
-      operator: equals
-      value: "mr"
     - attribute: subject.type
       operator: not_equals
       value: "user"
+  description: "MR status transitions (including merge) require human action"
 ```
 
-**Guided:** removes the `require-human-mr-approval` policy, keeps `alert-on-gate-failure`.
+The merge processor checks: before processing a queued MR, it evaluates ABAC with `action: "write"` on the MR resource. Under Supervised, this policy blocks the merge processor (which acts as `Server` origin, not `user`) unless a human has explicitly approved the MR via status transition.
 
-**Autonomous:** removes most alert policies, keeps `require-human-spec-approval` and `alert-on-assertion-failure`.
+**Guided:** removes the `require-human-mr-review` policy. The merge processor proceeds autonomously when all gates pass. Gate failures still surface in the Inbox.
+
+**Autonomous:** removes most notification policies. Keeps `require-human-spec-approval` (spec approval is always human, per `platform-model.md` §2) and `alert-on-assertion-failure`.
 
 **Custom:** opens the ABAC policy editor for direct manipulation.
 
@@ -380,11 +391,13 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 }
 ```
 
-This summary is:
-- Stored as part of the MR attestation bundle
-- Surfaced in the Briefing (uncertainties become Inbox items at Supervised/Guided trust)
-- Used as seed context for interrogation agents
-- One LLM call at completion time, not continuous overhead
+**Delivery path:** The completion summary is submitted as part of the `agent.complete` MCP tool call (extends the existing tool with a `summary` field). The server:
+1. Stores the summary in the MR attestation bundle
+2. Emits an `AgentCompleted` Event-tier message via the message bus with the summary as payload (requires adding `AgentCompleted` to `MessageKind` in `message-bus.md`)
+3. The Inbox consumes `AgentCompleted` messages and surfaces uncertainties as action items (at Supervised/Guided trust levels)
+4. The Briefing consumes `AgentCompleted` messages for the "Completed" section
+
+One LLM call at completion time, not continuous overhead. The summary is also used as seed context for interrogation agents.
 
 ### Interrogation Agents
 
@@ -405,13 +418,21 @@ Clicking "Ask why" spawns an interrogation agent with:
 - The spec the task was implementing
 - The MR diff
 
-**ABAC restrictions on interrogation agents:**
-- Can only send messages to the requesting human
-- Cannot create tasks, MRs, or push code
-- Cannot message other agents
-- Cannot access repos or worktrees
-- Read-only access to the knowledge graph
-- Session auto-terminates after 30 minutes of inactivity
+**Restrictions on interrogation agents** are enforced via JWT scope claims (not ABAC policies, since ABAC operates on resource types and these restrictions are capability-level):
+
+The interrogation agent's JWT is minted with narrow scope claims:
+```json
+{
+  "sub": "agent:interrogation-<uuid>",
+  "scope": ["message:send:user:<requesting-user-id>", "graph:read"],
+  "max_lifetime_secs": 1800
+}
+```
+
+- `message:send:user:<id>` — can only send messages to the requesting human (MCP server validates scope on `message.send`)
+- `graph:read` — read-only access to knowledge graph (MCP server validates scope on graph queries)
+- No `task:*`, `mr:*`, `worktree:*`, `git:*` scopes — these MCP tools reject the call
+- `max_lifetime_secs: 1800` — agent runtime kills the process after 30 minutes
 
 The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
 
@@ -425,7 +446,18 @@ When an agent writes code, the reasoning behind each decision is locked in the a
 
 ### Design
 
-Each agent's conversation with its LLM is hashed and stored as a provenance artifact:
+Each agent's conversation with its LLM is hashed and stored as a provenance artifact. Storage requires a new port trait:
+
+```rust
+// gyre-ports
+#[async_trait]
+pub trait ConversationRepository: Send + Sync {
+    async fn store(&self, agent_id: &Id, conversation: &[u8]) -> Result<String>; // returns SHA
+    async fn get(&self, conversation_sha: &str) -> Result<Option<Vec<u8>>>;
+}
+```
+
+The agent runtime captures the conversation via a new MCP tool `conversation.upload` called at `agent.complete` time. The conversation is transmitted as a compressed binary blob, encrypted at rest by the adapter. The upload is part of the completion flow — if it fails, completion still succeeds but the conversation is marked as unavailable.
 
 ```rust
 pub struct ConversationProvenance {
@@ -474,7 +506,7 @@ Specs live in repos. Repos belong to workspaces. But real systems have cross-wor
 
 ### Design
 
-Spec links gain a `workspace_id` + `repo_id` qualifier:
+Spec links extend the existing `target` field from `spec-links.md` with a composite path format for cross-repo references:
 
 ```yaml
 # In payment-api repo (Workspace: Payments)
@@ -482,12 +514,11 @@ specs:
   - path: system/payment-retry.md
     links:
       - type: depends_on
-        target: system/idempotent-api.md
-        target_repo: idempotent-service     # repo name
-        target_workspace: platform-core     # workspace slug
+        target: platform-core/idempotent-service/system/idempotent-api.md
+        #       ^workspace_slug/repo_name/spec_path
 ```
 
-The server resolves `target_workspace` + `target_repo` + `target` path to a specific spec in a specific repo. This creates a cross-workspace edge in the spec graph.
+The server resolves the composite path `workspace_slug/repo_name/spec_path` to a specific spec in a specific repo. Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`. This is consistent with `spec-links.md`'s target format.
 
 ### What the System Does With Cross-Workspace Links
 
@@ -526,7 +557,14 @@ Workspace: Payments
   Active: jsell (Specs view), maria (Explorer), bot-deploy (Agent)
 ```
 
-Presence is tracked via Telemetry-tier messages (`UserPresence` kind) through the message bus. WebSocket subscriptions deliver presence updates in real-time.
+Presence is tracked via Telemetry-tier messages through the message bus. This requires adding a `UserPresence` variant to `MessageKind` in `message-bus.md`:
+
+```rust
+// Tier 3: Telemetry
+UserPresence,  // payload: { user_id, workspace_id, view, timestamp }
+```
+
+`UserPresence` is Telemetry tier (unsigned, in-memory only, `Destination::Workspace`). The TelemetryBuffer stores the latest presence per user per workspace. WebSocket subscriptions deliver presence updates in real-time.
 
 ### Conflict Prevention
 
