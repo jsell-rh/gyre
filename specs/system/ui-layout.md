@@ -31,7 +31,7 @@ The application shell has three permanent zones that never change:
 **Topbar** (48px height):
 - Left: scope breadcrumb (clickable segments). Clicking a segment zooms out to that scope.
 - Center: `Cmd+K` search trigger (global search overlay).
-- Right: user avatar dropdown (profile, settings, sign out), notification badge count.
+- Right: user avatar dropdown (profile, settings, sign out), Inbox badge count (shows the number of unresolved Inbox items — this is a shortcut to the Inbox nav item, not a separate notification system).
 
 **Sidebar** (240px width, collapsible to 48px icon-only via toggle):
 - Six nav items, always in this order, always present. Active item highlighted.
@@ -413,7 +413,7 @@ When the LLM generates a view spec:
 - It can only produce view specs within this grammar.
 - It cannot execute arbitrary code, create tasks, or trigger agent actions.
 - If a question cannot be answered within the grammar, the LLM says so and suggests the closest possible view.
-- The generated spec is shown to the human before rendering (a "preview" step) so the human can modify it.
+- The generated view is rendered immediately. The view spec JSON is visible and editable in a collapsible panel alongside the view — the human can refine the query/layout/encoding and re-render.
 
 ---
 
