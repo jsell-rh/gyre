@@ -309,8 +309,8 @@ pub async fn send_message(
         msg.key_id = Some(kid);
     }
 
-    // Persist (skip storage for Broadcast).
-    if !matches!(msg.to, Destination::Broadcast) {
+    // Persist Directed and Event tier only (Telemetry is in-memory, Broadcast is not stored).
+    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
         state.messages.store(&msg).await.map_err(ApiError::Internal)?;
     }
 
@@ -862,6 +862,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn telemetry_not_persisted() {
+        // Telemetry-tier messages should NOT be stored in MessageRepository.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({
+            "to": {"workspace": "ws-tel"},
+            "kind": "tool_call_start",
+            "payload": {"agent_id": "agent-x", "tool_name": "Read"}
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-tel/messages")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let msg_id = json["id"].as_str().unwrap().to_string();
+
+        // Message should NOT be in the persistent store.
+        let found = state
+            .messages
+            .find_by_id(&gyre_common::Id::new(&msg_id))
+            .await
+            .unwrap();
+        assert!(found.is_none(), "Telemetry message must not be persisted");
     }
 
     #[tokio::test]
