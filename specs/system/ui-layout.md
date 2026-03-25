@@ -35,7 +35,7 @@ The application shell has three permanent zones that never change:
 
 **Sidebar** (240px width, collapsible to 48px icon-only via toggle):
 - Six nav items, always in this order, always present. Active item highlighted.
-- At the bottom: server status indicator (WebSocket connection, version).
+- At the bottom: server version indicator.
 
 Workspace switching is done exclusively via the breadcrumb (click workspace segment → dropdown of member workspaces). No duplicate switcher in the sidebar — one control, one location.
 
@@ -223,7 +223,7 @@ Inbox items and Briefing sections expand inline:
 3. Click again or click another item → current item collapses, new one expands.
 4. Only one item expanded at a time (accordion).
 
-No modals. No navigation away. The Inbox is designed to be cleared without leaving the view.
+No modals. The Inbox is designed to be cleared without leaving the view. Exception: clicking an entity reference within an expanded item (e.g., "View Spec", agent name, MR link) opens the detail panel in Split layout — the Inbox content compresses to 60% and the entity detail appears at 40%. This is the standard drill-down pattern from §2, not "navigating away" — closing the panel returns to full-width Inbox.
 
 ### Contextual Chat
 
@@ -444,7 +444,7 @@ Data from existing endpoints: `GET /api/v1/workspaces` + `GET /api/v1/workspaces
 
 ### Workspace Scope — Realized Architecture
 
-Default view: Boundary View (C4 Level 1). Graph canvas showing repos as nodes, cross-repo dependencies as edges. Click a repo node → drill down to Level 2 (crates within that repo). The detail panel shows repo metadata, recent activity, and spec summary.
+Default view: Boundary View. Graph canvas showing repos as nodes, cross-repo dependencies as edges. (This maps to C4 "Container" level — repos are containers within the workspace system. We skip C4 "Context" level because the workspace boundary IS the context.) Click a repo node → detail panel shows repo metadata. Double-click → drill down to crate level (scope changes to repo).
 
 The lens selector, view selector, search, and ask input are in the control bar below the canvas.
 
@@ -452,10 +452,10 @@ The lens selector, view selector, search, and ask input are in the control bar b
 
 Default view: Boundary View (C4 Level 2 — crates/packages). Further drill-down to modules (Level 3) and types (Level 4). The detail panel shows type/function detail with spec linkage, churn metrics, and conversation turn provenance.
 
-The Code sub-view (branches, commits, MRs, merge queue) is accessed via a tab in the control bar alongside the lens/view selectors:
+The Code sub-view (branches, commits, MRs, merge queue) is accessed via a tab in the control bar (which is always **below** the canvas, consistent with §2):
 
 ```
-[Architecture] [Code] | [Lens: Structural ▾] [View: Boundary ▾]
+[Architecture] [Code] | [Lens: Structural ▾] [View: Boundary ▾] | [/ Search] [Ask...]
 ```
 
 ---
