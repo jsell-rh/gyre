@@ -54,7 +54,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 |---|---|---|---|
 | **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
 | **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
-| **Explorer** | Workspace cards with summary stats (repos, agents, budget). This is a **list view**, not a knowledge graph canvas — `system-explorer.md`'s realized architecture starts at workspace scope. Click a workspace card to enter the graph-based Explorer. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
+| **Explorer** | Workspace cards with summary stats. This is a **list view**, not a graph canvas — click a workspace to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
 | **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
@@ -146,7 +146,7 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
   description: "Block autonomous merge processor — require human MR approval first"
 ```
 
-The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` for ABAC evaluation, because system tokens bypass ABAC entirely (`hierarchy-enforcement.md` §4). Instead, the merge processor authenticates as a dedicated internal service identity (`subject.type: "system"`, `subject.id: "merge-processor"`) that is subject to ABAC evaluation. Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
+The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` (which bypasses ABAC per `hierarchy-enforcement.md` §4). Instead, it evaluates ABAC as an internal service with `subject.type: "system"`, `subject.id: "merge-processor"`. The `system-full-access` built-in policy (which allows all for system tokens) must be refined: it should only match the global `GYRE_AUTH_TOKEN` identity, not all `subject.type: "system"`. Internal services like the merge processor are `system` type but NOT superuser — they are subject to ABAC policies. Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
 
 **Guided** policy set:
 - `require-human-spec-approval` (immutable, always present)
@@ -294,7 +294,7 @@ Views are serializable specs that can be saved to the workspace and shared:
 }
 ```
 
-Saved views are stored as JSON documents in the workspace's configuration (via `KvJsonStore` with namespace `explorer_views` and key `workspace_id:view_name`). API endpoints for view CRUD:
+Saved views are stored as JSON documents in the workspace's configuration (via `KvJsonStore` with namespace `explorer_views` and key `workspace_id:view_name`). API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
 - `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view
 - `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:name` — delete a view
@@ -458,10 +458,12 @@ MR #52: Payment retry endpoint
 ```
 
 Clicking "Ask why" spawns an interrogation agent with:
-- The original agent's conversation history (from `conversation_sha`)
+- The original agent's conversation history (retrieved via `ConversationRepository::get(conversation_sha)` — the SHA is stored in the MR attestation bundle's `conversation_sha` field and in the `AgentCompleted` message payload)
 - The original agent's persona
 - The spec the task was implementing
 - The MR diff
+
+**MR attestation amendment:** The existing attestation bundle (`MergeAttestation` in `agent-gates.md`) gains a `conversation_sha: Option<String>` field, populated from the `AgentCompleted` message when the MR is merged.
 
 **Restrictions on interrogation agents** are enforced via ABAC (the sole authorization layer per `hierarchy-enforcement.md` §4). When an interrogation agent is spawned, the server creates an `interrogation-only` ABAC policy scoped to that agent:
 
@@ -620,10 +622,9 @@ Workspace: Payments
 
 Presence is tracked via Telemetry-tier messages through the message bus. This requires adding a `UserPresence` variant to `MessageKind` in `message-bus.md`:
 
-**`UserPresence` specification** (add to `message-bus.md`'s `MessageKind` enum):
-- **Tier:** Telemetry (unsigned, in-memory only)
-- **Destination:** `Workspace(workspace_id)` — presence is scoped to a workspace
-- **server_only():** `false` (emitted by the UI client via WebSocket, not by agents)
+**`UserPresence` implementation:** UserPresence does NOT use the message bus `MessageKind` enum. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
+
+The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 - **Payload schema:**
   | Field | Type | Required |
   |---|---|---|
@@ -667,7 +668,7 @@ Saved Views:
 
 | Priority | Action Type | Source | Inline Action |
 |---|---|---|---|
-| 1 | **Agent needs clarification** | Agent completion summary (uncertainty) | Respond inline or spawn interrogation |
+| 1 | **Agent needs clarification** | In-flight: agent sends `Escalation` message to workspace orchestrator, which creates an Inbox item. Post-completion: from `AgentCompleted` summary uncertainties. | Respond inline or spawn interrogation |
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
@@ -778,8 +779,8 @@ These are architectural constraints, not implementation work. They ensure we don
 - `ui-journeys.md` — this spec replaces it entirely with refined journeys, trust gradient, and communication model
 - Sidebar navigation model in `docs/ui.md` — replaced by stable sidebar + adaptive content
 
-**Extends:**
-- `system-explorer.md` — adds progressive C4 drill-down, saved/generated views, three lenses
+**Extends (and partially supersedes):**
+- `system-explorer.md` — adds progressive C4 drill-down, saved/generated views, three lenses. Supersedes `system-explorer.md`'s keyboard shortcuts (`Cmd+K` → global search, not canvas-scoped). The Explorer's left panel (Boundaries, Interfaces, Data, Specs subsections from `system-explorer.md`) is an **in-view panel inside the Explorer content area**, not part of the stable sidebar.
 - `message-bus.md` — adds `UserPresence`, agent completion summaries, interrogation agent messages
 - `platform-model.md` §3 — mechanizes cross-workspace spec escalation via spec links
 - `abac-policy-engine.md` — trust level presets as ABAC policy bundles
