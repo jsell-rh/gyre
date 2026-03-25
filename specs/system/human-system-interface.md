@@ -165,7 +165,7 @@ All trust level transitions (workspace `trust_level` field update AND policy del
 | **Briefing detail** | Per-agent activity, per-MR status | Per-spec progress, exceptions | Spec-level summaries, exceptions only |
 | **Notifications** | Every state change | Failures and approvals | Exceptions only |
 | **Agent completion summaries** | Full decision log visible | Uncertainties highlighted | Only low-confidence decisions surfaced |
-| **Inbox priorities shown** | 1-10 (everything) | 1-9 (excludes suggested links) | 1-9 (excludes suggested links) |
+| **Inbox priorities shown** | 1-10 (everything) | 1-9 (excludes suggested links) | 1-9 (excludes suggested links) | Custom: defaults to 1-10 (admin can configure via ABAC policies) |
 
 **Spec approval is always human.** This is a hard rule from `platform-model.md` — specs encode intent, and intent is a human decision. Trust level never bypasses spec approval.
 
