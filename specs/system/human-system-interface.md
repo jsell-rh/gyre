@@ -54,7 +54,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 |---|---|---|---|
 | **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
 | **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
-| **Explorer** | Workspace cards with summary stats. This is a **list view**, not a graph canvas — click a workspace to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
+| **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **list view**, not a graph canvas — click a workspace to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
 | **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
@@ -65,13 +65,13 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds to prevent bursts during rapid navigation. The server evicts entries after 60 seconds without an update.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
 
 ### Deep Links
 
 **Entrypoint:** First visit lands on Explorer at tenant scope (workspace cards). After workspace selection, redirects to Inbox at workspace scope — the default landing view. Subsequent visits restore the last-used workspace and land on the Inbox. See `ui-layout.md` §1 for full entrypoint flow.
 
-**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored on the user profile (existing `UserPreferences` or a new `user_workspace_state` table). The `[▾ 24h]` dropdown in the Briefing overrides `last_seen_at` with a fixed time range (`?since=<epoch>`).
+**Last-seen tracking:** The server records `last_seen_at: u64` (epoch seconds) per user per workspace, updated on every authenticated request scoped to that workspace. The Briefing's "since your last visit" default uses this timestamp. Stored on the user profile (existing `UserPreferences` or a new `user_workspace_state` table). The Briefing time range dropdown options: `Since last visit` (default, uses `last_seen_at`), `Last 24h`, `Last 7d`, `Last 30d`, `Custom range`. Selecting any option overrides the `?since=<epoch>` parameter on the briefing API call.
 
 Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
@@ -601,7 +601,7 @@ CREATE INDEX idx_turn_links_agent ON turn_commit_links (agent_id);
 CREATE INDEX idx_turn_links_conversation ON turn_commit_links (conversation_sha);
 ```
 
-The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a zstd-compressed binary blob, max **10MB** compressed (configurable, `GYRE_MAX_CONVERSATION_SIZE`). The server computes SHA-256 on receipt and stores the blob encrypted at rest. If the caller-provided `conversation_sha` (if any) doesn't match the computed SHA, the server rejects with 400. The upload is called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
+The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a base64-encoded zstd-compressed blob (base64 because MCP tools use JSON — binary is encoded as a string), max **10MB** before base64 encoding (configurable, `GYRE_MAX_CONVERSATION_SIZE`). The server decodes base64, computes SHA-256 on the raw compressed bytes and stores the blob encrypted at rest. If the caller-provided `conversation_sha` (if any) doesn't match the computed SHA, the server rejects with 400. The upload is called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
 
 ```rust
 pub struct ConversationProvenance {

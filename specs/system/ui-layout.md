@@ -217,7 +217,7 @@ Click any entity reference (agent name, MR title, task ID, spec path, graph node
 4. Clicking another entity replaces the panel content (no stacking).
 5. Esc or ✕ closes the panel, main content returns to full-width.
 
-**Double-click** on a graph node in the Explorer: drill down to the next C4 level. This **changes scope** — double-clicking a repo node at workspace scope transitions to repo scope (breadcrumb updates, sidebar stays). The canvas re-renders for the new scope level. This is a scope transition, not a panel action. Single-click opens the detail panel without changing scope.
+**Double-click** on a graph node in the Explorer: drill down to the next C4 level. This **changes scope** — double-clicking a repo node at workspace scope transitions to repo scope. The breadcrumb updates, the URL changes via `history.pushState` (e.g., `/workspaces/:ws_id/explorer` → `/repos/:repo_id/explorer`), and the canvas re-renders for the new scope level. Single-click opens the detail panel without changing scope.
 
 ### Inline Expansion (Inbox/Briefing)
 
