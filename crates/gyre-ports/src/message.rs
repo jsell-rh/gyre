@@ -2,6 +2,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::{message::Message, Id};
 
+/// Observer trait for message bus consumers.
+///
+/// Implementations receive messages off the hot-path via a bounded mpsc channel.
+/// Slow consumers may have messages dropped (logged as warning) — they must keep up.
+#[async_trait]
+pub trait MessageConsumer: Send + Sync {
+    /// Called by the background dispatcher for each message stored to the bus.
+    /// May perform I/O (DB writes, etc.) — runs off the send hot path.
+    async fn on_message(&self, message: &Message);
+}
+
 /// Port trait for message persistence (Directed and Event tier).
 /// Telemetry-tier messages do NOT go through this trait — they use TelemetryBuffer.
 ///

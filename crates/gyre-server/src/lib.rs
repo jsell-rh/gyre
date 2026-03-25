@@ -292,6 +292,12 @@ pub struct AppState {
     pub graph_store: Arc<dyn GraphPort>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Message bus persistence (Directed + Event tier).
+    pub messages: Arc<dyn gyre_ports::MessageRepository>,
+    /// Bounded mpsc sender for background message consumer dispatch.
+    pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
+    /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
+    pub agent_inbox_max: u64,
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
@@ -677,6 +683,12 @@ pub fn build_state(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
         ),
+        messages: Arc::new(mem::MemMessageRepository::default()),
+        message_dispatch_tx: tokio::sync::mpsc::channel(256).0,
+        agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000),
     })
 }
 

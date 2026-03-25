@@ -2178,6 +2178,189 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+/// In-memory MessageRepository for tests.
+pub struct MemMessageRepository {
+    store: Arc<Mutex<HashMap<String, gyre_common::message::Message>>>,
+}
+
+impl Default for MemMessageRepository {
+    fn default() -> Self {
+        Self {
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl gyre_ports::MessageRepository for MemMessageRepository {
+    async fn store(&self, message: &gyre_common::message::Message) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(message.id.as_str().to_string(), message.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_common::message::Message>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn list_after(
+        &self,
+        agent_id: &Id,
+        after_ts: u64,
+        after_id: Option<&Id>,
+        limit: usize,
+    ) -> Result<Vec<gyre_common::message::Message>> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let mut msgs: Vec<_> = guard
+            .values()
+            .filter(|m| matches!(&m.to, Destination::Agent(id) if id == agent_id))
+            .filter(|m| match after_id {
+                Some(aid) => {
+                    m.created_at > after_ts
+                        || (m.created_at == after_ts && m.id.as_str() > aid.as_str())
+                }
+                None => m.created_at > after_ts,
+            })
+            .cloned()
+            .collect();
+        msgs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        });
+        msgs.truncate(limit);
+        Ok(msgs)
+    }
+
+    async fn list_unacked(
+        &self,
+        agent_id: &Id,
+        limit: usize,
+    ) -> Result<Vec<gyre_common::message::Message>> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let mut msgs: Vec<_> = guard
+            .values()
+            .filter(|m| matches!(&m.to, Destination::Agent(id) if id == agent_id))
+            .filter(|m| !m.acknowledged)
+            .cloned()
+            .collect();
+        msgs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        });
+        msgs.truncate(limit);
+        Ok(msgs)
+    }
+
+    async fn count_unacked(&self, agent_id: &Id) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let count = guard
+            .values()
+            .filter(|m| matches!(&m.to, Destination::Agent(id) if id == agent_id))
+            .filter(|m| !m.acknowledged)
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn acknowledge(&self, message_id: &Id, agent_id: &Id) -> Result<()> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        if let Some(m) = guard.get_mut(message_id.as_str()) {
+            if matches!(&m.to, Destination::Agent(id) if id == agent_id) {
+                m.acknowledged = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn acknowledge_all(&self, agent_id: &Id, _reason: &str) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        let mut count = 0u64;
+        for m in guard.values_mut() {
+            if matches!(&m.to, Destination::Agent(id) if id == agent_id) && !m.acknowledged {
+                m.acknowledged = true;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn list_by_workspace(
+        &self,
+        workspace_id: &Id,
+        kind: Option<&str>,
+        since: Option<u64>,
+        before_ts: Option<u64>,
+        before_id: Option<&Id>,
+        limit: Option<usize>,
+    ) -> Result<Vec<gyre_common::message::Message>> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let mut msgs: Vec<_> = guard
+            .values()
+            .filter(|m| {
+                m.workspace_id
+                    .as_ref()
+                    .map(|ws| ws == workspace_id)
+                    .unwrap_or(false)
+            })
+            .filter(|m| !matches!(&m.to, Destination::Agent(_)))
+            .filter(|m| kind.map(|k| m.kind.as_str() == k).unwrap_or(true))
+            .filter(|m| since.map(|s| m.created_at >= s).unwrap_or(true))
+            .filter(|m| match (before_ts, before_id) {
+                (Some(bts), Some(bid)) => {
+                    m.created_at < bts || (m.created_at == bts && m.id.as_str() < bid.as_str())
+                }
+                (Some(bts), None) => m.created_at < bts,
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        msgs.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
+        if let Some(lim) = limit {
+            msgs.truncate(lim);
+        }
+        Ok(msgs)
+    }
+
+    async fn expire_events(&self, older_than: u64) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        let before = guard.len();
+        guard.retain(|_, m| matches!(&m.to, Destination::Agent(_)) || m.created_at >= older_than);
+        Ok((before - guard.len()) as u64)
+    }
+
+    async fn expire_acked_inboxes(&self, older_than: u64) -> Result<u64> {
+        let mut guard = self.store.lock().await;
+        let before = guard.len();
+        guard.retain(|_, m| !m.acknowledged || m.created_at >= older_than);
+        Ok((before - guard.len()) as u64)
+    }
+
+    async fn expire_for_agents(&self, agent_ids: &[Id], older_than: u64) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        let before = guard.len();
+        guard.retain(|_, m| {
+            let is_target = matches!(&m.to, Destination::Agent(id) if agent_ids.contains(id));
+            !(is_target && m.created_at < older_than)
+        });
+        Ok((before - guard.len()) as u64)
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -2257,5 +2440,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         wg_config: crate::WireGuardConfig::from_env(),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        messages: Arc::new(MemMessageRepository::default()),
+        message_dispatch_tx: tokio::sync::mpsc::channel(256).0,
+        agent_inbox_max: 1000,
     })
 }
