@@ -566,6 +566,8 @@ Full-Width layout. Content adapts to scope:
 
 Click a spec → detail panel opens with tabs: **Content** (markdown viewer), **Edit** (markdown editor + LLM chat via `POST /repos/:id/specs/assist`), **Progress** (task list with status), **Links** (spec link graph for this spec), **History** (approval event timeline).
 
+**New spec creation:** The `[+ New Spec]` button opens the Editor Split layout (§2) with an empty markdown editor. The user writes the spec content and clicks Save, which calls the same `POST /repos/:repo_id/specs/save` endpoint with a new `spec_path` that doesn't exist yet. The server creates the file on a `spec-edit/*` branch and auto-creates an MR, following the same approval flow as spec edits.
+
 Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path?repo_id=` (detail — `repo_id` required to disambiguate spec paths across repos), `GET /api/v1/specs/:path/links?repo_id=` (links — defined in `spec-links.md`), `GET /api/v1/specs/:path/history?repo_id=` (approval event timeline — response: `[{event: "approved"|"invalidated"|"created", user_id, timestamp, sha}]`), `GET /api/v1/specs/:path/progress?repo_id=` (task rollup — response: `{total_tasks, completed_tasks, tasks: [{id, title, status, agent_id}]}`). The `repo_id` query parameter is required on all spec-by-path endpoints because spec paths (e.g., `system/vision.md`) are not globally unique — the same path can exist in different repos. Per-handler auth resolves workspace from the `repo_id` parameter.
 
 ---
