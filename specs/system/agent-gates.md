@@ -394,6 +394,9 @@ spec_approvals table:
   revoked_at      INTEGER             -- NULL unless revoked
   revoked_by      TEXT
   revocation_reason TEXT
+  rejected_at     INTEGER             -- NULL unless rejected (per human-system-interface.md §8)
+  rejected_by     TEXT
+  rejected_reason TEXT
 ```
 
 - Approvals are **immutable** - once recorded, they can be revoked but not modified.

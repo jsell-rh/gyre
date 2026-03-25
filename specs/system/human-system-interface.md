@@ -187,10 +187,15 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
 
 The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` (which bypasses ABAC per `hierarchy-enforcement.md` §4). Instead, it evaluates ABAC as an internal service. The mechanism: ABAC bypass is checked by identity (`subject.id == "gyre-system-token"`), not by type. The merge processor uses `subject.type: "system"`, `subject.id: "merge-processor"` — since its `subject.id` is not the system token identity, it does not bypass ABAC and is subject to the Supervised trust policy. This requires amending `hierarchy-enforcement.md` §4 to change the ABAC bypass condition from "system tokens bypass ABAC" to "the global `GYRE_AUTH_TOKEN` identity bypasses ABAC (matched by `subject.id`, not `subject.type`)." Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
 
-**Guided** policy set:
-- `require-human-spec-approval` (immutable, always present)
-- Gate failures surface in the Inbox (no additional policy — this is the default behavior from `default-deny` + `developer-write-access`)
-- `require-human-mr-review` is NOT present — merge processor proceeds autonomously when all gates pass
+**Guided** policy set (explicit):
+```yaml
+# No trust: policies created — Guided relies on built-in policies only.
+# builtin:require-human-spec-approval (immutable, always present) handles spec approval.
+# The merge processor is NOT blocked — no trust:require-human-mr-review policy exists.
+# Gate failures surface in the Inbox via the default notification system.
+# This is intentionally an empty trust: policy set — the delta from Supervised
+# is the REMOVAL of trust:require-human-mr-review.
+```
 
 **Autonomous:** removes most notification policies. Keeps two policies:
 
@@ -254,6 +259,8 @@ CREATE TABLE notifications (
 CREATE INDEX idx_notifications_user_ws ON notifications (user_id, workspace_id, resolved_at);
 ```
 The `dismissed_at` field tracks user dismissals (used by trust suggestions to suppress re-creation for 30 days). The `resolved_at` field tracks resolution (action taken). The Inbox badge count is the count of notifications where `resolved_at IS NULL AND dismissed_at IS NULL`.
+
+**Crate placement:** The `Notification` struct lives in `gyre-common` (shared wire type, like `Message` and `Id`). `NotificationRepository` lives in `gyre-ports`.
 
 **Port trait** (in `gyre-ports`):
 ```rust
@@ -547,7 +554,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 | Priority | Type | Creation Path |
 |---|---|---|
 | 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
-| 2 | Spec pending approval | Synchronous in spec lifecycle push handler (default branch) OR synchronous in `specs/save` handler (spec-edit MRs) |
+| 2 | Spec pending approval | Synchronous in `specs/save` handler (spec-edit MRs create the notification on MR creation). For agent-authored specs, the orchestrator creates the notification when the spec enters the approval queue. Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
 | 3 | Gate failure | Synchronous in gate evaluation handler |
 | 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler |
 | 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
@@ -991,7 +998,8 @@ These are architectural constraints, not implementation work. They ensure we don
 | `abac-policy-engine.md` §"Action attributes" | Add `generate` action (used by `explorer-views/generate` and `specs/assist` endpoints — distinct from `write` to allow policies that permit LLM generation while restricting CRUD). Applies to resource types: `explorer_view`, `spec`. |
 | `abac-policy-engine.md` §"Built-In Policies" | Add `builtin:require-human-spec-approval` (immutable Deny, priority 999, denies `approve` on `spec` when `subject.type != "user"`) to the built-in policy table. This policy is defined in HSI §2 and seeded at server startup. |
 | `agent-gates.md` `MergeAttestation` | Add `conversation_sha: Option<String>` field. |
-| `agent-gates.md` spec approval ledger | Add `Rejected` status with `rejected_at: Option<u64>` and `rejected_reason: Option<String>` fields. Add `POST /api/v1/specs/:path/reject` endpoint (request: `{reason}`, response: 204). Rejection closes the associated MR if the spec came from a `spec-edit/*` branch. |
+| `agent-gates.md` spec approval ledger | Add `Rejected` status with `rejected_at: Option<u64>`, `rejected_reason: Option<String>`, and `rejected_by: Option<Id>` fields to the `spec_approvals` table. Add `POST /api/v1/specs/:path/reject` endpoint (request: `{reason}`, response: 204, per-handler auth: requires `subject.type == "user"` — agents cannot reject specs, same constraint as approval). Rejection closes the associated MR if the spec came from a `spec-edit/*` branch. |
+| `spec-lifecycle.md` §"Spec Approval Interaction" | Add SHA-match check: when a spec modification is detected on the default branch, if the new SHA already has a valid approval in the ledger (e.g., pre-approved on a feature branch before merge), preserve the approval instead of invalidating it. |
 | `platform-model.md` §4 MCP tools | Add `conversation.upload` (scope: agent), `message.send` (scope: workspace), `message.poll` (scope: agent), `message.ack` (scope: agent) — per `message-bus.md` MCP tools section. |
 | `platform-model.md` §4 agent spawn | Add `agent_type: Option<String>` field to spawn request (values: `null` for normal agents, `"interrogation"` for interrogation agents per §4). |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
