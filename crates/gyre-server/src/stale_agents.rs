@@ -1,7 +1,7 @@
 //! Stale agent detection: marks agents Dead when heartbeat times out.
 //! Honors each agent's `disconnected_behavior` setting (BCP graceful degradation).
 
-use gyre_common::{ActivityEventData, AgEventType};
+use gyre_common::message::MessageKind;
 use gyre_domain::{AgentStatus, DisconnectedBehavior};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -60,16 +60,16 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     }
                 }
 
-                state.activity_store.record(ActivityEventData {
-                    event_id: uuid::Uuid::new_v4().to_string(),
-                    agent_id: agent.id.to_string(),
-                    event_type: AgEventType::StateChanged,
-                    description: format!(
-                        "Agent {} aborted (no heartbeat, abort behavior)",
-                        agent.name
-                    ),
-                    timestamp: now,
-                });
+                let ws_id = agent.workspace_id.clone();
+                state.emit_telemetry(
+                    ws_id,
+                    MessageKind::AgentStatusChanged,
+                    Some(serde_json::json!({
+                        "agent_id": agent.id.to_string(),
+                        "status": "dead",
+                        "reason": format!("Agent {} aborted (no heartbeat, abort behavior)", agent.name),
+                    })),
+                );
             }
 
             DisconnectedBehavior::Pause => {
@@ -78,13 +78,16 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 let _ = agent.transition_status(AgentStatus::Paused);
                 let _ = state.agents.update(&agent).await;
 
-                state.activity_store.record(ActivityEventData {
-                    event_id: uuid::Uuid::new_v4().to_string(),
-                    agent_id: agent.id.to_string(),
-                    event_type: AgEventType::StateChanged,
-                    description: format!("Agent {} paused (no heartbeat)", agent.name),
-                    timestamp: now,
-                });
+                let ws_id = agent.workspace_id.clone();
+                state.emit_telemetry(
+                    ws_id,
+                    MessageKind::AgentStatusChanged,
+                    Some(serde_json::json!({
+                        "agent_id": agent.id.to_string(),
+                        "status": "paused",
+                        "reason": format!("Agent {} paused (no heartbeat)", agent.name),
+                    })),
+                );
             }
 
             DisconnectedBehavior::ContinueOffline => {

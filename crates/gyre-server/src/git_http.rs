@@ -264,6 +264,7 @@ pub async fn git_receive_pack(
             .into_response();
     }
     let repo_id = resolved.id.to_string();
+    let repo_workspace_id = resolved.workspace_id.clone();
     let repo_path = resolved.path;
     let default_branch = resolved.default_branch;
 
@@ -305,18 +306,20 @@ pub async fn git_receive_pack(
             check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates, &auth.agent_id).await
         {
             undo_ref_updates(&repo_path, &ref_updates).await;
-            // Broadcast PushRejected domain event.
-            let _ = state
-                .event_tx
-                .send(crate::domain_events::DomainEvent::PushRejected {
-                    repo_id: repo_id.clone(),
-                    branch: ref_updates
-                        .first()
-                        .map(|u| u.refname.clone())
-                        .unwrap_or_default(),
-                    agent_id: auth.agent_id.clone(),
-                    reason: rejection.clone(),
-                });
+            // Emit PushRejected event via unified message bus.
+            state
+                .emit_event(
+                    Some(repo_workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                    gyre_common::message::MessageKind::PushRejected,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id,
+                        "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
+                        "agent_id": auth.agent_id,
+                        "reason": rejection,
+                    })),
+                )
+                .await;
             return (StatusCode::FORBIDDEN, rejection).into_response();
         }
     }
@@ -381,6 +384,7 @@ pub async fn git_receive_pack(
     let spawned_by_clone = spawned_by_user_id.clone();
     let model_context_clone = model_context.clone();
     let repo_id_clone = repo_id.clone();
+    let repo_workspace_id_clone = repo_workspace_id.clone();
     let branch_clone = branch.clone();
     let attestation_level_clone = attestation_level.to_string();
     let default_branch_clone = default_branch;
@@ -397,16 +401,21 @@ pub async fn git_receive_pack(
             &attestation_level_clone,
         )
         .await;
-        // Broadcast PushAccepted domain event.
-        let _ = state_clone
-            .event_tx
-            .send(crate::domain_events::DomainEvent::PushAccepted {
-                repo_id: repo_id_clone.clone(),
-                branch: branch_clone,
-                agent_id,
-                commit_count,
-                task_id: task_id_clone,
-            });
+        // Emit PushAccepted event via unified message bus.
+        state_clone
+            .emit_event(
+                Some(repo_workspace_id_clone.clone()),
+                gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
+                gyre_common::message::MessageKind::PushAccepted,
+                Some(serde_json::json!({
+                    "repo_id": repo_id_clone,
+                    "branch": branch_clone,
+                    "agent_id": agent_id,
+                    "commit_count": commit_count as u64,
+                    "task_id": task_id_clone,
+                })),
+            )
+            .await;
         // Spec lifecycle: auto-create tasks for spec changes on the default branch.
         process_spec_lifecycle(
             &state_clone,
@@ -1123,26 +1132,43 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    let _ = state
-                        .event_tx
-                        .send(crate::domain_events::DomainEvent::SpecChanged {
-                            repo_id: repo_id.to_string(),
-                            spec_path: path,
-                            change_kind: match status_char {
-                                'A' => "added",
-                                'M' => "modified",
-                                'D' => "deleted",
-                                'R' => "renamed",
-                                _ => "unknown",
-                            }
-                            .to_string(),
-                            task_id: task_id.to_string(),
-                        });
-                    let _ = state
-                        .event_tx
-                        .send(crate::domain_events::DomainEvent::TaskCreated {
-                            id: task_id.to_string(),
-                        });
+                    // Look up workspace_id from repo for proper scoping.
+                    let ws_id = state
+                        .repos
+                        .find_by_id(&gyre_common::Id::new(repo_id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.workspace_id)
+                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    let change_kind = match status_char {
+                        'A' => "added",
+                        'M' => "modified",
+                        'D' => "deleted",
+                        'R' => "renamed",
+                        _ => "unknown",
+                    };
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id.clone()),
+                            gyre_common::message::MessageKind::SpecChanged,
+                            Some(serde_json::json!({
+                                "repo_id": repo_id,
+                                "spec_path": path,
+                                "change_kind": change_kind,
+                                "task_id": task_id.to_string(),
+                            })),
+                        )
+                        .await;
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id),
+                            gyre_common::message::MessageKind::TaskCreated,
+                            Some(serde_json::json!({"task_id": task_id.to_string()})),
+                        )
+                        .await;
                 }
             }
         }

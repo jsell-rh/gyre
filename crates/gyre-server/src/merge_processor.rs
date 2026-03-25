@@ -314,15 +314,22 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 %current_sha,
                                 "stale spec_ref detected (warn only)"
                             );
-                            let _ = state.event_tx.send(
-                                crate::domain_events::DomainEvent::StaleSpecWarning {
-                                    mr_id: mr.id.to_string(),
-                                    repo_id: repo.id.to_string(),
-                                    spec_path: path.to_string(),
-                                    spec_sha: sha.to_string(),
-                                    current_sha,
-                                },
-                            );
+                            state
+                                .emit_event(
+                                    Some(mr.workspace_id.clone()),
+                                    gyre_common::message::Destination::Workspace(
+                                        mr.workspace_id.clone(),
+                                    ),
+                                    gyre_common::message::MessageKind::StaleSpecWarning,
+                                    Some(serde_json::json!({
+                                        "mr_id": mr.id.to_string(),
+                                        "repo_id": repo.id.to_string(),
+                                        "spec_path": path,
+                                        "spec_sha": sha,
+                                        "current_sha": current_sha,
+                                    })),
+                                )
+                                .await;
                         }
                     }
                 }

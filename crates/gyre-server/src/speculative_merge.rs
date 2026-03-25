@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 /// Result of a speculative merge attempt for a given branch.
@@ -151,19 +150,40 @@ pub async fn run_once(state: &Arc<AppState>) -> Result<()> {
                 results.insert((repo_id.clone(), branch.clone()), result.clone());
             }
 
-            // Emit domain event.
+            // Emit event via unified message bus.
+            // Workspace lookup: get repo's workspace_id for proper scoping.
+            let ws_id = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.workspace_id)
+                .unwrap_or_else(|| gyre_common::Id::new("default"));
             match result.status {
                 SpeculativeStatus::Clean => {
-                    let _ = state
-                        .event_tx
-                        .send(DomainEvent::SpeculativeMergeClean { repo_id, branch });
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id),
+                            gyre_common::message::MessageKind::SpeculativeMergeClean,
+                            Some(serde_json::json!({"repo_id": repo_id, "branch": branch})),
+                        )
+                        .await;
                 }
                 SpeculativeStatus::Conflict => {
-                    let _ = state.event_tx.send(DomainEvent::SpeculativeConflict {
-                        repo_id,
-                        branch,
-                        conflicting_files: result.conflicting_files,
-                    });
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id),
+                            gyre_common::message::MessageKind::SpeculativeConflict,
+                            Some(serde_json::json!({
+                                "repo_id": repo_id,
+                                "branch": branch,
+                                "conflicting_files": result.conflicting_files,
+                            })),
+                        )
+                        .await;
                 }
                 SpeculativeStatus::Skipped => {}
             }

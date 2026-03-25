@@ -2379,9 +2379,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         jj_ops: Arc::new(NoopJjOps),
         agent_commits: Arc::new(MemAgentCommitRepository::default()),
         worktrees: Arc::new(MemWorktreeRepository::default()),
-        activity_store: crate::activity::ActivityStore::new(),
-        broadcast_tx: broadcast::channel(16).0,
-        event_tx: broadcast::channel(16).0,
+        telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
+        message_broadcast_tx: broadcast::channel(16).0,
         kv_store: Arc::new(MemKvStore::default()),
         agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
         agent_jwt_ttl_secs: 3600,
@@ -2441,7 +2440,14 @@ pub fn test_state() -> Arc<crate::AppState> {
         wg_config: crate::WireGuardConfig::from_env(),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
-        message_dispatch_tx: tokio::sync::mpsc::channel(256).0,
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while rx.recv().await.is_some() {}
+            });
+            tx
+        },
         agent_inbox_max: 1000,
     })
 }
