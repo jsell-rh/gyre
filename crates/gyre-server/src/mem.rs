@@ -2442,7 +2442,10 @@ pub fn test_state() -> Arc<crate::AppState> {
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);
-            tokio::spawn(async move { let mut rx = rx; while rx.recv().await.is_some() {} });
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while rx.recv().await.is_some() {}
+            });
             tx
         },
         agent_inbox_max: 1000,

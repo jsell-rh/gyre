@@ -233,9 +233,9 @@ pub async fn admin_audit(
     let filtered: Vec<gyre_common::ActivityEventData> = msgs
         .into_iter()
         .filter_map(|m| {
-            m.payload
-                .as_ref()
-                .and_then(|p| serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()).ok())
+            m.payload.as_ref().and_then(|p| {
+                serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()).ok()
+            })
         })
         .filter(|e| {
             q.agent_id.as_deref().is_none_or(|id| e.agent_id == id)

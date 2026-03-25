@@ -11,6 +11,7 @@ use gyre_common::WsMessage;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 /// GET /ws - WebSocket upgrade endpoint.
@@ -27,8 +28,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Expect first message to be Auth.
-    let authed = match receiver.next().await {
-        Some(Ok(Message::Text(text))) => authenticate(&text, &state.auth_token, &mut sender).await,
+    let caller = match receiver.next().await {
+        Some(Ok(Message::Text(text))) => {
+            match authenticate(&text, &state, &mut sender).await {
+                Some(auth) => auth,
+                None => return, // auth failed — authenticate() already sent AuthResult
+            }
+        }
         Some(Ok(Message::Close(_))) | None => {
             info!("connection closed before auth");
             return;
@@ -39,11 +45,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    if !authed {
-        return;
-    }
-
-    // Subscribed workspace IDs for this connection. Empty = no workspace filtering yet.
+    // Subscribed workspace IDs authorized for this connection.
     let mut subscribed_workspaces: Vec<gyre_common::Id> = vec![];
 
     let mut bus_rx = state.message_broadcast_tx.subscribe();
@@ -64,13 +66,57 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     }
                                 }
                                 WsMessage::Subscribe { scopes, last_seen } => {
-                                    // Extract workspace IDs from SubscribeScope structs.
-                                    subscribed_workspaces.clear();
+                                    // Validate each requested workspace belongs to caller's tenant.
+                                    let mut authorized_workspaces: Vec<gyre_common::Id> = vec![];
+                                    let mut rejected_workspaces: Vec<String> = vec![];
+
                                     for scope in &scopes {
-                                        subscribed_workspaces.push(scope.workspace_id.clone());
+                                        let ws_id = &scope.workspace_id;
+                                        match state.workspaces.find_by_id(ws_id).await {
+                                            Ok(Some(workspace)) => {
+                                                // Admin bypass (global token): allow all workspaces.
+                                                let tenant_match = caller.roles.contains(&gyre_domain::UserRole::Admin)
+                                                    || workspace.tenant_id.as_str() == caller.tenant_id;
+                                                if tenant_match {
+                                                    authorized_workspaces.push(ws_id.clone());
+                                                } else {
+                                                    warn!(
+                                                        workspace_id = %ws_id,
+                                                        caller_tenant = %caller.tenant_id,
+                                                        "Subscribe: workspace belongs to different tenant, rejecting"
+                                                    );
+                                                    rejected_workspaces.push(ws_id.to_string());
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                warn!(workspace_id = %ws_id, "Subscribe: workspace not found");
+                                                rejected_workspaces.push(ws_id.to_string());
+                                            }
+                                            Err(e) => {
+                                                warn!(workspace_id = %ws_id, error = %e, "Subscribe: lookup error");
+                                                rejected_workspaces.push(ws_id.to_string());
+                                            }
+                                        }
                                     }
 
-                                    // Replay Event-tier messages since last_seen.
+                                    if !rejected_workspaces.is_empty() {
+                                        let err_msg = WsMessage::Unknown; // closest available; client will see the raw JSON
+                                        // Send structured error as raw JSON since WsMessage has no Error variant.
+                                        let err_json = serde_json::json!({
+                                            "type": "SubscribeError",
+                                            "rejected_workspaces": rejected_workspaces,
+                                            "message": "Unauthorized or unknown workspace IDs",
+                                        });
+                                        let _ = err_msg; // suppress unused warning
+                                        let payload = serde_json::to_string(&err_json).unwrap();
+                                        if sender.send(Message::Text(payload)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+
+                                    subscribed_workspaces = authorized_workspaces;
+
+                                    // Replay Event-tier messages since last_seen, oldest-first.
                                     let mut replayed = 0usize;
                                     let replay_limit = 1000usize;
                                     let mut truncated = false;
@@ -119,9 +165,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     description,
                                     timestamp,
                                 } => {
-                                    // Map legacy ActivityEvent to a Telemetry-tier message.
-                                    // Use a "default" workspace for legacy events without workspace context.
-                                    let ws_id = gyre_common::Id::new("default");
+                                    // Scope telemetry to the caller's first subscribed workspace
+                                    // (or a per-tenant default workspace).
+                                    let ws_id = subscribed_workspaces
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            gyre_common::Id::new(format!("default-{}", caller.tenant_id))
+                                        });
                                     state.emit_telemetry(
                                         ws_id,
                                         MessageKind::StateChanged,
@@ -135,19 +186,32 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     );
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
-                                    // Query from TelemetryBuffer across all workspaces.
+                                    // Query TelemetryBuffer scoped to subscribed workspaces.
                                     let since_ms = since.unwrap_or(0);
                                     let lim = limit.unwrap_or(100);
-                                    let msgs = state.telemetry_buffer.list_all_since(since_ms, lim);
-                                    // Convert to legacy ActivityEventData format.
-                                    let mut events = vec![];
-                                    for m in msgs {
-                                        if let Some(payload) = &m.payload {
-                                            if let Ok(ev) = serde_json::from_value::<gyre_common::ActivityEventData>(payload.clone()) {
-                                                events.push(ev);
+                                    let mut events: Vec<gyre_common::ActivityEventData> = vec![];
+
+                                    let scoped_workspaces: Vec<_> = if subscribed_workspaces.is_empty() {
+                                        // No subscription yet: fall back to tenant-default workspace.
+                                        vec![gyre_common::Id::new(format!("default-{}", caller.tenant_id))]
+                                    } else {
+                                        subscribed_workspaces.clone()
+                                    };
+
+                                    for ws_id in &scoped_workspaces {
+                                        let msgs = state.telemetry_buffer.list_since(ws_id, since_ms, lim.saturating_sub(events.len()));
+                                        for m in msgs {
+                                            if let Some(p) = &m.payload {
+                                                if let Ok(ev) = serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()) {
+                                                    events.push(ev);
+                                                }
                                             }
                                         }
+                                        if events.len() >= lim {
+                                            break;
+                                        }
                                     }
+
                                     let response = WsMessage::ActivityResponse { events };
                                     let payload = serde_json::to_string(&response).unwrap();
                                     if sender.send(Message::Text(payload)).await.is_err() {
@@ -173,14 +237,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             bus_msg = bus_rx.recv() => {
                 match bus_msg {
                     Ok(msg) => {
-                        // Filter by destination and subscription.
+                        // Filter by destination and subscription, plus tenant isolation.
                         let deliver = match &msg.to {
-                            Destination::Broadcast => true,
-                            Destination::Workspace(ws_id) => {
-                                subscribed_workspaces.is_empty()
-                                    || subscribed_workspaces.contains(ws_id)
+                            Destination::Broadcast => {
+                                // Broadcast: only deliver if tenant matches or caller is admin.
+                                caller.roles.contains(&gyre_domain::UserRole::Admin)
+                                    || msg.workspace_id.as_ref().map(|ws_tid| {
+                                        // Use workspace_id to infer tenant — check via subscribed list.
+                                        subscribed_workspaces.contains(ws_tid)
+                                    }).unwrap_or(true) // no workspace_id = global broadcast
                             }
-                            Destination::Agent(_) => false,
+                            Destination::Workspace(ws_id) => {
+                                // Must be subscribed AND workspace must be in caller's tenant.
+                                subscribed_workspaces.contains(ws_id)
+                            }
+                            Destination::Agent(_) => false, // Agent-directed: not delivered via WS
                         };
                         if deliver {
                             let payload = serde_json::to_string(&msg).unwrap();
@@ -201,35 +272,41 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     info!("WebSocket connection closed");
 }
 
-/// Send AuthResult and return true if token is valid.
-#[instrument(skip(token_json, sender, auth_token))]
+/// Validate the Auth message. Returns `Some(AuthenticatedAgent)` on success.
+/// Sends `AuthResult` over the socket in both cases.
+#[instrument(skip(token_json, sender, state))]
 async fn authenticate(
     token_json: &str,
-    auth_token: &str,
+    state: &Arc<AppState>,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-) -> bool {
-    match serde_json::from_str::<WsMessage>(token_json) {
-        Ok(WsMessage::Auth { token }) => {
-            let success = token == auth_token;
-            let result = if success {
-                WsMessage::AuthResult {
-                    success: true,
-                    message: "authenticated".to_string(),
-                }
-            } else {
-                warn!("authentication failed: invalid token");
-                WsMessage::AuthResult {
-                    success: false,
-                    message: "invalid token".to_string(),
-                }
+) -> Option<AuthenticatedAgent> {
+    let token = match serde_json::from_str::<WsMessage>(token_json) {
+        Ok(WsMessage::Auth { token }) => token,
+        _ => {
+            warn!("expected Auth message, got something else");
+            return None;
+        }
+    };
+
+    match crate::auth::authenticate_token(&token, state).await {
+        Ok(auth) => {
+            let result = WsMessage::AuthResult {
+                success: true,
+                message: "authenticated".to_string(),
             };
             let payload = serde_json::to_string(&result).unwrap();
             let _ = sender.send(Message::Text(payload)).await;
-            success
+            Some(auth)
         }
-        _ => {
-            warn!("expected Auth message, got something else");
-            false
+        Err(reason) => {
+            warn!(reason, "WebSocket authentication failed");
+            let result = WsMessage::AuthResult {
+                success: false,
+                message: reason.to_string(),
+            };
+            let payload = serde_json::to_string(&result).unwrap();
+            let _ = sender.send(Message::Text(payload)).await;
+            None
         }
     }
 }
@@ -370,6 +447,9 @@ mod tests {
 
         // Verify it landed in the telemetry buffer.
         let all = state.telemetry_buffer.list_all_since(0, 100);
-        assert!(!all.is_empty(), "telemetry buffer should have at least one entry");
+        assert!(
+            !all.is_empty(),
+            "telemetry buffer should have at least one entry"
+        );
     }
 }

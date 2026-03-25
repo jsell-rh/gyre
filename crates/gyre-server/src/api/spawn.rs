@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{
-    auth::AuthenticatedAgent, container_audit, git_refs, workload_attestation, AppState,
-};
+use crate::{auth::AuthenticatedAgent, container_audit, git_refs, workload_attestation, AppState};
 
 use super::agents::AgentResponse;
 use super::error::ApiError;

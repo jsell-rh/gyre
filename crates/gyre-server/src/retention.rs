@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RetentionPolicy {
     pub data_type: String,
