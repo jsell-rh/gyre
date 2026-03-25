@@ -2,6 +2,7 @@ pub mod activity;
 pub mod admin;
 pub mod agent_logs;
 pub mod agent_messages;
+pub mod messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
@@ -185,7 +186,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/agents/:id/card", put(update_agent_card))
         .route(
             "/api/v1/agents/:id/messages",
-            get(agent_messages::get_messages).post(agent_messages::send_message),
+            get(messages::poll_messages),
+        )
+        .route(
+            "/api/v1/agents/:id/messages/:message_id/ack",
+            put(messages::ack_message),
         )
         // Agent touched paths (M13.4)
         .route(
@@ -488,6 +493,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Message bus (Phase 3)
+        .route(
+            "/api/v1/workspaces/:workspace_id/messages",
+            post(messages::send_message).get(messages::list_workspace_messages),
         )
         // Meta-spec blast radius (M32)
         .route(

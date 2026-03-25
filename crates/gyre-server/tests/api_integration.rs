@@ -367,20 +367,25 @@ async fn agent_messages_send_and_receive() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
 
-    // Send a message to the agent (fields: from, content, message_type)
+    // Send via new unified send endpoint (workspace-scoped).
+    // The agent was created with workspace_id="default", so use that.
     let resp = ctx
         .post(
-            &format!("/api/v1/agents/{agent_id}/messages"),
-            json!({"from": "test-sender", "content": {"text": "hello"}}),
+            "/api/v1/workspaces/default/messages",
+            json!({
+                "to": {"agent": agent_id},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-1"}
+            }),
         )
         .await;
-    assert!(resp.status().is_success());
+    assert!(resp.status().is_success(), "send returned: {}", resp.status());
 
-    // Poll messages
+    // Poll messages via cursor-based GET (non-destructive).
     let msgs = ctx
-        .get_json(&format!("/api/v1/agents/{agent_id}/messages"))
+        .get_json(&format!("/api/v1/agents/{agent_id}/messages?after_ts=0"))
         .await;
-    assert!(msgs.is_array() || msgs.is_object());
+    assert!(msgs.is_array());
 }
 
 #[tokio::test]

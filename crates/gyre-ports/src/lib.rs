@@ -61,7 +61,7 @@ pub use jj_ops::{JjChange, JjOpsPort};
 pub use kv_store::KvJsonStore;
 pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;
-pub use message::MessageRepository;
+pub use message::{MessageConsumer, MessageRepository};
 pub use meta_spec_set::MetaSpecSetRepository;
 pub use network::NetworkPeerRepository;
 pub use notification::NotificationRepository;
