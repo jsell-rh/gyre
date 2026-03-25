@@ -129,7 +129,7 @@ Trust-managed policies are tagged with `trust_managed: true` in their metadata s
 |---|---|---|---|
 | **MR merge** | Human approval required | Autonomous if all gates pass | Autonomous if all gates pass |
 | **Spec approval** | Human approval required | Human approval required | Human approval required (always) |
-| **Inbox shows** | Every MR, every gate result, every agent decision | Gate failures, spec approvals, budget warnings | All judgment + safety items (priorities 1-9, per "Inbox priorities shown" below) |
+| **Inbox shows** | Every MR, every gate result, every agent decision | Priorities 1-9 (per row below) | Priorities 1-9 (per row below) |
 | **Briefing detail** | Per-agent activity, per-MR status | Per-spec progress, exceptions | Spec-level summaries, exceptions only |
 | **Notifications** | Every state change | Failures and approvals | Exceptions only |
 | **Agent completion summaries** | Full decision log visible | Uncertainties highlighted | Only low-confidence decisions surfaced |
@@ -177,7 +177,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
   description: "Spec approval is always human, regardless of trust level"
 ```
 
-This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy (like `default-deny`), not created by any trust preset. Trust presets only manage the `require-human-mr-review` policy and notification filtering. The Custom trust editor must prevent deletion of this policy (grayed out with tooltip: "Spec approval is always human — this policy cannot be removed"). Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
+This policy is **immutable** — it exists at every trust level, including Custom, and **independent of trust presets**. It is seeded at server startup as a built-in policy. Built-in policies in `abac-policy-engine.md` "cannot be deleted" but can be "overridden by higher-priority custom policies." To prevent override, this policy uses **priority 1000** (the maximum) — no custom policy can have higher priority. The Custom trust editor grays it out with tooltip: "Spec approval is always human — this policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
 Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
@@ -302,7 +302,7 @@ Views are serializable specs that can be saved to the workspace and shared:
 }
 ```
 
-Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_slug`, ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
+Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_id` (UUID), ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
 - `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view. Response (201): `{view_id: "<uuid>", name: "...", query: {...}, ...}`
 - `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a UUID, not a slug — avoids name collision issues. The human-readable name is a display field, not a key.)
@@ -568,7 +568,7 @@ pub struct TurnCommitLink {
 2. On push, the server reads the turn header and records a `TurnCommitLink`: "turn 7 of agent worker-12's conversation produced commit abc123 modifying `src/retry.rs`."
 3. At completion, the agent runtime uploads the full conversation via `conversation.upload` MCP tool. The conversation is stored (encrypted at rest) and referenced by `conversation_sha` in the MR attestation.
 
-The agent runtime (not the server) tracks the current conversation turn. It passes this to the server on every push via the header. The server correlates turn → commit. This requires no server-side conversation state — the agent is the source of truth for its own turn counter.
+The agent runtime (not the server) tracks the current conversation turn. It passes this to the server on every push via the header. The server records `TurnCommitLink` entries keyed by `(agent_id, turn_number, commit_sha)` — these are stored without a `conversation_sha` initially (it doesn't exist yet). When the conversation is uploaded at completion time, the server back-fills the `conversation_sha` on all `TurnCommitLink` records for that agent. This requires no server-side conversation state — the agent is the source of truth for its own turn counter.
 
 **UI integration:**
 
@@ -605,6 +605,7 @@ specs:
       - type: depends_on
         target: "@platform-core/idempotent-service/system/idempotent-api.md"
         #        ^@workspace_slug/repo_name/spec_path
+        # repo_name must be unique within a workspace (enforced by DB constraint)
 ```
 
 The server resolves the composite path to a specific spec in a specific repo. The first segment is the **workspace slug** (URL-safe identifier, unique per tenant, as defined in `platform-model.md`'s Workspace struct). Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`.
@@ -693,7 +694,7 @@ Saved Views:
 
 | Priority | Action Type | Source | Inline Action |
 |---|---|---|---|
-| 1 | **Agent needs clarification** | In-flight: agent sends `Escalation` Directed message to workspace orchestrator. The orchestrator's Ralph loop processes the escalation and creates a `Notification` (via `NotificationRepository`) for workspace Admin/Developer members with the escalation content. Post-completion: `agent.complete` handler creates Inbox items directly from `AgentCompleted` summary uncertainties. | Respond inline or spawn interrogation |
+| 1 | **Agent needs clarification** | Both in-flight and post-completion paths create the same `Notification` entity (via `NotificationRepository`) with `notification_type: AgentNeedsClarification`. In-flight: orchestrator creates it from `Escalation` message. Post-completion: `agent.complete` handler creates it from `AgentCompleted` uncertainties. Same schema, same query path, same Inbox rendering. | Respond inline or spawn interrogation |
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
@@ -815,7 +816,9 @@ These are architectural constraints, not implementation work. They ensure we don
 | `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |
 | `message-bus.md` `WsMessage` enum | Add `UserPresence` variant (bidirectional, payload: user_id, workspace_id, view, timestamp). |
 | `platform-model.md` §1 `Workspace` struct | Add `trust_level: TrustLevel` field (enum: Supervised, Guided, Autonomous, Custom). |
-| `hierarchy-enforcement.md` §4 built-in policies | Document `system-full-access` policy priority (must be > 250 to override `require-human-spec-approval`). Define ABAC identity mechanism for internal server processes (merge processor, stale agent detector) — these present subject attributes via an internal ABAC context, not via JWT/API key. |
+| `hierarchy-enforcement.md` §4 built-in policies | Rename `system-access` → `system-full-access` (or vice versa — name must be consistent). Document priority (must be > 1000 to override immutable policies, or use a separate non-overridable flag). Define ABAC identity mechanism for internal server processes (merge processor, stale agent detector). |
+| `platform-model.md` §1 Repository | Add unique constraint on `(workspace_id, name)` — repo names must be unique within a workspace for cross-workspace spec link resolution. |
+| `message-bus.md` §Scoping Rules | Document that Users (not just Agents) can send Directed messages to agents — required for human→agent steering (Pause, inline chat). |
 
 These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.
 
