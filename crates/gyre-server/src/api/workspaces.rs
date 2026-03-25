@@ -16,7 +16,7 @@ use super::{new_id, now_secs};
 
 #[derive(Deserialize)]
 pub struct CreateWorkspaceRequest {
-    /// Optional override for system callers only. Non-system callers have
+    /// Optional override for Admin callers only. Non-admin callers have
     /// tenant_id derived from their auth context and this field is ignored.
     pub tenant_id: Option<String>,
     pub name: String,
@@ -85,10 +85,11 @@ pub async fn create_workspace(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceResponse>), ApiError> {
-    // Derive tenant_id from auth context. System callers may supply an
-    // override in the request body; all other callers are bound to their
-    // authenticated tenant scope.
-    let tenant_id = if auth.agent_id == "system" {
+    // Derive tenant_id from auth context. Admin callers may supply a
+    // tenant_id override in the request body; all others are bound to
+    // their authenticated tenant scope. Using role check (not agent_id
+    // string match) prevents spoofing by a JWT user named "system".
+    let tenant_id = if auth.roles.contains(&UserRole::Admin) {
         req.tenant_id.unwrap_or(auth.tenant_id)
     } else {
         auth.tenant_id
@@ -387,5 +388,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    // -- Tenant-isolation security tests (NEW-17) -----------------------------
+
+    /// Non-admin callers cannot override tenant_id via the request body.
+    /// The workspace must be created under the caller's auth tenant, not
+    /// the attacker-supplied value.
+    #[tokio::test]
+    async fn create_workspace_non_admin_tenant_override_ignored() {
+        let state = test_state();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-sec-1", "agent-tok-1".to_string())
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "tenant_id": "evil-tenant",
+            "name": "Malicious",
+            "slug": "malicious"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer agent-tok-1")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = body_json(resp).await;
+        // Agent token has tenant_id "default" — the supplied "evil-tenant" must be ignored.
+        assert_eq!(created["tenant_id"], "default");
+        assert_ne!(created["tenant_id"], "evil-tenant");
+    }
+
+    /// Non-admin callers cannot filter list by a different tenant via query param.
+    /// Supplying ?tenant_id=other-tenant must be silently ignored; they only see
+    /// their own tenant's workspaces.
+    #[tokio::test]
+    async fn list_workspaces_non_admin_cannot_override_tenant_filter() {
+        let state = test_state();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-sec-2", "agent-tok-2".to_string())
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        // Create a workspace in "other-tenant" as admin (system token).
+        let body = serde_json::json!({
+            "tenant_id": "other-tenant",
+            "name": "Other",
+            "slug": "other"
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Non-admin agent tries to list "other-tenant" workspaces.
+        // The query param must be ignored; only their own tenant ("default") is queried.
+        let list_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces?tenant_id=other-tenant")
+                    .header("authorization", "Bearer agent-tok-2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list = body_json(list_resp).await;
+        // Should be empty — the agent is scoped to "default", not "other-tenant".
+        assert_eq!(list.as_array().unwrap().len(), 0);
     }
 }
