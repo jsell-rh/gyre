@@ -599,7 +599,7 @@ async fn test_push_triggers_graph_extraction() {
     let workspace_id = ws_resp["id"].as_str().unwrap().to_string();
 
     // Create a repo in the workspace.
-    let _repo_resp: Value = client
+    let repo_resp: Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth)
         .json(&json!({ "workspace_id": &workspace_id, "name": "rust-repo" }))
@@ -609,6 +609,7 @@ async fn test_push_triggers_graph_extraction() {
         .json()
         .await
         .unwrap();
+    let repo_id = repo_resp["id"].as_str().unwrap().to_string();
     // Git URLs use workspace slug + repo name.
     let clone_url = format!("{base_url}/git/{ws_id}/rust-repo.git");
     let token_owned = token.to_string();
