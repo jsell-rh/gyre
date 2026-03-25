@@ -81,8 +81,13 @@ CREATE TABLE user_workspace_state (
     last_seen_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, workspace_id)
 );
--- No tenant_id column: workspace_id is globally unique and tenant-bound
--- (same exemption rationale as MessageRepository — see message-bus.md)
+-- No tenant_id column: this table is never exposed via REST endpoint — it is
+-- only accessed internally by the last_seen_at middleware and the briefing handler.
+-- Since there is no API surface, there is no UUID-guessing attack vector, and
+-- workspace_id global uniqueness provides structural tenant isolation.
+-- This differs from the notifications table (which HAS tenant_id) because
+-- notifications have REST endpoints where per-handler auth must verify tenant
+-- ownership to prevent cross-tenant UUID guessing.
 -- Added to check-tenant-filter.sh skip list alongside MessageRepository
 ```
 
@@ -925,10 +930,11 @@ Example: "Tell me more about the auth refactor"
          "What changed in idempotent-api.md?"
 ```
 
-**Briefing endpoint:** `GET /api/v1/workspaces/:workspace_id/briefing` — response:
+**Briefing endpoint:** `GET /api/v1/workspaces/:workspace_id/briefing` — this spec is the **sole owner** of the response schema (supersedes `realized-model.md` §7's original narrative description). Response:
 ```json
 {
   "since": 1711324800,
+  "summary": "3 specs completed, 2 in progress, 1 gate failure. $23.40 spent.",
   "sections": {
     "completed": [{"spec_ref": "...", "summary": "...", "mr_count": 3, "agent_id": "...", "decisions": [...]}],
     "in_progress": [{"spec_ref": "...", "summary": "...", "progress": "3/5", "agents": [...], "uncertainties": [...]}],
@@ -938,7 +944,9 @@ Example: "Tell me more about the auth refactor"
   }
 }
 ```
-When `?since=` is omitted, the server uses `last_seen_at` from `user_workspace_state` as the default. ABAC: `resource_type: "workspace"`, `workspace_param: "workspace_id"`.
+The top-level `summary` is an LLM-synthesized narrative string (produced by the narrative generation pipeline in `realized-model.md` §6). Each section item also has a `summary` string field generated the same way. The structured `sections` object is the primary data; the `summary` strings provide human-readable context.
+
+When `?since=` is omitted, the server uses `last_seen_at` from `user_workspace_state` as the default. If no row exists (first visit), falls back to 24 hours ago. ABAC: `resource_type: "workspace"`, `workspace_param: "workspace_id"`.
 
 **Q&A endpoint:** `POST /api/v1/workspaces/:workspace_id/briefing/ask` — request: `{question: "..."}`, response: `{answer: "...", sources: [{spec_path, agent_id, ...}]}`. Requires workspace membership.
 
@@ -998,7 +1006,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `realized-model.md` briefing endpoint | `GET /workspaces/:id/briefing` should use `last_seen_at` from `user_workspace_state` as default `since` when `?since=` parameter is omitted. |
 | `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. Also verify `GraphNode` struct has `test_coverage` field (present in struct but missing from DB schema per realized-model.md §8). |
 | `spec-lifecycle.md` §Configuration | Add `"specs/prompts/"` to `ignored_paths` — prompt templates should iterate quickly without formal spec approval (per `ui-layout.md` §2). |
-| `realized-model.md` §7 briefing endpoint | The `GET /workspaces/:id/briefing` response schema is extended by `human-system-interface.md` §9 — the richer schema (completed/in_progress/cross_workspace/exceptions/metrics sections) builds on `realized-model.md`'s narrative generation. The original narrative fields are preserved; new sections are additive. The knowledge graph narrative generation (§6) feeds the briefing's structural change descriptions. |
+| `realized-model.md` §7 briefing endpoint | `human-system-interface.md` §9 is the **sole owner** of the `GET /workspaces/:id/briefing` response schema. `realized-model.md` §7 no longer defines the response shape — it cross-references this spec. The knowledge graph narrative generation (§6) feeds the briefing's `summary` string fields. |
 | `realized-model.md` §7 API table | Add workspace-scoped concept search: `GET /workspaces/:id/graph/concept/:name`. |
 | `realized-model.md` §8 DB schema | Add `test_coverage REAL` column to `graph_nodes` table (present in Rust struct, was missing from DB schema). |
 

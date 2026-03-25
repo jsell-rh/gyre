@@ -239,7 +239,7 @@ Both are grounded in the knowledge graph — the LLM is summarizing structured d
 | `GET /api/v1/repos/{id}/graph/diff` | GET | Graph diff between two commits (`?from=&to=`) |
 | `GET /api/v1/workspaces/{id}/graph` | GET | Cross-repo knowledge graph for a workspace |
 | `GET /api/v1/workspaces/{id}/graph/concept/{name}` | GET | Workspace-scoped concept search (avoids downloading full workspace graph for concept queries) |
-| `GET /api/v1/workspaces/{id}/briefing` | GET | Narrative summary of changes (`?since=`). Response schema extended by `human-system-interface.md` §9 (completed/in_progress/cross_workspace/exceptions/metrics sections). Knowledge graph narratives (§6 above) feed the briefing's structural descriptions. |
+| `GET /api/v1/workspaces/{id}/briefing` | GET | Briefing endpoint (`?since=`). **Response schema owned by `human-system-interface.md` §9** (this spec does not define the response shape). Knowledge graph narratives (§6 above) feed the briefing's `summary` string fields. |
 | `POST /api/v1/repos/{id}/graph/link` | POST | Manually link a node to a spec (human confirmation of suggested links) |
 | `POST /api/v1/repos/{id}/graph/predict` | POST | Structural prediction for a spec diff (request body: `{spec_path, draft_content}`) |
 
