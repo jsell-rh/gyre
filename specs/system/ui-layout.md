@@ -78,7 +78,7 @@ The content area uses one of four layout patterns depending on the view:
 
 ### Full-Width
 
-Used by: Inbox, Briefing, Specs (list), Meta-specs (catalog), Admin tabs. Note: full-width views can transition to Split layout when the user clicks an entity reference — the detail panel slides in over the full-width content. The view starts full-width but supports on-demand split.
+Used by: Inbox, Briefing, Specs (list), Meta-specs (catalog), Admin tabs, Explorer at tenant scope (workspace cards). Note: full-width views can transition to Split layout when the user clicks an entity reference — the detail panel slides in over the full-width content. The view starts full-width but supports on-demand split.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -334,7 +334,7 @@ In the Spec tab of any detail panel, or in the Editor Split layout:
    │  [Accept] [Edit] [Dismiss]                   │
    └──────────────────────────────────────────────┘
    ```
-4. **Accept:** applies the change to the spec editor. If preview is active, triggers agent re-implementation on throwaway branch.
+4. **Accept:** applies the change to the spec editor content (in-memory). The edit is NOT committed to git yet — the human must explicitly save. Saving commits the spec change to a **feature branch** (not the default branch), which then goes through the standard MR + approval flow per `spec-lifecycle.md`. This ensures spec edits always require approval before taking effect.
 5. **Edit:** copies the suggested text into the editor for manual refinement.
 6. **Dismiss:** removes the suggestion.
 
@@ -527,7 +527,7 @@ The Code sub-view is accessed via a tab in the control bar (which is always **be
 [Architecture] [Code] | [Lens: Structural ▾] [View: Boundary ▾] | [/ Search] [Ask...]
 ```
 
-**Code tab layout** (Full-Width, replaces canvas):
+**Code tab layout** (Full-Width, replaces canvas — when Code is active, canvas-specific controls (Lens, View, Search, Ask) are hidden; the control bar shows only `[Architecture] [Code]`):
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -566,7 +566,7 @@ Full-Width layout. Content adapts to scope:
 
 Click a spec → detail panel opens with tabs: **Content** (markdown viewer), **Edit** (markdown editor + LLM chat via `POST /repos/:id/specs/assist`), **Progress** (task list with status), **Links** (spec link graph for this spec), **History** (approval event timeline).
 
-Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path` (detail), `GET /api/v1/specs/:path/links` (links), `GET /api/v1/specs/:path/history` (history), `GET /api/v1/specs/:path/progress` (task rollup).
+Data from: `GET /api/v1/specs?workspace_id=` (list), `GET /api/v1/specs/:path` (detail), `GET /api/v1/specs/:path/links` (links — defined in `spec-links.md`), `GET /api/v1/specs/:path/history` (history — approval event timeline, new endpoint), `GET /api/v1/specs/:path/progress` (task rollup, new endpoint). New sub-endpoints use `RouteResourceMapping` with `resource_type: "spec"`, `workspace_param` resolved from the spec's owning repo's workspace.
 
 ---
 
