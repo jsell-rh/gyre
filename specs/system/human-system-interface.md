@@ -143,7 +143,7 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
 
 **Supervised:**
 ```yaml
-- name: require-human-mr-review
+- name: "trust:require-human-mr-review"
   effect: deny
   actions: ["merge"]
   resource_types: ["mr"]
@@ -151,7 +151,7 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
     - attribute: subject.type
       operator: equals
       value: "system"
-  description: "Block autonomous merge processor — require human MR approval first"
+  description: "trust: Block autonomous merge processor — require human MR approval first"
 ```
 
 The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` (which bypasses ABAC per `hierarchy-enforcement.md` §4). Instead, it evaluates ABAC as an internal service. The mechanism: ABAC bypass is checked by identity (`subject.id == "gyre-system-token"`), not by type. The merge processor uses `subject.type: "system"`, `subject.id: "merge-processor"` — since its `subject.id` is not the system token identity, it does not bypass ABAC and is subject to the Supervised trust policy. This requires amending `hierarchy-enforcement.md` §4 to change the ABAC bypass condition from "system tokens bypass ABAC" to "the global `GYRE_AUTH_TOKEN` identity bypasses ABAC (matched by `subject.id`, not `subject.type`)." Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
@@ -164,7 +164,7 @@ The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engi
 **Autonomous:** removes most notification policies. Keeps two policies:
 
 ```yaml
-- name: require-human-spec-approval
+- name: "trust:require-human-spec-approval"
   scope: tenant
   priority: 999
   immutable: true        # ABAC engine skips priority override for immutable policies
@@ -626,7 +626,7 @@ Note: `spec-links.md` uses `{workspace}` in its format description without speci
 
 ### What the System Does With Cross-Workspace Links
 
-1. **Inbox notification:** When a linked spec in another workspace changes, the dependent workspace's human gets an Inbox item: "idempotent-api.md changed in platform-core. Your payment-retry.md depends on it. Review impact."
+1. **Inbox notification:** The existing spec lifecycle system (`spec-lifecycle.md`) already detects spec file changes on push to the default branch. When a changed spec has inbound cross-workspace links (queried from the `spec_links` store), the server emits `SpecChanged` Event-tier messages into each dependent workspace and creates a `Notification` for the dependent workspace's Admin/Developer members: "idempotent-api.md changed in platform-core. Your payment-retry.md depends on it. Review impact."
 
 2. **Briefing integration:** The Briefing surfaces cross-workspace activity: "platform-core updated idempotent-api.md. 3 specs in your workspace depend on it."
 
@@ -708,7 +708,7 @@ Saved Views:
 | 2 | **Spec pending approval** | Spec registry | Approve / Reject (inline, read spec content) |
 | 3 | **Gate failure** | Merge queue | View diff + output, Retry / Override / Close |
 | 4 | **Cross-workspace spec change** | Spec link watcher | Review impact, Approve / Dismiss |
-| 5 | **Conflicting spec interpretations** | Detected post-merge by the knowledge graph: when two MRs referencing the same `spec_path` merge in sequence, the graph extraction runs after each merge. The server compares the **set of (node_type, qualified_name) tuples** linked to that `spec_path` before and after each merge. If two merges produce significantly different structural patterns for the same spec (symmetric difference exceeds `GYRE_DIVERGENCE_THRESHOLD`, default 3 nodes), it flags a divergence Inbox item. This uses post-merge graph extraction (M30b) — no per-branch extraction needed. | Review both implementations, pick one or request reconciliation |
+| 5 | **Conflicting spec interpretations** | Detected post-merge by comparing `ArchitecturalDelta` records (already produced by M30b extraction on every push). When two MRs referencing the same `spec_path` merge in sequence, the server compares the deltas: each delta records which nodes were added/modified/removed. If two deltas for the same spec produce contradictory structural changes (adding different types for the same concept, or different interface shapes), the server flags a divergence. The comparison uses `ArchitecturalDelta.delta_json` — no pre-merge snapshot needed, only the diff records already captured. Threshold: `GYRE_DIVERGENCE_THRESHOLD` (default 3 conflicting node changes). | Review both implementations, pick one or request reconciliation |
 | 6 | **Meta-spec drift alert** | Reconciliation controller | Review results, adjust meta-spec |
 | 7 | **Budget warning** | Budget enforcement | Increase limit / Pause work |
 | 8 | **Trust level suggestion** | Track record analysis | Increase trust / Dismiss |
