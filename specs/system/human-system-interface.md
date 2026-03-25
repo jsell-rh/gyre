@@ -67,7 +67,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted", "session_id": "<evicted-uuid>"}` WebSocket message — the client checks if the session_id matches its own tab and stops heartbeating only for that tab. The server maps `session_id` to WebSocket connections by including `session_id` in the initial `Subscribe` message (amending `message-bus.md`'s `Subscribe` payload with a required `session_id` field — required for user connections that send `UserPresence`, optional for agent connections that don't use presence). Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent **immediately on page load** (so the user appears present to others without waiting for the first timer tick), then on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. The server evicts entries after 60 seconds without an update. **Multi-tab:** The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted", "session_id": "<evicted-uuid>"}` WebSocket message — the client checks if the session_id matches its own tab and stops heartbeating only for that tab. The server maps `session_id` to WebSocket connections by including `session_id` in the initial `Subscribe` message (amending `message-bus.md`'s `Subscribe` payload with a required `session_id` field — required for user connections that send `UserPresence`, optional for agent connections that don't use presence). Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
 
 ### Deep Links
 
@@ -557,7 +557,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 | 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
 | 2 | Spec pending approval | Synchronous in `specs/save` handler (spec-edit MRs create the notification on MR creation). For agent-authored specs, the orchestrator creates the notification when the spec enters the approval queue. Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
 | 3 | Gate failure | Synchronous in gate evaluation handler |
-| 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler |
+| 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler (the push hook must query `spec_links` for inbound cross-workspace links and create notifications for dependent workspace members — amend `spec-lifecycle.md` to add this notification step alongside the existing task creation) |
 | 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
 | 6 | Meta-spec drift | Via `MessageConsumer` consuming `ReconciliationCompleted` events |
 | 7 | Budget warning | Synchronous in budget check middleware |
@@ -923,7 +923,7 @@ METRICS
 | Completed | Spec registry + task rollup + agent completion summaries |
 | In Progress | Task status + agent activity + in-flight `Escalation` messages (for uncertainties from active agents) + completion summary uncertainties (for recently completed agents) |
 | Cross-Workspace | Cross-workspace spec link watcher |
-| Exceptions | Gate results + spec assertion failures |
+| Exceptions | Gate results + spec assertion failures + MR reverts (MRs with `Reverted` status) |
 | Metrics | Budget usage + analytics |
 
 ### Briefing Q&A
