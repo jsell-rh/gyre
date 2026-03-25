@@ -1,6 +1,13 @@
 # System Explorer
 
-> **Status: Draft.** This spec defines the primary UI for Gyre: a live, navigable model of the realized system where every element links to its spec, specs are editable inline, and changes preview non-destructively.
+> **Status: Draft.** Extended by [`human-system-interface.md`](human-system-interface.md) (trust gradient, interrogation, conversation provenance) and [`ui-layout.md`](ui-layout.md) (spatial layout, view spec grammar). Key amendments from those specs:
+>
+> - **`Cmd+K`** is now global search (not canvas-scoped). Canvas-local search uses `/`.
+> - The **Sidebar** layout (Boundaries/Interfaces/Data/Specs) is an **in-view filter panel** (200px, collapsible) inside the Explorer content area, NOT part of the application sidebar.
+> - **Ghost overlays** (§3 structural prediction) are deferred — replaced by the Editor Split preview workflow in `ui-layout.md` §9.
+> - The Explorer is accessed via a stable 6-item app sidebar (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin).
+>
+> This spec defines the primary UI for Gyre: a live, navigable model of the realized system where every element links to its spec, specs are editable inline, and changes preview non-destructively.
 
 ## Problem
 
@@ -91,7 +98,7 @@ All three serve the same purpose: enhancing human reasoning about the system. No
 
 ### 1. The Navigable Architecture
 
-The default view when entering a workspace is the **realized architecture** — a visual, interactive representation of the system's current structure.
+The default Explorer view at workspace scope is the **realized architecture** — a visual, interactive representation of the system's current structure. (Note: the overall application landing page after workspace selection is Inbox, per `human-system-interface.md` §1. The Explorer shows realized architecture when the user navigates to it.)
 
 #### Layout
 
@@ -141,7 +148,7 @@ Colors indicate spec coverage (green = governed by spec, amber = suggested link,
 
 **Drag** the timeline scrubber → The canvas updates to show the architecture at that point in time. Ghost outlines show where things were added or removed since.
 
-**Search** (Cmd+K) → Find any entity by name, type, or spec. Results highlight on the canvas.
+**Search** (`/`) → Find any entity by name, type, or spec within the canvas. Results highlight on the canvas. (Note: `Cmd+K` is now global search per `human-system-interface.md` §1.)
 
 ### 2. Moldable Views
 
@@ -277,6 +284,8 @@ When you click a spec linkage badge anywhere in the explorer, the spec opens **i
 
 ### 3. Inline Spec Editing with Progressive Preview
 
+> **Note:** The ghost overlay UX (§3.2-3.3 below) is **Phase 1 priority** — the fast, probabilistic feedback loop (2-5 seconds via `POST /repos/{id}/graph/predict`) is more valuable for understanding than the thorough preview (minutes via agent implementation on throwaway branches). Lesson from Dark: instant/fast structural prediction creates the tight feedback loop that makes editing feel transformative; the slow-but-perfect preview is Phase 2. Both ship, but ghost overlays first. The Editor Split preview in `ui-layout.md` §9 complements ghost overlays — it provides certainty after the fast prediction builds intuition.
+
 This is the core interaction. The human sees the realized architecture, clicks a spec, edits it, and sees the projected impact — all in one view.
 
 #### The Edit → Preview Flow
@@ -326,8 +335,7 @@ The "fast" tier uses the knowledge graph + LLM to predict impact without running
 POST /api/v1/repos/{id}/graph/predict
 {
   "spec_path": "specs/system/search.md",
-  "draft_content": "<full spec with changes>",
-  "current_graph_snapshot": "<graph-version-id>"
+  "draft_content": "<full spec with changes>"
 }
 
 // Response (2-5 seconds)
