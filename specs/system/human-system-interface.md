@@ -65,7 +65,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 
 The content adapts. The sidebar doesn't.
 
-A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on every view change (sidebar nav click or scope transition). The server evicts entries after 60 seconds without an update.
+A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds to prevent bursts during rapid navigation. The server evicts entries after 60 seconds without an update.
 
 ### Deep Links
 
@@ -563,6 +563,31 @@ pub trait ConversationRepository: Send + Sync {
 
 **REST endpoint for retrieval:** `GET /api/v1/conversations/:sha` — returns the conversation binary blob (decompressed). Authorization: the `ConversationRepository::store` method records `(sha, agent_id, workspace_id)` as metadata alongside the blob. The retrieval endpoint looks up `workspace_id` from this metadata and verifies the caller has workspace membership — no cross-repository join needed. The adapter stores conversations encrypted at rest; large conversations (>1MB) are stored as files on disk with the SHA as filename.
 
+**DB schema** (new migration):
+```sql
+CREATE TABLE conversations (
+    sha TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    blob BLOB,                  -- NULL if stored on disk (>1MB)
+    file_path TEXT,             -- set if stored on disk
+    created_at INTEGER NOT NULL,
+    tenant_id TEXT NOT NULL
+);
+
+CREATE TABLE turn_commit_links (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    turn_number INTEGER NOT NULL,
+    commit_sha TEXT NOT NULL,
+    files_changed TEXT NOT NULL, -- JSON array
+    conversation_sha TEXT,      -- NULL until back-filled at completion
+    timestamp INTEGER NOT NULL
+);
+CREATE INDEX idx_turn_links_agent ON turn_commit_links (agent_id);
+CREATE INDEX idx_turn_links_conversation ON turn_commit_links (conversation_sha);
+```
+
 The agent runtime captures the conversation via a new MCP tool `conversation.upload` (addition to `platform-model.md` §4 tool table, scope: `agent`). The conversation is transmitted as a zstd-compressed binary blob, max **10MB** compressed (configurable, `GYRE_MAX_CONVERSATION_SIZE`). The server computes SHA-256 on receipt and stores the blob encrypted at rest. If the caller-provided `conversation_sha` (if any) doesn't match the computed SHA, the server rejects with 400. The upload is called by the agent runtime just before `agent.complete`. If it fails, completion still succeeds but the conversation is marked as unavailable. The MCP server validates that the uploading agent's `sub` claim matches the `agent_id` in the request.
 
 ```rust
@@ -840,6 +865,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `platform-model.md` §1 Repository | Add unique constraint on `(workspace_id, name)` — repo names must be unique within a workspace for cross-workspace spec link resolution. |
 | `message-bus.md` §Scoping Rules | Document that Users (not just Agents) can send Directed messages to agents — required for human→agent steering (Pause, inline chat). |
 | `realized-model.md` `GraphNode` struct | Add `spec_confidence` field (already in DB schema but missing from Rust struct). Required by Explorer encoding layer. |
+| `realized-model.md` predict endpoint | Reconcile HTTP method: `system-explorer.md` §3 uses POST, `realized-model.md` §7 uses GET. Recommend POST (sends draft content in body). |
 | `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. Also verify `GraphNode` struct has `test_coverage` field (present in struct but missing from DB schema per realized-model.md §8). |
 
 These amendments are tracked here rather than applied inline because each upstream spec may have its own review cycle.

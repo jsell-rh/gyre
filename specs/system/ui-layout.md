@@ -119,7 +119,12 @@ The detail panel slides in from the right when the user clicks an entity (node, 
 | **Spec** | When entity has `spec_path` | Spec content viewer + editor + LLM chat |
 | **Chat** | When entity is an agent or has an author agent | Scoped inline chat showing recipient |
 | **History** | When entity has modification history | Timeline of changes, conversation turn links |
-| **Diff** | When viewing an MR or preview | Side-by-side diff |
+| **Diff** | When viewing an MR | Side-by-side code diff |
+| **Gates** | When viewing an MR | Gate execution results |
+| **Attestation** | When viewing a merged MR | Merge attestation bundle + conversation provenance |
+| **Ask Why** | When entity has an author agent | Spawns interrogation agent (per HSI §4) |
+
+Note: The tab set is contextual per entity type. An MR shows Info/Diff/Gates/Attestation/Ask Why. A graph node shows Info/Spec/Chat/History. An agent shows Info/Chat/History. The tabs listed above are the superset — only applicable tabs appear.
 
 **Pop Out:** Expands the detail panel to full-width (replaces the main content temporarily). The sidebar and breadcrumb remain — the user is still in the same nav context, just viewing the entity detail at full width. This is NOT a standalone routable page — it's a panel expansion. Back button or Esc returns to the split layout. Entity views from `platform-model.md` §9 (Task Board, Agent List, etc.) are accessed exclusively through this drill-down pattern, never as primary navigation items.
 
@@ -149,7 +154,7 @@ Below the canvas, a control bar with:
 - Lens selector (Structural / Evaluative / Observable)
 - View selector (Boundary / Spec Realization / Change / saved views / LLM-generated)
 - Search input (`/` to focus — canvas-local search, highlights matching nodes)
-- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate` — sends the question + current graph context to the server, which calls the LLM and returns a view spec JSON. The frontend renders the returned spec. Requires workspace membership.)
+- Ask input (natural language → `POST /api/v1/workspaces/:workspace_id/explorer-views/generate`). Request: `{question: "How does auth work?", repo_id?: "<uuid>"}`. Response: `{view_spec: {...}, explanation: "..."}`. The server calls the LLM with the question + graph summary, returns a view spec JSON per the grammar in §4. The generated view is **ephemeral** (not auto-saved) — the user can save it explicitly via the saved views CRUD. Requires workspace membership. ABAC resource type: `explorer_view`.
 
 When a node is clicked, the Split layout activates (canvas compresses to 60%, detail panel at 40%).
 
@@ -398,7 +403,11 @@ Maps data attributes to visual properties.
 
 All encoding fields reference `GraphNode` or `GraphEdge` attributes from `realized-model.md`.
 
-**Lens-driven data enrichment:** When the Evaluative lens is active, the Explorer automatically fetches supplementary data from `GET /repos/:id/graph/risks` and merges `fan_out`, `fan_in`, and `spec_covered` into the node objects before applying the encoding. This fetch is triggered by lens selection, not by the view spec — the view spec references these fields, and the Explorer renderer ensures the data is available when the lens is active. If a view spec references `fan_out` without the Evaluative lens, the field is `null` and the encoding falls back to a default value. The Explorer renderer reads the encoding spec and maps graph data to visual properties. No arbitrary code execution.
+**Lens-driven data enrichment:** When the Evaluative lens is active, the Explorer automatically fetches supplementary data from two sources:
+1. `GET /repos/:id/graph/risks` — provides `fan_out`, `fan_in`, `churn_rate`, `spec_covered` per node
+2. `GET /repos/:id/gates` + `GET /api/v1/specs?kind=&workspace_id=` — provides gate pass/fail status and spec assertion state, mapped to nodes via `spec_path`
+
+These are merged into node objects before applying the encoding. The fetch is triggered by lens selection, not by the view spec. If a view spec references Evaluative fields without the lens active, the field is `null` and the encoding falls back to a default value. The Explorer renderer reads the encoding spec and maps graph data to visual properties. No arbitrary code execution.
 
 ### Extensibility
 
@@ -513,7 +522,7 @@ Expanded (accordion):
 
 ## 7. Briefing Layout
 
-Full-width. No split panel. Narrative flows top-to-bottom with section headers:
+Full-width by default. Clicking entity references within the Briefing opens the detail panel (Split layout) per the standard drill-down pattern in §2. Narrative flows top-to-bottom with section headers:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
