@@ -309,6 +309,7 @@ These endpoints are exempt from ABAC evaluation (handled before the middleware):
 | `POST /api/v1/notifications/:id/dismiss` | Notification dismissal (per-handler auth — verifies notification belongs to user) |
 | `POST /api/v1/notifications/:id/resolve` | Notification resolution (per-handler auth — verifies notification belongs to user) |
 | `GET /api/v1/specs/:path/links` | Spec link graph (per-handler auth — `:path` is not a UUID, resolves workspace from `?repo_id=`) |
+| `POST /api/v1/specs/:path/reject` | Spec rejection (per-handler auth — `:path` is not a UUID, same pattern as `/approve`) |
 | `GET /api/v1/specs/:path/history` | Spec approval history (per-handler auth — resolves workspace from spec's repo via `?repo_id=`) |
 | `GET /api/v1/specs/:path/progress` | Spec task rollup (per-handler auth — resolves workspace from spec's repo via `?repo_id=`) |
 | `GET /*` | SPA static files |
