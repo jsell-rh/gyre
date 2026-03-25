@@ -57,7 +57,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 | **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **card grid**, not a graph canvas — click a workspace card to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
-| **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
+| **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams, **Policies** (ABAC editor for Custom trust) | Repo settings, gates, policies |
 
 **Meta-specs at workspace scope** is the primary location for the preview loop from `meta-spec-reconciliation.md`: edit a persona → select target specs → preview agents implement on throwaway branches → view diff → iterate → publish. Reconciliation progress tracking also lives here. At tenant scope, Meta-specs shows a catalog of all personas/principles/standards across workspaces. At repo scope, it redirects to the workspace scope (meta-specs are workspace-scoped, not repo-scoped).
 
@@ -320,15 +320,20 @@ Views are serializable specs that can be saved to the workspace and shared:
 ```json
 {
   "name": "API surface",
-  "query": {
+  "data": {
     "node_types": ["Endpoint"],
-    "include_edges": ["RoutesTo"],
+    "edge_types": ["RoutesTo"],
     "depth": 1
   },
   "layout": "list",
-  "columns": ["name", "qualified_name", "spec_path", "last_modified_by"]
+  "encoding": {
+    "label": "qualified_name",
+    "color": {"field": "node_type", "scale": "categorical"}
+  }
 }
 ```
+
+Saved views use the **same view spec grammar** defined in `ui-layout.md` §4 (`data` + `layout` + `encoding` + optional `annotations` + `explanation`). The grammar is the single schema for all views — saved, generated, and built-in.
 
 Saved views are stored as JSON documents keyed by workspace. The key format is `workspace_id:view_id` (UUID), ensuring workspace isolation (views from workspace A are not queryable by workspace B). If `KvJsonStore` is used, the namespace is `explorer_views` — note the single-tenant limitation flagged in `hierarchy-enforcement.md` §3. For multi-tenant deployments, saved views should migrate to a proper port trait with tenant-scoped adapter. API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
@@ -585,7 +590,7 @@ pub trait ConversationRepository: Send + Sync {
     /// Get turn-commit links for a conversation (for "View conversation at this point").
     async fn get_turn_links(&self, conversation_sha: &str) -> Result<Vec<TurnCommitLink>>;
     /// List conversations for an agent (for Explorer detail panel provenance links).
-    async fn list_by_agent(&self, agent_id: &Id) -> Result<Vec<String>>; // returns SHAs
+    async fn list_by_agent(&self, agent_id: &Id, tenant_id: &Id) -> Result<Vec<String>>; // returns SHAs
 }
 ```
 
@@ -785,7 +790,7 @@ Saved Views:
 - **Conflicting spec interpretations** (#5) — the system detects that two agents implemented the same spec differently and asks the human to arbitrate.
 - **Trust level suggestion** (#8) — the system suggests the human can relax oversight based on track record.
 
-Inbox filtering by trust level is defined in the Trust Level table (§2, "Inbox priorities shown" row) as the single source of truth.
+Inbox filtering by trust level is defined in the Trust Level table (§2, "Inbox priorities shown" row) as the single source of truth. **Mechanism:** The Inbox query endpoint (`GET /api/v1/users/me/notifications`) accepts `?min_priority=1&max_priority=9` parameters. The UI reads the workspace's `trust_level` and maps it to the priority range before calling the endpoint. This is client-side logic, not ABAC — trust level controls what the UI *requests*, not what the server *allows*.
 
 ---
 

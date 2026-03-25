@@ -561,7 +561,7 @@ Expanded (accordion):
 
 ---
 
-## 7. Briefing Layout
+## 8. Briefing Layout
 
 Full-width by default. Clicking entity references within the Briefing opens the detail panel (Split layout) per the standard drill-down pattern in §2. Narrative flows top-to-bottom with section headers:
 
@@ -604,7 +604,7 @@ Action buttons are inline within the narrative. Clicking an entity name (spec, a
 
 ---
 
-## 8. Meta-specs Preview Loop Layout
+## 9. Meta-specs Preview Loop Layout
 
 Uses the Editor Split layout (§2):
 
@@ -675,7 +675,7 @@ The Architecture tab is the default — it shows structural impact derived from 
 
 ---
 
-## 9. Rendering Technology
+## 10. Rendering Technology
 
 ### Canvas Rendering
 
