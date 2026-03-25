@@ -228,6 +228,8 @@ struct RouteResourceMapping {
     id_param: Option<&'static str>,
     /// Which path param holds the parent workspace ID (if any)
     workspace_param: Option<&'static str>,
+    /// Override the default HTTP-method-to-action mapping (e.g., POST→"generate" instead of POST→"write")
+    action_override: Option<&'static str>,
 }
 ```
 
