@@ -221,7 +221,27 @@ Consider increasing trust level to Autonomous.
 
 This appears as an Inbox item (priority 8). The human decides.
 
-**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results and MR reverts for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, and the user has not dismissed this suggestion in the last 30 days (tracked via a `dismissed_at` timestamp on the notification), it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs.
+**Mechanism:** A background job (`trust_suggestion_check`) runs daily per workspace. It queries gate results and MR reverts for the last 30 days. If both counts are 0 and the current trust level is not already Autonomous, and the user has not dismissed this suggestion in the last 30 days, it creates a `Notification` for workspace Admin members. The job is registered in the server's `JobRegistry` alongside existing jobs.
+
+**Notification entity:** Notifications used throughout this spec (Inbox items) share a common schema:
+```sql
+CREATE TABLE notifications (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,          -- recipient
+    notification_type TEXT NOT NULL, -- e.g. "AgentNeedsClarification", "TrustSuggestion"
+    priority INTEGER NOT NULL,      -- 1-10 per §8 table
+    title TEXT NOT NULL,
+    body TEXT,                       -- JSON payload with type-specific data
+    entity_ref TEXT,                 -- optional reference (spec_path, agent_id, mr_id)
+    resolved_at INTEGER,            -- epoch seconds, NULL if unresolved
+    dismissed_at INTEGER,           -- epoch seconds, NULL if not dismissed
+    created_at INTEGER NOT NULL,
+    tenant_id TEXT NOT NULL
+);
+CREATE INDEX idx_notifications_user_ws ON notifications (user_id, workspace_id, resolved_at);
+```
+The `dismissed_at` field tracks user dismissals (used by trust suggestions to suppress re-creation for 30 days). The `resolved_at` field tracks resolution (action taken). The Inbox badge count is the count of notifications where `resolved_at IS NULL AND dismissed_at IS NULL`.
 
 ---
 
@@ -360,7 +380,7 @@ User: "How does authentication work?"
 LLM generates view definition:
 {
   "name": "How auth works",
-  "query": {
+  "data": {
     "concept": "auth",
     "node_types": ["Module", "Function", "Type", "Endpoint"],
     "depth": 2
@@ -852,7 +872,22 @@ Example: "Tell me more about the auth refactor"
          "What changed in idempotent-api.md?"
 ```
 
-**Endpoint:** `POST /api/v1/workspaces/:workspace_id/briefing/ask` — request: `{question: "..."}`, response: `{answer: "...", sources: [{spec_path, agent_id, ...}]}`. Requires workspace membership.
+**Briefing endpoint:** `GET /api/v1/workspaces/:workspace_id/briefing` — response:
+```json
+{
+  "since": 1711324800,
+  "sections": {
+    "completed": [{"spec_ref": "...", "summary": "...", "mr_count": 3, "agent_id": "...", "decisions": [...]}],
+    "in_progress": [{"spec_ref": "...", "summary": "...", "progress": "3/5", "agents": [...], "uncertainties": [...]}],
+    "cross_workspace": [{"source_workspace_slug": "...", "spec_path": "...", "summary": "..."}],
+    "exceptions": [{"type": "gate_failure", "entity_id": "...", "summary": "...", "actions": [...]}],
+    "metrics": {"mr_count": 12, "agent_runs": 47, "compute_cost_cents": 2340, "budget_pct": 67}
+  }
+}
+```
+When `?since=` is omitted, the server uses `last_seen_at` from `user_workspace_state` as the default. ABAC: `resource_type: "workspace"`, `workspace_param: "workspace_id"`.
+
+**Q&A endpoint:** `POST /api/v1/workspaces/:workspace_id/briefing/ask` — request: `{question: "..."}`, response: `{answer: "...", sources: [{spec_path, agent_id, ...}]}`. Requires workspace membership.
 
 The LLM answering this chat has read-only access to:
 - The briefing data (specs, tasks, MRs, completion summaries, deltas)
@@ -905,6 +940,7 @@ These are architectural constraints, not implementation work. They ensure we don
 | `realized-model.md` predict endpoint | Reconcile HTTP method — changed to POST (sends draft content in body). |
 | `realized-model.md` briefing endpoint | `GET /workspaces/:id/briefing` should use `last_seen_at` from `user_workspace_state` as default `since` when `?since=` parameter is omitted. |
 | `realized-model.md` API | Add workspace-scoped concept search endpoint (`GET /workspaces/:id/graph/concept/:name`) to avoid full-graph download for workspace-scoped queries. Without this, workspace concept search falls back to downloading `GET /workspaces/:id/graph` and filtering client-side. Also verify `GraphNode` struct has `test_coverage` field (present in struct but missing from DB schema per realized-model.md §8). |
+| `spec-lifecycle.md` §Configuration | Add `"specs/prompts/"` to `ignored_paths` — prompt templates should iterate quickly without formal spec approval (per `ui-layout.md` §2). |
 
 All amendments have been applied inline to the upstream specs in this PR. The table above serves as a cross-reference of what was changed and why.
 

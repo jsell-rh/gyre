@@ -98,7 +98,7 @@ All three serve the same purpose: enhancing human reasoning about the system. No
 
 ### 1. The Navigable Architecture
 
-The default view when entering a workspace is the **realized architecture** — a visual, interactive representation of the system's current structure.
+The default Explorer view at workspace scope is the **realized architecture** — a visual, interactive representation of the system's current structure. (Note: the overall application landing page after workspace selection is Inbox, per `human-system-interface.md` §1. The Explorer shows realized architecture when the user navigates to it.)
 
 #### Layout
 
