@@ -77,7 +77,7 @@ Every view state is URL-addressable:
 
 | Shortcut | Action |
 |---|---|
-| `Cmd+K` | Global search (specs, types, concepts, agents) |
+| `Cmd+K` | Global search (specs, types, concepts, agents). When Explorer canvas is focused, this opens global search, not canvas-local search. Canvas-local search uses `/` within the Explorer. This supersedes `system-explorer.md`'s `Cmd+K` which was canvas-scoped. |
 | `Cmd+1` | Jump to Inbox |
 | `Cmd+2` | Jump to Briefing |
 | `Cmd+3` | Jump to Explorer |
@@ -136,7 +136,7 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
 ```yaml
 - name: require-human-mr-review
   effect: deny
-  actions: ["write"]
+  actions: ["merge"]
   resource_types: ["mr"]
   conditions:
     - attribute: subject.type
@@ -145,9 +145,7 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
   description: "Block autonomous merge processor — require human MR approval first"
 ```
 
-The merge processor acts as `subject.type: system` (per `abac-policy-engine.md` attribute table). The action is `write` on `resource_types: ["mr"]` — this covers MR status transitions including the merge operation. Under Supervised, this policy blocks the merge processor from autonomously merging. The human must first transition the MR status to `approved` via the UI (a `user`-type action, not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy which has higher priority, so they are not blocked.
-
-Note: `abac-policy-engine.md` lists `merge` as a separate action value. For consistency, if the merge processor evaluates ABAC with `action: "merge"`, the policy should use `actions: ["merge"]` instead of `["write"]`. The implementer should follow whichever action value the merge processor actually uses — the intent is the same.
+The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table which lists `merge` as a distinct action). Under Supervised, this policy blocks the merge processor (`subject.type: system`) from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
 
 **Guided:** removes the `require-human-mr-review` policy. The merge processor proceeds autonomously when all gates pass. Gate failures still surface in the Inbox.
 
@@ -292,6 +290,11 @@ Views are serializable specs that can be saved to the workspace and shared:
 }
 ```
 
+Saved views are stored as JSON documents in the workspace's configuration (via `KvJsonStore` with namespace `explorer_views` and key `workspace_id:view_name`). API endpoints for view CRUD:
+- `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
+- `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view
+- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:name` — delete a view
+
 Built-in saved views shipped with every workspace:
 - **API Surface** — all endpoints with their handlers
 - **Domain Model** — types and interfaces in the domain crate
@@ -413,12 +416,21 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 
 **Delivery path:** The completion summary is submitted as part of the `agent.complete` MCP tool call (extends the existing tool with a `summary` field). The server:
 1. Stores the summary in the MR attestation bundle
-2. Emits an `AgentCompleted` **Event-tier, server-only** message via the message bus (requires adding to `message-bus.md`):
-   - Kind: `AgentCompleted`
-   - Tier: Event (signed, persisted with TTL)
-   - Destination: `Workspace(agent's workspace)`
-   - Payload: `{ agent_id, task_id, spec_ref, decisions: [...], uncertainties: [...], conversation_sha }`
-   - Server-only: yes (emitted by the server on `agent.complete`, not by agents directly)
+2. Emits an `AgentCompleted` message via the message bus. This kind must be added to `message-bus.md`'s `MessageKind` enum:
+
+   **`AgentCompleted` specification:**
+   - **Tier:** Event (signed, persisted with TTL)
+   - **Destination:** `Workspace(agent's workspace_id)`
+   - **server_only():** `true` (emitted by the server on `agent.complete`, not by agents)
+   - **Payload schema:**
+     | Field | Type | Required |
+     |---|---|---|
+     | `agent_id` | Id | yes |
+     | `task_id` | Id | yes |
+     | `spec_ref` | Option\<String\> | no |
+     | `decisions` | `[{what: String, why: String, confidence: String, alternatives_considered: Option<[String]>}]` | yes |
+     | `uncertainties` | `[String]` | yes |
+     | `conversation_sha` | Option\<String\> | no |
 3. The Inbox consumes `AgentCompleted` messages and surfaces uncertainties as action items (at Supervised/Guided trust levels)
 4. The Briefing consumes `AgentCompleted` messages for the "Completed" section
 
@@ -450,8 +462,8 @@ Clicking "Ask why" spawns an interrogation agent with:
   scope: tenant                      # uses existing PolicyScope variants
   priority: 200                      # high priority, overrides workspace/repo policies
   effect: deny
-  actions: ["write", "delete", "spawn", "approve"]
-  resource_types: ["*"]
+  actions: ["write", "delete", "spawn", "approve", "merge"]
+  resource_types: ["task", "mr", "repo", "agent", "spec", "persona", "worktree"]
   conditions:
     - attribute: subject.id
       operator: equals
@@ -519,9 +531,11 @@ pub struct TurnCommitLink {
 
 **How it works:**
 
-1. The agent runtime tracks which conversation turn is active when a `git push` occurs.
-2. On push, the server records a `TurnCommitLink`: "turn 7 of agent worker-12's conversation produced commit abc123 modifying `src/retry.rs`."
-3. The full conversation is stored (encrypted at rest) and referenced by `conversation_sha` in the MR attestation.
+1. The agent runtime includes a `X-Gyre-Conversation-Turn: <n>` header on every git push (extending the existing `X-Gyre-Model-Context` header from M13.2).
+2. On push, the server reads the turn header and records a `TurnCommitLink`: "turn 7 of agent worker-12's conversation produced commit abc123 modifying `src/retry.rs`."
+3. At completion, the agent runtime uploads the full conversation via `conversation.upload` MCP tool. The conversation is stored (encrypted at rest) and referenced by `conversation_sha` in the MR attestation.
+
+The agent runtime (not the server) tracks the current conversation turn. It passes this to the server on every push via the header. The server correlates turn → commit. This requires no server-side conversation state — the agent is the source of truth for its own turn counter.
 
 **UI integration:**
 
@@ -598,12 +612,17 @@ Workspace: Payments
 
 Presence is tracked via Telemetry-tier messages through the message bus. This requires adding a `UserPresence` variant to `MessageKind` in `message-bus.md`:
 
-```rust
-// Tier 3: Telemetry
-UserPresence,  // payload: { user_id, workspace_id, view, timestamp }
-```
-
-`UserPresence` is Telemetry tier (unsigned, in-memory only, `Destination::Workspace`). Presence is **best-effort** — lost on server restart or buffer pressure. The server maintains a separate lightweight presence map (user_id → last_seen_workspace, last_seen_timestamp) in memory, updated on every WebSocket message. This map is the source of truth for "who is active," not the TelemetryBuffer. The TelemetryBuffer carries the presence *events* for real-time push to other clients.
+**`UserPresence` specification** (add to `message-bus.md`'s `MessageKind` enum):
+- **Tier:** Telemetry (unsigned, in-memory only)
+- **Destination:** `Workspace(workspace_id)` — presence is scoped to a workspace
+- **server_only():** `false` (emitted by the UI client via WebSocket, not by agents)
+- **Payload schema:**
+  | Field | Type | Required |
+  |---|---|---|
+  | `user_id` | Id | yes |
+  | `workspace_id` | Id | yes |
+  | `view` | String | yes — e.g., "inbox", "explorer", "specs" |
+  | `timestamp` | u64 | yes — epoch ms | Presence is **best-effort** — lost on server restart or buffer pressure. The server maintains a separate lightweight presence map (user_id → last_seen_workspace, last_seen_timestamp) in memory, updated on every WebSocket message. This map is the source of truth for "who is active," not the TelemetryBuffer. The TelemetryBuffer carries the presence *events* for real-time push to other clients.
 
 ### Conflict Prevention
 
@@ -656,7 +675,7 @@ Saved Views:
 |---|---|
 | Supervised | 1-10 (everything) |
 | Guided | 1-7 (skip trust suggestions and low-confidence links) |
-| Autonomous | 1-7 (all judgment + safety items; excludes only trust suggestions #8 and low-confidence links #10) |
+| Autonomous | 1-9 (all judgment + safety items; excludes only #10 suggested spec links) |
 
 ---
 
