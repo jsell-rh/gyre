@@ -317,6 +317,137 @@ The human didn't write the code. They can't reason about it from memory. Traditi
 
 The Explorer solves this with **progressive disclosure starting from boundaries** — the same technique architects use when onboarding onto a new system.
 
+### Design Principle: The Built Software Is Always Alive
+
+The Explorer shows the architecture of the software being built — not Gyre's own internals. The knowledge graph is static structure. But structure without behavior is dead. The human needs to see data flowing through the architecture to understand it — not just what the code *is*, but what it *does*.
+
+The spreadsheet insight: Google Sheets is the best IDE because the program is always running. Change an input, see the output. The Explorer should be the same — you see the built software's architecture, and you see test data flowing through it. Edit a spec, see the ghost overlay predict structural changes. View an endpoint, see the actual request/response from the last gate run.
+
+**Two layers of liveness on the canvas:**
+
+**Layer 1 — SDLC activity (Gyre's work):** Ambient indicators of what agents are building:
+- **Active agents:** nodes where agents are working pulse with a subtle glow (sourced from `RunStarted`/`RunFinished` Telemetry-tier messages).
+- **Recent changes:** nodes modified in the last hour have a fading highlight ring (sourced from `ArchitecturalDelta` records).
+- **Gate status:** edges show gate pass/fail as color (green/red) when the Evaluative lens is active.
+
+**Layer 2 — Test-time traces (the built software's behavior):** Animated data flow showing real requests flowing through the architecture, captured during gate execution. This is the "always alive" layer — the software was alive during its last gate run, and you can see that aliveness replayed on the graph. See §3a (Test-Time Trace Capture) for the full design.
+
+### Test-Time Trace Capture
+
+#### The Problem
+
+The knowledge graph shows what the software *is* — types, endpoints, dependencies. But it doesn't show what the software *does*. When an agent builds a payment retry endpoint, the Explorer shows the endpoint node, its connections, and its spec linkage. What it doesn't show: "when a retry request arrives, it calls the idempotency check, then the payment gateway, then records the result in the ledger." That data flow *through* the architecture is what makes the system legible.
+
+Production observability (the Observable lens, §10) solves this eventually, but it requires a deployed system. **Test-time trace capture** solves it now — during gate execution, the test suite already exercises the software. We capture those execution traces and map them to the knowledge graph.
+
+#### Design
+
+**Gate-time OTel instrumentation:** A new gate type (`TraceCapture`) instruments the integration test run with OpenTelemetry. The gate runner starts an OTLP collector that receives spans from the application under test. Each span captures:
+- The operation (HTTP request, function call, DB query)
+- Input/output data (request body, response body, query params)
+- Timing (start, duration)
+- The call chain (parent span → child span)
+
+**Gyre's internal OTLP receiver:** The forge includes a lightweight OTLP receiver (gRPC, per the OpenTelemetry Protocol specification) that ingests spans from gate runs. This is not a general-purpose observability backend — it is scoped to gate-time traces only, stored alongside gate results, and linked to a specific MR and commit SHA.
+
+```rust
+pub struct GateTrace {
+    pub mr_id: Id,
+    pub gate_run_id: Id,
+    pub commit_sha: String,
+    pub spans: Vec<TraceSpan>,
+    pub captured_at: u64,
+}
+
+pub struct TraceSpan {
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub operation_name: String,        // e.g., "POST /payments/retry"
+    pub service_name: String,          // e.g., "payment-api"
+    pub kind: SpanKind,                // Server, Client, Internal
+    pub start_time: u64,               // epoch microseconds
+    pub duration_us: u64,
+    pub attributes: HashMap<String, String>,  // http.method, http.url, db.statement, etc.
+    pub input_summary: Option<String>,  // truncated request body
+    pub output_summary: Option<String>, // truncated response body
+    pub status: SpanStatus,            // Ok, Error
+    pub graph_node_id: Option<Id>,     // linked to knowledge graph node (resolved post-capture)
+}
+```
+
+**Graph node linkage:** After trace capture, the server maps spans to knowledge graph nodes:
+- HTTP spans → `Endpoint` nodes (matched by path pattern)
+- Function spans → `Function` nodes (matched by `qualified_name`)
+- DB spans → adapter nodes (matched by module path)
+
+This linkage is heuristic (name matching) and may not resolve every span. Unresolved spans are still stored and visible in the trace timeline but don't animate on the graph.
+
+**Storage:** Traces are stored per-MR, capped at the most recent gate run per MR. Old traces are evicted when the MR merges (the merged trace is preserved on the `MergeAttestation` for provenance). This bounds storage: at most one trace per open MR.
+
+#### Explorer Visualization: Animated Data Flow
+
+**Prior art:** Netflix Vizceral (animated particles flowing through a service graph), Kiali (Istio traffic flow), Jaeger (trace timeline with time scrubbing).
+
+The novel combination: **Vizceral-style animated particles mapped to a knowledge graph (not a service mesh), driven by test-time OTel traces (not production traffic), with Jaeger-style time scrubbing.**
+
+When viewing an MR's trace in the Explorer:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│   [payment-api]                                          │
+│       │                                                  │
+│       ●──→ POST /payments/retry                          │
+│       │         │                                        │
+│       │         ●──→ check_idempotency()                 │
+│       │         │         │                              │
+│       │         │         ●──→ SELECT * FROM payments    │
+│       │         │                                        │
+│       │         ●──→ PaymentGateway::charge()            │
+│       │         │         │                              │
+│       │         │         ●──→ [mock: stripe-rs]         │
+│       │         │              {amount: 2500, ok: true}  │
+│       │         │                                        │
+│       │         ●──→ RecordResult::save()                │
+│       │                                                  │
+│  ─────┼──────────────────────────────────────────── time  │
+│  0ms  50ms    120ms   180ms    250ms    300ms            │
+│  [▶ Play] [⏸ Pause] [Speed: 1x ▾] [Scrub: ━━━●━━━━]   │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **Particles:** each test request is an animated dot that flows through the graph edges, following the span tree. Multiple test cases can play simultaneously with different colored particles.
+- **Time scrubbing:** drag the scrubber to any point in the trace. The graph freezes at that moment. Click a span to see the input/output data at that point.
+- **Speed control:** play at 1x (real-time relative to the trace), 10x, or step-through (span by span).
+- **External deps:** mocked/stubbed dependencies show the mock response inline (e.g., `{amount: 2500, ok: true}` from the Stripe mock).
+- **Hover:** hovering on any span during playback shows the input/output summary in a tooltip.
+
+**Access:** The animated trace view is available via:
+- The "Trace" tab on MR detail panels (alongside Diff, Gates, Attestation)
+- The Explorer's Evaluative lens — when active, nodes that have trace data show a ▶ play icon. Click to start the animation.
+- `GET /api/v1/merge-requests/:id/trace` REST endpoint (returns the `GateTrace` struct as JSON for CLI/MCP consumption per §11)
+
+#### External Dependencies at Scale
+
+External dependencies are mocked/stubbed during gate execution (standard integration test practice). The trace captures the mock interaction, not real external I/O. This is sufficient for understanding data flow — the human sees "this endpoint calls Stripe and expects a charge response" even though the actual Stripe API wasn't hit.
+
+For workspaces that deploy to staging environments and run smoke tests against real deps, the `TraceCapture` gate can be configured to capture real external spans too. This is opt-in per workspace via gate configuration, not a default.
+
+#### Relationship to Observable Lens (§10)
+
+The Observable lens is about **production** telemetry — SLIs, error rates, latency from real traffic. Test-time traces are about **understanding** — seeing what the software does during its verified-correct execution. They serve different purposes:
+
+| | Test-Time Traces (this section) | Observable Lens (§10, future) |
+|---|---|---|
+| **When** | Gate execution (pre-merge) | Production (post-deploy) |
+| **Data** | Test requests, mock responses | Real user traffic, real deps |
+| **Purpose** | Understanding what the code does | Monitoring how it performs |
+| **Volume** | Bounded (test cases per MR) | Unbounded (production traffic) |
+| **Storage** | Per-MR, evicted on merge | Time-series DB (external) |
+
+**Architecture constraint:** The OTLP receiver, span-to-graph-node linkage, and animated flow visualization are designed to support **both** test-time and production traces. The same pipeline ingests spans regardless of source. The same Explorer visualization renders them. When the Observable lens ships, production traces flow through the identical path — the only difference is the volume (requiring sampling/aggregation for production) and the data source (real vs. mock external deps). Build once, use for both.
+
 ### Default Views (Automatic, No LLM)
 
 #### Boundary View (C4 Progressive Drill-Down)
