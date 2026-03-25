@@ -171,7 +171,7 @@ pub enum MessageKind {
 - Telemetry tier requires `Destination::Workspace(id)`. Telemetry + Broadcast is rejected with 400 — there is no valid `TelemetryBuffer` key for `workspace_id: None`. Telemetry + Agent is rejected — telemetry is observability, not communication.
 - Event tier works with any destination.
 
-**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `AgentError`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
+**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `ReconciliationCompleted`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
 
 **Broadcast-only kinds:** `DataSeeded` and `QueueUpdated` use `Destination::Broadcast` with `workspace_id: None`. They are server-only AND storage-exempt — they flow through the in-memory broadcast channel only, never hitting `MessageRepository::store()`. The send path must short-circuit before attempting storage for these kinds.
 
@@ -325,13 +325,13 @@ The agent must be the authenticated caller (verified from JWT `sub` claim). An a
 
 3. **Users can send Directed messages to agents in any workspace they are a member of.** When `MessageOrigin::User(id)`, the server verifies the user is a member of the recipient agent's workspace via `WorkspaceMembershipRepository`. This enables human→agent steering (Pause, inline chat) per `human-system-interface.md` §4.
 
-3. **Cross-workspace messaging is server-mediated.** Workspace orchestrators do not message each other directly. Instead, cross-workspace coordination flows through server-originated events. When a Workspace Orchestrator creates a cross-repo task or MR dependency (via existing REST endpoints), the server emits the appropriate Event-tier messages (`TaskCreated`, `MrCreated`) into each affected workspace. The orchestrators observe these events in their own workspace's message stream. This avoids the need for cross-workspace agent messaging entirely.
+4. **Cross-workspace messaging is server-mediated.** Workspace orchestrators do not message each other directly. Instead, cross-workspace coordination flows through server-originated events. When a Workspace Orchestrator creates a cross-repo task or MR dependency (via existing REST endpoints), the server emits the appropriate Event-tier messages (`TaskCreated`, `MrCreated`) into each affected workspace. The orchestrators observe these events in their own workspace's message stream. This avoids the need for cross-workspace agent messaging entirely.
 
-4. **Server-originated messages inherit the workspace of the entity they describe.** An `AgentCreated` event for an agent in workspace X has `workspace_id: Some(X)` and is only delivered to clients subscribed to workspace X.
+5. **Server-originated messages inherit the workspace of the entity they describe.** An `AgentCreated` event for an agent in workspace X has `workspace_id: Some(X)` and is only delivered to clients subscribed to workspace X.
 
-5. **Broadcast destination requires Server origin or Admin role.** Agent JWTs cannot target Broadcast. API key callers with Admin role can target Broadcast for operational announcements.
+6. **Broadcast destination requires Server origin or Admin role.** Agent JWTs cannot target Broadcast. API key callers with Admin role can target Broadcast for operational announcements.
 
-6. **Workspace fan-out requires workspace membership.** An agent can only send `Destination::Workspace(id)` if its `workspace_id` matches `id`. Users can target any workspace they are a member of (verified via `WorkspaceMembershipRepository`).
+7. **Workspace fan-out requires workspace membership.** An agent can only send `Destination::Workspace(id)` if its `workspace_id` matches `id`. Users can target any workspace they are a member of (verified via `WorkspaceMembershipRepository`).
 
 ### Storage
 

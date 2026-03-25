@@ -85,6 +85,8 @@ pub enum TrustLevel {
 - Budget is inherited from tenant; workspace can set lower limits but never higher
 - The Workspace Orchestrator agent runs at this level
 
+**Slug uniqueness:** `(tenant_id, slug)` is unique — enforced by DB constraint (see `hierarchy-enforcement.md` §6). The `GET /api/v1/workspaces` endpoint supports `?slug=<slug>` filtering for cross-workspace spec link resolution (see `human-system-interface.md` §6).
+
 **CLI:** `gyre workspace create`, `gyre workspace list`, `gyre workspace add-repo`, `gyre workspace set-budget`
 
 **UI:** Workspace dashboard showing all repos, active agents, budget usage, cross-repo MR dependencies. Workspace settings for budget, team, personas.
