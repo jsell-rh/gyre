@@ -54,7 +54,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 |---|---|---|---|
 | **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo |
 | **Briefing** | Narrative across all workspaces | Narrative for this workspace | Narrative for this repo |
-| **Explorer** | Workspace list with summary stats (repos, agents, budget — from existing workspace/budget APIs, not the knowledge graph) | Realized architecture (C4 progressive) | Repo-level architecture detail |
+| **Explorer** | Workspace cards with summary stats (repos, agents, budget). This is a **list view**, not a knowledge graph canvas — `system-explorer.md`'s realized architecture starts at workspace scope. Click a workspace card to enter the graph-based Explorer. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
 | **Admin** | Users, compute, tenant budget, audit | Workspace settings, budget, trust level, teams | Repo settings, gates, policies |
@@ -71,7 +71,7 @@ Every view state is URL-addressable:
 - `/inbox` — tenant-scoped inbox
 - `/workspaces/:id/inbox` — workspace-scoped inbox
 - `/repos/:id/explorer` — repo-scoped explorer
-- `/repos/:id/specs?path=system/vision.md` — specific spec in a repo (path as query param, not URL segment, to avoid nesting depth violation per `api-conventions.md` §4)
+- `/repos/:id/specs?path=system/vision.md` — specific spec in a repo (path as query param for clean URL structure; note: UI routes are not bound by `api-conventions.md` §4 which governs API endpoints, but the query param pattern is cleaner regardless)
 
 ### Keyboard Navigation
 
@@ -145,11 +145,31 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
   description: "Block autonomous merge processor — require human MR approval first"
 ```
 
-The merge processor acts as `subject.type: system` (per `abac-policy-engine.md` attribute table). Under Supervised, this policy blocks the merge processor from autonomously merging. The human must first transition the MR status to `approved` (which is a `user`-type action, not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy which has higher priority, so they are not blocked.
+The merge processor acts as `subject.type: system` (per `abac-policy-engine.md` attribute table). The action is `write` on `resource_types: ["mr"]` — this covers MR status transitions including the merge operation. Under Supervised, this policy blocks the merge processor from autonomously merging. The human must first transition the MR status to `approved` via the UI (a `user`-type action, not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy which has higher priority, so they are not blocked.
+
+Note: `abac-policy-engine.md` lists `merge` as a separate action value. For consistency, if the merge processor evaluates ABAC with `action: "merge"`, the policy should use `actions: ["merge"]` instead of `["write"]`. The implementer should follow whichever action value the merge processor actually uses — the intent is the same.
 
 **Guided:** removes the `require-human-mr-review` policy. The merge processor proceeds autonomously when all gates pass. Gate failures still surface in the Inbox.
 
-**Autonomous:** removes most notification policies. Keeps `require-human-spec-approval` (spec approval is always human, per `platform-model.md` §2) and `alert-on-assertion-failure`.
+**Autonomous:** removes most notification policies. Keeps two policies:
+
+```yaml
+- name: require-human-spec-approval
+  scope: tenant
+  priority: 250         # very high, not overridable
+  effect: deny
+  actions: ["approve"]
+  resource_types: ["spec"]
+  conditions:
+    - attribute: subject.type
+      operator: not_equals
+      value: "user"
+  description: "Spec approval is always human, regardless of trust level"
+```
+
+This policy is **immutable** — it exists at every trust level, including Custom. Per `platform-model.md` §2, spec approval is human-only. Agents cannot approve specs that define their own behavior.
+
+Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
 **Custom:** opens the ABAC policy editor for direct manipulation.
 
@@ -427,28 +447,30 @@ Clicking "Ask why" spawns an interrogation agent with:
 
 ```yaml
 - name: interrogation-restrict-<agent-id>
-  scope: agent
-  scope_id: <interrogation-agent-id>
-  priority: 200       # highest, overrides all other policies
+  scope: tenant                      # uses existing PolicyScope variants
+  priority: 200                      # high priority, overrides workspace/repo policies
   effect: deny
   actions: ["write", "delete", "spawn", "approve"]
   resource_types: ["*"]
-  description: "Interrogation agents are read-only + message to requesting human"
+  conditions:
+    - attribute: subject.id
+      operator: equals
+      value: "agent:<interrogation-agent-id>"
+  description: "Interrogation agent is read-only + message to requesting human"
 
 - name: interrogation-allow-message-<agent-id>
-  scope: agent
-  scope_id: <interrogation-agent-id>
+  scope: tenant
   priority: 201
   effect: allow
   actions: ["write"]
   resource_types: ["message"]
   conditions:
-    - attribute: resource.to_user_id
+    - attribute: subject.id
       operator: equals
-      value: "<requesting-user-id>"
+      value: "agent:<interrogation-agent-id>"
 ```
 
-The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes). The agent runtime kills the process on expiry. The scoped ABAC policies are deleted when the interrogation session ends.
+The policies use `subject.id` conditions (not a new `Agent` scope variant) to target the specific interrogation agent, staying within `abac-policy-engine.md`'s existing `PolicyScope` enum (Tenant, Workspace, Repo). The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes). The scoped policies are deleted when the interrogation session ends.
 
 The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
 
@@ -538,7 +560,9 @@ specs:
         #       ^workspace_slug/repo_name/spec_path
 ```
 
-The server resolves the composite path `workspace_slug/repo_name/spec_path` to a specific spec in a specific repo. Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`. This is consistent with `spec-links.md`'s target format.
+The server resolves the composite path to a specific spec in a specific repo. The first segment is the **workspace slug** (URL-safe identifier, unique per tenant, as defined in `platform-model.md`'s Workspace struct). Same-repo links use just the spec path (existing behavior). Cross-repo same-workspace links use `repo_name/spec_path`. Cross-workspace links use the full `workspace_slug/repo_name/spec_path`.
+
+Note: `spec-links.md` uses `{workspace}` in its format description without specifying whether this is name or slug. This spec clarifies: **always use slug** (unique, URL-safe). The server resolves slug → workspace ID internally.
 
 ### What the System Does With Cross-Workspace Links
 
@@ -632,7 +656,7 @@ Saved Views:
 |---|---|
 | Supervised | 1-10 (everything) |
 | Guided | 1-7 (skip trust suggestions and low-confidence links) |
-| Autonomous | 1-5 (spec approvals, gate failures, cross-workspace, conflicts — judgment items only, not suggestions or budget) |
+| Autonomous | 1-7 (all judgment + safety items; excludes only trust suggestions #8 and low-confidence links #10) |
 
 ---
 
