@@ -269,10 +269,10 @@ This is consistent with the existing commit signature approach (`commit_signatur
 Clients connect to `GET /ws` and authenticate as today. After auth, the client sends a subscription message:
 
 ```json
-{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700000}
+{"type": "Subscribe", "scopes": [{"workspace_id": "ws-123"}], "last_seen": 1711324700000, "session_id": "a1b2c3d4-uuid"}
 ```
 
-`last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen` **filtered to the subscribed workspaces only**, capped at 1000 messages total across all subscribed workspaces. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
+`session_id` is `Option<String>` — a random UUID per browser tab, required for user connections (used for presence tracking and `PresenceEvicted` delivery), optional for agent connections. `last_seen` is `Option<u64>` — Unix epoch **milliseconds**, matching the `created_at` field on messages. When present, the server replays persisted Event-tier messages with `created_at > last_seen` **filtered to the subscribed workspaces only**, capped at 1000 messages total across all subscribed workspaces. If more than 1000 exist, the server sends the newest 1000 and includes a `{"type": "ReplayCatchUp", "truncated": true}` message — the client can use `GET /api/v1/workspaces/:id/messages` with cursor pagination for the full history. `last_seen: null` means no replay (fresh subscription). Telemetry-tier messages are never replayed (ephemeral). Directed messages are always available via REST poll regardless of WebSocket state.
 
 The `Subscribe` variant is added to `gyre_common::WsMessage`. To avoid breaking old CLI versions, also add a catch-all `Unknown` variant with `#[serde(other)]` to `WsMessage` so unrecognized message types are silently ignored rather than causing deserialization errors.
 

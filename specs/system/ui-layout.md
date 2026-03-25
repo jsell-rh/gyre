@@ -400,7 +400,7 @@ Specifies what to pull from the knowledge graph.
 | `edge_types` | `Vec<String>` | Include only these edge types. Empty = all edges. |
 | `depth` | `u32` | Traversal depth from matching nodes (0 = matched nodes only, 1 = +neighbors, etc.) |
 | `filter.min_churn` | `Option<u32>` | Only nodes with `churn_count_30d >= min_churn` |
-| `filter.spec_path` | `Option<String>` | Only nodes linked to this spec |
+| `filter.spec_path` | `Option<String>` | Only nodes linked to this spec. **Requires `repo_id` to be set** — spec paths are repo-scoped. If `spec_path` is set without `repo_id`, the server returns 400. |
 | `filter.visibility` | `Option<String>` | Only nodes with this visibility (`public`, `private`) |
 | `repo_id` | `Option<String>` | Scope to a single repo. Null = all repos in workspace. **Validated:** the server rejects saved views where `repo_id` does not belong to the workspace in the URL (prevents cross-workspace data leakage). |
 
