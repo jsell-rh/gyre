@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -309,9 +308,14 @@ pub async fn create_mr(
             facets,
         })
         .await;
-    let _ = state.event_tx.send(DomainEvent::MrCreated {
-        id: mr.id.to_string(),
-    });
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(mr.workspace_id.clone()),
+            gyre_common::message::MessageKind::MrCreated,
+            Some(serde_json::json!({"mr_id": mr.id.to_string()})),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
@@ -477,10 +481,27 @@ pub async fn transition_mr_status(
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
-    let _ = state.event_tx.send(DomainEvent::MrStatusChanged {
-        id: mr.id.to_string(),
-        status: req.status.clone(),
-    });
+    {
+        let ws_id = mr.workspace_id.clone();
+        let kind = if is_merge {
+            gyre_common::message::MessageKind::MrMerged
+        } else {
+            gyre_common::message::MessageKind::MrStatusChanged
+        };
+        let payload = if is_merge {
+            serde_json::json!({"mr_id": mr.id.to_string()})
+        } else {
+            serde_json::json!({"mr_id": mr.id.to_string(), "status": req.status})
+        };
+        state
+            .emit_event(
+                Some(ws_id.clone()),
+                gyre_common::message::Destination::Workspace(ws_id),
+                kind,
+                Some(payload),
+            )
+            .await;
+    }
 
     // Auto-track mr.merged analytics event
     if is_merge {

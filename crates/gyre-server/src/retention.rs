@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
-use crate::activity::ActivityStore;
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RetentionPolicy {
     pub data_type: String,
@@ -63,29 +61,17 @@ impl RetentionStore {
         }
     }
 
-    /// Run cleanup based on current policies. Removes old activity events from the store.
-    pub async fn run_cleanup(&self, activity_store: &ActivityStore) {
+    /// Run cleanup based on current policies.
+    /// Note: activity_events are now stored in TelemetryBuffer (ring buffer with automatic
+    /// eviction) — no explicit cleanup needed. Analytics/cost entries are not yet purged here.
+    pub async fn run_cleanup(&self) {
         let policies = self.list();
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
         for policy in &policies {
-            if policy.data_type == "activity_events" {
-                let cutoff = now_secs.saturating_sub(policy.max_age_days * 86400);
-                let removed = activity_store.purge_before(cutoff);
-                if removed > 0 {
-                    info!(
-                        data_type = %policy.data_type,
-                        removed = removed,
-                        cutoff_secs = cutoff,
-                        "retention cleanup removed old events"
-                    );
-                }
-            }
-            // analytics_events and cost_entries are not yet stored server-side;
-            // their policies are tracked for future use.
+            info!(
+                data_type = %policy.data_type,
+                max_age_days = policy.max_age_days,
+                "retention policy checked (no-op for ring-buffer backed stores)"
+            );
         }
     }
 }
@@ -144,27 +130,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_removes_old_events() {
+    async fn cleanup_runs_without_error() {
         let store = RetentionStore::new();
-        // Set very short retention so all current events are "old"
         store.set_policy("activity_events", 0);
-
-        let activity_store = ActivityStore::new();
-        // Record an event with timestamp = 1 (ancient)
-        activity_store.record(gyre_common::ActivityEventData {
-            event_id: "old-event".to_string(),
-            agent_id: "agent-1".to_string(),
-            event_type: gyre_common::AgEventType::StateChanged,
-            description: "old".to_string(),
-            timestamp: 1,
-        });
-
-        let events_before = activity_store.query(None, Some(100));
-        assert_eq!(events_before.len(), 1);
-
-        store.run_cleanup(&activity_store).await;
-
-        let events_after = activity_store.query(None, Some(100));
-        assert_eq!(events_after.len(), 0);
+        // TelemetryBuffer is a ring buffer with automatic eviction; cleanup is a no-op.
+        store.run_cleanup().await;
     }
 }

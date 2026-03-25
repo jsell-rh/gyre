@@ -12,10 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{
-    auth::AuthenticatedAgent, container_audit, domain_events::DomainEvent, git_refs,
-    workload_attestation, AppState,
-};
+use crate::{auth::AuthenticatedAgent, container_audit, git_refs, workload_attestation, AppState};
 
 use super::agents::AgentResponse;
 use super::error::ApiError;
@@ -434,13 +431,22 @@ pub async fn spawn_agent(
                         .await;
                         let _ = state.container_audits.save(&rec).await;
 
-                        // M19.3: Emit AgentContainerSpawned domain event.
-                        let _ = state.event_tx.send(DomainEvent::AgentContainerSpawned {
-                            agent_id: agent.id.to_string(),
-                            container_id: handle.id.clone(),
-                            image: image.clone(),
-                            runtime: runtime_str.clone(),
-                        });
+                        // M19.3: Emit AgentContainerSpawned event.
+                        state
+                            .emit_event(
+                                Some(agent.workspace_id.clone()),
+                                gyre_common::message::Destination::Workspace(
+                                    agent.workspace_id.clone(),
+                                ),
+                                gyre_common::message::MessageKind::AgentContainerSpawned,
+                                Some(serde_json::json!({
+                                    "agent_id": agent.id.to_string(),
+                                    "container_id": handle.id,
+                                    "image": image,
+                                    "runtime": runtime_str,
+                                })),
+                            )
+                            .await;
 
                         // M23: Emit container_started audit event.
                         {
