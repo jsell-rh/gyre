@@ -115,6 +115,8 @@ Workspace Settings > Trust Level
 
 One click. No ABAC knowledge required.
 
+**Storage:** The trust level is a field on the `Workspace` entity: `trust_level: TrustLevel` (enum: `Supervised`, `Guided`, `Autonomous`, `Custom`). Changing trust level is a `PUT /api/v1/workspaces/:id` update (existing endpoint). The server atomically replaces the workspace's trust-related ABAC policies when the trust level changes. ABAC resource resolution for this action: `resource_type: "workspace"`, `action: "write"` — requires Admin workspace role.
+
 ### What Each Level Controls
 
 | Aspect | Supervised | Guided | Autonomous |
@@ -146,7 +148,7 @@ Each trust preset maps to a set of ABAC policies applied to the workspace:
   description: "Block autonomous merge processor — require human MR approval first"
 ```
 
-The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` (which bypasses ABAC per `hierarchy-enforcement.md` §4). Instead, it evaluates ABAC as an internal service with `subject.type: "system"`, `subject.id: "merge-processor"`. The `system-full-access` built-in policy (which allows all for system tokens) must be refined: it should only match the global `GYRE_AUTH_TOKEN` identity, not all `subject.type: "system"`. Internal services like the merge processor are `system` type but NOT superuser — they are subject to ABAC policies. Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
+The merge processor evaluates ABAC with `action: "merge"` (per `abac-policy-engine.md`'s action attribute table). **Important:** the merge processor must NOT use the global `GYRE_AUTH_TOKEN` (which bypasses ABAC per `hierarchy-enforcement.md` §4). Instead, it evaluates ABAC as an internal service. The mechanism: ABAC bypass is checked by identity (`subject.id == "gyre-system-token"`), not by type. The merge processor uses `subject.type: "system"`, `subject.id: "merge-processor"` — since its `subject.id` is not the system token identity, it does not bypass ABAC and is subject to the Supervised trust policy. This requires amending `hierarchy-enforcement.md` §4 to change the ABAC bypass condition from "system tokens bypass ABAC" to "the global `GYRE_AUTH_TOKEN` identity bypasses ABAC (matched by `subject.id`, not `subject.type`)." Under Supervised, this policy blocks the merge processor from autonomously merging. The human approves the MR via status transition in the UI (`action: "write"`, `subject.type: "user"` — not blocked). The merge processor then sees the approved status and proceeds. Administrative operations use the `system-full-access` built-in policy (higher priority), so they are not blocked.
 
 **Guided** policy set:
 - `require-human-spec-approval` (immutable, always present)
@@ -297,7 +299,7 @@ Views are serializable specs that can be saved to the workspace and shared:
 Saved views are stored as JSON documents in the workspace's configuration (via `KvJsonStore` with namespace `explorer_views` and key `workspace_id:view_name`). API endpoints for view CRUD (each requires a `RouteResourceMapping` entry in the ABAC `ResourceResolver` with `resource_type: "explorer_view"` and `workspace_param: "workspace_id"`):
 - `GET /api/v1/workspaces/:workspace_id/explorer-views` — list saved views
 - `POST /api/v1/workspaces/:workspace_id/explorer-views` — create a view
-- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:name` — delete a view
+- `DELETE /api/v1/workspaces/:workspace_id/explorer-views/:view_id` — delete a view (`:view_id` is a URL-safe slug auto-generated from the view name, e.g., "api-surface")
 
 Built-in saved views shipped with every workspace:
 - **API Surface** — all endpoints with their handlers
@@ -439,7 +441,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
      | `decisions` | `[{what: String, why: String, confidence: String, alternatives_considered: Option<[String]>}]` | yes |
      | `uncertainties` | `[String]` | yes |
      | `conversation_sha` | Option\<String\> | no |
-3. The Inbox consumes `AgentCompleted` messages and surfaces uncertainties as action items (at Supervised/Guided trust levels)
+3. The notification consumer (per `message-bus.md` §MessageConsumer) receives `AgentCompleted` messages and creates Inbox items for **all workspace members with Admin or Developer workspace role** when the completion summary contains non-empty `uncertainties`. The Inbox item priority is 1 (highest).
 4. The Briefing consumes `AgentCompleted` messages for the "Completed" section
 
 One LLM call at completion time, not continuous overhead. The summary is also used as seed context for interrogation agents.
@@ -492,7 +494,9 @@ Clicking "Ask why" spawns an interrogation agent with:
       value: "agent:INTERROGATION_AGENT_UUID"
 ```
 
-The policies use `subject.id` conditions (not a new `Agent` scope variant) to target the specific interrogation agent, staying within `abac-policy-engine.md`'s existing `PolicyScope` enum (Tenant, Workspace, Repo). The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes). The scoped policies are deleted when the interrogation session ends.
+The policies use `subject.id` conditions (not a new `Agent` scope variant) to target the specific interrogation agent, staying within `abac-policy-engine.md`'s existing `PolicyScope` enum (Tenant, Workspace, Repo). The agent's JWT `max_lifetime_secs` is set to 1800 (30 minutes).
+
+**Policy cleanup:** When the interrogation agent completes or its JWT expires, the stale agent detector marks it Dead and the `agent.complete` handler (or kill handler) deletes the interrogation-specific ABAC policies by name pattern (`interrogation-*-<agent-id>`). This is deterministic — no session-end signal needed; the policies are cleaned up on the same code path as any agent termination.
 
 The interrogation session is itself attested — the conversation is stored as a provenance artifact linked to the original MR.
 
@@ -620,9 +624,7 @@ Workspace: Payments
   Active: jsell (Specs view), maria (Explorer), bot-deploy (Agent)
 ```
 
-Presence is tracked via Telemetry-tier messages through the message bus. This requires adding a `UserPresence` variant to `MessageKind` in `message-bus.md`:
-
-**`UserPresence` implementation:** UserPresence does NOT use the message bus `MessageKind` enum. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
+**`UserPresence` implementation:** Presence does NOT use the message bus `MessageKind` enum or tier system. It is a WebSocket-only signal with its own handling path — the server receives it on the WebSocket, updates the in-memory presence map, and rebroadcasts to workspace subscribers. This avoids conflating presence with the message bus tier model (Telemetry tier's storage semantics don't fit presence).
 
 The `WsMessage` enum gains a `UserPresence` variant (alongside `Subscribe`):
 - **Payload schema:**
