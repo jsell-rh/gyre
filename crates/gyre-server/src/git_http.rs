@@ -385,6 +385,8 @@ pub async fn git_receive_pack(
     let model_context_clone = model_context.clone();
     let repo_id_clone = repo_id.clone();
     let repo_workspace_id_clone = repo_workspace_id.clone();
+    // Save workspace ID string before the clone is moved into PushAccepted event destination.
+    let repo_workspace_id_str = repo_workspace_id.to_string();
     let branch_clone = branch.clone();
     let attestation_level_clone = attestation_level.to_string();
     let default_branch_clone = default_branch;
@@ -427,6 +429,14 @@ pub async fn git_receive_pack(
         .await;
         // Spec registry: sync ledger from manifest on pushes to the default branch (M21.1).
         let default_ref = format!("refs/heads/{default_branch_clone}");
+        // Resolve workspace tenant_id for cross-workspace link resolution.
+        let workspace_tenant_id = state_clone
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(&repo_workspace_id_str))
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id);
         for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
             let now = crate::api::now_secs();
             crate::spec_registry::sync_spec_ledger(
@@ -435,6 +445,10 @@ pub async fn git_receive_pack(
                 &repo_path_clone,
                 &update.new_sha,
                 now,
+                Some(repo_id_clone.as_str()),
+                Some(&state_clone.workspaces),
+                Some(&state_clone.repos),
+                workspace_tenant_id.as_ref(),
             )
             .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
@@ -1169,7 +1183,123 @@ async fn process_spec_lifecycle(
                             Some(serde_json::json!({"task_id": task_id.to_string()})),
                         )
                         .await;
+
+                    // Cross-workspace spec change notification (priority 4):
+                    // Find inbound cross-workspace links targeting this spec path
+                    // and notify Admin/Developer members of each dependent workspace.
+                    notify_cross_workspace_dependents(state, repo_id, &path).await;
                 }
+            }
+        }
+    }
+}
+
+/// Notify Admin and Developer members of workspaces that have cross-workspace spec links
+/// pointing to the given changed spec. Creates one priority-4 notification per dependent
+/// workspace member (Admin or Developer role).
+async fn notify_cross_workspace_dependents(
+    state: &Arc<crate::AppState>,
+    source_repo_id: &str,
+    changed_spec_path: &str,
+) {
+    // Collect inbound cross-workspace links pointing to this spec path.
+    // A cross-workspace link has `source_repo_id` set to a different repo than `source_repo_id`.
+    let inbound_links: Vec<crate::spec_registry::SpecLinkEntry> = {
+        let store = state.spec_links_store.lock().await;
+        store
+            .iter()
+            .filter(|l| {
+                l.target_path == changed_spec_path
+                    && l.source_repo_id.as_deref() != Some(source_repo_id)
+                    && l.source_repo_id.is_some()
+            })
+            .cloned()
+            .collect()
+    };
+
+    if inbound_links.is_empty() {
+        return;
+    }
+
+    let now = crate::api::now_secs();
+
+    // Collect unique source repo IDs from inbound links.
+    let mut notified_workspaces: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for link in &inbound_links {
+        let dep_repo_id = match &link.source_repo_id {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+
+        // Look up the dependent repo to get its workspace_id.
+        let dep_repo = match state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&dep_repo_id))
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let ws_id_str = dep_repo.workspace_id.to_string();
+        if notified_workspaces.contains(&ws_id_str) {
+            continue;
+        }
+        notified_workspaces.insert(ws_id_str.clone());
+
+        // Get workspace and its tenant_id for notification construction.
+        let dep_workspace = match state
+            .workspaces
+            .find_by_id(&dep_repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(ws) => ws,
+            None => continue,
+        };
+
+        // Get workspace members (Admin + Developer roles receive this notification).
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&dep_repo.workspace_id)
+            .await
+            .unwrap_or_default();
+
+        for member in members {
+            use gyre_domain::WorkspaceRole;
+            if !matches!(
+                member.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            ) {
+                continue;
+            }
+
+            let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
+            let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
+            let title = format!("Cross-workspace spec changed: {display}");
+            let body = format!(
+                "{display} changed in repo {}. Your spec {} depends on it. Review for impact.",
+                source_repo_id, link.source_path
+            );
+            let mut notif = gyre_common::Notification::new(
+                notif_id,
+                dep_repo.workspace_id.clone(),
+                member.user_id,
+                gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                title,
+                dep_workspace.tenant_id.to_string(),
+                now as i64,
+            );
+            notif.body = Some(body);
+            notif.entity_ref = Some(changed_spec_path.to_string());
+
+            if let Err(e) = state.notifications.create(&notif).await {
+                tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
             }
         }
     }

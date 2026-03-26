@@ -313,6 +313,27 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register cross_workspace_link_staleness_check job (runs daily, HSI §6)
+    registry
+        .register(
+            JobDefinition {
+                name: "cross_workspace_link_staleness_check".to_string(),
+                description:
+                    "Re-resolves cross-workspace spec links and marks stale entries (HSI §6)"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |_state| async move {
+                // Stub: real impl iterates spec_links_store entries where target_display
+                // starts with '@', re-resolves workspace slug → repo UUID, and updates
+                // target_repo_id + status ("unresolved" if slug no longer found).
+                tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
+                Ok(())
+            },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
