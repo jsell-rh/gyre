@@ -524,6 +524,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
         )
+        // Meta-spec preview loop (S4.6 — §5 of meta-spec-reconciliation.md)
+        // NOTE: the status route must be registered before the POST route to avoid
+        // axum matching the preview_id segment as a method collision.
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/preview",
+            post(meta_specs::post_meta_spec_preview),
+        )
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
+            get(meta_specs::get_meta_spec_preview_status),
+        )
         // Message bus (Phase 3)
         .route(
             "/api/v1/workspaces/:workspace_id/messages",
