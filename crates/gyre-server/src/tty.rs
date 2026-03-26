@@ -43,7 +43,9 @@ async fn handle_tty_socket(socket: WebSocket, agent_id: String, state: Arc<AppSt
     let authed = match receiver.next().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::Auth { token }) => {
-                let ok = crate::auth::authenticate_token(&token, &state).await.is_ok();
+                let ok = crate::auth::authenticate_token(&token, &state)
+                    .await
+                    .is_ok();
                 let result = if ok {
                     WsMessage::AuthResult {
                         success: true,
@@ -148,7 +150,6 @@ async fn handle_tty_socket(socket: WebSocket, agent_id: String, state: Arc<AppSt
 
     info!(agent_id = %agent_id, "TTY WebSocket closed");
 }
-
 
 #[cfg(test)]
 mod tests {
