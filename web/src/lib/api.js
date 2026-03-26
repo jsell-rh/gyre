@@ -419,4 +419,20 @@ export const api = {
     request(`/workspaces/${id}/abac-policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request(`/workspaces/${id}/abac-policies/simulate`, { method: 'POST', body: JSON.stringify(data) }),
+  // Explorer saved views (HSI §3)
+  explorerViews: (workspaceId) => request(`/workspaces/${workspaceId}/explorer-views`),
+  saveExplorerView: (workspaceId, data) =>
+    request(`/workspaces/${workspaceId}/explorer-views`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteExplorerView: (workspaceId, id) =>
+    request(`/workspaces/${workspaceId}/explorer-views/${id}`, { method: 'DELETE' }),
+  // LLM view generation (SSE — returns raw Response, not parsed JSON)
+  generateExplorerView: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
 };
