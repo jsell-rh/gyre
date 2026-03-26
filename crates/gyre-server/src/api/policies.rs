@@ -145,6 +145,7 @@ pub struct UpdatePolicyRequest {
 pub async fn update_policy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    _auth: AuthenticatedAgent,
     Json(req): Json<UpdatePolicyRequest>,
 ) -> Result<Json<Policy>, ApiError> {
     let mut policy = state
@@ -152,6 +153,17 @@ pub async fn update_policy(
         .find_by_id(&id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("policy {id} not found")))?;
+
+    if policy.built_in {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{id}' is a built-in policy and cannot be modified"
+        )));
+    }
+    if policy.immutable {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{id}' is immutable and cannot be modified"
+        )));
+    }
 
     if let Some(name) = req.name {
         if name.starts_with("trust:") || name.starts_with("builtin:") {
@@ -197,6 +209,7 @@ pub async fn update_policy(
 pub async fn delete_policy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    _auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let policy = state
         .policies
@@ -378,7 +391,7 @@ pub async fn effective_permissions(
     // Sample action/resource_type pairs to test.
     let resource_type = q.resource_type.as_deref().unwrap_or("*");
     let actions = [
-        "read", "write", "delete", "approve", "spawn", "push", "merge",
+        "read", "write", "delete", "approve", "spawn", "push", "merge", "generate",
     ];
 
     let mut results = Vec::new();
