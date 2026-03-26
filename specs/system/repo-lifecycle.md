@@ -186,11 +186,11 @@ Archiving a repo makes it read-only. No new agents can be spawned, no new MRs cr
 
 **UI:** Admin → Repo Scope → Danger Zone → "Archive Repo" (confirmation dialog)
 
-**What happens:**
+**What happens (in order):**
 1. Repo status set to `Archived`
-2. All active agents in the repo are gracefully stopped (60-second grace period)
-3. All open MRs are closed with reason "Repo archived"
-4. All non-terminal tasks (`InProgress`, `Backlog`, and `Blocked`) are cancelled
+2. All active agents in the repo are gracefully stopped (60-second grace period) — agents receive a shutdown message in their inbox and have 60 seconds to commit and call `agent.complete`. After the grace period, remaining agents are killed via `ComputeTarget::kill_process()`. Agents that complete in time are marked `Idle`; agents killed are marked `Stopped`.
+3. After all agents reach a terminal status (`Idle`, `Failed`, `Stopped`, `Dead`): all non-terminal tasks (`InProgress`, `Backlog`, and `Blocked`) are set to `Cancelled` status (terminal, per HSI §8 amendment to `platform-model.md` §3)
+4. All open MRs are closed with reason "Repo archived"
 5. Git push hook rejects new pushes
 6. Agent spawn rejects new agents scoped to this repo
 7. Repo appears grayed out in Explorer and repo lists
