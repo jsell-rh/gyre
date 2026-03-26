@@ -247,7 +247,7 @@ describe('Inbox', () => {
     const approveBtn = await findByText('Approve');
     await fireEvent.click(approveBtn);
     expect(api.approveSpec).toHaveBeenCalledWith(
-      'specs/system/api-conventions.md',
+      'system/api-conventions.md',
       'abc123def456abc123def456abc123def456abc1',
     );
   });
@@ -260,7 +260,7 @@ describe('Inbox', () => {
     const rejectBtn = await findByText('Reject');
     await fireEvent.click(rejectBtn);
     expect(api.revokeSpec).toHaveBeenCalledWith(
-      'specs/system/api-conventions.md',
+      'system/api-conventions.md',
       'Rejected from inbox',
     );
   });
