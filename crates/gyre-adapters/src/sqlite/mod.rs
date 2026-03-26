@@ -249,8 +249,7 @@ mod tests {
         let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
         let mut versions = std::collections::HashMap::<String, Vec<String>>::new();
 
-        let entries = std::fs::read_dir(migrations_dir)
-            .expect("migrations directory should exist");
+        let entries = std::fs::read_dir(migrations_dir).expect("migrations directory should exist");
 
         for entry in entries {
             let entry = entry.expect("valid dir entry");
