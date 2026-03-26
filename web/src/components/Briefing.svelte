@@ -195,7 +195,7 @@
   onMount(load);
 </script>
 
-<div class="briefing" data-testid="briefing-view">
+<div class="briefing" data-testid="briefing-view" aria-busy={loading}>
     <span class="sr-only" aria-live="polite">{loading ? '' : 'Briefing loaded'}</span>
     <!-- Header -->
     <div class="briefing-header">

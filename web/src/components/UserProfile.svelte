@@ -190,7 +190,7 @@
       <button class="btn-edit" onclick={() => (editing = true)}>Edit</button>
     {/if}
     {#if unread > 0}
-      <div class="notif-bell" role="status" aria-label="{unread} unread notifications">
+      <div class="notif-bell" role="status" aria-live="polite" aria-label="{unread} unread notifications">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
           <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
           <path d="M13.73 21a2 2 0 01-3.46 0"/>
@@ -213,7 +213,7 @@
       </label>
       <div class="edit-actions">
         <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
-        <button class="btn-primary" onclick={saveEdit} disabled={saving}>
+        <button class="btn-primary" onclick={saveEdit} disabled={saving} aria-busy={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
@@ -238,13 +238,13 @@
           {/each}
         </div>
       {:else}
-        <EmptyState message="Profile data unavailable." />
+        <EmptyState description="Profile data unavailable." />
       {/if}
 
     {:else if activeTab === 'memberships'}
       <!-- Workspace memberships with quick-switch -->
       {#if workspaces.length === 0}
-        <EmptyState message="No workspace memberships." />
+        <EmptyState description="No workspace memberships." />
       {:else}
         <div class="memberships-list">
           {#each workspaces as ws}
@@ -274,7 +274,7 @@
       <!-- Judgment Ledger: chronological log of human judgment decisions -->
       <!-- Sourced from GET /api/v1/users/me/judgments -->
       {#if judgments.length === 0}
-        <EmptyState message="No judgment events recorded. Spec approvals, gate overrides, trust changes, and meta-spec edits will appear here." />
+        <EmptyState description="No judgment events recorded. Spec approvals, gate overrides, trust changes, and meta-spec edits will appear here." />
       {:else}
         <div class="ledger-list">
           {#each judgments as j}
@@ -323,7 +323,7 @@
 
     {:else if activeTab === 'notifications'}
       {#if notifications.length === 0}
-        <EmptyState message="No notifications." />
+        <EmptyState description="No notifications." />
       {:else}
         <div class="notif-list">
           {#each notifications as notif}
@@ -548,4 +548,13 @@
 
   .mono { font-family: var(--font-mono); }
   .muted { color: var(--color-text-muted); }
+
+  .btn-edit:focus-visible,
+  .btn-secondary:focus-visible,
+  .btn-primary:focus-visible,
+  .btn-switch:focus-visible,
+  .mark-read-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>
