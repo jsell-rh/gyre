@@ -31,7 +31,7 @@ The application shell has three permanent zones that never change:
 **Topbar** (48px height):
 - Left: scope breadcrumb (clickable segments). Clicking a segment zooms out to that scope.
 - Center: `Cmd+K` search trigger (global search overlay).
-- Right: user avatar dropdown (profile, settings, sign out), Inbox badge count (shows the number of unresolved Inbox items — this is a shortcut to the Inbox nav item, not a separate notification system).
+- Right: user avatar dropdown (Profile, Sign out), Inbox badge count (shows the number of unresolved Inbox items — this is a shortcut to the Inbox nav item, not a separate notification system). The "Profile" link navigates to the User Profile view (HSI §12). This is NOT a link to Admin — the profile is a distinct view for identity, preferences, and judgment history.
 
 **Sidebar** (240px width, collapsible to 48px icon-only via toggle):
 - Six nav items, always in this order, always present. Active item highlighted.
