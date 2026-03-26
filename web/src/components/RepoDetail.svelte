@@ -1478,4 +1478,13 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
   }
+
+  .back-btn:focus-visible,
+  .toggle-row:focus-visible,
+  .gate-del-btn:focus-visible,
+  .push-gate-toggle:focus-visible,
+  .jj-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>

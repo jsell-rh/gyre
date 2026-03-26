@@ -96,4 +96,9 @@
     background: color-mix(in srgb, var(--color-danger) 80%, black);
     border-color: color-mix(in srgb, var(--color-danger) 80%, black);
   }
+
+  .btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>

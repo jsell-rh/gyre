@@ -1323,4 +1323,15 @@
   :global(.hl-str) { color: #99cc88; }
   :global(.hl-cmt) { color: #6b7a8d; font-style: italic; }
   :global(.hl-num) { color: #f09a3e; }
+
+  .back-btn:focus-visible,
+  .meta-link-btn:focus-visible,
+  .action-btn:focus-visible,
+  .tab-btn:focus-visible,
+  .file-item:focus-visible,
+  .dep-remove-btn:focus-visible,
+  .dep-add-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>

@@ -768,4 +768,12 @@
     border-radius: 2px;
     background: var(--color-success);
   }
+
+  .refresh-btn:focus-visible,
+  .cancel-btn:focus-visible,
+  .cancel-btn-sm:focus-visible,
+  .toggle-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>
