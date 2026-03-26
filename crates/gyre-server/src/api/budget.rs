@@ -16,7 +16,7 @@ use gyre_domain::{BudgetConfig, BudgetUsage};
 use serde::{Deserialize, Serialize};
 
 use super::now_secs;
-use crate::{api::error::ApiError, AppState};
+use crate::{api::error::ApiError, auth::AuthenticatedAgent, AppState};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -171,9 +171,20 @@ pub async fn set_workspace_budget(
 
 // ── GET /api/v1/budget/summary  (Admin only) ─────────────────────────────────
 
+/// GET /api/v1/budget/summary — Admin only.
+///
+/// Returns the full tenant budget picture: all workspace configs and usage.
+/// Agents must not read this — it reveals limits and consumption for workspaces
+/// other than their own and could inform resource-exhaustion strategies (NEW-40).
 pub async fn budget_summary(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
 ) -> Result<Json<TenantBudgetSummary>, ApiError> {
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may read tenant budget summary".to_string(),
+        ));
+    }
     let tenant_config = state
         .budget_configs
         .get_config(tenant_key())
@@ -442,6 +453,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_role_cannot_read_budget_summary() {
+        // NEW-40 regression: Agent role must be rejected with 403.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "rogue-agent",
+                "preferred_username": "rogue-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/budget/summary")
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent role must not read tenant budget summary (NEW-40)"
+        );
     }
 
     #[tokio::test]
