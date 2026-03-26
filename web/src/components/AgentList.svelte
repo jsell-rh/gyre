@@ -1,5 +1,5 @@
 <script>
-  import { getContext } from 'svelte';
+  import { getContext, tick } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -39,6 +39,13 @@
   let ttyWs = $state(null);
   let ttyConnecting = $state(false);
   let containerRecord = $state(null);
+  let spawnModalEl = $state(null);
+
+  $effect(() => {
+    if (showSpawnModal) {
+      tick().then(() => spawnModalEl?.focus());
+    }
+  });
 
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 
@@ -231,6 +238,7 @@
       aria-modal="true"
       tabindex="-1"
       aria-label="Spawn Agent"
+      bind:this={spawnModalEl}
       onkeydown={(e) => {
         if (e.key === 'Escape') { closeSpawnModal(); return; }
         if (e.key === 'Enter' && !spawnResult && e.target.tagName !== 'SELECT') doSpawn();
@@ -364,13 +372,13 @@
           <h3>Agent: {selected.name}</h3>
           <button class="close-btn" aria-label="Close agent detail" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
         </div>
-        <div class="detail-tabs">
-          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')}>Info</button>
-          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')}>Logs</button>
-          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')}>Terminal</button>
+        <div class="detail-tabs" role="tablist">
+          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')} role="tab" aria-selected={detailTab === 'info'} id="dtab-info" aria-controls="dtabpanel-info">Info</button>
+          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')} role="tab" aria-selected={detailTab === 'logs'} id="dtab-logs" aria-controls="dtabpanel-logs">Logs</button>
+          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')} role="tab" aria-selected={detailTab === 'terminal'} id="dtab-terminal" aria-controls="dtabpanel-terminal">Terminal</button>
         </div>
         {#if detailTab === 'info'}
-          <div class="detail-body">
+          <div class="detail-body" role="tabpanel" id="dtabpanel-info" aria-labelledby="dtab-info">
             <dl class="detail-dl">
               <dt>ID</dt><dd class="mono">{selected.id}</dd>
               <dt>Status</dt><dd><Badge value={selected.status} /></dd>
@@ -409,13 +417,13 @@
             <AgentCardPanel agentId={selected.id} />
           </div>
         {:else if detailTab === 'logs'}
-          <div class="logs-panel">
+          <div class="logs-panel" role="tabpanel" id="dtabpanel-logs" aria-labelledby="dtab-logs">
             {#if logsLoading}
               <p class="logs-empty">Loading logs…</p>
             {:else if agentLogLines.length === 0}
               <p class="logs-empty">No logs for this agent.</p>
             {:else}
-              <div class="logs-output">
+              <div class="logs-output" aria-live="polite" aria-label="Agent logs">
                 {#each agentLogLines as line}
                   <div class="log-line">{line}</div>
                 {/each}
@@ -423,13 +431,13 @@
             {/if}
           </div>
         {:else}
-          <div class="logs-panel tty-panel">
+          <div class="logs-panel tty-panel" role="tabpanel" id="dtabpanel-terminal" aria-labelledby="dtab-terminal">
             {#if ttyConnecting}
               <p class="logs-empty">Connecting…</p>
             {:else if ttyLines.length === 0}
               <p class="logs-empty">No output yet.</p>
             {:else}
-              <div class="logs-output tty-output">
+              <div class="logs-output tty-output" aria-live="polite" aria-label="Terminal output">
                 {#each ttyLines as line}
                   <div class="log-line">{line}</div>
                 {/each}

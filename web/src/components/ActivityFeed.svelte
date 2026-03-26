@@ -198,7 +198,7 @@
   }
 
   .pill:hover { border-color: var(--color-border-strong); color: var(--color-text); }
-  .pill.active { background: rgba(238,0,0,0.12); border-color: var(--color-primary); color: var(--color-primary); }
+  .pill.active { background: color-mix(in srgb, var(--color-primary) 12%, transparent); border-color: var(--color-primary); color: var(--color-primary); }
 
   .timeline {
     flex: 1;
@@ -234,11 +234,11 @@
     color: var(--color-text-secondary);
   }
 
-  .node-success { border-color: rgba(99,153,61,0.4);  color: #7dc25a; background: rgba(99,153,61,0.1); }
-  .node-warning { border-color: rgba(245,146,27,0.4); color: #f5921b; background: rgba(245,146,27,0.1); }
-  .node-danger  { border-color: rgba(240,86,29,0.4);  color: #f0561d; background: rgba(240,86,29,0.1); }
-  .node-info    { border-color: rgba(0,102,204,0.4);  color: #4394e5; background: rgba(0,102,204,0.1); }
-  .node-purple  { border-color: rgba(94,64,190,0.4);  color: #8b6fe0; background: rgba(94,64,190,0.1); }
+  .node-success { border-color: color-mix(in srgb, var(--color-success) 40%, transparent);  color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .node-warning { border-color: color-mix(in srgb, var(--color-warning) 40%, transparent); color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
+  .node-danger  { border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);  color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .node-info    { border-color: color-mix(in srgb, var(--color-info) 40%, transparent);  color: var(--color-info); background: color-mix(in srgb, var(--color-info) 10%, transparent); }
+  .node-purple  { border-color: color-mix(in srgb, var(--color-blocked, #5e40be) 40%, transparent);  color: var(--color-blocked, #8b6fe0); background: color-mix(in srgb, var(--color-blocked, #5e40be) 10%, transparent); }
 
   .skeleton-dot {
     width: 28px;

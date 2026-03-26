@@ -119,6 +119,9 @@
   // ---- MODAL REFS (auto-focus) ----
   let budgetModalEl = $state(null);
   let trustModalEl = $state(null);
+  let memberModalEl = $state(null);
+  let deleteConfirmModalEl = $state(null);
+  let newWorkspaceModalEl = $state(null);
 
   $effect(() => {
     if (budgetModal) {
@@ -129,6 +132,24 @@
   $effect(() => {
     if (trustConfirmModal) {
       tick().then(() => trustModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (newMemberModal) {
+      tick().then(() => memberModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (deleteConfirmModal) {
+      tick().then(() => deleteConfirmModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (newWorkspaceModal) {
+      tick().then(() => newWorkspaceModalEl?.focus());
     }
   });
 
@@ -481,7 +502,7 @@
     <Tabs tabs={REPO_TABS} bind:active={repoTab} />
   {/if}
 
-  <div class="admin-content">
+  <div class="admin-content" role="tabpanel" id="tabpanel-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}" aria-labelledby="tab-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}">
     {#if error}
       <div class="error-banner" role="alert">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -981,6 +1002,7 @@
 {#if newMemberModal}
   <div class="modal-backdrop" role="presentation" onclick={() => newMemberModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Member"
+    bind:this={memberModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') newMemberModal = false; }}>
     <h3 class="modal-title">Add Member</h3>
     <div class="form-field">
@@ -1052,6 +1074,7 @@
   <div class="modal-backdrop" role="presentation" onclick={() => deleteConfirmModal = null}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
     aria-label={deleteConfirmModal.kind === 'member' ? 'Remove Member' : deleteConfirmModal.kind === 'gate' ? 'Remove Gate' : deleteConfirmModal.kind === 'compute' ? 'Delete Compute Target' : 'Delete Policy'}
+    bind:this={deleteConfirmModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') deleteConfirmModal = null; }}>
     <h3 class="modal-title">
       {#if deleteConfirmModal.kind === 'member'}Remove Member
@@ -1076,6 +1099,7 @@
 {#if newWorkspaceModal}
   <div class="modal-backdrop" role="presentation" onclick={() => newWorkspaceModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="New Workspace"
+    bind:this={newWorkspaceModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') newWorkspaceModal = false; }}>
     <h3 class="modal-title">New Workspace</h3>
     <div class="form-field">
