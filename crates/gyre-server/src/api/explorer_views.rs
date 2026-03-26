@@ -29,7 +29,11 @@ use serde_json::json;
 use std::sync::Arc;
 
 use super::{error::ApiError, new_id, now_secs};
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{
+    auth::AuthenticatedAgent,
+    llm_rate_limit::{check_rate_limit, LLM_RATE_LIMIT, LLM_WINDOW_SECS},
+    AppState,
+};
 
 // ── Storage constants ─────────────────────────────────────────────────────────
 
@@ -402,13 +406,24 @@ pub async fn delete_explorer_view(
 
 pub async fn generate_explorer_view(
     State(state): State<Arc<AppState>>,
-    Path(_workspace_id): Path<String>,
+    Path(workspace_id): Path<String>,
     caller: AuthenticatedAgent,
     Json(req): Json<GenerateViewRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
-    // TODO: per-user rate limiting (10 req/min per user per workspace) via
-    //       in-memory sliding window counter on AppState.llm_rate_limits.
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &caller.agent_id,
+            &workspace_id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
 
     // Build a stub view spec as the generated result.
     // Real implementation would: read prompt template from specs/prompts/explorer-generate.md,
@@ -737,5 +752,50 @@ mod tests {
             body1.as_array().unwrap().len(),
             body2.as_array().unwrap().len()
         );
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_rate_limited_after_10_requests() {
+        let app = app();
+        let generate_body = r#"{"question":"What uses the database?"}"#;
+
+        // First 10 requests must succeed (SSE 200).
+        for i in 0..10 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-rl/explorer-views/generate")
+                        .header("Authorization", auth())
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(generate_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} should succeed");
+        }
+
+        // 11th request must be rate-limited.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-rl/explorer-views/generate")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(generate_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("Retry-After header");
+        let secs: u64 = retry_after.to_str().unwrap().parse().unwrap();
+        assert!(secs >= 1, "Retry-After must be at least 1 second");
     }
 }

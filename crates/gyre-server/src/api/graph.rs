@@ -33,7 +33,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{error::ApiError, new_id, now_secs};
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{
+    auth::AuthenticatedAgent,
+    llm_rate_limit::{check_rate_limit, LLM_RATE_LIMIT, LLM_WINDOW_SECS},
+    AppState,
+};
 
 // ── Response / Request types ─────────────────────────────────────────────────
 
@@ -878,10 +882,25 @@ pub async fn get_workspace_briefing(
 pub async fn briefing_ask(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    caller: AuthenticatedAgent,
     Json(mut req): Json<BriefingAskRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
     require_workspace(&state, &id).await?;
+
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &caller.agent_id,
+            &id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
 
     // Cap history at 20 entries (truncate oldest).
     if let Some(ref mut history) = req.history {
@@ -1109,6 +1128,89 @@ fn _new_delta(repo_id: &str, sha: &str, timestamp: u64) -> ArchitecturalDelta {
 mod tests {
     use super::*;
     use crate::mem::test_state;
+    use axum::{body::Body, Router};
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        crate::api::api_router().with_state(test_state())
+    }
+
+    fn auth() -> &'static str {
+        "Bearer test-token"
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_rate_limited_after_10_requests() {
+        let app = app();
+
+        // Create a workspace so require_workspace passes.
+        let ws_body = serde_json::json!({"name": "rate-limit-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "What changed recently?"});
+
+        // First 10 requests must succeed (SSE 200).
+        for i in 0..10 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                        .header("Authorization", auth())
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} should succeed");
+        }
+
+        // 11th request must be rate-limited.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("Retry-After header present");
+        let secs: u64 = retry_after.to_str().unwrap().parse().unwrap();
+        assert!(secs >= 1, "Retry-After must be at least 1 second");
+    }
 
     #[tokio::test]
     async fn test_save_and_list_nodes() {
