@@ -192,6 +192,17 @@ pub struct BriefingQuery {
     pub since: Option<u64>,
 }
 
+/// One completed-agent entry for the Briefing "Completed" section (HSI §4).
+#[derive(Serialize)]
+pub struct BriefingCompletedAgent {
+    pub agent_id: String,
+    pub spec_ref: Option<String>,
+    pub decisions: Vec<serde_json::Value>,
+    pub uncertainties: Vec<String>,
+    pub conversation_sha: Option<String>,
+    pub completed_at: u64,
+}
+
 /// HSI §9 briefing response schema.
 #[derive(Serialize)]
 pub struct BriefingResponse {
@@ -204,6 +215,8 @@ pub struct BriefingResponse {
     pub metrics: BriefingMetrics,
     /// LLM-synthesized narrative (stubbed for now).
     pub summary: String,
+    /// Completed agents with their decisions and uncertainties (HSI §4).
+    pub completed_agents: Vec<BriefingCompletedAgent>,
 }
 
 #[derive(Serialize)]
@@ -777,6 +790,63 @@ pub async fn get_workspace_briefing(
         budget_pct: 0,
     };
 
+    // ── Completed agents section (HSI §4) ────────────────────────────────────
+    // Read AgentCompleted Event-tier messages from the message bus for this workspace.
+    let ws_id_obj = Id::new(&id);
+    let since_ms = since.saturating_mul(1000); // convert epoch seconds to milliseconds
+    let completed_msgs = state
+        .messages
+        .list_by_workspace(
+            &ws_id_obj,
+            Some("agent_completed"),
+            Some(since_ms),
+            None,
+            None,
+            Some(50),
+        )
+        .await
+        .unwrap_or_default();
+
+    let completed_agents: Vec<BriefingCompletedAgent> = completed_msgs
+        .into_iter()
+        .filter_map(|msg| {
+            let payload = msg.payload?;
+            let agent_id = payload.get("agent_id")?.as_str()?.to_string();
+            let spec_ref = payload
+                .get("spec_ref")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let decisions = payload
+                .get("decisions")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let uncertainties = payload
+                .get("uncertainties")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let conversation_sha = payload
+                .get("conversation_sha")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // created_at is epoch milliseconds per message bus convention
+            let completed_at = msg.created_at / 1000;
+            Some(BriefingCompletedAgent {
+                agent_id,
+                spec_ref,
+                decisions,
+                uncertainties,
+                conversation_sha,
+                completed_at,
+            })
+        })
+        .collect();
+
     // Stub summary string.
     let summary = {
         use std::time::{Duration, UNIX_EPOCH};
@@ -799,6 +869,7 @@ pub async fn get_workspace_briefing(
         exceptions,
         metrics,
         summary,
+        completed_agents,
     }))
 }
 
