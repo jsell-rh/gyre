@@ -293,7 +293,7 @@
 
   .ws-filter:focus:not(:focus-visible) { outline: none; }
   .ws-filter:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
     border-color: var(--color-primary);
   }
@@ -472,7 +472,7 @@
 
   .enter-btn:focus-visible,
   .btn-secondary:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -508,7 +508,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 </style>

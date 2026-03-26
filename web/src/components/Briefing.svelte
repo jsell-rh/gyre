@@ -631,7 +631,7 @@
   }
 
   .range-select:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -849,7 +849,7 @@
   .apply-btn:focus-visible,
   .entity-ref:focus-visible,
   .date-input:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 

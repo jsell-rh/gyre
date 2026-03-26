@@ -200,6 +200,6 @@
     font-size: var(--text-sm);
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
-  .field-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .field-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>
