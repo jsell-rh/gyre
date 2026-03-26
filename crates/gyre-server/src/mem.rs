@@ -2712,6 +2712,9 @@ pub fn test_state() -> Arc<crate::AppState> {
             max_spans_per_trace: 10_000,
         },
         conversations: Arc::new(MemConversationRepository::default()),
+        // Use a non-existent path that unit tests will never actually access via real git.
+        // NoopGitOps does not create files; commits_since() on a missing path returns 0.
+        repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
     })
 }
 

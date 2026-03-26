@@ -342,6 +342,9 @@ pub struct AppState {
     pub otlp_config: otlp_receiver::OtlpServerConfig,
     /// Conversation provenance repository (HSI §5).
     pub conversations: Arc<dyn gyre_ports::ConversationRepository>,
+    /// Root directory for bare git repositories. Defaults to `./repos`.
+    /// Stored here so unit tests can override it without touching env vars.
+    pub repos_root: String,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -904,6 +907,7 @@ pub fn build_state(
             dyn ConversationRepository,
             mem::MemConversationRepository::default()
         ),
+        repos_root: std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string()),
     })
 }
 
