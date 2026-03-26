@@ -60,6 +60,14 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     }
                 }
 
+                // HSI §4: Clean up interrogation ABAC policies for dead agents.
+                let agent_id_str = agent.id.to_string();
+                crate::api::spawn::cleanup_interrogation_policies(state, &agent_id_str).await;
+                let _ = state
+                    .kv_store
+                    .kv_remove("interrogation_context", &agent_id_str)
+                    .await;
+
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
                     ws_id,
