@@ -194,7 +194,7 @@
     position: fixed;
     inset: 0;
     z-index: 900;
-    background: rgba(0, 0, 0, 0.5);
+    background: color-mix(in srgb, black 50%, transparent);
     backdrop-filter: blur(2px);
   }
 

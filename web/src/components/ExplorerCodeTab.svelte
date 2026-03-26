@@ -280,7 +280,8 @@
     outline: none;
   }
 
-  .filter-input:focus { border-color: var(--color-primary); }
+  .filter-input:focus:not(:focus-visible) { outline: none; border-color: var(--color-primary); }
+  .filter-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
   .filter-input::-webkit-search-cancel-button { display: none; }
 
   .table-wrap {

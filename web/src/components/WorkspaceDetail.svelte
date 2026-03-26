@@ -311,6 +311,7 @@
   }
 
   .back-btn:hover { color: var(--color-text); }
+  .back-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .ws-title h2 {
     margin: 0;
@@ -410,6 +411,7 @@
   }
 
   .repo-link-btn:hover { opacity: 0.8; }
+  .repo-link-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
   .muted { color: var(--color-text-muted); }
 
   .teams-grid {
@@ -440,6 +442,7 @@
     cursor: pointer;
   }
   .configure-budget-btn:hover { opacity: 0.88; }
+  .configure-budget-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .budget-form {
     margin-top: var(--space-5);
@@ -463,6 +466,8 @@
   .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
   .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-secondary:hover { color: var(--color-text); }
+  .btn-primary:focus-visible,
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .ws-name-row { display: flex; align-items: center; gap: var(--space-3); }
 

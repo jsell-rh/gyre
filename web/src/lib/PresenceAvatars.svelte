@@ -192,7 +192,7 @@
     font-family: var(--font-body);
     font-size: 0.6rem;
     font-weight: 700;
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     cursor: default;
     position: relative;
     transition: transform var(--transition-fast);
@@ -224,7 +224,7 @@
     justify-content: center;
     font-size: 0.5rem;
     font-weight: 700;
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     line-height: 1;
   }
 

@@ -701,7 +701,7 @@
         {#if showGateForm}
           <div class="gate-form">
             <input class="branch-select" placeholder="Gate name" bind:value={newGateName} />
-            <select class="branch-select" bind:value={newGateType}>
+            <select class="branch-select" bind:value={newGateType} aria-label="Gate type">
               {#each GATE_TYPES as t (t)}
                 <option value={t}>{t}</option>
               {/each}
@@ -1304,7 +1304,8 @@
     padding: var(--space-2) var(--space-3);
   }
 
-  .policy-input:focus { outline: none; border-color: var(--color-primary); }
+  .policy-input:focus:not(:focus-visible) { outline: none; }
+  .policy-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   .policy-op-label {
     font-size: var(--text-sm);

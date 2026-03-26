@@ -172,7 +172,7 @@
   {:else}
     <!-- History tab -->
     <div class="filter-bar">
-      <select class="filter-select" bind:value={filterType}>
+      <select class="filter-select" bind:value={filterType} aria-label="Filter by event type">
         <option value="">All event types</option>
         {#each EVENT_TYPES as t}
           <option value={t}>{t}</option>

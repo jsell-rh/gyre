@@ -445,4 +445,9 @@
     white-space: nowrap;
     border-width: 0;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cursor { animation: none; }
+    .spin { animation: none; }
+  }
 </style>

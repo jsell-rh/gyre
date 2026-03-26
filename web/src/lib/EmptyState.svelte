@@ -9,7 +9,7 @@
 </script>
 
 <div class="empty-state">
-  <div class="empty-icon">
+  <div class="empty-icon" aria-hidden="true">
     {#if icon}
       {@html icon}
     {:else}

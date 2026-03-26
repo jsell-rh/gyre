@@ -869,6 +869,11 @@
     background: var(--color-surface-elevated);
   }
 
+  .panel-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
   .panel-close:hover {
     color: var(--color-danger);
   }
@@ -947,6 +952,11 @@
 
   .start-interrogation:hover {
     background: var(--color-primary-hover);
+  }
+
+  .start-interrogation:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .ask-why-hint {
@@ -1273,6 +1283,11 @@
 
   .llm-send:hover:not(:disabled) { background: var(--color-primary-hover); }
   .llm-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .llm-send:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 
   .llm-hint {
     font-size: var(--text-xs);

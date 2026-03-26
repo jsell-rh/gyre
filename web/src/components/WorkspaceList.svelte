@@ -199,6 +199,7 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
   }
-  .field-input:focus { outline: none; border-color: var(--color-primary); }
+  .field-input:focus:not(:focus-visible) { outline: none; }
+  .field-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>

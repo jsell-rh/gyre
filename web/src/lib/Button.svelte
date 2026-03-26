@@ -56,7 +56,7 @@
   /* Primary — Red Hat red */
   .btn-primary {
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     border-color: var(--color-primary);
   }
   .btn-primary:hover:not(:disabled) {
@@ -89,11 +89,11 @@
   /* Danger */
   .btn-danger {
     background: var(--color-danger);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     border-color: var(--color-danger);
   }
   .btn-danger:hover:not(:disabled) {
-    background: #c43a10;
-    border-color: #c43a10;
+    background: color-mix(in srgb, var(--color-danger) 80%, black);
+    border-color: color-mix(in srgb, var(--color-danger) 80%, black);
   }
 </style>

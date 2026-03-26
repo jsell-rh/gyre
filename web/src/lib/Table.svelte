@@ -24,9 +24,13 @@
       <tr>
         {#each columns as col}
           <th
+            scope="col"
             class:sortable={col.sortable}
             class:sorted={sortKey === col.key}
             onclick={col.sortable ? () => toggleSort(col.key) : undefined}
+            onkeydown={col.sortable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSort(col.key); } } : undefined}
+            tabindex={col.sortable ? 0 : undefined}
+            aria-sort={col.sortable ? (sortKey === col.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
             style={col.width ? `width:${col.width}` : ''}
           >
             {col.label}

@@ -68,7 +68,7 @@
 
   .field-input:focus {
     border-color: var(--color-link);
-    box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.2);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 20%, transparent);
   }
 
   .field-input.error {
@@ -77,7 +77,7 @@
 
   .field-input.error:focus {
     border-color: var(--color-danger);
-    box-shadow: 0 0 0 2px rgba(240, 86, 29, 0.2);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-danger) 20%, transparent);
   }
 
   .field-input:disabled {

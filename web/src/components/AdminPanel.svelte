@@ -1,5 +1,5 @@
 <script>
-  import { getContext } from 'svelte';
+  import { getContext, tick } from 'svelte';
   import { api } from '../lib/api.js';
   import Tabs from '../lib/Tabs.svelte';
   import Badge from '../lib/Badge.svelte';
@@ -115,6 +115,22 @@
   let gateForm = $state({ name: '', command: '', timeout: 300 });
   let gateSaving = $state(false);
   let gateDeleting = $state({});
+
+  // ---- MODAL REFS (auto-focus) ----
+  let budgetModalEl = $state(null);
+  let trustModalEl = $state(null);
+
+  $effect(() => {
+    if (budgetModal) {
+      tick().then(() => budgetModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (trustConfirmModal) {
+      tick().then(() => trustModalEl?.focus());
+    }
+  });
 
   // ---- COMPUTE MODAL (tenant) ----
   let computeModal = $state(false);
@@ -450,7 +466,7 @@
       else if (effectiveScope === 'workspace') loadWorkspace();
       else loadRepo();
     }} disabled={loading}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
       </svg>
       {loading ? 'Loading…' : 'Refresh'}
@@ -467,7 +483,7 @@
 
   <div class="admin-content">
     {#if error}
-      <div class="error-banner">
+      <div class="error-banner" role="alert">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
           <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
         </svg>
@@ -637,7 +653,14 @@
               <span class="budget-label">Token Usage</span>
               <span class="budget-amount">{wsBudget.used ?? 0} / {wsBudget.limit ?? '∞'} {wsBudget.currency ?? ''}</span>
             </div>
-            <div class="budget-bar-track">
+            <div
+              class="budget-bar-track"
+              role="progressbar"
+              aria-valuenow={Math.round(pct)}
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-label="Budget usage"
+            >
               <div
                 class="budget-bar-fill {pct >= 90 ? 'danger' : pct >= 70 ? 'warning' : ''}"
                 style="width: {pct}%"
@@ -921,6 +944,7 @@
 {#if trustConfirmModal}
   <div class="modal-backdrop" role="presentation" onclick={cancelTrustChange}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Change Trust Level"
+    bind:this={trustModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') cancelTrustChange(); }}>
     <h3 class="modal-title">Change Trust Level</h3>
     <p class="modal-desc">{trustChangeDescription(trustConfirmModal.to)}</p>
@@ -937,6 +961,7 @@
 {#if budgetModal}
   <div class="modal-backdrop" role="presentation" onclick={() => budgetModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Adjust Budget Limit"
+    bind:this={budgetModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') budgetModal = false; }}>
     <h3 class="modal-title">Adjust Budget Limit</h3>
     <div class="form-field">

@@ -22,7 +22,7 @@
   ];
 
   // Ralph refs from task description/labels
-  let ralphRefs = $derived(() => {
+  let ralphRefs = $derived.by(() => {
     if (!detail) return [];
     const refs = [];
     if (detail.labels) {
@@ -161,9 +161,9 @@
               </div>
             </div>
           {/if}
-          {#if ralphRefs().length}
+          {#if ralphRefs.length}
             <div class="artifact-section-title">Ralph Loop Refs</div>
-            {#each ralphRefs() as ref}
+            {#each ralphRefs as ref}
               <div class="artifact-card">
                 <span class="artifact-icon">⚡</span>
                 <div class="artifact-body">
@@ -172,7 +172,7 @@
               </div>
             {/each}
           {/if}
-          {#if !detail.pr_link && !ralphRefs().length}
+          {#if !detail.pr_link && !ralphRefs.length}
             <EmptyState title="No artifacts" description="Artifacts appear here when an agent completes this task and opens a merge request." />
           {/if}
         </div>
