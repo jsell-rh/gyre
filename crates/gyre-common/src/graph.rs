@@ -92,6 +92,28 @@ pub struct GraphEdge {
     pub metadata: Option<String>,
 }
 
+/// A single field change within a modified graph node (HSI §8 / realized-model.md §3).
+///
+/// Used in the divergence detection algorithm to compare how two agents modified
+/// the same node.  `old_value` is informational only — conflicts are detected by
+/// comparing `(field, new_value)` pairs between deltas.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FieldChange {
+    pub field: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+/// Compact node identity used inside `delta_json` for divergence comparison.
+///
+/// Stored instead of the full `GraphNode` to keep delta records small.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeltaNodeEntry {
+    pub name: String,
+    pub node_type: String,
+    pub qualified_name: String,
+}
+
 /// A recorded architectural change associated with a commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitecturalDelta {
@@ -102,6 +124,20 @@ pub struct ArchitecturalDelta {
     pub agent_id: Option<Id>,
     pub spec_ref: Option<String>,
     /// Serialized delta details (JSON).
+    ///
+    /// Schema (when agent context is present):
+    /// ```json
+    /// {
+    ///   "nodes_extracted": 5,
+    ///   "edges_extracted": 3,
+    ///   "nodes_added": [{"name":"Foo","node_type":"type","qualified_name":"crate::Foo"}],
+    ///   "nodes_modified": []
+    /// }
+    /// ```
+    /// Schema (no agent context — compact):
+    /// ```json
+    /// {"nodes_extracted": 5, "edges_extracted": 3}
+    /// ```
     pub delta_json: String,
 }
 
