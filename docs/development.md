@@ -203,5 +203,8 @@ Key specs to read before making changes:
 | Agent experience + legibility | [specs/development/agent-experience.md](../specs/development/agent-experience.md) |
 | CI, docs, release | [specs/development/ci-docs-release.md](../specs/development/ci-docs-release.md) |
 
-> `web/dist/` is committed so the server can serve the SPA without requiring `npm` at build
-> time. Agents and CI do not need Node installed to build or run `gyre-server`.
+> `crates/gyre-server/build.rs` auto-runs `npm run build` when building gyre-server, so
+> **Node.js ≥ 18 + npm are required** for a full build. Set `SKIP_WEB_BUILD=1` to skip the
+> web rebuild and use the committed `web/dist/` instead (useful for Rust-only development
+> or environments without Node). CI runs the web build in a separate `web-build` job and
+> sets `SKIP_WEB_BUILD=1` is NOT set in the `test` job — ubuntu-latest runners have npm.
