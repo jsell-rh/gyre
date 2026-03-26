@@ -786,7 +786,11 @@ mod tests {
             .iter()
             .filter(|e| e["type"] == "GraphExtraction")
             .collect();
-        assert_eq!(graph_events.len(), 1, "expected exactly 1 GraphExtraction event");
+        assert_eq!(
+            graph_events.len(),
+            1,
+            "expected exactly 1 GraphExtraction event"
+        );
         assert_eq!(graph_events[0]["detail"]["commit_sha"], "delta-sha");
         assert_eq!(graph_events[0]["detail"]["nodes_added"], 2);
         assert_eq!(graph_events[0]["detail"]["nodes_modified"], 1);
@@ -848,7 +852,11 @@ mod tests {
         let json = body_json(resp).await;
         let events = json["events"].as_array().unwrap();
         let push_events: Vec<_> = events.iter().filter(|e| e["type"] == "GitPush").collect();
-        assert_eq!(push_events.len(), 1, "only correct-branch commit should appear");
+        assert_eq!(
+            push_events.len(),
+            1,
+            "only correct-branch commit should appear"
+        );
         assert_eq!(push_events[0]["detail"]["commit_sha"], "sha-good");
     }
 
@@ -955,7 +963,11 @@ mod tests {
         let json = body_json(resp).await;
         let events = json["events"].as_array().unwrap();
         let merged_events: Vec<_> = events.iter().filter(|e| e["type"] == "Merged").collect();
-        assert_eq!(merged_events.len(), 1, "dedup: status fallback must not duplicate bus-message Merged event");
+        assert_eq!(
+            merged_events.len(),
+            1,
+            "dedup: status fallback must not duplicate bus-message Merged event"
+        );
     }
 
     #[tokio::test]
