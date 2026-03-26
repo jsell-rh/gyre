@@ -292,6 +292,51 @@ pub async fn list_workspace_repos(
     ))
 }
 
+/// Response entry for GET /api/v1/workspaces/:workspace_id/presence.
+#[derive(Serialize)]
+pub struct PresenceEntryResponse {
+    pub user_id: String,
+    pub session_id: String,
+    pub view: String,
+    pub last_seen: u64,
+}
+
+/// GET /api/v1/workspaces/:workspace_id/presence
+///
+/// Returns the current in-memory presence map for the given workspace.
+/// Used by clients on reconnection to populate the initial presence state.
+pub async fn get_workspace_presence(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Vec<PresenceEntryResponse>>, ApiError> {
+    // Verify workspace exists and caller has access.
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(&workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!(
+            "workspace {workspace_id} not found"
+        )));
+    }
+
+    let map = state.presence.read().await;
+    let entries: Vec<PresenceEntryResponse> = map
+        .iter()
+        .filter(|(_, entry)| entry.workspace_id == workspace_id)
+        .map(|((user_id, session_id), entry)| PresenceEntryResponse {
+            user_id: user_id.clone(),
+            session_id: session_id.clone(),
+            view: entry.view.clone(),
+            last_seen: entry.timestamp,
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;

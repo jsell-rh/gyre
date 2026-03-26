@@ -2541,5 +2541,11 @@ pub fn test_state() -> Arc<crate::AppState> {
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        presence: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
     })
 }

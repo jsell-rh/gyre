@@ -8,11 +8,12 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use gyre_common::message::{Destination, MessageKind};
 use gyre_common::WsMessage;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
 use crate::auth::AuthenticatedAgent;
-use crate::AppState;
+use crate::{AppState, PresenceEntry};
 
 /// GET /ws - WebSocket upgrade endpoint.
 pub async fn ws_handler(
@@ -45,8 +46,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
+    // Assign a unique connection ID for targeted delivery (e.g. PresenceEvicted).
+    let connection_id = state.ws_connection_counter.fetch_add(1, Ordering::SeqCst);
+
+    // Per-connection mpsc channel: server → this WS sender (for targeted messages).
+    let (targeted_tx, mut targeted_rx) = tokio::sync::mpsc::channel::<String>(32);
+    state
+        .ws_connections
+        .write()
+        .await
+        .insert(connection_id, targeted_tx);
+
     // Subscribed workspace IDs authorized for this connection.
     let mut subscribed_workspaces: Vec<gyre_common::Id> = vec![];
+
+    // session_id for this connection (set via Subscribe message).
+    let mut connection_session_id: Option<String> = None;
 
     let mut bus_rx = state.message_broadcast_tx.subscribe();
 
@@ -65,7 +80,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         break;
                                     }
                                 }
-                                WsMessage::Subscribe { scopes, last_seen } => {
+                                WsMessage::Subscribe { scopes, last_seen, session_id } => {
+                                    // Record session_id for this connection (presence tracking).
+                                    connection_session_id = session_id;
+
                                     // Validate each requested workspace belongs to caller's tenant.
                                     let mut authorized_workspaces: Vec<gyre_common::Id> = vec![];
                                     let mut rejected_workspaces: Vec<String> = vec![];
@@ -115,6 +133,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     }
 
                                     subscribed_workspaces = authorized_workspaces;
+                                    // Update per-connection workspace index for targeted broadcasts.
+                                    state.ws_connection_workspaces.write().await
+                                        .insert(connection_id, subscribed_workspaces.clone());
 
                                     // Replay Event-tier messages since last_seen, oldest-first.
                                     let mut replayed = 0usize;
@@ -155,6 +176,120 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         let payload = serde_json::to_string(&catchup).unwrap();
                                         if sender.send(Message::Text(payload)).await.is_err() {
                                             break;
+                                        }
+                                    }
+                                }
+                                WsMessage::UserPresence {
+                                    user_id: _client_user_id, // ignored — server uses verified identity
+                                    session_id: presence_session_id,
+                                    workspace_id,
+                                    view,
+                                    timestamp,
+                                } => {
+                                    // Only track presence for connections with verified user identity.
+                                    // Shared-token (GYRE_AUTH_TOKEN) and agent-token connections have
+                                    // user_id: None and are excluded from presence tracking.
+                                    if let Some(verified_user_id) = &caller.user_id {
+                                        let verified_user_str = verified_user_id.to_string();
+
+                                        // Validate that UserPresence.session_id matches the session_id
+                                        // established during Subscribe. Mismatches indicate a protocol
+                                        // error or a misbehaving client — reject silently.
+                                        let canonical_session_id = match &connection_session_id {
+                                            Some(s) if s == &presence_session_id => s.clone(),
+                                            Some(_) => {
+                                                warn!(
+                                                    "UserPresence session_id mismatch with Subscribe session_id — ignoring"
+                                                );
+                                                continue; // use `continue` to skip to next select! iteration — but we're in a match, so we need to break out
+                                            }
+                                            None => presence_session_id.clone(),
+                                        };
+
+                                        // Server-side timestamp for eviction (immune to client manipulation).
+                                        let server_now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as u64;
+
+                                        // Graceful disconnect: client sends view="disconnected" on beforeunload.
+                                        if view == "disconnected" {
+                                            state
+                                                .presence
+                                                .write()
+                                                .await
+                                                .remove(&(verified_user_str, canonical_session_id));
+                                        } else {
+                                            // Update presence map.
+                                            {
+                                                let mut map = state.presence.write().await;
+                                                map.insert(
+                                                    (verified_user_str.clone(), canonical_session_id.clone()),
+                                                    PresenceEntry {
+                                                        workspace_id: workspace_id.to_string(),
+                                                        view: view.clone(),
+                                                        timestamp,
+                                                        server_last_seen: server_now_ms,
+                                                        connection_id,
+                                                    },
+                                                );
+
+                                                // Enforce 5-session cap per user: evict oldest if exceeded.
+                                                let user_sessions: Vec<_> = map
+                                                    .iter()
+                                                    .filter(|((uid, _), _)| uid == &verified_user_str)
+                                                    .map(|((_, sid), entry)| {
+                                                        (sid.clone(), entry.server_last_seen, entry.connection_id)
+                                                    })
+                                                    .collect();
+
+                                                if user_sessions.len() > 5 {
+                                                    // Find oldest by server_last_seen.
+                                                    if let Some((evict_sid, _, evict_conn_id)) =
+                                                        user_sessions.iter().min_by_key(|(_, ts, _)| ts)
+                                                    {
+                                                        let evict_conn_id = *evict_conn_id;
+                                                        let evict_sid = evict_sid.clone();
+                                                        map.remove(&(verified_user_str.clone(), evict_sid.clone()));
+                                                        drop(map); // release lock before async work
+
+                                                        // Send PresenceEvicted to the evicted connection.
+                                                        let evict_msg = WsMessage::PresenceEvicted {
+                                                            session_id: evict_sid,
+                                                        };
+                                                        if let Ok(payload) = serde_json::to_string(&evict_msg) {
+                                                            let conns = state.ws_connections.read().await;
+                                                            if let Some(tx) = conns.get(&evict_conn_id) {
+                                                                let _ = tx.try_send(payload);
+                                                            }
+                                                        }
+                                                    } else {
+                                                        drop(map);
+                                                    }
+                                                }
+                                            }
+
+                                            // Rebroadcast UserPresence (with verified user_id) to
+                                            // connections subscribed to this workspace only.
+                                            let broadcast_msg = WsMessage::UserPresence {
+                                                user_id: verified_user_id.clone(),
+                                                session_id: canonical_session_id,
+                                                workspace_id: workspace_id.clone(),
+                                                view,
+                                                timestamp,
+                                            };
+                                            if let Ok(payload) = serde_json::to_string(&broadcast_msg) {
+                                                let ws_id = &workspace_id;
+                                                let conn_workspaces = state.ws_connection_workspaces.read().await;
+                                                let conns = state.ws_connections.read().await;
+                                                for (conn_id, workspaces) in conn_workspaces.iter() {
+                                                    if workspaces.contains(ws_id) {
+                                                        if let Some(tx) = conns.get(conn_id) {
+                                                            let _ = tx.try_send(payload.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -266,7 +401,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            Some(targeted_payload) = targeted_rx.recv() => {
+                // Targeted message for this specific connection (e.g. PresenceEvicted).
+                if sender.send(Message::Text(targeted_payload)).await.is_err() {
+                    break;
+                }
+            }
         }
+    }
+
+    // Cleanup: deregister connection and remove presence entries for this session.
+    state.ws_connections.write().await.remove(&connection_id);
+    state
+        .ws_connection_workspaces
+        .write()
+        .await
+        .remove(&connection_id);
+    if let (Some(user_id), Some(session_id)) = (&caller.user_id, &connection_session_id) {
+        state
+            .presence
+            .write()
+            .await
+            .remove(&(user_id.to_string(), session_id.clone()));
     }
 
     info!("WebSocket connection closed");

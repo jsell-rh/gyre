@@ -512,6 +512,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:workspace_id/messages",
             post(messages::send_message).get(messages::list_workspace_messages),
         )
+        // Presence (HSI §7)
+        .route(
+            "/api/v1/workspaces/:workspace_id/presence",
+            get(workspaces::get_workspace_presence),
+        )
         // Meta-spec blast radius (M32)
         .route(
             "/api/v1/meta-specs/:path/blast-radius",
