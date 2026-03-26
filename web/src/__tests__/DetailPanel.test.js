@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen } from '@testing-library/svelte';
+import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import DetailPanel from '../lib/DetailPanel.svelte';
 
 const mrEntity = {
@@ -171,6 +171,63 @@ describe('DetailPanel', () => {
     it('panel does not have open class when entity is null', () => {
       const { container } = render(DetailPanel, { props: { entity: null } });
       expect(container.querySelector('.detail-panel.open')).toBeNull();
+    });
+  });
+
+  describe('Ask Why — interrogation button', () => {
+    const interrogationEntity = {
+      type: 'agent',
+      id: 'agent-42',
+      data: {
+        name: 'agent-42',
+        status: 'active',
+        conversation_sha: 'deadbeef1234',
+        repo_id: 'repo-abc',
+        task_id: 'task-xyz',
+      },
+    };
+
+    it('shows "Start interrogation" button in Ask Why tab', async () => {
+      render(DetailPanel, { props: { entity: interrogationEntity } });
+      const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
+      await fireEvent.click(askWhyTab);
+      expect(screen.getByRole('button', { name: /start interrogation/i })).toBeTruthy();
+    });
+
+    it('calls spawnAgent with correct payload on click', async () => {
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ agent: { id: 'intr-1' }, token: 'tok', worktree_path: '/w', clone_url: 'u', branch: 'b' }),
+      });
+      render(DetailPanel, { props: { entity: interrogationEntity } });
+      const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
+      await fireEvent.click(askWhyTab);
+      const btn = screen.getByRole('button', { name: /start interrogation/i });
+      await fireEvent.click(btn);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/agents/spawn'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(body.agent_type).toBe('interrogation');
+      expect(body.conversation_sha).toBe('deadbeef1234');
+      expect(body.repo_id).toBe('repo-abc');
+      expect(body.task_id).toBe('task-xyz');
+    });
+
+    it('shows error toast when repo_id and task_id are missing', async () => {
+      const noContextEntity = {
+        type: 'agent',
+        id: 'agent-43',
+        data: { name: 'agent-43', conversation_sha: 'sha999' },
+      };
+      render(DetailPanel, { props: { entity: noContextEntity } });
+      const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
+      await fireEvent.click(askWhyTab);
+      const btn = screen.getByRole('button', { name: /start interrogation/i });
+      await fireEvent.click(btn);
+      expect(global.fetch).not.toHaveBeenCalled();
     });
   });
 });

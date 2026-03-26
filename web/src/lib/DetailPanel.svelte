@@ -27,6 +27,7 @@
 
   let activeTab = $state('info');
   let panelEl = $state(null);
+  let interrogationLoading = $state(false);
 
   // Compute which tabs to show based on entity type.
   // Spec: ui-layout.md §2 "Detail panel tabs (contextual)"
@@ -96,6 +97,34 @@
     if (data.author_agent_id) result.push({ id: 'chat', label: 'Chat' });
     if (data.has_history) result.push({ id: 'history', label: 'History' });
     return result;
+  }
+
+  async function startInterrogation() {
+    if (!entity) return;
+    const data = entity.data ?? {};
+    const repoId = data.repo_id ?? data.repository_id ?? null;
+    const taskId = data.task_id ?? data.current_task_id ?? null;
+    const conversationSha = data.conversation_sha ?? null;
+    if (!repoId || !taskId) {
+      toastError('Cannot start interrogation: entity is missing repo/task context.');
+      return;
+    }
+    interrogationLoading = true;
+    try {
+      await api.spawnAgent({
+        name: `interrogation-${entity.type}-${entity.id}`,
+        repo_id: repoId,
+        task_id: taskId,
+        branch: `interrogation/${entity.type}/${entity.id}`,
+        agent_type: 'interrogation',
+        conversation_sha: conversationSha,
+      });
+      toastSuccess('Interrogation agent spawned.');
+    } catch (e) {
+      toastError('Failed to spawn interrogation agent: ' + (e?.message ?? String(e)));
+    } finally {
+      interrogationLoading = false;
+    }
   }
 
   // Reset active tab when entity changes, defaulting to the first tab.
@@ -730,9 +759,10 @@
           {#if entity.data?.conversation_sha}
             <button
               class="start-interrogation"
-              onclick={() => {/* Spawn interrogation agent — implemented by S2 slice */}}
+              onclick={startInterrogation}
+              disabled={interrogationLoading}
             >
-              Start interrogation
+              {interrogationLoading ? 'Starting…' : 'Start interrogation'}
             </button>
             <p class="ask-why-hint">Spawns an interrogation agent to answer questions about this entity's decision history.</p>
           {:else}
