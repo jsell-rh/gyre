@@ -211,13 +211,18 @@ pub async fn update_workspace(
     state.workspaces.update(&ws).await?;
 
     // Apply trust preset ABAC policies as a side effect of trust level change.
-    // Delete old trust: policies for this workspace, create new ones for the new level.
+    // When transitioning TO Custom, preserve existing trust: policies as the
+    // starting point for user-managed ABAC (HSI §2). On all other transitions,
+    // delete workspace-scoped trust: policies and seed the new preset.
     if trust_changed {
-        state
-            .policies
-            .delete_by_name_prefix("trust:")
-            .await
-            .map_err(ApiError::Internal)?;
+        let is_now_custom = matches!(ws.trust_level, TrustLevel::Custom);
+        if !is_now_custom {
+            state
+                .policies
+                .delete_by_name_prefix_and_scope_id("trust:", ws.id.as_str())
+                .await
+                .map_err(ApiError::Internal)?;
+        }
         for policy in trust_policies_for_level(&ws.trust_level, ws.id.as_str(), &auth.agent_id) {
             state.policies.create(&policy).await.map_err(|e| {
                 ApiError::Internal(anyhow::anyhow!(
@@ -784,9 +789,7 @@ mod tests {
         assert_eq!(updated2["trust_level"], "Guided");
 
         let policies2 = state.policies.list().await.unwrap();
-        let trust_policy2 = policies2
-            .iter()
-            .find(|p| p.name.starts_with("trust:"));
+        let trust_policy2 = policies2.iter().find(|p| p.name.starts_with("trust:"));
         assert!(
             trust_policy2.is_none(),
             "trust: policies must be deleted on transition away from Supervised"

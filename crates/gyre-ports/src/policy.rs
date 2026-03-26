@@ -34,6 +34,13 @@ pub trait PolicyRepository: Send + Sync {
     /// Returns the number of policies deleted.
     async fn delete_by_name_prefix(&self, prefix: &str) -> Result<u64>;
 
+    /// Delete all policies whose name starts with the given prefix AND whose
+    /// scope_id matches the given value. Used by trust level transitions to
+    /// clean up `trust:` prefixed policies for a specific workspace only.
+    /// Returns the number of policies deleted.
+    async fn delete_by_name_prefix_and_scope_id(&self, prefix: &str, scope_id: &str)
+        -> Result<u64>;
+
     /// Append a policy decision to the audit log.
     async fn record_decision(&self, decision: &PolicyDecision) -> Result<()>;
 

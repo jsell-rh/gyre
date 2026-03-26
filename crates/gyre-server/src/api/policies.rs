@@ -154,6 +154,11 @@ pub async fn update_policy(
         .ok_or_else(|| ApiError::NotFound(format!("policy {id} not found")))?;
 
     if let Some(name) = req.name {
+        if name.starts_with("trust:") || name.starts_with("builtin:") {
+            return Err(ApiError::InvalidInput(format!(
+                "policy name '{name}' uses a reserved prefix ('trust:' or 'builtin:') and cannot be set by callers"
+            )));
+        }
         policy.name = name;
     }
     if let Some(desc) = req.description {

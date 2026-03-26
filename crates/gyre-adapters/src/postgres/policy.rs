@@ -318,6 +318,30 @@ impl PolicyRepository for PgStorage {
         .await?
     }
 
+    async fn delete_by_name_prefix_and_scope_id(
+        &self,
+        prefix: &str,
+        scope_id: &str,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let pattern = format!("{prefix}%");
+        let scope_id = scope_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let count = diesel::delete(
+                policies::table.filter(
+                    policies::name
+                        .like(&pattern)
+                        .and(policies::scope_id.eq(Some(&scope_id))),
+                ),
+            )
+            .execute(&mut *conn)
+            .context("delete policies by name prefix and scope_id")?;
+            Ok(count as u64)
+        })
+        .await?
+    }
+
     async fn record_decision(&self, decision: &PolicyDecision) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let d = decision.clone();

@@ -265,6 +265,34 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Developers (and above) can generate explorer views and specs via LLM.
+        // Priority 800 — below system-full-access (1000) but above user policies (200-299).
+        Policy {
+            id: Id::new("builtin-developer-generate-access"),
+            name: "developer-generate-access".to_string(),
+            description: "Developers and above can generate explorer views and specs via LLM"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 800,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::In,
+                value: ConditionValue::StringList(vec![
+                    "Developer".to_string(),
+                    "Admin".to_string(),
+                ]),
+            }],
+            actions: vec!["generate".to_string()],
+            resource_types: vec!["explorer_view".to_string(), "spec".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
     ]
 }
 
