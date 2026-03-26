@@ -16,6 +16,18 @@
 
   let teardownLoading = $state(false);
 
+  let jsonStatus = $state(null);
+  let jsonError = $state('');
+
+  $effect(() => {
+    if (!yamlInput.trim()) { jsonStatus = null; return; }
+    const t = setTimeout(() => {
+      try { JSON.parse(yamlInput); jsonStatus = 'valid'; jsonError = ''; }
+      catch(e) { jsonStatus = 'invalid'; jsonError = e.message; }
+    }, 400);
+    return () => clearTimeout(t);
+  });
+
   const placeholderText = `{
   "version": "1",
   "workspace_id": "...",
@@ -100,6 +112,12 @@
         spellcheck="false"
         aria-label="Spec content editor"
       ></textarea>
+
+      {#if jsonStatus === 'valid'}
+        <p class="json-hint valid">Valid JSON</p>
+      {:else if jsonStatus === 'invalid'}
+        <p class="json-hint invalid">{jsonError}</p>
+      {/if}
 
       {#if applyError}
         <div class="form-error" role="alert">
@@ -530,6 +548,10 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
   }
+
+  .json-hint { font-size: var(--text-xs); margin-top: var(--space-1); margin-bottom: 0; }
+  .json-hint.valid { color: var(--color-success); }
+  .json-hint.invalid { color: var(--color-danger); }
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; }
