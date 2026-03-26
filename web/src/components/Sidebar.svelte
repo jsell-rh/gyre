@@ -9,12 +9,12 @@
   let collapsed = $state(false);
 
   const NAV_ITEMS = [
-    { id: 'briefing',   label: 'Briefing',   shortcut: '1' },
-    { id: 'explorer',   label: 'Explorer',   shortcut: '2' },
-    { id: 'specs',      label: 'Specs',      shortcut: '3' },
-    { id: 'meta-specs', label: 'Meta-specs', shortcut: '4' },
-    { id: 'admin',      label: 'Admin',      shortcut: '5' },
-    { id: 'inbox',      label: 'Inbox',      shortcut: '6' },
+    { id: 'inbox',      label: 'Inbox',      shortcut: '1' },
+    { id: 'briefing',   label: 'Briefing',   shortcut: '2' },
+    { id: 'explorer',   label: 'Explorer',   shortcut: '3' },
+    { id: 'specs',      label: 'Specs',      shortcut: '4' },
+    { id: 'meta-specs', label: 'Meta-specs', shortcut: '5' },
+    { id: 'admin',      label: 'Admin',      shortcut: '6' },
   ];
 
   function nav(id) {

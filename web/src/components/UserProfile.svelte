@@ -189,7 +189,7 @@
     {/if}
     {#if unread > 0}
       <div class="notif-bell" role="status" aria-label="{unread} unread notifications">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
           <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
           <path d="M13.73 21a2 2 0 01-3.46 0"/>
         </svg>
@@ -248,7 +248,7 @@
           {#each workspaces as ws}
             <div class="membership-item">
               <div class="membership-info">
-                <span class="membership-name">{ws.name ?? ws.slug ?? ws.id}</span>
+                <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? ws.id}</span>
                 {#if ws.role}
                   <Badge value={ws.role} color="neutral" />
                 {/if}
@@ -279,7 +279,7 @@
             <div class="ledger-item">
               <div class="ledger-row">
                 <Badge value={judgmentLabel(j)} color={judgmentEventColor(judgmentLabel(j))} />
-                <span class="ledger-target mono">{judgmentTarget(j)}</span>
+                <span class="ledger-target mono" title={judgmentTarget(j)}>{judgmentTarget(j)}</span>
                 <span class="ledger-time muted">{rel(j.timestamp ?? j.created_at ?? j.approved_at)}</span>
               </div>
               <div class="ledger-meta">

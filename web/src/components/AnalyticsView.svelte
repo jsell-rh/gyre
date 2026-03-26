@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
 
   let events = $state([]);
   let topEvents = $state([]);
@@ -66,9 +67,12 @@
   </div>
 
   {#if error}
-    <div class="error" role="alert">{error}</div>
+    <div class="error" role="alert">
+      <p>{error}</p>
+      <button onclick={load} class="retry-btn">Retry</button>
+    </div>
   {:else if loading}
-    <div class="loading">Loading…</div>
+    <Skeleton lines={5} />
   {:else}
     <div class="panels">
       <!-- Top Events Summary -->
@@ -142,22 +146,22 @@
     gap: 0.5rem;
   }
 
-  h2 { font-size: 1.1rem; font-weight: 600; color: var(--text); }
-  h3 { font-size: 0.95rem; font-weight: 600; color: var(--text); margin-bottom: 0.75rem; }
+  h2 { font-size: 1.1rem; font-weight: 600; color: var(--color-text); }
+  h3 { font-size: 0.95rem; font-weight: 600; color: var(--color-text); margin-bottom: 0.75rem; }
 
   .filters { display: flex; gap: 0.5rem; align-items: center; }
 
   select, button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
     border-radius: 4px;
     padding: 0.3rem 0.6rem;
     font-size: 0.85rem;
     cursor: pointer;
   }
 
-  button:hover { background: var(--surface-hover); }
+  button:hover { background: var(--color-surface-elevated); }
 
   .panels {
     display: grid;
@@ -167,8 +171,8 @@
   }
 
   .panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 1rem;
     overflow: auto;
@@ -177,14 +181,14 @@
   .events-panel { overflow: auto; }
 
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; padding: 0.4rem 0.5rem; color: var(--text-muted); font-size: 0.8rem; border-bottom: 1px solid var(--border); }
+  th { text-align: left; padding: 0.4rem 0.5rem; color: var(--color-text-muted); font-size: 0.8rem; border-bottom: 1px solid var(--color-border); }
   td { padding: 0.4rem 0.5rem; font-size: 0.85rem; }
 
-  .event-name { font-family: monospace; color: var(--accent); }
-  .count { text-align: right; color: var(--text-muted); width: 50px; }
+  .event-name { font-family: monospace; color: var(--color-primary); }
+  .count { text-align: right; color: var(--color-text-muted); width: 50px; }
 
   .bar-cell { width: 120px; padding-left: 0.5rem; }
-  .bar { height: 10px; background: var(--accent); border-radius: 2px; min-width: 2px; transition: width 0.3s; }
+  .bar { height: 10px; background: var(--color-primary); border-radius: 2px; min-width: 2px; transition: width 0.3s; }
 
   .event-list { display: flex; flex-direction: column; gap: 0.25rem; }
 
@@ -195,27 +199,43 @@
     gap: 0.5rem;
     padding: 0.4rem 0.5rem;
     border-radius: 4px;
-    background: var(--bg);
+    background: var(--color-bg, var(--color-surface));
     flex-wrap: wrap;
   }
 
-  .ev-name { font-family: monospace; font-size: 0.82rem; color: var(--accent); }
-  .ev-agent { font-size: 0.78rem; color: var(--text-muted); }
-  .ev-time { font-size: 0.75rem; color: var(--text-dim); }
+  .ev-name { font-family: monospace; font-size: 0.82rem; color: var(--color-primary); }
+  .ev-agent { font-size: 0.78rem; color: var(--color-text-muted); }
+  .ev-time { font-size: 0.75rem; color: var(--color-text-secondary); }
   .ev-detail { font-size: 0.7rem; padding: 0.1rem 0.3rem; }
   .ev-props {
     grid-column: 1 / -1;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-radius: 4px;
     padding: 0.5rem;
     font-size: 0.78rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     overflow: auto;
     max-height: 200px;
   }
 
-  .empty { color: var(--text-dim); font-size: 0.85rem; }
-  .loading { color: var(--text-muted); padding: 1rem; }
-  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; }
+  .empty { color: var(--color-text-secondary); font-size: 0.85rem; }
+  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .error p { margin: 0; }
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: 4px;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0.25rem 0.75rem;
+    white-space: nowrap;
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 </style>

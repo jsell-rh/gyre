@@ -560,12 +560,12 @@
 
     <div class="canvas-toolbar">
       <button class="tool-btn" onclick={resetView} title="Reset view">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/></svg>
         Reset
       </button>
       {#if drillNode}
         <button class="tool-btn drill-back" onclick={exitDrillIn}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
           Full Graph
         </button>
         <span class="drill-label">Drill-in: <strong>{drillNode.name}</strong></span>

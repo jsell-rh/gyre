@@ -16,6 +16,11 @@
 
   let scopeType = $derived(scope?.type ?? 'tenant');
 
+  // ── Workspace-scope repo list ──────────────────────────────────────────
+  let wsRepos = $state([]);
+  let wsReposLoading = $state(true);
+  let wsReposError = $state(null);
+
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
   let selectedRepoId = $state('');
@@ -37,6 +42,9 @@
     if (scopeType !== 'tenant') {
       loadRepos();
     }
+    if (scopeType === 'workspace') {
+      loadWsRepos();
+    }
   });
 
   // Auto-select repo when scope.repoId is set
@@ -47,6 +55,23 @@
       loadGraph(scope.repoId);
     }
   });
+
+  async function loadWsRepos() {
+    wsReposLoading = true;
+    wsReposError = null;
+    try {
+      wsRepos = await api.allRepos();
+    } catch (e) {
+      wsReposError = e.message ?? 'Failed to load repositories';
+      wsRepos = [];
+    } finally {
+      wsReposLoading = false;
+    }
+  }
+
+  function selectRepo(repo) {
+    navigate?.('explorer', { type: 'repo', repoId: repo.id, workspaceId: scope.workspaceId });
+  }
 
   async function loadRepos() {
     reposLoading = true;
@@ -139,17 +164,45 @@
   <WorkspaceCards {onSelectWorkspace} />
 
 {:else if scopeType === 'workspace'}
-  <!-- Workspace scope: realized architecture canvas — S4.4b -->
-  <div class="canvas-placeholder">
-    <div class="placeholder-inner">
-      <svg viewBox="0 0 48 48" fill="none" width="48" height="48" aria-hidden="true">
-        <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
-        <circle cx="24" cy="24" r="6" stroke="currentColor" stroke-width="2"/>
-        <path d="M24 4v14M24 30v14M4 24h14M30 24h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-      </svg>
-      <p class="placeholder-title">Workspace Architecture</p>
-      <p class="placeholder-sub">Select a repository below to explore its knowledge graph</p>
+  <!-- Workspace scope: repo list for graph exploration — S4.4b -->
+  <div class="ws-repo-list">
+    <div class="ws-repo-header">
+      <h2>Workspace Architecture</h2>
+      <p class="ws-repo-desc">Select a workspace repository to explore its knowledge graph</p>
     </div>
+    {#if wsReposLoading}
+      <div class="ws-repo-grid">
+        <Skeleton height="80px" />
+        <Skeleton height="80px" />
+        <Skeleton height="80px" />
+      </div>
+    {:else if wsReposError}
+      <div class="error-banner" role="alert">
+        <span>{wsReposError}</span>
+        <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">Retry</button>
+      </div>
+    {:else if wsRepos.length === 0}
+      <EmptyState title="No repositories" description="Create a repository in this workspace to explore its architecture." />
+    {:else}
+      <div class="ws-repo-grid">
+        {#each wsRepos as repo (repo.id)}
+          <button class="ws-repo-card" onclick={() => selectRepo(repo)}>
+            <div class="ws-repo-card-left">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="ws-repo-icon" aria-hidden="true">
+                <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
+              </svg>
+              <div class="ws-repo-info">
+                <span class="ws-repo-name">{repo.name}</span>
+                {#if repo.description}
+                  <span class="ws-repo-description">{repo.description}</span>
+                {/if}
+              </div>
+            </div>
+            <span class="ws-repo-explore">Explore &rarr;</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 
 {:else}
@@ -282,36 +335,99 @@
 {/if}
 
 <style>
-  /* ── Workspace scope placeholder ────────────────────────────────────── */
-  .canvas-placeholder {
-    display: flex;
-    flex: 1;
-    height: 100%;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text-muted);
-  }
-
-  .placeholder-inner {
+  /* ── Workspace scope repo list ──────────────────────────────────────── */
+  .ws-repo-list {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: var(--space-3);
-    text-align: center;
+    gap: var(--space-4);
+    padding: var(--space-6);
+    overflow-y: auto;
+    height: 100%;
   }
 
-  .placeholder-title {
-    margin: 0;
-    font-size: var(--text-base);
+  .ws-repo-header h2 {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xl);
     font-weight: 600;
-    color: var(--color-text-secondary);
+    color: var(--color-text);
   }
 
-  .placeholder-sub {
+  .ws-repo-desc {
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-text-muted);
-    font-style: italic;
+  }
+
+  .ws-repo-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .ws-repo-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-5);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg, var(--radius));
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    width: 100%;
+  }
+
+  .ws-repo-card:hover {
+    border-color: var(--color-primary);
+    background: var(--color-surface-elevated);
+  }
+
+  .ws-repo-card:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  .ws-repo-card-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .ws-repo-icon {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .ws-repo-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .ws-repo-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .ws-repo-description {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ws-repo-explore {
+    font-size: var(--text-sm);
+    color: var(--color-primary);
+    flex-shrink: 0;
+    font-weight: 500;
   }
 
   /* ── Repo scope: graph view styles ───────────────────────────────────── */
@@ -580,6 +696,43 @@
 
   .chip-clear:hover { opacity: 1; }
   .chip-clear:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
+  /* ── Workspace repo error ─────────────────────────────────────────────── */
+  .error-banner {
+    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-danger, #ef4444);
+    font-size: var(--text-sm);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    white-space: nowrap;
+  }
+
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 
   /* ── Graph error state ────────────────────────────────────────────────── */
   .graph-error {

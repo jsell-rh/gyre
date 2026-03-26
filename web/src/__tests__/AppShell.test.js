@@ -407,12 +407,12 @@ describe('Keyboard shortcuts', () => {
   });
 
   const navShortcuts = [
-    { key: '1', nav: 'Briefing' },
-    { key: '2', nav: 'Explorer' },
-    { key: '3', nav: 'Specs' },
-    { key: '4', nav: 'Meta-specs' },
-    { key: '5', nav: 'Admin' },
-    { key: '6', nav: 'Inbox' },
+    { key: '1', nav: 'Inbox' },
+    { key: '2', nav: 'Briefing' },
+    { key: '3', nav: 'Explorer' },
+    { key: '4', nav: 'Specs' },
+    { key: '5', nav: 'Meta-specs' },
+    { key: '6', nav: 'Admin' },
   ];
 
   navShortcuts.forEach(({ key, nav }) => {

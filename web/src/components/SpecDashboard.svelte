@@ -276,9 +276,9 @@
       </div>
 
     {:else if error}
-      <div class="error-state">
-        <EmptyState title="Failed to load specs" description={error} />
-        <button class="retry-btn" onclick={load}>Retry</button>
+      <div class="error-banner" role="alert">
+        <span>{error}</span>
+        <button onclick={load} class="retry-btn">Retry</button>
       </div>
 
     {:else if filtered.length === 0}
@@ -304,7 +304,7 @@
             onclick={() => handleRowClick(spec)}
             onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
           >
-            <span class="spec-path">{spec.path}</span>
+            <span class="spec-path" title={spec.path}>{spec.path}</span>
             <span class="spec-status-inline {statusColor(spec.approval_status)}">
               {statusIcon(spec.approval_status)} {spec.approval_status ?? 'unknown'}
             </span>
@@ -354,7 +354,7 @@
               aria-selected={selectedPath === spec.path}
             >
               <td class="col-path">
-                <span class="spec-path">{spec.path}</span>
+                <span class="spec-path" title={spec.path}>{spec.path}</span>
               </td>
               <td>
                 <Badge
@@ -595,7 +595,10 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
-    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
   }
 
   .col-kind,
@@ -803,27 +806,35 @@
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
 
-  /* ── Error state ──────────────────────────────────────────────────────── */
-  .error-state {
-    text-align: center;
-    padding: var(--space-4);
+  /* ── Error banner ─────────────────────────────────────────────────────── */
+  .error-banner {
+    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-danger, #ef4444);
+    font-size: var(--text-sm);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
   }
 
   .retry-btn {
-    margin-top: var(--space-3);
-    padding: var(--space-2) var(--space-4);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
+    color: var(--color-primary);
     cursor: pointer;
-    transition: background var(--transition-fast), border-color var(--transition-fast);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    white-space: nowrap;
   }
 
   .retry-btn:hover {
-    background: var(--color-surface);
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
 

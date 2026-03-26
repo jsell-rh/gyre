@@ -19,6 +19,7 @@
   import Modal from '../lib/Modal.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import DiffSuggestion from '../lib/DiffSuggestion.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -114,6 +115,7 @@
 
   let suggestions      = $state([]);
   let nextSuggestionId = 0;
+  let publishSaving    = $state(false);
 
   async function loadWorkspaceData() {
     loading = true;
@@ -231,9 +233,15 @@
 
   async function publish() {
     if (!selectedPersonaId || !workspaceId) return;
+    publishSaving = true;
     try {
       await api.publishPersona(workspaceId, selectedPersonaId, { content: personaContent });
-    } catch { /* stub — 404 expected */ }
+      toastSuccess('Persona published successfully');
+    } catch (e) {
+      toastError('Failed to publish: ' + (e?.message ?? 'unknown error'));
+    } finally {
+      publishSaving = false;
+    }
   }
 
   async function handleChatMessage(text) {
@@ -371,7 +379,7 @@
               {:else}
                 <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>Preview</Button>
               {/if}
-              <Button variant="primary" onclick={publish}>Publish</Button>
+              <Button variant="primary" onclick={publish} disabled={publishSaving}>{publishSaving ? 'Publishing\u2026' : 'Publish'}</Button>
             </div>
           {/if}
         </div>
