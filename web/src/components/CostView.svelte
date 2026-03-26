@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
 
   let costs = $state([]);
   let summary = $state(null);
@@ -79,9 +80,12 @@
   </div>
 
   {#if error}
-    <div class="error" role="alert">{error}</div>
+    <div class="error" role="alert">
+      <p>{error}</p>
+      <button onclick={load} class="retry-btn">Retry</button>
+    </div>
   {:else if loading}
-    <div class="loading">Loading…</div>
+    <Skeleton lines={5} />
   {:else}
     {#if summary}
       <div class="summary-card">
@@ -236,6 +240,22 @@
   .detail-btn { font-size: 0.75rem; padding: 0.15rem 0.4rem; }
 
   .empty { color: var(--color-text-secondary); font-size: 0.85rem; }
-  .loading { color: var(--color-text-muted); padding: 1rem; }
-  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; }
+  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .error p { margin: 0; }
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: 4px;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0.25rem 0.75rem;
+    white-space: nowrap;
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 </style>

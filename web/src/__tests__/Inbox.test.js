@@ -115,11 +115,10 @@ describe('Inbox', () => {
     expect(await findByText('Agent needs clarification')).toBeTruthy();
   });
 
-  it('renders mock data when API returns empty', async () => {
+  it('renders empty state when API returns empty', async () => {
     api.myNotifications.mockResolvedValue([]);
     const { findByText } = render(Inbox);
-    // Mock data always has a priority-1 agent_clarification card
-    expect(await findByText('Agent needs clarification')).toBeTruthy();
+    expect(await findByText('All caught up!')).toBeTruthy();
   });
 
   it('shows priority badge on each card', async () => {
@@ -311,24 +310,15 @@ describe('Inbox', () => {
     });
   });
 
-  it('renders mock data covering all 10 notification types when API is empty', async () => {
+  it('shows empty state when API returns empty array', async () => {
     api.myNotifications.mockResolvedValue([]);
     const { findByText } = render(Inbox);
-    expect(await findByText('Agent needs clarification')).toBeTruthy();
-    expect(await findByText('Spec pending approval')).toBeTruthy();
-    expect(await findByText('Gate failure: lint')).toBeTruthy();
-    expect(await findByText('Cross-workspace spec change')).toBeTruthy();
-    expect(await findByText('Conflicting interpretations detected')).toBeTruthy();
-    expect(await findByText('Meta-spec drift detected')).toBeTruthy();
-    expect(await findByText('Budget warning: 85% used')).toBeTruthy();
-    expect(await findByText('Consider increasing trust level')).toBeTruthy();
-    expect(await findByText('Spec assertion failure')).toBeTruthy();
-    expect(await findByText('Suggested spec link')).toBeTruthy();
+    expect(await findByText('All caught up!')).toBeTruthy();
   });
 
-  it('falls back to mock data on API error', async () => {
+  it('shows error banner on API error', async () => {
     api.myNotifications.mockRejectedValue(new Error('Network error'));
     const { findByText } = render(Inbox);
-    expect(await findByText('Agent needs clarification')).toBeTruthy();
+    expect(await findByText('Network error')).toBeTruthy();
   });
 });

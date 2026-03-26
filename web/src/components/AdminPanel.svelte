@@ -646,14 +646,14 @@
             <h3 class="section-title">General</h3>
             <div class="form-field">
               <label class="form-label" for="ws-name">Name</label>
-              <input id="ws-name" class="filter-input full-width" bind:value={wsSettingsForm.name} />
+              <input id="ws-name" class="filter-input full-width" bind:value={wsSettingsForm.name} aria-required="true" />
             </div>
             <div class="form-field">
               <label class="form-label" for="ws-desc">Description</label>
               <textarea id="ws-desc" class="filter-input full-width textarea" bind:value={wsSettingsForm.description} rows="3"></textarea>
             </div>
             <div class="form-actions">
-              <button class="primary-btn" onclick={saveWsSettings} disabled={wsSettingsSaving}>
+              <button class="primary-btn" onclick={saveWsSettings} disabled={wsSettingsSaving || !wsSettingsForm?.name?.trim()}>
                 {wsSettingsSaving ? 'Saving…' : 'Save Settings'}
               </button>
             </div>

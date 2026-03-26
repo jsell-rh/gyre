@@ -131,12 +131,14 @@
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       }
     } catch (e) {
-      // Graceful degradation: show empty state on 404 / network error
-      briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       if (e.message && e.message.includes('404')) {
+        // 404: no briefing data yet — show empty state
+        briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
         error = 'Briefing data not yet available';
-      } else if (e.message) {
-        error = e.message;
+      } else {
+        // Real error — set briefing to null to prevent "All caught up" showing alongside error
+        briefing = null;
+        if (e.message) error = e.message;
       }
     } finally {
       loading = false;

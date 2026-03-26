@@ -21,183 +21,6 @@
   let refreshInterval;
   let workspaceMap = $state({});
 
-  // Mock notifications covering all 10 types for demonstration when API is empty
-  const MOCK_NOTIFICATIONS = [
-    {
-      id: 'mock-1',
-      notification_type: 'agent_clarification',
-      priority: 1,
-      title: 'Agent needs clarification',
-      body: JSON.stringify({
-        message: 'Token refresh for offline clients not covered by spec. Used 30s timeout as default.',
-        spec_path: 'specs/system/identity-security.md',
-        agent_id: 'worker-8',
-        persona: 'backend-dev v4',
-        mr_title: 'auth-refactor',
-      }),
-      entity_ref: 'worker-8',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-2',
-      notification_type: 'spec_approval',
-      priority: 2,
-      title: 'Spec pending approval',
-      body: JSON.stringify({
-        spec_path: 'specs/system/api-conventions.md',
-        spec_sha: 'abc123def456abc123def456abc123def456abc1',
-        diff_summary: '+45 lines: added pagination conventions',
-      }),
-      entity_ref: 'specs/system/api-conventions.md',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-3',
-      notification_type: 'gate_failure',
-      priority: 3,
-      title: 'Gate failure: lint',
-      body: JSON.stringify({
-        mr_id: 'mr-uuid-42',
-        mr_title: 'feat: add rate limiting',
-        gate_name: 'lint',
-        output: 'error: unused import on line 42',
-      }),
-      entity_ref: 'mr-uuid-42',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-4',
-      notification_type: 'cross_workspace_change',
-      priority: 4,
-      title: 'Cross-workspace spec change',
-      body: JSON.stringify({
-        spec_path: 'specs/system/platform-model.md',
-        source_workspace: 'Platform',
-        change_summary: 'Added new field to Workspace entity',
-      }),
-      entity_ref: 'specs/system/platform-model.md',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-5',
-      notification_type: 'conflicting_interpretations',
-      priority: 5,
-      title: 'Conflicting interpretations detected',
-      body: JSON.stringify({
-        spec_path: 'specs/system/abac-policy-engine.md',
-        interpretation_a: { agent_id: 'worker-3', summary: 'Deny policies evaluated first' },
-        interpretation_b: { agent_id: 'worker-7', summary: 'Priority strictly linear' },
-      }),
-      entity_ref: 'specs/system/abac-policy-engine.md',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-6',
-      notification_type: 'meta_spec_drift',
-      priority: 6,
-      title: 'Meta-spec drift detected',
-      body: JSON.stringify({
-        meta_spec_path: 'specs/meta/coding-standards.md',
-        drift_count: 3,
-        repos_affected: ['payment-api', 'auth-service'],
-      }),
-      entity_ref: 'specs/meta/coding-standards.md',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-7',
-      notification_type: 'budget_warning',
-      priority: 7,
-      title: 'Budget warning: 85% used',
-      body: JSON.stringify({
-        used_percent: 85,
-        remaining_usd: 15.5,
-      }),
-      entity_ref: null,
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-8',
-      notification_type: 'trust_suggestion',
-      priority: 8,
-      title: 'Consider increasing trust level',
-      body: JSON.stringify({
-        message: 'This workspace has had 0 gate failures and 0 reverted MRs in 30 days.',
-        suggested_level: 'Autonomous',
-        current_level: 'Guided',
-      }),
-      entity_ref: null,
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-9',
-      notification_type: 'spec_assertion_failure',
-      priority: 9,
-      title: 'Spec assertion failure',
-      body: JSON.stringify({
-        spec_path: 'specs/system/ralph-loop.md',
-        assertion: 'All gate checks must pass before merge',
-        repo_id: 'payment-api',
-        file_path: 'src/merge_queue.rs',
-      }),
-      entity_ref: 'specs/system/ralph-loop.md',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'mock-10',
-      notification_type: 'suggested_link',
-      priority: 10,
-      title: 'Suggested spec link',
-      body: JSON.stringify({
-        source_spec: 'specs/system/abac-policy-engine.md',
-        target_spec: 'specs/system/platform-model.md',
-        reason: 'These specs reference overlapping ABAC concepts',
-      }),
-      entity_ref: 'specs/system/abac-policy-engine.md',
-      workspace_id: 'demo-workspace',
-      repo_id: null,
-      resolved_at: null,
-      dismissed_at: null,
-      created_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-    },
-  ];
-
   // Badge variant per notification type
   const TYPE_VARIANTS = {
     agent_clarification: 'danger',
@@ -244,10 +67,7 @@
       error = null;
       let data = await api.myNotifications();
 
-      if (!data || data.length === 0) {
-        notifications = MOCK_NOTIFICATIONS;
-        return;
-      }
+      if (!Array.isArray(data)) data = [];
 
       // Client-side scope filtering
       if (repoId) {
@@ -256,17 +76,11 @@
         data = data.filter(n => n.workspace_id === workspaceId);
       }
 
-      if (data.length === 0) {
-        notifications = MOCK_NOTIFICATIONS;
-        return;
-      }
-
       // Sort by priority ascending (1 = highest)
       notifications = data.sort((a, b) => a.priority - b.priority);
     } catch (e) {
-      // Fall back to mock data on API failure
       error = e.message || 'Failed to load notifications';
-      notifications = MOCK_NOTIFICATIONS;
+      notifications = [];
     } finally {
       loading = false;
     }
