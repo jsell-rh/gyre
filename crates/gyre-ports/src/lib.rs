@@ -6,7 +6,6 @@
 pub mod activity;
 pub mod agent;
 pub mod agent_tracking;
-pub mod llm;
 pub mod analytics;
 pub mod attestation_repo;
 pub mod audit;
@@ -20,6 +19,7 @@ pub mod git_ops;
 pub mod graph;
 pub mod jj_ops;
 pub mod kv_store;
+pub mod llm;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message;

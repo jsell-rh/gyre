@@ -77,8 +77,8 @@ impl RigVertexAiFactory {
     pub fn from_env() -> Result<Self> {
         let project = std::env::var("GYRE_VERTEX_PROJECT")
             .context("GYRE_VERTEX_PROJECT is not set — cannot initialise Vertex AI adapter")?;
-        let location = std::env::var("GYRE_VERTEX_LOCATION")
-            .unwrap_or_else(|_| "us-central1".to_string());
+        let location =
+            std::env::var("GYRE_VERTEX_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
         Ok(Self {
             project,
             location,
@@ -166,7 +166,10 @@ impl RigVertexAiAdapter {
             anyhow::bail!("Vertex AI returned {status}: {text}");
         }
 
-        let json: Value = resp.json().await.context("Failed to parse Vertex AI response")?;
+        let json: Value = resp
+            .json()
+            .await
+            .context("Failed to parse Vertex AI response")?;
         Ok(json)
     }
 
@@ -212,11 +215,7 @@ impl LlmPort for RigVertexAiAdapter {
         Self::extract_text(&response)
     }
 
-    async fn predict_json(
-        &self,
-        system_prompt: &str,
-        user_prompt: &str,
-    ) -> Result<Value> {
+    async fn predict_json(&self, system_prompt: &str, user_prompt: &str) -> Result<Value> {
         let json_system = format!(
             "{}\nRespond with valid JSON only, no markdown code fences.",
             system_prompt
@@ -240,7 +239,9 @@ impl LlmPort for RigVertexAiAdapter {
         // The Vertex AI generateContent REST endpoint does not support streaming
         // without a separate streamGenerateContent call. We fall back to complete()
         // and emit the full response as a single chunk to satisfy the trait contract.
-        let text = self.complete(system_prompt, user_prompt, max_tokens).await?;
+        let text = self
+            .complete(system_prompt, user_prompt, max_tokens)
+            .await?;
         let chunks: Vec<Result<String>> = vec![Ok(text)];
         Ok(Box::pin(futures_util::stream::iter(chunks)))
     }
@@ -394,8 +395,7 @@ fn rs256_sign(pem_key: &str, data: &[u8]) -> Result<Vec<u8>> {
         .lines()
         .filter(|l| !l.starts_with("-----"))
         .collect();
-    let der = base64_decode_standard(&pem_body)
-        .context("Failed to decode RSA private key PEM")?;
+    let der = base64_decode_standard(&pem_body).context("Failed to decode RSA private key PEM")?;
 
     let key_pair = RsaKeyPair::from_pkcs8(&der)
         .map_err(|e| anyhow::anyhow!("Failed to parse RSA private key (PKCS8): {:?}", e))?;

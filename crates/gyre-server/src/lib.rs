@@ -925,18 +925,16 @@ pub fn build_state(
             mem::MemPromptRepository::default()
         ),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
-            Ok(_) => {
-                match gyre_adapters::RigVertexAiFactory::from_env() {
-                    Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to initialize Vertex AI LLM adapter: {e}. \
+            Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
+                Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize Vertex AI LLM adapter: {e}. \
                              LLM features are DISABLED."
-                        );
-                        None
-                    }
+                    );
+                    None
                 }
-            }
+            },
             Err(_) => {
                 tracing::warn!(
                     "GYRE_VERTEX_PROJECT is not set — LLM features are DISABLED. \
