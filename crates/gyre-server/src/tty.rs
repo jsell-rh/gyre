@@ -43,7 +43,9 @@ async fn handle_tty_socket(socket: WebSocket, agent_id: String, state: Arc<AppSt
     let authed = match receiver.next().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::Auth { token }) => {
-                let ok = validate_token(&token, &state).await;
+                let ok = crate::auth::authenticate_token(&token, &state)
+                    .await
+                    .is_ok();
                 let result = if ok {
                     WsMessage::AuthResult {
                         success: true,
@@ -147,21 +149,6 @@ async fn handle_tty_socket(socket: WebSocket, agent_id: String, state: Arc<AppSt
     }
 
     info!(agent_id = %agent_id, "TTY WebSocket closed");
-}
-
-/// Returns true if the token is the global auth token or a registered agent token.
-async fn validate_token(token: &str, state: &Arc<AppState>) -> bool {
-    if token == state.auth_token {
-        return true;
-    }
-    // API-key or JWT auth is not attempted here — WS first-message auth only
-    // supports the two token forms used by agents and the dev global token.
-    state
-        .kv_store
-        .kv_list("agent_tokens")
-        .await
-        .map(|pairs| pairs.iter().any(|(_, t)| t.as_str() == token))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
