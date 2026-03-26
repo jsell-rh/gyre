@@ -287,6 +287,7 @@ mod tests {
             traces: base.traces.clone(),
             otlp_config: base.otlp_config.clone(),
             conversations: base.conversations.clone(),
+            repos_root: base.repos_root.clone(),
         });
         crate::build_router(state)
     }

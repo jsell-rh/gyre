@@ -103,9 +103,8 @@ pub async fn create_repo(
             ));
         }
     }
-    let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
     // C-4 fix: always compute path server-side, never from user input.
-    let repo_path = format!("{}/{}/{}.git", repos_root, req.workspace_id, req.name);
+    let repo_path = format!("{}/{}/{}.git", state.repos_root, req.workspace_id, req.name);
 
     let now = now_secs();
     let mut repo = Repository::new(
@@ -227,8 +226,7 @@ pub async fn create_mirror_repo(
             "mirror URL must use https:// scheme".to_string(),
         ));
     }
-    let repos_root = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
-    let repo_path = format!("{}/{}/{}.git", repos_root, req.workspace_id, req.name);
+    let repo_path = format!("{}/{}/{}.git", state.repos_root, req.workspace_id, req.name);
 
     let now = now_secs();
     let repo = Repository {
