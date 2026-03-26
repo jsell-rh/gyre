@@ -500,6 +500,11 @@
     color: var(--color-text);
   }
 
+  .pill:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
   .pill.active {
     background: color-mix(in srgb, var(--color-primary) 12%, transparent);
     border-color: var(--color-primary);
@@ -553,6 +558,11 @@
   }
 
   .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 
   .sort-arrow {
     font-size: 10px;
@@ -815,5 +825,10 @@
   .retry-btn:hover {
     background: var(--color-surface);
     border-color: var(--color-primary);
+  }
+
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 </style>

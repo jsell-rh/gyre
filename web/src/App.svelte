@@ -506,7 +506,7 @@
       <ContentArea layout={currentLayout} {detailPanel} onclosePanel={closeDetailPanel}>
         <div class="content-inner" class:faded={!contentVisible}>
           {#if currentNav === 'inbox'}
-            <Inbox workspaceId={scope.workspaceId} />
+            <Inbox workspaceId={scope.workspaceId} scope={scope.type} />
           {:else if currentNav === 'briefing'}
             <Briefing workspaceId={scope.workspaceId} workspaceName={currentWorkspace?.name} {trustLevel} />
           {:else if currentNav === 'explorer'}
