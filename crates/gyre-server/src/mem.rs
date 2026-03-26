@@ -1554,7 +1554,7 @@ impl TeamRepository for MemTeamRepository {
 // Notification
 // ──────────────────────────────────────────────────────────────────────────────
 
-use gyre_domain::Notification;
+use gyre_common::Notification;
 use gyre_ports::NotificationRepository;
 
 #[derive(Default)]
@@ -1569,54 +1569,105 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(())
     }
 
-    async fn find_by_id(&self, id: &Id) -> Result<Option<Notification>> {
+    async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>> {
         Ok(self
             .store
             .lock()
             .await
             .iter()
-            .find(|n| n.id == *id)
+            .find(|n| n.id == *id && n.user_id == *user_id)
             .cloned())
     }
 
-    async fn list_by_user(&self, user_id: &Id, unread_only: bool) -> Result<Vec<Notification>> {
-        Ok(self
-            .store
-            .lock()
-            .await
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
             .iter()
-            .filter(|n| n.user_id == *user_id && (!unread_only || !n.read))
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.map_or(true, |ws| n.workspace_id == *ws)
+                    && min_priority.map_or(true, |min| n.priority >= min)
+                    && max_priority.map_or(true, |max| n.priority <= max)
+            })
             .cloned()
+            .collect();
+        items.sort_by(|a, b| a.priority.cmp(&b.priority).then(b.created_at.cmp(&a.created_at)));
+        Ok(items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
             .collect())
     }
 
-    async fn count_unread(&self, user_id: &Id) -> Result<u64> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .iter()
-            .filter(|n| n.user_id == *user_id && !n.read)
-            .count() as u64)
-    }
-
-    async fn mark_read(&self, id: &Id, now: u64) -> Result<()> {
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for n in self.store.lock().await.iter_mut() {
-            if n.id == *id {
-                n.mark_read(now);
+            if n.id == *id && n.user_id == *user_id {
+                n.dismissed_at = Some(now);
                 break;
             }
         }
         Ok(())
     }
 
-    async fn mark_all_read(&self, user_id: &Id, now: u64) -> Result<()> {
+    async fn resolve(&self, id: &Id, user_id: &Id, _action_taken: Option<&str>) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for n in self.store.lock().await.iter_mut() {
-            if n.user_id == *user_id && !n.read {
-                n.mark_read(now);
+            if n.id == *id && n.user_id == *user_id {
+                n.resolved_at = Some(now);
+                break;
             }
         }
         Ok(())
+    }
+
+    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.map_or(true, |ws| n.workspace_id == *ws)
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+            })
+            .count() as u64)
+    }
+
+    async fn has_recent_dismissal(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        days: u32,
+    ) -> Result<bool> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - (days as i64 * 86400);
+        Ok(self.store.lock().await.iter().any(|n| {
+            n.workspace_id == *workspace_id
+                && n.user_id == *user_id
+                && n.notification_type.as_str() == notification_type
+                && n.dismissed_at.map_or(false, |d| d >= cutoff)
+        }))
     }
 }
 
