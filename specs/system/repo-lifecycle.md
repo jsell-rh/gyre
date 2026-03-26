@@ -208,7 +208,7 @@ Deleting a repo permanently removes it. This is destructive and irreversible.
 
 **Preconditions:**
 - Repo must be archived first (cannot delete an active repo)
-- No cross-workspace spec links reference this repo as a target (or they must be removed first)
+- No cross-workspace spec links reference this repo as a target (query: `SELECT * FROM spec_links WHERE target_repo_id = :repo_id`). If links exist, return `409 Conflict` with a list of blocking link paths. Links must be removed or retargeted before deletion.
 
 **What happens:**
 1. All repo data removed from database (tasks, MRs, agents, specs, graph, gates)
