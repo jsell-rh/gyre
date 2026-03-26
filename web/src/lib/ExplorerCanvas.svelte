@@ -69,13 +69,13 @@
     }
   });
 
-  let riskByNodeId = $derived(() => {
+  let riskByNodeId = $derived.by(() => {
     const m = new Map();
     for (const r of riskData) m.set(r.node_id, r);
     return m;
   });
 
-  let riskScores = $derived(() => {
+  let riskScores = $derived.by(() => {
     const data = riskData;
     if (!data.length) return new Map();
     const maxFanOut = Math.max(...data.map(r => r.fan_out ?? 0), 1);
@@ -91,9 +91,9 @@
     return scores;
   });
 
-  let topRiskNodes = $derived(() => {
-    const scores = riskScores();
-    const byId = riskByNodeId();
+  let topRiskNodes = $derived.by(() => {
+    const scores = riskScores;
+    const byId = riskByNodeId;
     const entries = [...scores.entries()].sort((a, b) => {
       if (riskSortBy === 'score') return b[1] - a[1];
       const ra = byId.get(a[0]) ?? {};
@@ -118,7 +118,7 @@
   $effect.pre(() => { specLinkageOn = showSpecLinkage; });
   let showUnspeccedOnly = $state(false);
 
-  let specCounts = $derived(() => {
+  let specCounts = $derived.by(() => {
     const specced = nodes.filter(n => !!n.spec_path).length;
     return { specced, unspecced: nodes.length - specced };
   });
@@ -128,12 +128,12 @@
   const THRESHOLD_LIST   = 1000;
   let showAllPrivate = $state(false);
 
-  let showPublicOnlyBanner = $derived(() => nodes.length > THRESHOLD_FILTER && nodes.length <= THRESHOLD_LIST);
-  let showListFallback     = $derived(() => nodes.length > THRESHOLD_LIST);
-  let privateNodeCount     = $derived(() => nodes.filter(n => n.visibility === 'private').length);
+  let showPublicOnlyBanner = $derived.by(() => nodes.length > THRESHOLD_FILTER && nodes.length <= THRESHOLD_LIST);
+  let showListFallback     = $derived.by(() => nodes.length > THRESHOLD_LIST);
+  let privateNodeCount     = $derived.by(() => nodes.filter(n => n.visibility === 'private').length);
 
   // ── Visible nodes/edges ────────────────────────────────────────────────────
-  let visibleNodes = $derived(() => {
+  let visibleNodes = $derived.by(() => {
     let result = nodes;
 
     if (nodes.length > THRESHOLD_FILTER && !showAllPrivate) {
@@ -165,8 +165,8 @@
     return result;
   });
 
-  let visibleEdges = $derived(() => {
-    const visibleIds = new Set(visibleNodes().map(n => n.id));
+  let visibleEdges = $derived.by(() => {
+    const visibleIds = new Set(visibleNodes.map(n => n.id));
     let result = edges.filter(e => {
       const src = e.source_id ?? e.from_node_id ?? e.from;
       const tgt = e.target_id ?? e.to_node_id ?? e.to;
@@ -179,7 +179,7 @@
   });
 
   // ── Highlight from viewSpec ────────────────────────────────────────────────
-  let specHighlightIds = $derived(() => {
+  let specHighlightIds = $derived.by(() => {
     const h = viewSpec?.highlight;
     if (!h) return null;
     if (h.node_ids?.length) return new Set(h.node_ids);
@@ -210,7 +210,7 @@
     if (!enc) return 1;
     const val = node[enc.field] ?? 0;
     const [minS, maxS] = enc.range ?? [1, 2.5];
-    const maxVal = Math.max(1, ...visibleNodes().map(n => n[enc.field] ?? 0));
+    const maxVal = Math.max(1, ...visibleNodes.map(n => n[enc.field] ?? 0));
     return minS + (val / maxVal) * (maxS - minS);
   }
 
@@ -249,8 +249,8 @@
 
   // ── Layout computation ─────────────────────────────────────────────────────
   $effect(() => {
-    const ns  = visibleNodes();
-    const es  = visibleEdges();
+    const ns  = visibleNodes;
+    const es  = visibleEdges;
     const eng = layoutEngine;
 
     if (!ns.length) { nodePositionsMap = {}; return; }
@@ -275,7 +275,7 @@
 
   function getPos(id) { return nodePositionsMap[id] ?? { x: 400, y: 300 }; }
 
-  let canvasBounds = $derived(() => {
+  let canvasBounds = $derived.by(() => {
     const pos = nodePositionsMap;
     const xs = Object.values(pos).map(p => p.x);
     const ys = Object.values(pos).map(p => p.y);
@@ -284,7 +284,7 @@
   });
 
   function resetView() {
-    const b = canvasBounds();
+    const b = canvasBounds;
     viewBox = { x: 0, y: 0, w: b.w, h: b.h };
   }
 
@@ -469,7 +469,7 @@
   function getEffectiveColors(node) {
     if (viewSpec?.encoding?.color) return encodedNodeColor(node);
     if (showRiskHeatmap) {
-      const score = riskScores().get(node.id);
+      const score = riskScores.get(node.id);
       if (score != null) { const fill = riskFillColor(score); return { fill, stroke: fill }; }
     }
     return nodeTypeColor(node.node_type);
@@ -481,7 +481,7 @@
       if (node) return encodedNodeSize(node);
     }
     if (showRiskHeatmap) {
-      const risk = riskByNodeId().get(nodeId);
+      const risk = riskByNodeId.get(nodeId);
       if (risk) return Math.min(3, 1 + (risk.fan_in ?? 0) * 0.5);
     }
     return 1;
@@ -489,8 +489,8 @@
 
   function getNodeTooltip(node) {
     if (!showRiskHeatmap) return `${node.node_type}: ${node.name}`;
-    const risk  = riskByNodeId().get(node.id);
-    const score = riskScores().get(node.id);
+    const risk  = riskByNodeId.get(node.id);
+    const score = riskScores.get(node.id);
     if (!risk) return `${node.node_type}: ${node.name} (no risk data)`;
     return [`${node.node_type}: ${node.name}`, `Risk: ${score?.toFixed(2)}`, `Churn: ${risk.churn_rate ?? 0}`, `Fan-out: ${risk.fan_out ?? 0}`, `Spec: ${risk.spec_covered ? 'yes' : 'no'}`].join('\n');
   }
@@ -522,7 +522,7 @@
 <div class="canvas-wrap" onclick={closeContextMenu}>
   {#if !nodes.length}
     <EmptyState title="No graph data" message="Select a repository to view its knowledge graph. Graph nodes are extracted on push." />
-  {:else if showListFallback()}
+  {:else if showListFallback}
     <div class="threshold-banner warning">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       Graph too large ({nodes.length} nodes) — showing list view. Drill into a module to view its graph.
@@ -544,10 +544,10 @@
       </table>
     </div>
   {:else}
-    {#if showPublicOnlyBanner() && !showAllPrivate}
+    {#if showPublicOnlyBanner && !showAllPrivate}
       <div class="threshold-banner info">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        Showing public API only — {privateNodeCount()} private nodes hidden.
+        Showing public API only — {privateNodeCount} private nodes hidden.
         <button class="banner-action" onclick={() => (showAllPrivate = true)}>Show All</button>
       </div>
     {/if}
@@ -588,7 +588,7 @@
       {#if specLinkageOn}
         <button class="tool-btn" class:active={showUnspeccedOnly} onclick={() => (showUnspeccedOnly = !showUnspeccedOnly)}
           title="Show only unspecced nodes" aria-pressed={showUnspeccedOnly}>
-          Unspecced only ({specCounts().unspecced})
+          Unspecced only ({specCounts.unspecced})
         </button>
       {/if}
 
@@ -607,7 +607,7 @@
         </span>
       {/if}
 
-      <span class="node-count">{visibleNodes().length} nodes · {visibleEdges().length} edges</span>
+      <span class="node-count">{visibleNodes.length} nodes · {visibleEdges.length} edges</span>
 
       {#if !showRiskHeatmap}
         <div class="legend">
@@ -633,7 +633,7 @@
         </defs>
 
         <!-- Edges -->
-        {#each visibleEdges() as edge}
+        {#each visibleEdges as edge}
           {@const from = getPos(edge.source_id ?? edge.from_node_id ?? edge.from)}
           {@const to   = getPos(edge.target_id ?? edge.to_node_id ?? edge.to)}
           <line class="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y}
@@ -642,14 +642,14 @@
         {/each}
 
         <!-- Nodes -->
-        {#each visibleNodes() as node}
+        {#each visibleNodes as node}
           {@const pos = getPos(node.id)}
           {@const colors = getEffectiveColors(node)}
           {@const shape = nodeShape(node.node_type)}
           {@const isSelected = selectedNode?.id === node.id}
           {@const isFindHighlighted = highlightedNodeIds.size > 0 && highlightedNodeIds.has(node.id)}
           {@const isRiskHighlighted = highlightedNodeId === node.id}
-          {@const isSpecHighlighted = specHighlightIds()?.has(node.id)}
+          {@const isSpecHighlighted = specHighlightIds?.has(node.id)}
           {@const isHighlighted = isFindHighlighted || isRiskHighlighted || isSpecHighlighted}
           {@const isDimmed = highlightedNodeIds.size > 0 && !highlightedNodeIds.has(node.id)}
           {@const ring = specLinkageOn ? specRingColor(node) : null}
@@ -720,8 +720,8 @@
             </div>
           {/each}
           <div class="spec-legend-counts">
-            <span class="spec-count specced">{specCounts().specced} specced</span>
-            <span class="spec-count unspecced">{specCounts().unspecced} unspecced</span>
+            <span class="spec-count specced">{specCounts.specced} specced</span>
+            <span class="spec-count unspecced">{specCounts.unspecced} unspecced</span>
           </div>
         </div>
       {/if}
@@ -746,7 +746,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {#each topRiskNodes() as entry}
+                  {#each topRiskNodes as entry}
                     {@const fill = riskFillColor(entry.score)}
                     <tr class="risk-row" class:highlighted={highlightedNodeId === entry.id} role="button" tabindex="0"
                       aria-label="Highlight node {entry.name} on canvas"
@@ -795,9 +795,9 @@
                 <Badge variant={selectedNode.spec_confidence === 'High' ? 'success' : selectedNode.spec_confidence === 'Medium' ? 'warning' : 'default'} value={selectedNode.spec_confidence} />
               </div>
             {/if}
-            {#if showRiskHeatmap && riskByNodeId().has(selectedNode.id)}
-              {@const risk  = riskByNodeId().get(selectedNode.id)}
-              {@const score = riskScores().get(selectedNode.id)}
+            {#if showRiskHeatmap && riskByNodeId.has(selectedNode.id)}
+              {@const risk  = riskByNodeId.get(selectedNode.id)}
+              {@const score = riskScores.get(selectedNode.id)}
               <div class="panel-section risk-detail-section">
                 <div class="panel-label">Risk</div>
                 <div class="risk-detail-grid">

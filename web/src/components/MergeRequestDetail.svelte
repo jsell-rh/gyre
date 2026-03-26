@@ -41,7 +41,9 @@
         api.mrGates(mr.id),
       ]);
       try { deps = await api.mrDependencies(mr.id); } catch { deps = null; }
-    } catch { /* ignore */ }
+    } catch (e) {
+      toastError('Failed to load MR details: ' + (e.message ?? 'unknown error'));
+    }
     loading = false;
   }
 
@@ -160,7 +162,7 @@
   <!-- Header -->
   <div class="panel-header">
     <div class="breadcrumb">
-      <button class="back-btn" onclick={onBack}>
+      <button class="back-btn" onclick={onBack} aria-label="Go back">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
         {repo?.name ?? 'Repo'}
       </button>
@@ -171,15 +173,15 @@
   </div>
 
   <!-- Tab bar -->
-  <div class="tab-bar">
-    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')}>Overview</button>
-    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')}>
+  <div class="tab-bar" role="tablist" aria-label="Merge request tabs">
+    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'}>Overview</button>
+    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'}>
       Files
       {#if mr.diff_stats}<span class="tab-badge">{mr.diff_stats.files_changed}</span>{/if}
     </button>
   </div>
 
-  <div class="content" class:content-files={activeTab === 'files'}>
+  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel">
     {#if activeTab === 'overview'}
     <!-- Two-column layout -->
     <div class="two-col">
@@ -284,6 +286,7 @@
                       onclick={() => removeDep(depId)}
                       disabled={removingDepId === depId}
                       title="Remove dependency"
+                      aria-label="Remove dependency"
                     >
                       {removingDepId === depId ? '…' : '×'}
                     </button>
@@ -457,6 +460,7 @@
               class="file-item"
               class:selected={selectedFile === file.path}
               onclick={() => selectedFile = file.path}
+              aria-label="View diff for {file.path}"
             >
               <span class="file-status-dot" class:modified={file.status === 'Modified'} class:added={file.status === 'Added'} class:deleted={file.status === 'Deleted'}></span>
               <span class="file-path-text">{file.path}</span>
@@ -694,30 +698,30 @@
   }
 
   .action-btn.approve {
-    background: rgba(99, 153, 61, 0.12);
-    border-color: rgba(99, 153, 61, 0.4);
-    color: #7dc25a;
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+    color: var(--color-success);
   }
   .action-btn.approve:hover:not(:disabled) {
-    background: rgba(99, 153, 61, 0.22);
+    background: color-mix(in srgb, var(--color-success) 22%, transparent);
   }
 
   .action-btn.changes {
-    background: rgba(245, 146, 27, 0.12);
-    border-color: rgba(245, 146, 27, 0.4);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
     color: var(--color-warning);
   }
   .action-btn.changes:hover:not(:disabled) {
-    background: rgba(245, 146, 27, 0.22);
+    background: color-mix(in srgb, var(--color-warning) 22%, transparent);
   }
 
   .action-btn.enqueue {
-    background: rgba(0, 102, 204, 0.12);
-    border-color: rgba(0, 102, 204, 0.4);
+    background: color-mix(in srgb, var(--color-info) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
     color: var(--color-link);
   }
   .action-btn.enqueue:hover:not(:disabled) {
-    background: rgba(0, 102, 204, 0.22);
+    background: color-mix(in srgb, var(--color-info) 22%, transparent);
   }
 
   /* Main content */
@@ -766,7 +770,7 @@
   .timeline-step.active .timeline-dot {
     background: var(--color-primary);
     border-color: var(--color-primary);
-    box-shadow: 0 0 8px rgba(238, 0, 0, 0.4);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--color-primary) 40%, transparent);
   }
 
   .timeline-label {
@@ -908,7 +912,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-link);
-    background: rgba(0, 102, 204, 0.1);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
     padding: 0.1rem var(--space-2);
     border-radius: var(--radius-sm);
   }
@@ -1080,7 +1084,7 @@
   }
 
   .file-item.selected {
-    background: rgba(238, 0, 0, 0.08);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
     color: var(--color-text);
   }
 
@@ -1145,7 +1149,7 @@
   .hunk:first-child { border-top: none; }
 
   .hunk-header {
-    background: rgba(0, 102, 204, 0.06);
+    background: color-mix(in srgb, var(--color-info) 6%, transparent);
     padding: var(--space-1) var(--space-4);
     font-family: var(--font-mono);
     font-size: 0.72rem;
@@ -1168,11 +1172,11 @@
   }
 
   .diff-line.line-add {
-    background: rgba(99, 153, 61, 0.12);
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
   }
 
   .diff-line.line-delete {
-    background: rgba(238, 0, 0, 0.1);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
   }
 
   .diff-line.line-context {
@@ -1226,7 +1230,7 @@
     font-family: var(--font-mono);
     font-size: 0.68rem;
     color: var(--color-link);
-    background: rgba(0,102,204,0.1);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
     padding: 0.1rem 0.3rem;
     border-radius: var(--radius-sm);
     flex-shrink: 0;
@@ -1279,7 +1283,7 @@
     flex-shrink: 0;
     transition: background var(--transition-fast);
   }
-  .dep-remove-btn:hover:not(:disabled) { background: rgba(240,86,29,0.1); }
+  .dep-remove-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
   .dep-remove-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .dep-add-row {
     display: flex;
@@ -1300,8 +1304,8 @@
   .dep-input:focus:not(:focus-visible) { outline: none; }
   .dep-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
   .dep-add-btn {
-    background: rgba(0,102,204,0.1);
-    border: 1px solid rgba(0,102,204,0.3);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
     border-radius: var(--radius);
     color: var(--color-link);
     cursor: pointer;
@@ -1311,7 +1315,7 @@
     white-space: nowrap;
     transition: background var(--transition-fast);
   }
-  .dep-add-btn:hover:not(:disabled) { background: rgba(0,102,204,0.18); }
+  .dep-add-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-info) 18%, transparent); }
   .dep-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* Syntax highlighting token colors */

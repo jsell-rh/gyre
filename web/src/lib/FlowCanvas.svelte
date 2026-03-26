@@ -28,17 +28,17 @@
   let hoveredParticleId = $state(null);
 
   // Build span tree from spans array
-  let spanById = $derived(() => {
+  let spanById = $derived.by(() => {
     const m = new Map();
     for (const s of spans) m.set(s.id, s);
     return m;
   });
 
-  let rootSpans = $derived(() => {
+  let rootSpans = $derived.by(() => {
     return spans.filter(s => !s.parent_id);
   });
 
-  let childrenByParent = $derived(() => {
+  let childrenByParent = $derived.by(() => {
     const m = new Map();
     for (const s of spans) {
       if (s.parent_id) {
@@ -51,7 +51,7 @@
   });
 
   // Node position lookup by id
-  let nodePos = $derived(() => {
+  let nodePos = $derived.by(() => {
     const m = new Map();
     for (const n of nodes) {
       m.set(n.id, {
@@ -63,13 +63,13 @@
   });
 
   // Compute active particles at currentTime
-  let activeParticles = $derived(() => {
+  let activeParticles = $derived.by(() => {
     const roots = selectedTests.length > 0
-      ? rootSpans().filter(s => selectedTests.includes(s.id) || selectedTests.includes(s.name))
-      : rootSpans();
+      ? rootSpans.filter(s => selectedTests.includes(s.id) || selectedTests.includes(s.name))
+      : rootSpans;
 
     return roots.map((root, testIndex) => {
-      return computeParticle(root, testIndex, spanById(), childrenByParent(), nodePos(), currentTime);
+      return computeParticle(root, testIndex, spanById, childrenByParent, nodePos, currentTime);
     }).filter(Boolean);
   });
 
@@ -179,13 +179,13 @@
   }
 
   // Max time for loop boundary
-  let maxTime = $derived(() => {
+  let maxTime = $derived.by(() => {
     if (!spans.length) return 10000;
     return Math.max(...spans.map(s => s.start_time + (s.duration_us ?? 0)));
   });
 
   // Determine if we should use WebGL (> 100 active particles)
-  let useWebGL = $derived(() => activeParticles().length > 100);
+  let useWebGL = $derived.by(() => activeParticles.length > 100);
 
   // Animation loop
   let animFrameId = $state(null);
@@ -197,7 +197,7 @@
         const dt = (ts - lastTs) * speed;
         lastTs = ts;
         currentTime = currentTime + dt * 1000; // ms to microseconds
-        if (currentTime > maxTime()) {
+        if (currentTime > maxTime) {
           currentTime = 0; // loop
         }
         drawFrame();
@@ -217,7 +217,7 @@
   $effect(() => {
     // Access reactive deps
     const _time = currentTime;
-    const _particles = activeParticles();
+    const _particles = activeParticles;
     if (!playing) {
       drawFrame();
     }
@@ -225,9 +225,9 @@
 
   function drawFrame() {
     if (!canvasEl) return;
-    const particles = activeParticles();
+    const particles = activeParticles;
 
-    if (useWebGL()) {
+    if (useWebGL) {
       drawWebGL(particles);
     } else {
       draw2D(particles);
@@ -409,7 +409,7 @@
   function findNearestParticle(mx, my, threshold = 16) {
     let best = null;
     let bestDist = threshold * threshold;
-    for (const p of activeParticles()) {
+    for (const p of activeParticles) {
       const dx = p.x - mx;
       const dy = p.y - my;
       const d = dx * dx + dy * dy;
@@ -431,7 +431,8 @@
   onclick={onCanvasClick}
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}
-  aria-label="Particle flow animation — {activeParticles().length} active traces"
+  tabindex="0"
+  aria-label="Particle flow animation — {activeParticles.length} active traces"
 ></canvas>
 
 <style>
