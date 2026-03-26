@@ -258,8 +258,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn put_meta_spec_set_requires_admin() {
         // A Developer-role JWT should be rejected with 403 (NEW-26 fix).
-        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         use axum::routing::{get, put};
 
         let state = make_test_state_with_jwt();
