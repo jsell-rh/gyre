@@ -142,9 +142,9 @@
               onkeydown={(e) => e.key === 'Enter' && selectNode(node)}
             >
               <circle
+                class="node-circle"
+                class:selected={isSelected}
                 r={isSelected ? 22 : 18}
-                fill={isSelected ? 'rgba(238,0,0,0.15)' : 'var(--color-surface-elevated)'}
-                stroke={isSelected ? 'var(--color-primary)' : 'var(--color-border-strong)'}
                 stroke-width={isSelected ? 2 : 1}
               />
               <text
@@ -229,6 +229,16 @@
 
   .graph-node { cursor: pointer; }
   .graph-node:hover circle { stroke: var(--color-primary); }
+
+  .node-circle {
+    fill: var(--color-surface-elevated);
+    stroke: var(--color-border-strong);
+  }
+
+  .node-circle.selected {
+    fill: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    stroke: var(--color-primary);
+  }
 
   .detail-panel {
     width: 260px;

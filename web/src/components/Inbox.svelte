@@ -481,6 +481,7 @@
               class="card-header"
               onclick={() => toggleExpand(n.id)}
               aria-expanded={isExpanded}
+              aria-controls="inbox-card-{n.id}"
               aria-label="{isExpanded ? 'Collapse' : 'Expand'}: {n.title}"
             >
               <div class="card-header-left">
@@ -523,7 +524,7 @@
 
             <!-- Expanded body (accordion — only one open at a time) -->
             {#if isExpanded}
-              <div class="card-body">
+              <div class="card-body" id="inbox-card-{n.id}">
                 {#if body.message}
                   <blockquote class="card-message">"{body.message}"</blockquote>
                 {/if}

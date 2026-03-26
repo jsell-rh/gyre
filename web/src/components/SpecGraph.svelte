@@ -167,11 +167,11 @@
               onkeydown={(e) => e.key === 'Enter' && (selected = node)}
             >
               <rect
+                class="node-rect"
+                class:selected={isSelected}
                 x="-48" y="-18"
                 width="96" height="36"
                 rx="6"
-                fill={isSelected ? 'rgba(238,0,0,0.12)' : 'var(--color-surface-elevated)'}
-                stroke={isSelected ? 'var(--color-primary)' : 'var(--color-border-strong)'}
                 stroke-width={isSelected ? 2 : 1}
               />
               <text
@@ -283,6 +283,16 @@
 
   .spec-node { cursor: pointer; }
   .spec-node:hover rect { stroke: var(--color-primary); }
+
+  .node-rect {
+    fill: var(--color-surface-elevated);
+    stroke: var(--color-border-strong);
+  }
+
+  .node-rect.selected {
+    fill: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    stroke: var(--color-primary);
+  }
 
   .detail-panel {
     width: 280px;

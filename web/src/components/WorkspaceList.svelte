@@ -147,7 +147,7 @@
     width: 40px;
     height: 40px;
     border-radius: var(--radius);
-    background: rgba(238, 0, 0, 0.1);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
     color: var(--color-primary);
     font-weight: 700;
     font-size: var(--text-lg);

@@ -453,6 +453,7 @@
     transition: opacity var(--transition-fast);
   }
   .go-admin-btn:hover { opacity: 0.85; }
+  .go-admin-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .loading-wrap {
     padding: var(--space-6);
@@ -578,6 +579,7 @@
   }
 
   .chip-clear:hover { opacity: 1; }
+  .chip-clear:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   /* ── Graph error state ────────────────────────────────────────────────── */
   .graph-error {
@@ -612,5 +614,10 @@
   .graph-error button:hover {
     background: var(--color-surface);
     border-color: var(--color-primary);
+  }
+
+  .graph-error button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 </style>
