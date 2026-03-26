@@ -475,7 +475,7 @@ async fn test_workspace_graph_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-/// GET /api/v1/workspaces/{id}/briefing — returns summary for empty workspace.
+/// GET /api/v1/workspaces/{id}/briefing — returns HSI schema for empty workspace (always 200).
 #[tokio::test]
 async fn test_workspace_briefing_empty() {
     use gyre_domain::Workspace;
@@ -492,10 +492,64 @@ async fn test_workspace_briefing_empty() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["workspace_id"], ws_id.to_string());
-    assert!(body["summary"]
-        .as_str()
+    // HSI §9: zero activity returns empty arrays + zeroed metrics, always 200.
+    assert!(body["completed"].as_array().unwrap().is_empty());
+    assert!(body["in_progress"].as_array().unwrap().is_empty());
+    assert!(body["cross_workspace"].as_array().unwrap().is_empty());
+    assert!(body["exceptions"].as_array().unwrap().is_empty());
+    assert_eq!(body["metrics"]["mrs_merged"], 0);
+    assert!(body["summary"].as_str().unwrap().contains("MR(s) merged"));
+}
+
+/// POST /api/v1/workspaces/{id}/briefing/ask — SSE streaming Q&A (HSI §9).
+#[tokio::test]
+async fn test_briefing_ask_sse() {
+    use gyre_domain::Workspace;
+    let ctx = Ctx::new().await;
+
+    let ws_id = Id::new(uuid::Uuid::new_v4().to_string());
+    let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), "ask-ws", "ask-ws", 0);
+    ctx.state.workspaces.create(&ws).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            &format!("/api/v1/workspaces/{ws_id}/briefing/ask"),
+            json!({"question": "What happened with auth?", "history": []}),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
         .unwrap()
-        .contains("No architectural changes"));
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.contains("text/event-stream"),
+        "expected SSE content-type, got: {ct}"
+    );
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("partial"),
+        "expected 'partial' event in SSE stream"
+    );
+    assert!(
+        text.contains("complete"),
+        "expected 'complete' event in SSE stream"
+    );
+}
+
+/// POST /api/v1/workspaces/{id}/briefing/ask — 404 for missing workspace.
+#[tokio::test]
+async fn test_briefing_ask_not_found() {
+    let ctx = Ctx::new().await;
+    let resp = ctx
+        .post_json(
+            "/api/v1/workspaces/no-such-ws/briefing/ask",
+            json!({"question": "anything"}),
+        )
+        .await;
+    assert_eq!(resp.status(), 404);
 }
 
 /// GET /api/v1/repos/{id}/graph — 404 for missing repo.
