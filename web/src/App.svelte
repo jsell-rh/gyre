@@ -18,6 +18,7 @@
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
+  import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Primary navigation state ─────────────────────────────────────────
   // One of: 'inbox' | 'briefing' | 'explorer' | 'specs' | 'meta-specs' | 'admin'
@@ -336,6 +337,10 @@
     // 2. Determine initial scope from URL or entrypoint flow
     const fromUrl = parseUrl(window.location.pathname);
 
+    if (!fromUrl && window.location.pathname !== '/') {
+      showToast('Page not found \u2014 redirecting to home', { type: 'info' });
+    }
+
     if (fromUrl) {
       // URL-driven navigation
       currentNav = fromUrl.nav;
@@ -488,6 +493,7 @@
             <div
               class="user-dropdown"
               role="menu"
+              tabindex="-1"
               aria-label="User menu"
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}

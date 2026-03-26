@@ -25,7 +25,7 @@
 
 </script>
 
-<main
+<div
   class="content-area"
   class:full-width={effectiveLayout === 'full-width'}
   class:split={effectiveLayout === 'split'}
@@ -41,7 +41,7 @@
       <DetailPanel entity={detailPanel.entity} onclose={onclosePanel} />
     </aside>
   {/if}
-</main>
+</div>
 
 <style>
   .content-area {

@@ -291,14 +291,14 @@
 
     {:else if scope === 'repo'}
       <!-- Repo scope: progress bar list -->
-      <ul class="spec-list" role="list">
+      <ul class="spec-list" role="listbox" aria-label="Specs">
         {#each filtered as spec (spec.path)}
           {@const pct = Math.round(progressFraction(spec.path) * 100)}
           {@const label = progressLabel(spec.path)}
           <li
             class="spec-row"
             class:selected={selectedPath === spec.path}
-            role="button"
+            role="option"
             tabindex="0"
             aria-selected={selectedPath === spec.path}
             onclick={() => handleRowClick(spec)}
@@ -346,7 +346,6 @@
         <tbody>
           {#each filtered as spec (spec.path)}
             <tr
-              role="row"
               class:selected={selectedPath === spec.path}
               onclick={() => handleRowClick(spec)}
               tabindex="0"
