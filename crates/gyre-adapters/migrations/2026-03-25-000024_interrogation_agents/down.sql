@@ -1,0 +1,3 @@
+-- Revert S2.3 interrogation agents migration.
+-- SQLite does not support DROP COLUMN in older versions; recreate the table without the column.
+-- In production PostgreSQL this is: ALTER TABLE attestation_bundles DROP COLUMN conversation_sha;

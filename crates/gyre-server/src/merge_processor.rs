@@ -450,6 +450,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 spec_ref: updated_mr.spec_ref.clone(),
                 spec_fully_approved,
                 author_agent_id: updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                // HSI §4: conversation_sha is populated when the agent that authored this MR
+                // stored a conversation via the ConversationRepository (S2.1). Best-effort: None
+                // when the agent did not upload a conversation.
+                conversation_sha: None,
             };
 
             let bundle =
