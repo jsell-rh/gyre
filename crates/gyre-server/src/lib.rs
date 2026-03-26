@@ -52,15 +52,15 @@ use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
-    ContainerAuditRepository, CostRepository, DependencyRepository, GateResultRepository,
-    GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
-    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
-    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository,
-    WorkspaceRepository, WorktreeRepository,
+    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyRepository,
+    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
+    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
+    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -340,6 +340,8 @@ pub struct AppState {
     pub traces: Arc<dyn TraceRepository>,
     /// OTLP receiver server configuration (HSI §3a). From GYRE_OTLP_* env vars.
     pub otlp_config: otlp_receiver::OtlpServerConfig,
+    /// Conversation provenance repository (HSI §5).
+    pub conversations: Arc<dyn gyre_ports::ConversationRepository>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -593,6 +595,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // MCP (Model Context Protocol) endpoints
         .route("/mcp", post(mcp::mcp_handler))
         .route("/mcp/sse", get(mcp::mcp_sse_handler))
+        // Conversation provenance (HSI §5) — per-handler auth, ABAC-exempt from middleware.
+        .route(
+            "/api/v1/conversations/:sha",
+            get(api::conversations::get_conversation),
+        )
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
         .merge(api)
@@ -890,6 +897,10 @@ pub fn build_state(
         ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
         traces: store!(dyn TraceRepository, mem::MemTraceRepository::default()),
         otlp_config: otlp_receiver::OtlpServerConfig::from_env(),
+        conversations: store!(
+            dyn ConversationRepository,
+            mem::MemConversationRepository::default()
+        ),
     })
 }
 

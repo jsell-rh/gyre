@@ -441,6 +441,18 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 true // no spec bound — treat as approved
             };
 
+            // Look up conversation SHA uploaded by the authoring agent (HSI §5).
+            let conversation_sha = if let Some(ref agent_id) = updated_mr.author_agent_id {
+                let kv_key = format!("conv_sha:{}", agent_id.as_str());
+                state
+                    .kv_store
+                    .kv_get("agent_provenance", &kv_key)
+                    .await
+                    .unwrap_or(None)
+            } else {
+                None
+            };
+
             let attestation = crate::attestation::MergeAttestation {
                 attestation_version: 1,
                 mr_id: updated_mr.id.to_string(),
@@ -450,10 +462,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 spec_ref: updated_mr.spec_ref.clone(),
                 spec_fully_approved,
                 author_agent_id: updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
-                // HSI §4: conversation_sha is populated when the agent that authored this MR
-                // stored a conversation via the ConversationRepository (S2.1). Best-effort: None
-                // when the agent did not upload a conversation.
-                conversation_sha: None,
+                conversation_sha,
             };
 
             let bundle =

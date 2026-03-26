@@ -22,6 +22,7 @@ use gyre_ports::{
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -2267,6 +2268,131 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+/// sha -> (agent_id, workspace_id, tenant_id, blob)
+type ConvMap = Arc<Mutex<HashMap<String, (String, String, String, Vec<u8>)>>>;
+
+/// In-memory ConversationRepository for development and tests.
+pub struct MemConversationRepository {
+    convs: ConvMap,
+    links: Arc<Mutex<Vec<gyre_common::TurnCommitLink>>>,
+}
+
+impl Default for MemConversationRepository {
+    fn default() -> Self {
+        Self {
+            convs: Arc::new(Mutex::new(HashMap::new())),
+            links: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl gyre_ports::ConversationRepository for MemConversationRepository {
+    async fn store(
+        &self,
+        agent_id: &Id,
+        workspace_id: &Id,
+        tenant_id: &Id,
+        conversation: &[u8],
+    ) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(conversation);
+        let sha = hex::encode(hasher.finalize());
+        self.convs
+            .lock()
+            .await
+            .entry(sha.clone())
+            .or_insert_with(|| {
+                (
+                    agent_id.as_str().to_string(),
+                    workspace_id.as_str().to_string(),
+                    tenant_id.as_str().to_string(),
+                    conversation.to_vec(),
+                )
+            });
+        Ok(sha)
+    }
+
+    async fn get(&self, conversation_sha: &str, tenant_id: &Id) -> Result<Option<Vec<u8>>> {
+        let guard = self.convs.lock().await;
+        let Some((_, _, tid, blob)) = guard.get(conversation_sha) else {
+            return Ok(None);
+        };
+        if tid != tenant_id.as_str() {
+            return Ok(None);
+        }
+        // Decompress.
+        let decompressed = zstd::decode_all(blob.as_slice())
+            .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
+        Ok(Some(decompressed))
+    }
+
+    async fn record_turn_link(&self, link: &gyre_common::TurnCommitLink) -> Result<()> {
+        self.links.lock().await.push(link.clone());
+        Ok(())
+    }
+
+    async fn get_turn_links(
+        &self,
+        conversation_sha: &str,
+        tenant_id: &Id,
+    ) -> Result<Vec<gyre_common::TurnCommitLink>> {
+        let guard = self.links.lock().await;
+        Ok(guard
+            .iter()
+            .filter(|l| {
+                l.conversation_sha.as_deref() == Some(conversation_sha)
+                    && l.tenant_id.as_str() == tenant_id.as_str()
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn get_metadata(
+        &self,
+        conversation_sha: &str,
+        tenant_id: &Id,
+    ) -> Result<Option<(Id, Id)>> {
+        let guard = self.convs.lock().await;
+        let Some((aid, wid, tid, _)) = guard.get(conversation_sha) else {
+            return Ok(None);
+        };
+        if tid != tenant_id.as_str() {
+            return Ok(None);
+        }
+        Ok(Some((Id::new(aid), Id::new(wid))))
+    }
+
+    async fn list_by_agent(&self, agent_id: &Id, tenant_id: &Id) -> Result<Vec<String>> {
+        let guard = self.convs.lock().await;
+        Ok(guard
+            .iter()
+            .filter(|(_, (aid, _, tid, _))| aid == agent_id.as_str() && tid == tenant_id.as_str())
+            .map(|(sha, _)| sha.clone())
+            .collect())
+    }
+
+    async fn backfill_turn_links(
+        &self,
+        agent_id: &Id,
+        conversation_sha: &str,
+        tenant_id: &Id,
+    ) -> Result<u64> {
+        let mut guard = self.links.lock().await;
+        let mut count = 0u64;
+        for link in guard.iter_mut() {
+            if link.agent_id.as_str() == agent_id.as_str()
+                && link.tenant_id.as_str() == tenant_id.as_str()
+                && link.conversation_sha.is_none()
+            {
+                link.conversation_sha = Some(conversation_sha.to_string());
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
 /// In-memory MessageRepository for tests.
 pub struct MemMessageRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::message::Message>>>,
@@ -2553,6 +2679,7 @@ pub fn test_state() -> Arc<crate::AppState> {
             grpc_port: 4317,
             max_spans_per_trace: 10_000,
         },
+        conversations: Arc::new(MemConversationRepository::default()),
     })
 }
 
