@@ -860,7 +860,10 @@ pub fn build_state(
         policies: store!(dyn PolicyRepository, mem::MemPolicyRepository::default()),
         workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(mem::MemTeamRepository::default()),
-        notifications: Arc::new(mem::MemNotificationRepository::default()),
+        notifications: store!(
+            dyn NotificationRepository,
+            mem::MemNotificationRepository::default()
+        ),
         wg_config: WireGuardConfig::from_env(),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         meta_spec_sets: store!(
@@ -870,13 +873,13 @@ pub fn build_state(
         messages: Arc::new(mem::MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);
-            // Spawn a background consumer so the receiver is not immediately dropped.
-            // This drains the channel; a full notification consumer can replace this later.
+            // Drain the channel so the receiver is not dropped.
+            // ReconciliationCompleted → MetaSpecDrift notification creation happens
+            // synchronously in emit_reconciliation_completed() helper, not here.
             tokio::spawn(async move {
                 let mut rx = rx;
                 while let Some(_msg) = rx.recv().await {
-                    // No-op drain: notifications system not yet wired.
-                    // A proper MessageConsumer implementation can plug in here.
+                    // No-op drain. Consumers can be wired via spawn_message_consumer().
                 }
             });
             tx
@@ -946,6 +949,89 @@ pub fn spawn_presence_eviction(state: Arc<AppState>) {
             }
         }
     });
+}
+
+/// Emit a `ReconciliationCompleted` Event-tier message and create priority-6
+/// `MetaSpecDrift` notifications for all Admin/Developer/Owner workspace members (HSI §4).
+///
+/// This is the "MessageConsumer path" for ReconciliationCompleted: the spec says p6 is
+/// "async acceptable", so we create notifications inline alongside the event emission.
+/// This avoids the complexity of a separate consumer while meeting the spec requirement.
+pub async fn emit_reconciliation_completed(
+    state: &Arc<AppState>,
+    workspace_id: Id,
+    payload: Option<serde_json::Value>,
+) {
+    use gyre_common::{Notification, NotificationType};
+    use gyre_domain::WorkspaceRole;
+
+    // Emit Event-tier message.
+    state
+        .emit_event(
+            Some(workspace_id.clone()),
+            Destination::Workspace(workspace_id.clone()),
+            MessageKind::ReconciliationCompleted,
+            payload,
+        )
+        .await;
+
+    // Resolve tenant_id from workspace record (avoid hardcoding "default").
+    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            tracing::warn!("emit_reconciliation_completed: workspace {workspace_id} not found; skipping notifications");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "emit_reconciliation_completed: failed to resolve workspace tenant: {e}"
+            );
+            return;
+        }
+    };
+
+    // Create priority-6 MetaSpecDrift notifications for all Admin/Developer/Owner members.
+    let members = match state
+        .workspace_memberships
+        .list_by_workspace(&workspace_id)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("emit_reconciliation_completed: failed to list members: {e}");
+            return;
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    for member in &members {
+        if !matches!(
+            member.role,
+            WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+        ) {
+            continue;
+        }
+        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
+        let notif = Notification::new(
+            notif_id,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::MetaSpecDrift,
+            "Meta-spec reconciliation completed — workspace specs may have drifted",
+            &tenant_id,
+            now,
+        );
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(
+                "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
+                member.user_id
+            );
+        }
+    }
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.

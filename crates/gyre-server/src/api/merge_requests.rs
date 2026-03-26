@@ -1153,6 +1153,7 @@ mod tests {
             spec_fully_approved: true,
             author_agent_id: Some("agent-1".to_string()),
             conversation_sha: None,
+            completion_summary: None,
         };
 
         let bundle = sign_attestation(attestation, &state.agent_signing_key);
@@ -1194,6 +1195,7 @@ mod tests {
             spec_fully_approved: true,
             author_agent_id: None,
             conversation_sha: None,
+            completion_summary: None,
         };
         let bundle = sign_attestation(attestation, &state.agent_signing_key);
         state.attestation_store.save(&mr_id, &bundle).await.unwrap();
