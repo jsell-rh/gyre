@@ -69,7 +69,7 @@ describe('SpecDashboard', () => {
 
   it('shows sortable table for workspace scope after loading', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByRole('table')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('grid')).toBeTruthy());
   });
 
   // ── Table columns and sorting ──────────────────────────────────────────────
@@ -109,7 +109,7 @@ describe('SpecDashboard', () => {
     const statusBtn = screen.getByRole('button', { name: /status/i });
     await fireEvent.click(statusBtn);
     // Should not throw and table should still be rendered
-    expect(screen.getByRole('table')).toBeTruthy();
+    expect(screen.getByRole('grid')).toBeTruthy();
   });
 
   // ── Filter pills ──────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ describe('SpecDashboard', () => {
 
   it('does not show "+ New Spec" for workspace scope', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByRole('table')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('grid')).toBeTruthy());
     expect(screen.queryByRole('button', { name: /\+ new spec/i })).toBeNull();
   });
 

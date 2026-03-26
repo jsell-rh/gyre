@@ -296,9 +296,9 @@
             class:selected={selectedPath === spec.path}
             role="button"
             tabindex="0"
-            aria-pressed={selectedPath === spec.path}
+            aria-selected={selectedPath === spec.path}
             onclick={() => handleRowClick(spec)}
-            onkeydown={(e) => e.key === 'Enter' && handleRowClick(spec)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
           >
             <span class="spec-path">{spec.path}</span>
             <span class="spec-status-inline {statusColor(spec.approval_status)}">
@@ -326,7 +326,7 @@
 
     {:else}
       <!-- Workspace / tenant scope: sortable table -->
-      <table class="specs-table" aria-label="Specs registry">
+      <table class="specs-table" role="grid" aria-label="Specs registry">
         <thead>
           <tr>
             {#each TABLE_COLS as [col, label]}
@@ -342,10 +342,11 @@
         <tbody>
           {#each filtered() as spec (spec.path)}
             <tr
+              role="row"
               class:selected={selectedPath === spec.path}
               onclick={() => handleRowClick(spec)}
               tabindex="0"
-              onkeydown={(e) => e.key === 'Enter' && handleRowClick(spec)}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
               aria-selected={selectedPath === spec.path}
             >
               <td class="col-path">
@@ -392,7 +393,7 @@
     </div>
     <!-- Right: preview -->
     <div class="preview-pane">
-      <span class="preview-label">Preview</span>
+      <span class="preview-label">Source preview</span>
       <pre class="preview-pre">{newSpecContent}</pre>
     </div>
   </div>
@@ -489,7 +490,7 @@
   }
 
   .pill.active {
-    background: rgba(238, 0, 0, 0.12);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
     border-color: var(--color-primary);
     color: var(--color-primary);
     font-weight: 500;
@@ -564,7 +565,7 @@
   }
 
   .specs-table tr.selected td {
-    background: rgba(238, 0, 0, 0.06);
+    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
   }
 
   .col-path { max-width: 240px; }
@@ -617,7 +618,13 @@
 
   .spec-row.selected { background: rgba(238, 0, 0, 0.06); }
 
-  .spec-row .spec-path { flex: 1; min-width: 0; }
+  .spec-row .spec-path {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .spec-status-inline {
     font-size: var(--text-xs);

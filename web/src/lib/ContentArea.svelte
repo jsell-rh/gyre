@@ -22,13 +22,7 @@
     detailPanel?.open ? 'split' : layout
   );
 
-  // Content opacity for scope cross-fade (triggered by parent via contentKey)
-  let contentVisible = $state(true);
 
-  export function triggerFade() {
-    contentVisible = false;
-    setTimeout(() => { contentVisible = true; }, 150);
-  }
 </script>
 
 <div
@@ -38,7 +32,7 @@
   class:canvas-controls={effectiveLayout === 'canvas-controls'}
   class:editor-split={effectiveLayout === 'editor-split'}
 >
-  <div class="content-main" class:faded={!contentVisible}>
+  <div class="content-main">
     {@render children?.()}
   </div>
 
@@ -94,6 +88,7 @@
   .split .content-main {
     flex: 0 0 60%;
     max-width: 60%;
+    min-width: 480px;
   }
 
   /* Editor-split layout: left panel is 60% */

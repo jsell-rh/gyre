@@ -22,10 +22,17 @@
   } = $props();
 
   let inputEl = $state(null);
+  let historyEl = $state(null);
   let text = $state('');
   let messages = $state([]);
   let streamBuffer = $state('');
   let error = $state(null);
+
+  // Scroll chat history to bottom whenever messages or streaming buffer updates.
+  $effect(() => {
+    messages; streamBuffer;
+    if (historyEl) historyEl.scrollTop = historyEl.scrollHeight;
+  });
 
   // Recipient display text per spec.
   let recipientLabel = $derived(buildRecipientLabel(recipient, recipientType));
@@ -149,7 +156,7 @@
 
 <div class="inline-chat">
   {#if messages.length > 0 || streamBuffer}
-    <div class="chat-history" aria-live="polite" aria-label="Chat history">
+    <div class="chat-history" aria-live="polite" aria-label="Chat history" bind:this={historyEl}>
       {#each messages as msg}
         <div class="chat-msg chat-msg-{msg.role}">
           <span class="msg-role" aria-label={msg.role === 'user' ? 'You' : recipient}>
@@ -192,7 +199,6 @@
         rows="1"
         disabled={streaming}
         aria-label="Message input"
-        aria-multiline="true"
         onkeydown={onkeydown}
       ></textarea>
 

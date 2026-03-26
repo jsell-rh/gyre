@@ -3,6 +3,7 @@
     currentNav = $bindable('inbox'),
     onnavigate = undefined,
     inboxBadge = 0,
+    wsStatus = 'disconnected',
   } = $props();
 
   let collapsed = $state(false);
@@ -97,7 +98,7 @@
   <!-- Bottom: server version -->
   <div class="sidebar-footer">
     <div class="version-indicator" role="status" aria-label="Server version">
-      <span class="version-dot" aria-hidden="true"></span>
+      <span class="version-dot" class:connected={wsStatus === 'connected'} class:error={wsStatus === 'error' || wsStatus === 'auth-failed'} aria-hidden="true"></span>
       {#if !collapsed}
         <span class="version-text">v0.1.0</span>
       {/if}
@@ -298,9 +299,19 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
+    background: var(--color-warning);
+    box-shadow: none;
+    flex-shrink: 0;
+  }
+
+  .version-dot.connected {
     background: var(--color-success);
     box-shadow: 0 0 5px rgba(99, 153, 61, 0.6);
-    flex-shrink: 0;
+  }
+
+  .version-dot.error {
+    background: var(--color-danger);
+    box-shadow: none;
   }
 
   .version-text {
