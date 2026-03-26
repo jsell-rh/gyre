@@ -10,7 +10,6 @@
 
 pub mod activity;
 pub mod agent;
-pub mod llm_config;
 pub mod agent_card;
 pub mod agent_tracking;
 pub mod analytics;
@@ -22,6 +21,7 @@ pub mod container_audit;
 pub mod dependency;
 pub mod extractor;
 pub mod git_types;
+pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;

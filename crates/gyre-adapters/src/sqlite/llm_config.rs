@@ -219,11 +219,7 @@ impl LlmConfigRepository for SqliteStorage {
         .await?
     }
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()> {
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.as_str().to_string();
         let fk = function_key.to_string();
@@ -270,13 +266,9 @@ mod tests {
     #[tokio::test]
     async fn get_effective_returns_none_when_no_config() {
         let (_tmp, s) = setup();
-        let result = LlmConfigRepository::get_effective(
-            &s,
-            &Id::new("ws-1"),
-            "briefing-ask",
-        )
-        .await
-        .unwrap();
+        let result = LlmConfigRepository::get_effective(&s, &Id::new("ws-1"), "briefing-ask")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 

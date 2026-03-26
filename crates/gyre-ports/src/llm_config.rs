@@ -38,11 +38,7 @@ pub trait LlmConfigRepository: Send + Sync {
         updated_by: &Id,
     ) -> Result<LlmFunctionConfig>;
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()>;
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()>;
 
     async fn list_tenant_defaults(&self) -> Result<Vec<LlmFunctionConfig>>;
 }

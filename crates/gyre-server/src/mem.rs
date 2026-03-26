@@ -2318,7 +2318,10 @@ impl LlmConfigRepository for MemLlmConfigRepository {
     ) -> Result<Option<LlmFunctionConfig>> {
         let guard = self.store.lock().await;
         // Workspace override first.
-        if let Some(cfg) = guard.get(&(Some(workspace_id.as_str().to_string()), function_key.to_string())) {
+        if let Some(cfg) = guard.get(&(
+            Some(workspace_id.as_str().to_string()),
+            function_key.to_string(),
+        )) {
             return Ok(Some(cfg.clone()));
         }
         // Tenant default.
@@ -2355,7 +2358,10 @@ impl LlmConfigRepository for MemLlmConfigRepository {
                 .unwrap_or_default()
                 .as_secs(),
         };
-        let key = (Some(workspace_id.as_str().to_string()), function_key.to_string());
+        let key = (
+            Some(workspace_id.as_str().to_string()),
+            function_key.to_string(),
+        );
         self.store.lock().await.insert(key, cfg.clone());
         Ok(cfg)
     }
@@ -2384,12 +2390,11 @@ impl LlmConfigRepository for MemLlmConfigRepository {
         Ok(cfg)
     }
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()> {
-        let key = (Some(workspace_id.as_str().to_string()), function_key.to_string());
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
+        let key = (
+            Some(workspace_id.as_str().to_string()),
+            function_key.to_string(),
+        );
         self.store.lock().await.remove(&key);
         Ok(())
     }

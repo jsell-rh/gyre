@@ -219,11 +219,7 @@ impl LlmConfigRepository for PgStorage {
         .await?
     }
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()> {
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.as_str().to_string();
         let fk = function_key.to_string();
