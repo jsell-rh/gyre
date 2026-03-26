@@ -500,7 +500,7 @@
   }
 
   .pill:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -559,7 +559,7 @@
   .sort-btn:hover { color: var(--color-text); }
 
   .sort-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -753,12 +753,12 @@
   }
 
   .spec-editor:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
   }
 
-  .spec-editor:focus {
-    border-color: var(--color-primary);
+  .spec-editor:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .modal-footer {
@@ -795,12 +795,12 @@
   }
 
   .field-input:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
   }
 
-  .field-input:focus {
-    border-color: var(--color-primary);
+  .field-input:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -838,7 +838,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 </style>

@@ -260,7 +260,7 @@
   }
 
   .form-input:focus:not(:focus-visible) { outline: none; }
-  .form-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .form-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .form-textarea { resize: vertical; min-height: 5rem; }
 

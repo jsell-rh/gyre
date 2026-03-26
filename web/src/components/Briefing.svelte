@@ -195,7 +195,7 @@
   onMount(load);
 </script>
 
-<div class="briefing" data-testid="briefing-view">
+<div class="briefing" data-testid="briefing-view" aria-live="polite">
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
@@ -216,7 +216,7 @@
             class="range-select"
             value={selectedRange}
             onchange={(e) => onRangeChange(e.target.value)}
-            aria-label="Time range"
+            aria-label="Briefing time range"
           >
             {#each TIME_RANGES as opt}
               <option value={opt.value}>{opt.label}</option>
@@ -230,7 +230,7 @@
               aria-label="Custom start date"
               data-testid="custom-date-input"
             />
-            <button class="apply-btn" onclick={onCustomApply}>Apply</button>
+            <button class="apply-btn" onclick={onCustomApply} disabled={!customSince}>Apply</button>
           {/if}
         </div>
       </div>
@@ -416,6 +416,7 @@
                   class="action-btn secondary"
                   onclick={() => handleDismiss(item)}
                   data-testid="dismiss-btn"
+                  aria-label="Dismiss: {item.description ?? item.spec_ref ?? 'item'}"
                 >
                   Dismiss
                 </button>
@@ -625,12 +626,12 @@
     outline: none;
   }
 
-  .range-select:focus {
-    border-color: var(--color-primary);
+  .range-select:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .range-select:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -738,7 +739,7 @@
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-primary);
+    color: var(--color-link, var(--color-primary));
     text-decoration: underline;
     text-underline-offset: 2px;
     transition: color var(--transition-fast);
@@ -848,7 +849,7 @@
   .apply-btn:focus-visible,
   .entity-ref:focus-visible,
   .date-input:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 

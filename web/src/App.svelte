@@ -604,8 +604,8 @@
 
 <!-- Keyboard shortcut overlay -->
 {#if shortcutsOpen}
-  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl}>
+  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => e.key === 'Escape' && (shortcutsOpen = false)}>
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="presentation">
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
@@ -768,7 +768,7 @@
 
   .search-trigger:focus-visible,
   .inbox-badge-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -1021,6 +1021,11 @@
     padding: 0;
   }
 
+  .shortcuts-header button:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   .shortcuts-body {
     padding: var(--space-4) var(--space-6);
   }
@@ -1132,9 +1137,9 @@
   }
 
   .token-input:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
-    border-color: var(--color-primary);
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .token-actions {
@@ -1173,7 +1178,7 @@
 
   .btn-primary:focus-visible,
   .btn-secondary:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
   .btn-primary:active {
@@ -1181,5 +1186,17 @@
   }
   .btn-secondary:active {
     opacity: 0.85;
+  }
+
+  .user-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .user-dropdown-item:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
+    background: var(--color-border);
+    color: var(--color-text);
   }
 </style>

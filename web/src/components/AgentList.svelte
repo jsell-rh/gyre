@@ -44,7 +44,12 @@
 
   $effect(() => {
     if (showSpawnModal) {
-      tick().then(() => spawnModalEl?.focus());
+      tick().then(() => {
+        if (spawnModalEl) {
+          const first = spawnModalEl.querySelector('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+          (first ?? spawnModalEl).focus();
+        }
+      });
     }
   });
 
@@ -223,11 +228,12 @@
   </div>
 
   <div class="filter-bar">
-    <button class="pill" class:active={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
+    <button class="pill" class:active={statusFilter === ''} aria-pressed={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
     {#each statuses as s}
       <button
         class="pill"
         class:active={statusFilter === s}
+        aria-pressed={statusFilter === s}
         onclick={() => (statusFilter = statusFilter === s ? '' : s)}
       >
         {s}
@@ -800,7 +806,7 @@
   .form input:focus:not(:focus-visible),
   .form select:focus:not(:focus-visible) { outline: none; }
   .form input:focus-visible,
-  .form select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .form select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; }
 
@@ -857,4 +863,16 @@
   }
 
   .link-btn:hover { opacity: 0.8; }
+
+  .toggle-btn:focus-visible,
+  .spawn-btn:focus-visible,
+  .pill:focus-visible,
+  .modal-btn:focus-visible,
+  .link-btn:focus-visible,
+  .dtab:focus-visible,
+  .agent-card:focus-visible,
+  .close-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>

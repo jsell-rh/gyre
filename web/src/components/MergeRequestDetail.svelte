@@ -174,14 +174,14 @@
 
   <!-- Tab bar -->
   <div class="tab-bar" role="tablist" aria-label="Merge request tabs">
-    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'}>Overview</button>
-    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'}>
+    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'} id="tab-overview">Overview</button>
+    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'} id="tab-files">
       Files
       {#if mr.diff_stats}<span class="tab-badge">{mr.diff_stats.files_changed}</span>{/if}
     </button>
   </div>
 
-  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel">
+  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
     {#if activeTab === 'overview'}
     <!-- Two-column layout -->
     <div class="two-col">
@@ -199,7 +199,7 @@
             <div class="meta-row">
               <span class="meta-label">Author</span>
               {#if navigate}
-                <button class="meta-link-btn" onclick={() => navigate('agents')}>{mr.author_agent_id}</button>
+                <button class="meta-link-btn" onclick={() => navigate('agents')} aria-label="View agent {mr.author_agent_id}">{mr.author_agent_id}</button>
               {:else}
                 <span class="meta-value">{mr.author_agent_id}</span>
               {/if}
@@ -286,7 +286,7 @@
                       onclick={() => removeDep(depId)}
                       disabled={removingDepId === depId}
                       title="Remove dependency"
-                      aria-label="Remove dependency"
+                      aria-label="Remove dependency {depId}"
                     >
                       {removingDepId === depId ? '…' : '×'}
                     </button>
@@ -1302,7 +1302,7 @@
     min-width: 0;
   }
   .dep-input:focus:not(:focus-visible) { outline: none; }
-  .dep-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .dep-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
   .dep-add-btn {
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
@@ -1323,4 +1323,15 @@
   :global(.hl-str) { color: #99cc88; }
   :global(.hl-cmt) { color: #6b7a8d; font-style: italic; }
   :global(.hl-num) { color: #f09a3e; }
+
+  .back-btn:focus-visible,
+  .meta-link-btn:focus-visible,
+  .action-btn:focus-visible,
+  .tab-btn:focus-visible,
+  .file-item:focus-visible,
+  .dep-remove-btn:focus-visible,
+  .dep-add-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>

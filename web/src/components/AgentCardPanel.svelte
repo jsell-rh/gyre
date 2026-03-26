@@ -267,7 +267,7 @@
   .field-input:focus:not(:focus-visible),
   .field-textarea:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible,
-  .field-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-link); }
+  .field-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .field-hint {
     font-size: var(--text-xs);
@@ -408,4 +408,13 @@
     transition: background var(--transition-fast);
   }
   .publish-btn:hover { background: color-mix(in srgb, var(--color-info) 20%, transparent); }
+
+  .edit-btn:focus-visible,
+  .cancel-btn:focus-visible,
+  .save-btn:focus-visible,
+  .edit-btn-secondary:focus-visible,
+  .publish-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>

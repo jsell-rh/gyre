@@ -344,7 +344,7 @@
   }
 
   .back-btn:hover { color: var(--color-text); }
-  .back-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .back-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .ws-title h2 {
     margin: 0;
@@ -444,7 +444,7 @@
   }
 
   .repo-link-btn:hover { opacity: 0.8; }
-  .repo-link-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .repo-link-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
   .muted { color: var(--color-text-muted); }
 
   .teams-grid {
@@ -475,7 +475,7 @@
     cursor: pointer;
   }
   .configure-budget-btn:hover { opacity: 0.88; }
-  .configure-budget-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .configure-budget-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .budget-form {
     margin-top: var(--space-5);
@@ -491,8 +491,8 @@
   .budget-field input { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text); font-size: var(--text-sm); }
   .budget-field input:focus-visible {
     outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-color: var(--color-focus, #4db0ff);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
   }
   .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
   .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
@@ -500,7 +500,7 @@
   .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-secondary:hover { color: var(--color-text); }
   .btn-primary:focus-visible,
-  .btn-secondary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .ws-name-row { display: flex; align-items: center; gap: var(--space-3); }
 
@@ -533,7 +533,7 @@
     color: var(--color-text);
   }
   .trust-select:disabled { opacity: 0.5; cursor: not-allowed; }
-  .trust-select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .trust-select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
   .trust-select.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-info, #8b5cf6) 30%, transparent); }
   .trust-select.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); border-color: color-mix(in srgb, var(--color-info, #60a5fa) 30%, transparent); }
   .trust-select.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }

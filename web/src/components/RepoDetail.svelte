@@ -434,7 +434,7 @@
 
   <div class="tab-content" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
     {#if error}
-      <div class="error-msg">Error: {error}</div>
+      <div class="error-msg" role="alert">Error: {error}</div>
     {:else if loading && (activeTab === 'branches' || activeTab === 'commits')}
       <Skeleton lines={8} height="2.5rem" />
     {:else if activeTab === 'branches'}
@@ -553,7 +553,7 @@
 
     {:else if activeTab === 'activity'}
       {#if activityError}
-        <div class="error-msg">Error: {activityError}</div>
+        <div class="error-msg" role="alert">Error: {activityError}</div>
       {:else if hotFilesLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else}
@@ -609,7 +609,7 @@
       {#if policyLoading}
         <Skeleton lines={8} height="2.5rem" />
       {:else if policyError}
-        <div class="error-msg">Error: {policyError}</div>
+        <div class="error-msg" role="alert">Error: {policyError}</div>
       {:else}
         <div class="policy-section">
           <h3 class="section-title">Spec Policy</h3>
@@ -687,7 +687,7 @@
 
     {:else if activeTab === 'gates'}
       {#if gatesError}
-        <div class="error-msg">Error: {gatesError}</div>
+        <div class="error-msg" role="alert">Error: {gatesError}</div>
       {:else if gatesLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else}
@@ -769,7 +769,7 @@
 
     {:else if activeTab === 'aibom'}
       {#if aibomError}
-        <div class="error-msg">Error: {aibomError}</div>
+        <div class="error-msg" role="alert">Error: {aibomError}</div>
       {:else if aibomLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else if !aibom}
@@ -865,7 +865,7 @@
         {/if}
       </div>
       {#if jjError}
-        <div class="error-msg">{jjError}</div>
+        <div class="error-msg" role="alert">{jjError}</div>
       {:else if jjLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else if jjChanges.length === 0}
@@ -1306,7 +1306,7 @@
   }
 
   .policy-input:focus:not(:focus-visible) { outline: none; }
-  .policy-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .policy-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .policy-op-label {
     font-size: var(--text-sm);
@@ -1477,5 +1477,16 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
+  }
+
+  .back-btn:focus-visible,
+  .toggle-row:focus-visible,
+  .gate-del-btn:focus-visible,
+  .push-gate-toggle:focus-visible,
+  .jj-btn:focus-visible,
+  .copy-btn:focus-visible,
+  .abac-remove-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 </style>

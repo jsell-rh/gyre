@@ -241,7 +241,7 @@
   });
 </script>
 
-<div class="inbox">
+<div class="inbox" aria-busy={loading}>
   <div class="inbox-header">
       <div class="inbox-title-row">
         <h1 class="inbox-title">Inbox</h1>
@@ -472,12 +472,8 @@
                         Dismiss
                       </Button>
                     {:else if n.notification_type === 'conflicting_interpretations'}
-                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        View Both
-                      </Button>
-                      <Button variant="primary" size="sm" disabled title="Coming soon">Pick A</Button>
-                      <Button variant="primary" size="sm" disabled title="Coming soon">Pick B</Button>
-                      <Button variant="ghost" size="sm" disabled title="Coming soon">Reconcile</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>View Both Specs</Button>
+                      <span class="coming-soon-note">Auto-reconciliation coming soon — view both specs above to resolve manually.</span>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
                         variant="primary"
@@ -498,9 +494,9 @@
                       >
                         Adjust Meta-spec
                       </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
                     {:else if n.notification_type === 'budget_warning'}
                       <Button variant="primary" size="sm" onclick={() => navigate?.('admin')}>Increase Limit</Button>
-                      <Button variant="ghost" size="sm" disabled title="Coming soon">Pause Work</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
                         variant="primary"
@@ -529,6 +525,7 @@
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         Update Spec
                       </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
                     {:else if n.notification_type === 'suggested_link'}
                       <Button
                         variant="primary"
@@ -663,7 +660,7 @@
   }
 
   .card-header:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -805,7 +802,7 @@
   }
 
   .ref-link:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -855,7 +852,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -871,5 +868,11 @@
 
   .action-feedback.failure {
     color: var(--color-danger, #ef4444);
+  }
+
+  .coming-soon-note {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
   }
 </style>
