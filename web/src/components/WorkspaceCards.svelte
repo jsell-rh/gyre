@@ -239,6 +239,8 @@
             {/snippet}
           </Card>
         </div>
+      {:else}
+        <EmptyState title="No results" description="No workspaces match your filter." />
       {/each}
     </div>
   {/if}
@@ -295,7 +297,7 @@
   .ws-filter:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
-    border-color: var(--color-primary);
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .cards-grid {

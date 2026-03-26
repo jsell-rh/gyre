@@ -241,7 +241,7 @@
   });
 </script>
 
-<div class="inbox">
+<div class="inbox" aria-busy={loading}>
   <div class="inbox-header">
       <div class="inbox-title-row">
         <h1 class="inbox-title">Inbox</h1>
