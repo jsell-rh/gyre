@@ -181,7 +181,7 @@
 
   .nav-list li {
     padding: 0 var(--space-2);
-    margin-bottom: var(--space-1);
+    margin-bottom: var(--space-2);
   }
 
   .nav-item {
@@ -189,7 +189,7 @@
     align-items: center;
     gap: var(--space-3);
     width: 100%;
-    padding: var(--space-2) var(--space-2);
+    padding: var(--space-3) var(--space-2);
     border: none;
     border-left: 2px solid transparent;
     background: transparent;
