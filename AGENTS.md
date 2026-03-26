@@ -11,9 +11,12 @@ See [specs/system/ralph-loop.md](specs/system/ralph-loop.md) for the canonical l
 ## Quick Start
 
 ```bash
-# Build and run
+# Build and run (requires Node.js ≥ 18 + npm — build.rs auto-builds the Svelte UI)
 cargo build --all
 cargo run -p gyre-server        # starts on port 3000, token: gyre-dev-token
+
+# Rust-only build (skip web rebuild, uses committed web/dist/)
+SKIP_WEB_BUILD=1 cargo build -p gyre-server
 
 # Run tests
 cargo test --all

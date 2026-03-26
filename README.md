@@ -6,11 +6,14 @@ Built-in git forge, merge queue, agent orchestration, and full audit trail. Huma
 
 ## Quick Start
 
-**Prerequisites:** Rust (stable), git
+**Prerequisites:** Rust (stable), Node.js ≥ 18 + npm, git
 
 ```bash
-# Build
+# Build (build.rs auto-runs npm run build for the Svelte UI)
 cargo build --release -p gyre-server -p gyre-cli
+
+# Rust-only build (skip web rebuild — uses committed web/dist/)
+SKIP_WEB_BUILD=1 cargo build --release -p gyre-server -p gyre-cli
 
 # Run (in-memory, stateless — good for dev/eval)
 ./target/release/gyre-server
@@ -86,7 +89,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 ## Tech Stack
 
 - **Rust** - server, CLI, agent runtime
-- **Svelte 5 + shadcn-svelte** - web UI (pre-built, no Node required to run)
+- **Svelte 5 + shadcn-svelte** - web UI (Node required to build; `web/dist/` committed for Rust-only dev with `SKIP_WEB_BUILD=1`)
 - **SQLite + PostgreSQL via Diesel ORM** - type-safe queries, auto-migrations on startup; `sqlite://` for default persistence, `postgres://` for production scale
 - **NixOS** - single definition builds server, Docker image, QEMU VM, LXC container
 - **WireGuard** - agent networking mesh
