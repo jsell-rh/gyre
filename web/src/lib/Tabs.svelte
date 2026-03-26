@@ -4,7 +4,7 @@
     active = $bindable(''),
     onchange = undefined,
     panelId = undefined,
-    ariaLabel = '',
+    ariaLabel = 'Tab navigation',
   } = $props();
 
   $effect(() => {

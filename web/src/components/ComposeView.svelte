@@ -98,10 +98,11 @@
         placeholder={placeholderText}
         rows="10"
         spellcheck="false"
+        aria-label="Spec content editor"
       ></textarea>
 
       {#if applyError}
-        <div class="form-error">
+        <div class="form-error" role="alert">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
           </svg>
@@ -155,7 +156,7 @@
       </div>
 
       {#if statusError}
-        <div class="form-error">
+        <div class="form-error" role="alert">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
           </svg>
@@ -281,9 +282,13 @@
     line-height: 1.6;
     transition: border-color var(--transition-fast);
   }
-  .spec-editor:focus {
+  .spec-editor:focus:not(:focus-visible) {
     outline: none;
     border-color: var(--color-link);
+  }
+  .spec-editor:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   /* Buttons */
@@ -299,7 +304,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     cursor: pointer;
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-4);
@@ -331,8 +336,8 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.3);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
     color: var(--color-danger);
     cursor: pointer;
@@ -341,7 +346,7 @@
     font-family: var(--font-body);
     transition: background var(--transition-fast);
   }
-  .danger-btn:hover:not(:disabled) { background: rgba(240, 86, 29, 0.2); }
+  .danger-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
   .danger-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* Status controls */
@@ -362,9 +367,13 @@
     padding: var(--space-2) var(--space-3);
     transition: border-color var(--transition-fast);
   }
-  .id-input:focus {
+  .id-input:focus:not(:focus-visible) {
     outline: none;
     border-color: var(--color-link);
+  }
+  .id-input:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   /* Form error */
@@ -374,8 +383,8 @@
     gap: var(--space-2);
     color: var(--color-danger);
     font-size: var(--text-sm);
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.2);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 20%, transparent);
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-3);
   }
@@ -386,8 +395,8 @@
     align-items: flex-start;
     gap: var(--space-3);
     color: var(--color-success);
-    background: rgba(99, 153, 61, 0.1);
-    border: 1px solid rgba(99, 153, 61, 0.3);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 30%, transparent);
     border-radius: var(--radius);
     padding: var(--space-3) var(--space-4);
   }
@@ -520,5 +529,9 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-text-muted);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
   }
 </style>

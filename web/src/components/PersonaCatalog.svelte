@@ -164,7 +164,7 @@
             {#if persona.approval_status !== 'Approved'}
               <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)}>Approve</button>
             {/if}
-            <button class="btn-danger-sm" onclick={() => deletePersona(persona.id)}>Delete</button>
+            <button class="btn-danger-sm" onclick={() => { if (confirm('Delete this persona? This cannot be undone.')) deletePersona(persona.id); }}>Delete</button>
           </div>
         </div>
       {/each}
@@ -284,7 +284,7 @@
     width: 40px;
     height: 40px;
     border-radius: 50%;
-    background: rgba(238, 0, 0, 0.12);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
     color: var(--color-primary);
     display: flex;
     align-items: center;
@@ -374,7 +374,7 @@
     font-size: var(--text-xs);
     cursor: pointer;
   }
-  .btn-danger-sm:hover { background: rgba(255, 80, 80, 0.08); }
+  .btn-danger-sm:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
   .btn-danger-sm:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .btn-approve-sm {
@@ -386,7 +386,7 @@
     font-size: var(--text-xs);
     cursor: pointer;
   }
-  .btn-approve-sm:hover { background: rgba(63, 185, 80, 0.08); }
+  .btn-approve-sm:hover { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .btn-approve-sm:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }

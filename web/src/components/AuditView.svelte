@@ -321,7 +321,7 @@
 
   .live-dot.connected {
     background: var(--color-success);
-    box-shadow: 0 0 5px rgba(99, 153, 61, 0.6);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--color-success) 60%, transparent);
     animation: pulse 2s infinite;
   }
 
@@ -381,10 +381,15 @@
   .filter-select { width: 180px; }
   .filter-input { flex: 1; }
 
-  .filter-select:focus,
-  .filter-input:focus {
+  .filter-select:focus:not(:focus-visible),
+  .filter-input:focus:not(:focus-visible) {
     outline: none;
     border-color: var(--color-primary);
+  }
+  .filter-select:focus-visible,
+  .filter-input:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .search-btn {
@@ -451,5 +456,9 @@
     color: var(--color-text-muted);
     white-space: nowrap;
     font-family: var(--font-mono);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot { animation: none; }
   }
 </style>
