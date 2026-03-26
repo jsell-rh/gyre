@@ -41,6 +41,7 @@ pub mod task;
 pub mod team;
 pub mod tenant;
 pub mod user;
+pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
 
@@ -82,5 +83,6 @@ pub use task::TaskRepository;
 pub use team::TeamRepository;
 pub use tenant::TenantRepository;
 pub use user::{ApiKeyRepository, UserRepository};
+pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};
 pub use workspace_membership::WorkspaceMembershipRepository;

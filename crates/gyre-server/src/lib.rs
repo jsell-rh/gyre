@@ -56,8 +56,8 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
     SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, UserRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    TeamRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -298,6 +298,11 @@ pub struct AppState {
     pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
     /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
     pub agent_inbox_max: u64,
+    /// Per-user, per-workspace last-seen tracking (HSI §1).
+    pub user_workspace_state: Arc<dyn UserWorkspaceStateRepository>,
+    /// Debounce cache for last-seen middleware: (user_id, workspace_id) -> last upsert Instant.
+    pub last_seen_debounce:
+        Arc<std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -506,11 +511,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // Apply global API auth middleware and ABAC middleware to all /api/v1/ routes.
     // Layer ordering (axum): later .layer() calls run FIRST.
-    // So require_auth runs before abac_middleware runs before the handler.
+    // So require_auth runs before last_seen_middleware runs before abac runs before the handler.
     let api = api::api_router()
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             abac_middleware::abac_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::last_seen_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -832,6 +841,11 @@ pub fn build_state(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000),
+        user_workspace_state: store!(
+            dyn UserWorkspaceStateRepository,
+            mem::MemUserWorkspaceStateRepository::default()
+        ),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     })
 }
 
