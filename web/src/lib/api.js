@@ -387,6 +387,10 @@ export const api = {
   myNotifications: () => request('/users/me/notifications'),
   markNotificationRead: (id) =>
     request(`/users/me/notifications/${id}/read`, { method: 'PUT' }),
+  myJudgments: (params) => {
+    const qs = params ? new URLSearchParams(params).toString() : '';
+    return request(`/users/me/judgments${qs ? '?' + qs : ''}`);
+  },
   // Knowledge graph (TASK-174/TASK-175)
   repoGraph: (id) => request(`/repos/${id}/graph`),
   repoGraphNode: (repoId, nodeId) => request(`/repos/${repoId}/graph/node/${nodeId}`),

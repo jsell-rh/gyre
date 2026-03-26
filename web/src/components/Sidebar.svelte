@@ -40,13 +40,13 @@
 >
   <!-- Logo + collapse toggle -->
   <div class="logo">
-    <div class="logo-mark" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" width="22" height="22" aria-hidden="true">
-        <circle cx="12" cy="12" r="10" stroke="var(--color-primary)" stroke-width="2"/>
-        <path d="M8 12l3 3 5-5" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </div>
     {#if !collapsed}
+      <div class="logo-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" stroke="var(--color-primary)" stroke-width="2"/>
+          <path d="M8 12l3 3 5-5" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
       <span class="logo-text">Gyre</span>
     {:else}
       <span class="sr-only">Gyre</span>
@@ -132,6 +132,15 @@
     height: var(--topbar-height);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
+  }
+
+  .sidebar.collapsed .logo {
+    padding: 0 var(--space-1);
+    justify-content: center;
+  }
+
+  .sidebar.collapsed .collapse-btn {
+    margin-left: 0;
   }
 
   .logo-mark {
