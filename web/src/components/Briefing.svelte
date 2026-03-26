@@ -133,7 +133,7 @@
     try {
       if (scope === 'workspace' && workspaceId) {
         const raw = await api.getWorkspaceBriefing(workspaceId, since);
-        briefing = isEmpty(raw) ? MOCK_BRIEFING : raw;
+        briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
         const results = await Promise.allSettled(
@@ -170,14 +170,14 @@
           cost_usd:   costUsd,
           budget_pct: budgetN ? Math.round(budgetPct / budgetN) : null,
         };
-        briefing = isEmpty(merged) ? MOCK_BRIEFING : merged;
+        briefing = isEmpty(merged) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : merged;
       } else {
-        // Repo scope — stub until server endpoint exists
-        briefing = MOCK_BRIEFING;
+        // Repo scope — no briefing endpoint yet; show empty state
+        briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       }
     } catch (e) {
-      // Graceful degradation: show mock on 404 / network error
-      briefing = MOCK_BRIEFING;
+      // Graceful degradation: show empty state on 404 / network error
+      briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       if (e.message && !e.message.includes('404')) {
         error = e.message;
       }
@@ -567,7 +567,7 @@
     padding: var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: var(--space-5);
+    gap: var(--space-6);
     max-width: 1000px;
     min-height: 100%;
   }
@@ -619,7 +619,7 @@
     color: var(--color-text);
     font-family: var(--font-body);
     font-size: var(--text-sm);
-    padding: var(--space-1) var(--space-5) var(--space-1) var(--space-2);
+    padding: var(--space-2) var(--space-6) var(--space-2) var(--space-3);
     cursor: pointer;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
@@ -702,7 +702,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    padding: var(--space-3) 0;
+    padding: var(--space-4) 0;
     border-bottom: 1px solid var(--color-border);
   }
 

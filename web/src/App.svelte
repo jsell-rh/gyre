@@ -195,10 +195,13 @@
       return;
     }
 
-    // Cmd+1-6: nav shortcuts
-    if ((e.metaKey || e.ctrlKey) && NAV_SHORTCUTS[e.key]) {
+    // Cmd+1-6: nav shortcuts (check e.key first, fall back to e.code for non-US layouts)
+    const shortcutDigit = NAV_SHORTCUTS[e.key]
+      ? e.key
+      : (e.code?.match(/^Digit([1-6])$/)?.[1] ?? null);
+    if ((e.metaKey || e.ctrlKey) && shortcutDigit && NAV_SHORTCUTS[shortcutDigit]) {
       e.preventDefault();
-      navigate(NAV_SHORTCUTS[e.key]);
+      navigate(NAV_SHORTCUTS[shortcutDigit]);
       return;
     }
 
@@ -468,7 +471,7 @@
           {:else if currentNav === 'explorer'}
             <ExplorerView {scope} />
           {:else if currentNav === 'specs'}
-            <SpecDashboard {scope} />
+            <SpecDashboard workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'meta-specs'}
             <MetaSpecs {scope} />
           {:else if currentNav === 'admin'}
