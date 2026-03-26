@@ -306,10 +306,15 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
-                RouteResourceMapping::api("/api/v1/admin/agents/:id/kill", "agent", Some("write")),
+                // NEW-27 fix: all /api/v1/admin/* routes use resource_type="admin" so that
+                // builtin-admin-only-deny (priority 850) rejects non-Admin callers.
+                // Previously, kill/reassign used "agent" and compute-targets used
+                // "compute_target", allowing Developer/Agent roles to force-kill agents
+                // and open SSH tunnels without Admin privilege.
+                RouteResourceMapping::api("/api/v1/admin/agents/:id/kill", "admin", Some("write")),
                 RouteResourceMapping::api(
                     "/api/v1/admin/agents/:id/reassign",
-                    "agent",
+                    "admin",
                     Some("write"),
                 ),
                 RouteResourceMapping::api("/api/v1/admin/snapshot", "admin", Some("write")),
@@ -323,20 +328,16 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/retention", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/siem", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/siem/:id", "admin", None),
-                RouteResourceMapping::api("/api/v1/admin/compute-targets", "compute_target", None),
-                RouteResourceMapping::api(
-                    "/api/v1/admin/compute-targets/:id",
-                    "compute_target",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/admin/compute-targets", "admin", None),
+                RouteResourceMapping::api("/api/v1/admin/compute-targets/:id", "admin", None),
                 RouteResourceMapping::api(
                     "/api/v1/admin/compute-targets/:id/tunnel",
-                    "compute_target",
+                    "admin",
                     Some("write"),
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/admin/compute-targets/:id/tunnel/:tunnel_id",
-                    "compute_target",
+                    "admin",
                     None,
                 ),
                 // ── Network ────────────────────────────────────────────────
@@ -357,7 +358,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
-                RouteResourceMapping::api("/api/v1/admin/search/reindex", "search", Some("write")),
+                RouteResourceMapping::api("/api/v1/admin/search/reindex", "admin", Some("write")),
                 // ── Tenants ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/tenants", "tenant", None),
                 RouteResourceMapping::api("/api/v1/tenants/:id", "tenant", None),
@@ -974,6 +975,79 @@ pub mod tests {
         // Version should be exempt.
         let v = resolver.resolve("/api/v1/version").unwrap();
         assert!(v.exempt, "/api/v1/version should be exempt");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn developer_cannot_access_admin_kill_or_tunnel() {
+        // NEW-27 regression test: admin/agents/:id/kill and admin/compute-targets/:id/tunnel
+        // must be denied for Developer role now that they use resource_type="admin".
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state_base = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/admin/agents/:id/kill", post(ok_handler))
+            .route("/api/v1/admin/compute-targets/:id/tunnel", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state_base.clone(),
+                abac_middleware,
+            ))
+            .with_state(state_base);
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        // Developer cannot kill agents.
+        let kill_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/some-agent-id/kill")
+                    .header("Authorization", format!("Bearer {dev_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            kill_resp.status(),
+            StatusCode::FORBIDDEN,
+            "kill must be Admin-only"
+        );
+
+        // Developer cannot open tunnels.
+        let tunnel_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/compute-targets/some-target/tunnel")
+                    .header("Authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tunnel_resp.status(),
+            StatusCode::FORBIDDEN,
+            "tunnel must be Admin-only"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
