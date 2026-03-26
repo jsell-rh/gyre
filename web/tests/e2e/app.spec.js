@@ -1,318 +1,557 @@
 /**
- * M17.5: Frontend E2E tests with Playwright
+ * Gyre E2E tests — HSI navigation model (S4.1 App Shell)
  *
  * Tests run against a live gyre-server on localhost:2222 with GYRE_AUTH_TOKEN=e2e-test-token.
  * The seeded fixture calls POST /api/v1/admin/seed before each test.
+ *
+ * Navigation model: 6 fixed sidebar items (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin)
+ * URL routing: /inbox | /briefing | /explorer | /specs | /meta-specs | /admin (tenant scope)
+ *              /workspaces/:id/:nav (workspace scope)
+ *              /repos/:id/:nav (repo scope)
  */
 
 import { test, expect } from './fixtures/seeded.js';
 
-const TOKEN = 'e2e-test-token';
-
 // ---------------------------------------------------------------------------
-// Helper: navigate to a view by label — uses direct URL after nav restructure
+// Helper: navigate by direct URL (more reliable than clicking sidebar)
 // ---------------------------------------------------------------------------
-const LABEL_TO_ROUTE = {
-  'Projects': '/projects',
-  'Tasks': '/tasks',
-  'Agents': '/agents',
-  'MCP Tools': '/mcp-catalog',
-  'Settings': '/settings',
-  'Merge Queue': '/merge-queue',
-  'Analytics': '/analytics',
-  'Costs': '/costs',
-  'Workspaces': '/workspaces',
-  'Personas': '/personas',
-  'Budget': '/budget',
-  'Dependencies': '/dependencies',
-  'Spec Graph': '/spec-graph',
-  'My Profile': '/profile',
-  'Inbox': '/inbox',
-  'Briefing': '/briefing',
-  'Explorer': '/explorer',
+const NAV_ROUTES = {
+  'inbox':      '/inbox',
+  'briefing':   '/briefing',
+  'explorer':   '/explorer',
+  'specs':      '/specs',
+  'meta-specs': '/meta-specs',
+  'admin':      '/admin',
 };
 
-async function navigateTo(page, label) {
-  const route = LABEL_TO_ROUTE[label];
-  if (route) {
-    await page.goto(route);
-    await page.waitForLoadState('networkidle');
-  } else {
-    await page.getByRole('button', { name: label, exact: true }).first().click();
-  }
+async function navigateTo(page, nav) {
+  const route = NAV_ROUTES[nav];
+  if (!route) throw new Error(`Unknown nav: ${nav}`);
+  await page.goto(route);
+  await page.waitForLoadState('networkidle');
 }
+
+// ---------------------------------------------------------------------------
+// App shell structure
+// ---------------------------------------------------------------------------
+
+test.describe('App shell', () => {
+  test('renders_sidebar_with_6_nav_items', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Sidebar should be present
+    const sidebar = page.locator('[data-testid="sidebar"]');
+    await expect(sidebar).toBeVisible({ timeout: 5000 });
+
+    // All 6 nav items should be present
+    const navItems = ['Inbox', 'Briefing', 'Explorer', 'Specs', 'Meta-specs', 'Admin'];
+    for (const label of navItems) {
+      const btn = sidebar.getByRole('button', { name: label });
+      await expect(btn).toBeVisible({ timeout: 3000 });
+    }
+  });
+
+  test('sidebar_active_state_updates_on_navigation', async ({ page }) => {
+    await navigateTo(page, 'explorer');
+
+    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
+    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+
+    // Navigate to Specs — active state should move
+    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs' });
+    await specsBtn.click();
+    await page.waitForLoadState('networkidle');
+    await expect(specsBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('sidebar_collapse_toggle', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const collapseBtn = page.getByRole('button', { name: /collapse sidebar/i });
+    await expect(collapseBtn).toBeVisible({ timeout: 3000 });
+    await collapseBtn.click();
+
+    // Sidebar should now show 'Expand sidebar' button
+    const expandBtn = page.getByRole('button', { name: /expand sidebar/i });
+    await expect(expandBtn).toBeVisible({ timeout: 3000 });
+
+    // Click again to restore
+    await expandBtn.click();
+    await expect(page.getByRole('button', { name: /collapse sidebar/i })).toBeVisible({ timeout: 3000 });
+  });
+
+  test('topbar_renders_search_and_user_menu', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Search trigger should be visible in topbar
+    const searchTrigger = page.locator('.search-trigger').first();
+    await expect(searchTrigger).toBeVisible({ timeout: 3000 });
+
+    // User menu button should be visible
+    const userBtn = page.getByRole('button', { name: /user menu/i });
+    await expect(userBtn).toBeVisible({ timeout: 3000 });
+  });
+
+  test('status_bar_renders_with_ws_indicator', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Status bar footer should exist
+    const statusBar = page.locator('[aria-label="Status bar"]');
+    await expect(statusBar).toBeVisible({ timeout: 3000 });
+
+    // WS status item should be visible
+    const wsStatus = statusBar.locator('[aria-label*="WebSocket" i]');
+    await expect(wsStatus).toBeVisible({ timeout: 3000 });
+  });
+
+  test('landing_page_is_explorer_on_first_visit', async ({ page }) => {
+    // Clear any stored workspace ID to simulate first visit
+    await page.addInitScript(() => {
+      localStorage.removeItem('gyre_workspace_id');
+    });
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Should land on explorer (no stored workspace)
+    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
+    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Auth flow
 // ---------------------------------------------------------------------------
 
 test.describe('Auth flow', () => {
-  test('auth_token_modal_stores_token', async ({ page }) => {
+  test('user_menu_opens_on_click', async ({ page }) => {
     await page.goto('/');
-    // Click the auth button in the topbar
-    await page.getByRole('button', { name: /authenticated|no token/i }).click();
+    await page.waitForLoadState('networkidle');
 
-    // Modal should open — fill in the token input
+    const userBtn = page.getByRole('button', { name: /user menu/i });
+    await userBtn.click();
+
+    // Dropdown menu should appear with at least Profile and API Token
+    const dropdown = page.locator('[role="menu"]');
+    await expect(dropdown).toBeVisible({ timeout: 3000 });
+    await expect(page.locator('[role="menuitem"]', { hasText: 'Profile' })).toBeVisible();
+    await expect(page.locator('[role="menuitem"]', { hasText: 'API Token' })).toBeVisible();
+  });
+
+  test('api_token_modal_opens_and_saves', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Open user menu → API Token
+    await page.getByRole('button', { name: /user menu/i }).click();
+    await page.locator('[role="menuitem"]', { hasText: 'API Token' }).click();
+
+    // Token modal should open
     const tokenInput = page.locator('#token-input');
-    await tokenInput.waitFor({ state: 'visible' });
-    await tokenInput.fill(TOKEN);
-    // Use CSS locator: aria-hidden on modal-backdrop hides buttons from getByRole
+    await tokenInput.waitFor({ state: 'visible', timeout: 3000 });
+
+    await tokenInput.fill('e2e-test-token');
     await page.locator('[role="dialog"] button:has-text("Save")').click();
 
     // Modal should close
-    await expect(tokenInput).not.toBeVisible();
-
-    // Auth button should now show "Authenticated"
-    await expect(page.getByRole('button', { name: /authenticated/i })).toBeVisible();
+    await expect(tokenInput).not.toBeVisible({ timeout: 3000 });
   });
 
-  test('wrong_token_shows_error_state', async ({ page }) => {
-    // Start without seeded token — set a wrong one
+  test('auth_active_class_set_when_token_present', async ({ page }) => {
+    // Token is set by the seeded fixture via addInitScript
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // User button should have auth-active class (green dot) when token is set
+    const userBtn = page.locator('.user-btn.auth-active');
+    await expect(userBtn).toBeVisible({ timeout: 3000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbox view
+// ---------------------------------------------------------------------------
+
+test.describe('Inbox view', () => {
+  test('inbox_view_renders', async ({ page }) => {
+    await navigateTo(page, 'inbox');
+
+    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/inbox');
+  });
+
+  test('inbox_sidebar_item_is_active', async ({ page }) => {
+    await navigateTo(page, 'inbox');
+
+    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
+    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('inbox_badge_btn_in_topbar', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Topbar inbox badge shortcut button
+    const inboxBtn = page.locator('.inbox-badge-btn').first();
+    await expect(inboxBtn).toBeVisible({ timeout: 3000 });
+  });
+
+  test('inbox_shows_content_or_empty_state', async ({ page }) => {
+    await navigateTo(page, 'inbox');
+
+    // Inbox renders some content or empty state
+    const inboxContent = page
+      .locator('[class*="inbox"]')
+      .or(page.locator('[class*="notification"]'))
+      .or(page.locator('[class*="empty"]'))
+      .or(page.locator('[class*="skeleton"]'))
+      .first();
+    await expect(inboxContent).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Briefing view
+// ---------------------------------------------------------------------------
+
+test.describe('Briefing view', () => {
+  test('briefing_view_renders', async ({ page }) => {
+    await navigateTo(page, 'briefing');
+
+    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/briefing');
+  });
+
+  test('briefing_sidebar_item_is_active', async ({ page }) => {
+    await navigateTo(page, 'briefing');
+
+    const briefingBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Briefing' });
+    await expect(briefingBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('briefing_shows_content_or_empty_state', async ({ page }) => {
+    await navigateTo(page, 'briefing');
+
+    const briefingContent = page
+      .locator('[class*="briefing"]')
+      .or(page.locator('[class*="section"]'))
+      .or(page.locator('[class*="empty"]'))
+      .or(page.locator('[class*="skeleton"]'))
+      .first();
+    await expect(briefingContent).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Explorer view
+// ---------------------------------------------------------------------------
+
+test.describe('Explorer view', () => {
+  test('explorer_view_renders_at_tenant_scope', async ({ page }) => {
     await page.addInitScript(() => {
-      localStorage.setItem('gyre_auth_token', 'totally-wrong-token');
+      localStorage.removeItem('gyre_workspace_id');
     });
-    await page.goto('/');
+    await navigateTo(page, 'explorer');
 
-    // Dashboard loads but WS/API calls may fail; auth button shows "Authenticated"
-    // because token is set (but wrong). The WS indicator should show error state.
-    await page.waitForLoadState('networkidle');
+    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/explorer');
+  });
 
-    // The auth button still shows "Authenticated" (token is set)
-    const authBtn = page.getByRole('button', { name: /authenticated/i });
-    await expect(authBtn).toBeVisible();
+  test('explorer_sidebar_item_is_active', async ({ page }) => {
+    await navigateTo(page, 'explorer');
+
+    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
+    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('explorer_shows_workspace_cards_or_content', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem('gyre_workspace_id');
+    });
+    await navigateTo(page, 'explorer');
+
+    // Tenant scope: workspace cards or empty state
+    const explorerContent = page
+      .locator('[class*="explorer"]')
+      .or(page.locator('[class*="workspace-card"]'))
+      .or(page.locator('[class*="card"]'))
+      .or(page.locator('[class*="canvas"]'))
+      .or(page.locator('[class*="empty"]'))
+      .first();
+    await expect(explorerContent).toBeVisible({ timeout: 5000 });
   });
 });
 
 // ---------------------------------------------------------------------------
-// Dashboard home
+// Specs view
 // ---------------------------------------------------------------------------
 
-test.describe('Dashboard home', () => {
-  test('dashboard_loads_metric_cards', async ({ page }) => {
-    await page.goto('/dashboard');
+test.describe('Specs view', () => {
+  test('specs_view_renders', async ({ page }) => {
+    await navigateTo(page, 'specs');
+
+    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/specs');
+  });
+
+  test('specs_sidebar_item_is_active', async ({ page }) => {
+    await navigateTo(page, 'specs');
+
+    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs' });
+    await expect(specsBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('specs_shows_table_or_empty_state', async ({ page }) => {
+    await navigateTo(page, 'specs');
+
+    const specsContent = page
+      .locator('[class*="spec"]')
+      .or(page.locator('table'))
+      .or(page.locator('[class*="empty"]'))
+      .or(page.locator('[class*="skeleton"]'))
+      .first();
+    await expect(specsContent).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Meta-specs view
+// ---------------------------------------------------------------------------
+
+test.describe('Meta-specs view', () => {
+  test('metaspecs_view_renders', async ({ page }) => {
+    await navigateTo(page, 'meta-specs');
+
+    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/meta-specs');
+  });
+
+  test('metaspecs_sidebar_item_is_active', async ({ page }) => {
+    await navigateTo(page, 'meta-specs');
+
+    const metaBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Meta-specs' });
+    await expect(metaBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('metaspecs_shows_persona_catalog_or_empty_state', async ({ page }) => {
+    await navigateTo(page, 'meta-specs');
+
+    const metaContent = page
+      .locator('[class*="meta"]')
+      .or(page.locator('[class*="persona"]'))
+      .or(page.locator('table'))
+      .or(page.locator('[class*="empty"]'))
+      .or(page.locator('[class*="skeleton"]'))
+      .first();
+    await expect(metaContent).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin view
+// ---------------------------------------------------------------------------
+
+test.describe('Admin view', () => {
+  test('admin_view_renders', async ({ page }) => {
+    await navigateTo(page, 'admin');
+
+    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/admin');
+  });
+
+  test('admin_sidebar_item_is_active', async ({ page }) => {
+    await navigateTo(page, 'admin');
+
+    const adminBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Admin' });
+    await expect(adminBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('admin_shows_tabbed_interface', async ({ page }) => {
+    await navigateTo(page, 'admin');
+
+    // Admin panel has tabs: Health, Jobs, Audit, Agents, etc.
+    const tabs = page.locator('[role="tab"], [class*="tab-btn"], [class*="tab-item"]');
+    await expect(tabs.first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('admin_health_tab_shows_server_info', async ({ page }) => {
+    await navigateTo(page, 'admin');
+
+    // Health tab should show gyre server info
+    const healthContent = page
+      .locator('[class*="health"]')
+      .or(page.getByText('gyre'))
+      .or(page.getByText(/0\.1\.0/))
+      .first();
+    await expect(healthContent).toBeVisible({ timeout: 5000 });
+  });
+
+  test('user_menu_profile_navigates_to_admin', async ({ page }) => {
+    await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // Four metric cards should be visible
-    await expect(page.getByText('Active Agents')).toBeVisible();
-    await expect(page.getByText('Open Tasks')).toBeVisible();
-    await expect(page.getByText('Pending MRs')).toBeVisible();
-    await expect(page.getByText('Queue Depth')).toBeVisible();
+    await page.getByRole('button', { name: /user menu/i }).click();
+    await page.locator('[role="menuitem"]', { hasText: 'Profile' }).click();
 
-    // Each metric-value should contain a number
-    const values = page.locator('.metric-value');
-    const count = await values.count();
-    expect(count).toBeGreaterThanOrEqual(4);
-    for (let i = 0; i < count; i++) {
-      const text = await values.nth(i).textContent();
-      expect(text?.trim()).toMatch(/^\d+$/);
+    await page.waitForLoadState('networkidle');
+    const adminBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Admin' });
+    await expect(adminBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope breadcrumb
+// ---------------------------------------------------------------------------
+
+test.describe('Scope breadcrumb', () => {
+  test('breadcrumb_renders_in_topbar', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // ScopeBreadcrumb renders in the topbar — look for tenant name "Gyre" or breadcrumb element
+    const topbar = page.locator('.topbar, header').first();
+    await expect(topbar).toBeVisible({ timeout: 3000 });
+
+    const breadcrumb = topbar
+      .locator('[class*="breadcrumb"]')
+      .or(topbar.locator('[class*="scope"]'))
+      .or(topbar.getByText('Gyre'))
+      .first();
+    await expect(breadcrumb).toBeVisible({ timeout: 3000 });
+  });
+
+  test('workspace_scope_url_loads_without_crash', async ({ page }) => {
+    // Navigating to a scope URL should load gracefully
+    await page.goto('/explorer');
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// URL routing
+// ---------------------------------------------------------------------------
+
+test.describe('URL routing', () => {
+  test('all_6_nav_routes_are_reachable', async ({ page }) => {
+    for (const [nav, route] of Object.entries(NAV_ROUTES)) {
+      await page.goto(route);
+      await page.waitForLoadState('networkidle');
+
+      // App shell should render
+      await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+
+      // Correct sidebar item should be active
+      const navBtn = page.locator('[data-testid="sidebar"]')
+        .getByRole('button', { name: new RegExp(nav.replace('-', '[-\\s]'), 'i') })
+        .first();
+      await expect(navBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
     }
   });
 
-  test('seed_demo_data_button_works', async ({ page }) => {
-    await page.goto('/dashboard');
+  test('unknown_route_falls_back_gracefully', async ({ page }) => {
+    // SPA: unknown route should not crash the app
+    await page.goto('/nonexistent-view');
     await page.waitForLoadState('networkidle');
+    await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+  });
 
-    // Get initial agent count
-    const firstValue = page.locator('.metric-value').first();
-    const beforeText = await firstValue.textContent();
+  test('browser_back_forward_navigation', async ({ page }) => {
+    await navigateTo(page, 'inbox');
+    await navigateTo(page, 'explorer');
 
-    // Click Seed Demo Data
-    const seedBtn = page.getByRole('button', { name: /seed demo data/i });
-    await seedBtn.click();
+    // Go back to inbox
+    await page.goBack();
+    await page.waitForLoadState('networkidle');
+    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
+    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
 
-    // Toast should appear confirming success
-    await expect(page.getByText(/demo data seeded|already.seeded/i)).toBeVisible({ timeout: 5000 });
+    // Go forward to explorer
+    await page.goForward();
+    await page.waitForLoadState('networkidle');
+    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
+    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
 });
 
 // ---------------------------------------------------------------------------
-// Repositories (M33: Project entity removed, repos now workspace-scoped)
+// Keyboard shortcuts
 // ---------------------------------------------------------------------------
 
-test.describe('Repositories', () => {
-  test('repo_list_shows_new_repo_button', async ({ page }) => {
+test.describe('Keyboard shortcuts', () => {
+  test('cmd_k_opens_search_overlay', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Repositories');
-
-    // New Repo button should be visible
-    const newRepoBtn = page.getByRole('button', { name: /new repo/i });
-    await expect(newRepoBtn).toBeVisible({ timeout: 5000 });
-  });
-
-  test('repo_list_shows_repos_or_empty_state', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Repositories');
-
-    // Either repos are visible (from seed) or empty state is shown
-    const hasRepos = await page.locator('.repo-card, [class*="card"]').count();
-    const emptyState = page.locator('[class*="empty"], text="No repositories"');
-    // At least one of the two conditions holds
-    expect(hasRepos > 0 || await emptyState.count() > 0).toBeTruthy();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Task board
-// ---------------------------------------------------------------------------
-
-test.describe('Task board', () => {
-  test('create_task_appears_in_kanban', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Tasks');
-
-    // Wait for task board to load
     await page.waitForLoadState('networkidle');
 
-    // Click "+ New Task" button (in task board or quick actions on dashboard)
-    const newTaskBtn = page.getByRole('button', { name: /new task/i }).first();
-    await newTaskBtn.click();
+    await page.keyboard.press('Control+k');
 
-    // Fill task title
-    const titleInput = page.locator('input[placeholder="Task title"], input[placeholder*="title"]').first();
-    await titleInput.waitFor({ state: 'visible' });
-    const taskTitle = `e2e-task-${Date.now()}`;
-    await titleInput.fill(taskTitle);
-
-    // Submit — use CSS locator: aria-hidden on modal-backdrop hides buttons from getByRole
-    await page.locator('[role="dialog"] button:has-text("Create Task"), [role="dialog"] button:has-text("Creating")').first().click();
-
-    // Toast and task should appear
-    await expect(page.getByText(/task created/i)).toBeVisible({ timeout: 5000 });
+    const searchInput = page
+      .locator('[class*="search-bar"]')
+      .or(page.locator('[class*="search-overlay"]'))
+      .or(page.locator('input[placeholder*="search" i]'))
+      .first();
+    await expect(searchInput).toBeVisible({ timeout: 3000 });
   });
 
-  test('task_board_renders_kanban_columns', async ({ page }) => {
+  test('slash_key_opens_search', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Tasks');
     await page.waitForLoadState('networkidle');
 
-    // Kanban columns should be visible (Backlog, In Progress, etc.)
-    const columns = page.locator('.column-header, .kanban-column, [class*="column"]');
-    await expect(columns.first()).toBeVisible({ timeout: 5000 });
-  });
-});
+    await page.keyboard.press('/');
 
-// ---------------------------------------------------------------------------
-// Agent management
-// ---------------------------------------------------------------------------
-
-test.describe('Agent management', () => {
-  test('agent_list_shows_status_badges', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Agents');
-    await page.waitForLoadState('networkidle');
-
-    // Either agents list is shown with status badges, or empty state
-    const agentItems = page.locator('.agent-card, [class*="agent"], .status-badge, [class*="badge"]');
-    const emptyState = page.locator('text=/no agents/i');
-
-    const agentCount = await agentItems.count();
-    const emptyCount = await emptyState.count();
-    expect(agentCount > 0 || emptyCount > 0).toBeTruthy();
+    const searchInput = page
+      .locator('[class*="search-bar"]')
+      .or(page.locator('input[placeholder*="search" i]'))
+      .first();
+    await expect(searchInput).toBeVisible({ timeout: 3000 });
   });
 
-  test('spawn_agent_modal_validates_fields', async ({ page }) => {
+  test('question_mark_opens_shortcuts_overlay', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Agents');
     await page.waitForLoadState('networkidle');
 
-    // Look for Spawn Agent button
-    const spawnBtn = page.getByRole('button', { name: /spawn agent/i });
-    if (await spawnBtn.count() > 0) {
-      await spawnBtn.click();
-      // Modal should open
-      const modal = page.locator('[role="dialog"], .modal, [class*="modal"]').first();
-      await expect(modal).toBeVisible({ timeout: 3000 });
-    }
-    // If no spawn button visible, agents list might be empty — that's okay
+    await page.keyboard.press('?');
+
+    const dialog = page.getByRole('dialog', { name: /keyboard shortcuts/i });
+    await expect(dialog).toBeVisible({ timeout: 3000 });
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).not.toBeVisible({ timeout: 3000 });
   });
 
-  test('agent_logs_tab_shows_output', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Agents');
+  test('cmd_1_navigates_to_inbox', async ({ page }) => {
+    await page.goto('/explorer');
     await page.waitForLoadState('networkidle');
 
-    // If an agent card is clickable, open it and check logs tab
-    const agentCard = page.locator('.agent-card, [class*="agent-item"]').first();
-    if (await agentCard.count() > 0) {
-      await agentCard.click();
+    await page.keyboard.press('Control+1');
 
-      // Look for a Logs tab
-      const logsTab = page.getByRole('button', { name: /logs/i });
-      if (await logsTab.count() > 0) {
-        await logsTab.click();
-        // Either log lines or empty state should appear
-        await page.waitForLoadState('networkidle');
-        const logArea = page.locator('[class*="log"], .log-line').or(page.getByText(/no logs/i));
-        expect(await logArea.count()).toBeGreaterThanOrEqual(0); // flexible
-      }
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// MCP Tool Catalog
-// ---------------------------------------------------------------------------
-
-test.describe('MCP Tool Catalog', () => {
-  test('mcp_catalog_shows_8_tools', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'MCP Tools');
-    await page.waitForLoadState('networkidle');
-
-    // Wait for tool cards to appear
-    const toolCards = page.locator('.tool-card, [class*="tool-card"], [class*="mcp-tool"]');
-    await toolCards.first().waitFor({ state: 'visible', timeout: 5000 });
-    const count = await toolCards.count();
-    expect(count).toBeGreaterThanOrEqual(8);
+    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
+    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
 
-  test('mcp_tool_card_expands_schema', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'MCP Tools');
+  test('cmd_3_navigates_to_explorer', async ({ page }) => {
+    await page.goto('/inbox');
     await page.waitForLoadState('networkidle');
 
-    // Click on the first tool card to expand it
-    const firstCard = page.locator('.tool-card, [class*="tool-card"]').first();
-    await firstCard.waitFor({ state: 'visible', timeout: 5000 });
-    await firstCard.click();
+    await page.keyboard.press('Control+3');
 
-    // JSON schema or expanded content should appear
-    await expect(page.locator('pre, code, [class*="schema"]').first()).toBeVisible({ timeout: 3000 });
+    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
+    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
-});
 
-// ---------------------------------------------------------------------------
-// Settings
-// ---------------------------------------------------------------------------
-
-test.describe('Settings', () => {
-  test('settings_shows_server_info', async ({ page }) => {
+  test('esc_closes_user_menu', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Settings');
     await page.waitForLoadState('networkidle');
 
-    // Server info card should show name and version from /api/v1/version
-    await expect(page.getByText('gyre', { exact: true })).toBeVisible();
-    await expect(page.getByText('0.1.0').first()).toBeVisible();
-  });
-});
+    await page.getByRole('button', { name: /user menu/i }).click();
+    const dropdown = page.locator('[role="menu"]');
+    await expect(dropdown).toBeVisible({ timeout: 3000 });
 
-// ---------------------------------------------------------------------------
-// Merge Queue
-// ---------------------------------------------------------------------------
-
-test.describe('Merge Queue', () => {
-  test('merge_queue_view_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Merge Queue');
-    await page.waitForLoadState('networkidle');
-
-    // Either entries are shown (from seed) or empty state appears
-    const queueEntries = page.locator('[class*="queue"], .queue-entry');
-    const emptyState = page.locator('text=/no entries|empty|nothing queued/i');
-    const entryCount = await queueEntries.count();
-    const emptyCount = await emptyState.count();
-    expect(entryCount > 0 || emptyCount > 0).toBeTruthy();
+    await page.keyboard.press('Escape');
+    await expect(dropdown).not.toBeVisible({ timeout: 3000 });
   });
 });
 
@@ -321,179 +560,31 @@ test.describe('Merge Queue', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Global Search', () => {
-  test('cmd_k_opens_search', async ({ page }) => {
+  test('search_trigger_button_opens_search', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // Press Ctrl+K (Meta+K on Mac, Ctrl+K on Linux)
+    await page.locator('.search-trigger').first().click();
+
+    const searchInput = page
+      .locator('[class*="search-bar"]')
+      .or(page.locator('input[placeholder*="search" i]'))
+      .first();
+    await expect(searchInput).toBeVisible({ timeout: 3000 });
+  });
+
+  test('search_input_accepts_text', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
     await page.keyboard.press('Control+k');
 
-    // Search overlay should open
-    const searchOverlay = page.locator('[class*="search-bar"], [class*="search-overlay"], input[placeholder*="search" i]');
-    await expect(searchOverlay.first()).toBeVisible({ timeout: 3000 });
-  });
+    const input = page.locator('input[type="text"], input[type="search"]').last();
+    await input.waitFor({ state: 'visible', timeout: 3000 });
+    await input.fill('spec');
 
-  test('search_for_agent_returns_result', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
-
-    await page.keyboard.press('Control+k');
-
-    // Type a search query
-    const searchInput = page.locator('input[type="text"]').last();
-    await searchInput.waitFor({ state: 'visible', timeout: 3000 });
-    await searchInput.fill('agent');
-
-    // Results should appear (or "no results" if none match)
-    await page.waitForLoadState('networkidle');
-    // Just verify no crash — results container exists
-    const results = page.locator('[class*="search-result"], [class*="result-item"]');
-    expect(await results.count()).toBeGreaterThanOrEqual(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Analytics & Cost
-// ---------------------------------------------------------------------------
-
-test.describe('Analytics and Cost', () => {
-  test('analytics_bar_chart_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Analytics');
-    await page.waitForLoadState('networkidle');
-
-    // Analytics view should load without errors — check heading or content area
-    await expect(
-      page.locator('[class*="analytics"]').or(page.locator('[class*="chart"]')).or(page.getByText('Analytics')).first()
-    ).toBeVisible({ timeout: 5000 });
-  });
-
-  test('cost_summary_table_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Costs');
-    await page.waitForLoadState('networkidle');
-
-    // Cost view should render — table or empty state
-    await expect(
-      page.locator('[class*="cost"]').or(page.locator('table')).or(page.getByText('Cost')).first()
-    ).toBeVisible({ timeout: 5000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Accessibility baseline
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// i18n / console error guard
-// ---------------------------------------------------------------------------
-
-test.describe('i18n locale init', () => {
-  test('no_console_errors_on_dashboard_load', async ({ page }) => {
-    const errors = [];
-    page.on('pageerror', (err) => errors.push(err.message));
-    await page.goto('/');
-    await page.waitForTimeout(2000);
-    expect(errors).toEqual([]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Accessibility baseline
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// M22.5 Platform UI — Workspaces, Personas, Budget, Dependencies, Spec Graph,
-// User Profile
-// ---------------------------------------------------------------------------
-
-test.describe('Workspaces', () => {
-  test('workspace_list_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Workspaces');
-    await page.waitForLoadState('networkidle');
-
-    // Either workspace cards or empty state
-    const cards = page.locator('[class*="workspace"], [class*="ws-card"]');
-    const empty = page.locator('[class*="empty"]');
-    expect(await cards.count() > 0 || await empty.count() > 0).toBeTruthy();
-  });
-
-  test('create_workspace_modal_opens', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Workspaces');
-    await page.waitForLoadState('networkidle');
-
-    const newBtn = page.getByRole('button', { name: /new workspace/i });
-    if (await newBtn.count() > 0) {
-      await newBtn.click();
-      const modal = page.locator('[role="dialog"]').first();
-      await expect(modal).toBeVisible({ timeout: 3000 });
-    }
-  });
-});
-
-test.describe('Personas', () => {
-  test('persona_catalog_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Personas');
-    await page.waitForLoadState('networkidle');
-
-    // Persona cards or empty state
-    const cards = page.locator('[class*="persona"], [class*="card"]');
-    const empty = page.locator('[class*="empty"]');
-    expect(await cards.count() > 0 || await empty.count() > 0).toBeTruthy();
-  });
-});
-
-test.describe('Budget Dashboard', () => {
-  test('budget_dashboard_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Budget');
-    await page.waitForLoadState('networkidle');
-
-    await expect(
-      page.locator('[class*="budget"]').or(page.getByText(/budget/i)).first()
-    ).toBeVisible({ timeout: 5000 });
-  });
-});
-
-test.describe('Dependency Graph', () => {
-  test('dependency_graph_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Dependencies');
-    await page.waitForLoadState('networkidle');
-
-    // SVG graph or empty state
-    await expect(
-      page.locator('svg').or(page.locator('[class*="empty"]')).first()
-    ).toBeVisible({ timeout: 5000 });
-  });
-});
-
-test.describe('Spec Graph', () => {
-  test('spec_graph_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'Spec Graph');
-    await page.waitForLoadState('networkidle');
-
-    // SVG graph or empty state
-    await expect(
-      page.locator('svg').or(page.locator('[class*="empty"]')).first()
-    ).toBeVisible({ timeout: 5000 });
-  });
-});
-
-test.describe('User Profile', () => {
-  test('user_profile_renders', async ({ page }) => {
-    await page.goto('/');
-    await navigateTo(page, 'My Profile');
-    await page.waitForLoadState('networkidle');
-
-    // Profile form or content area
-    await expect(
-      page.locator('[class*="profile"]').or(page.locator('input[type="text"]')).first()
-    ).toBeVisible({ timeout: 5000 });
+    // Input accepted the text
+    await expect(input).toHaveValue('spec');
   });
 });
 
@@ -502,26 +593,55 @@ test.describe('User Profile', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Accessibility', () => {
-  test('no_axe_violations_on_dashboard', async ({ page }) => {
+  test('no_axe_violations_on_load', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // Run axe-core accessibility audit
     const { checkA11y } = await import('@axe-core/playwright').catch(() => ({ checkA11y: null }));
     if (checkA11y) {
       await checkA11y(page, undefined, {
-        runOnly: {
-          type: 'tag',
-          values: ['wcag2a', 'wcag2aa'],
-        },
-        // Only fail on critical and serious violations
-        violations: {
-          impact: ['critical', 'serious'],
-        },
+        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] },
+        violations: { impact: ['critical', 'serious'] },
       });
     } else {
-      // axe not available — just verify page loads without JS errors
       await expect(page.locator('.app').first()).toBeVisible({ timeout: 5000 });
     }
+  });
+
+  test('skip_to_main_content_link_exists', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const skipLink = page.locator('.skip-to-content, a[href="#main-content"]');
+    await expect(skipLink).toBeAttached();
+  });
+
+  test('sidebar_has_aria_label', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const sidebar = page.getByRole('navigation', { name: /main navigation/i });
+    await expect(sidebar).toBeVisible({ timeout: 3000 });
+  });
+
+  test('main_content_has_id_for_skip_link', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await expect(page.locator('#main-content')).toBeAttached();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Console error guard
+// ---------------------------------------------------------------------------
+
+test.describe('i18n locale init', () => {
+  test('no_console_errors_on_load', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+    await page.goto('/');
+    await page.waitForTimeout(2000);
+    expect(errors).toEqual([]);
   });
 });
