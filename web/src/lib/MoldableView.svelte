@@ -1,5 +1,6 @@
 <script>
   import ExplorerCanvas from './ExplorerCanvas.svelte';
+  import FlowRenderer from './FlowRenderer.svelte';
   import Badge from './Badge.svelte';
   import EmptyState from './EmptyState.svelte';
   import { api } from './api.js';
@@ -13,7 +14,7 @@
     conceptQuery = '',
   } = $props();
 
-  let activeView = $state('graph'); // 'graph' | 'list' | 'timeline'
+  let activeView = $state('graph'); // 'graph' | 'list' | 'timeline' | 'flow'
 
   // List view sort
   let sortBy = $state('type'); // 'type' | 'name' | 'file'
@@ -207,6 +208,19 @@
       </svg>
       Timeline
     </button>
+    <button
+      class="view-tab"
+      class:active={activeView === 'flow'}
+      role="tab"
+      aria-selected={activeView === 'flow'}
+      onclick={() => (activeView = 'flow')}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+        <circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/>
+        <path d="M7 11.5l9-5M7 12.5l9 5"/>
+      </svg>
+      Flow
+    </button>
   </div>
 
   <!-- View content -->
@@ -287,6 +301,14 @@
           {/if}
         </div>
       </div>
+
+    {:else if activeView === 'flow'}
+      <FlowRenderer
+        nodes={displayNodes()}
+        edges={displayEdges()}
+        {repoId}
+        spans={[]}
+      />
 
     {:else if activeView === 'timeline'}
       <div class="timeline-view">
