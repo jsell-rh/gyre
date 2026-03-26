@@ -6,6 +6,7 @@
 pub mod activity;
 pub mod agent;
 pub mod agent_tracking;
+pub mod llm;
 pub mod analytics;
 pub mod attestation_repo;
 pub mod audit;
@@ -64,6 +65,7 @@ pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
 pub use jj_ops::{JjChange, JjOpsPort};
 pub use kv_store::KvJsonStore;
+pub use llm::{LlmPort, LlmPortFactory};
 pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;
 pub use message::{MessageConsumer, MessageRepository};

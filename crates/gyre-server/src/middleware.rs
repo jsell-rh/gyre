@@ -289,6 +289,7 @@ mod tests {
             conversations: base.conversations.clone(),
             repos_root: base.repos_root.clone(),
             prompt_templates: base.prompt_templates.clone(),
+            llm: base.llm.clone(),
         });
         crate::build_router(state)
     }
