@@ -17,6 +17,7 @@ pub mod budget;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
+pub mod graph;
 pub mod kv_store;
 pub mod merge_queue;
 pub mod merge_request;
