@@ -253,15 +253,12 @@ pub async fn get_mr_timeline(
                     if author_agent_id_str.is_some() && msg_agent_id == author_agent_id_str {
                         // persona: prefer payload field if present (future), fall back to
                         // agent.name (best-effort proxy until persona is stored on Agent).
-                        let persona: Value = payload
-                            .get("persona")
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                author_agent_name
-                                    .as_deref()
-                                    .map(|n| Value::String(n.to_string()))
-                                    .unwrap_or(Value::Null)
-                            });
+                        let persona: Value = payload.get("persona").cloned().unwrap_or_else(|| {
+                            author_agent_name
+                                .as_deref()
+                                .map(|n| Value::String(n.to_string()))
+                                .unwrap_or(Value::Null)
+                        });
                         events.push(TimelineEvent {
                             timestamp: ts,
                             event_type: "AgentSpawned".to_string(),
