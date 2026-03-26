@@ -306,12 +306,18 @@
     if (expandedId === n.id) expandedId = null;
   }
 
+  // Spec paths in notification bodies may include a leading "specs/" prefix.
+  // The /specs/{path} API endpoint already provides the /specs/ segment, so strip it.
+  function normalizeSpecPath(path) {
+    return path ? path.replace(/^specs\//, '') : path;
+  }
+
   async function handleApproveSpec(n) {
     const body = getBody(n);
     if (!body.spec_path || !body.spec_sha) return;
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.approveSpec(body.spec_path, body.spec_sha);
+      await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
@@ -332,7 +338,7 @@
     if (!body.spec_path) return;
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.revokeSpec(body.spec_path, 'Rejected from inbox');
+      await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected from inbox');
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
