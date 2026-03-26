@@ -179,6 +179,13 @@ mod tests {
             "trace_spans",
             "conversations",
             "turn_commit_links",
+            // Previously shadowed by duplicate version prefixes — regression guard
+            "kv_store",
+            "budget_usages",
+            "graph_nodes",
+            "graph_edges",
+            "graph_deltas",
+            "user_workspace_state",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;
