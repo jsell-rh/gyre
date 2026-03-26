@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 
@@ -115,8 +115,19 @@ pub async fn get_meta_spec_set(
 pub async fn put_meta_spec_set(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
+    auth: AuthenticatedAgent,
     Json(req): Json<UpdateMetaSpecSetRequest>,
 ) -> Result<(StatusCode, Json<MetaSpecSet>), ApiError> {
+    // Admin-only: meta-spec-set bindings are governance controls that determine
+    // which personas, principles, standards, and processes govern all agents in a
+    // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
+    // bindings would let agents rewrite the rules they operate under (NEW-26).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace meta-spec-set bindings".to_string(),
+        ));
+    }
+
     // Verify workspace exists.
     state
         .workspaces
@@ -242,6 +253,64 @@ mod tests {
         let json = body_json(resp).await;
         assert!(json["affected_repos"].as_array().unwrap().is_empty());
         assert!(json["affected_workspaces"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_meta_spec_set_requires_admin() {
+        // A Developer-role JWT should be rejected with 403 (NEW-26 fix).
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use crate::abac_middleware::seed_builtin_policies;
+        use axum::routing::{get, put};
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        // Create a workspace using the admin static token.
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws26","slug":"ws26"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // Developer-role OIDC JWT.
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"personas":{},"principles":[],"standards":[],"process":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test(flavor = "multi_thread")]
