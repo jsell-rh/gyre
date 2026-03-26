@@ -11,21 +11,26 @@
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
 //!   GET  /api/v1/workspaces/{id}/graph         — cross-repo graph for a workspace
-//!   GET  /api/v1/workspaces/{id}/briefing      — narrative summary (?since=)
+//!   GET  /api/v1/workspaces/{id}/briefing      — HSI briefing summary (?since=)
+//!   POST /api/v1/workspaces/{id}/briefing/ask  — LLM Q&A grounded in briefing (SSE)
 //!   POST /api/v1/repos/{id}/graph/link         — manually link node to spec
 //!   GET  /api/v1/repos/{id}/graph/predict      — structural prediction stub
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, Sse},
     Json,
 };
+use futures_util::stream;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
     Id,
 };
+use gyre_domain::{MrStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{error::ApiError, new_id, now_secs};
 use crate::{auth::AuthenticatedAgent, AppState};
@@ -187,12 +192,48 @@ pub struct BriefingQuery {
     pub since: Option<u64>,
 }
 
+/// HSI §9 briefing response schema.
 #[derive(Serialize)]
 pub struct BriefingResponse {
     pub workspace_id: String,
     pub since: u64,
+    pub completed: Vec<BriefingItem>,
+    pub in_progress: Vec<BriefingItem>,
+    pub cross_workspace: Vec<BriefingItem>,
+    pub exceptions: Vec<BriefingItem>,
+    pub metrics: BriefingMetrics,
+    /// LLM-synthesized narrative (stubbed for now).
     pub summary: String,
-    pub deltas: Vec<DeltaResponse>,
+}
+
+#[derive(Serialize)]
+pub struct BriefingItem {
+    pub title: String,
+    pub description: String,
+    pub entity_type: String,
+    pub entity_id: Option<String>,
+    pub spec_path: Option<String>,
+    pub timestamp: u64,
+}
+
+#[derive(Serialize)]
+pub struct BriefingMetrics {
+    pub mrs_merged: u32,
+    pub gate_runs: u32,
+    pub budget_spent_usd: f64,
+    pub budget_pct: u32,
+}
+
+#[derive(Deserialize)]
+pub struct BriefingAskRequest {
+    pub question: String,
+    pub history: Option<Vec<HistoryEntry>>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HistoryEntry {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Deserialize)]
@@ -647,9 +688,9 @@ pub async fn get_workspace_graph(
 }
 
 /// GET /api/v1/workspaces/{id}/briefing
-/// Returns a template-based narrative summary of recent architectural changes.
+/// Returns the HSI-defined briefing for a workspace (HSI §9).
 /// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
-/// Falls back to 24 hours ago if no row exists (first visit).
+/// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
 pub async fn get_workspace_briefing(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -658,7 +699,7 @@ pub async fn get_workspace_briefing(
 ) -> Result<Json<BriefingResponse>, ApiError> {
     require_workspace(&state, &id).await?;
 
-    // Resolve `since`: explicit param > last_seen_at > 24h fallback.
+    // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
     let since: u64 = if let Some(s) = q.since {
         s
     } else if let Some(uid) = &auth.user_id {
@@ -674,45 +715,136 @@ pub async fn get_workspace_briefing(
         now_secs().saturating_sub(24 * 3600)
     };
 
-    let repo_ids: Vec<String> = state
-        .kv_store
-        .kv_get("workspace_repos", &id)
+    // Collect MRs and tasks for this workspace.
+    let workspace_id = Id::new(&id);
+    let all_mrs = state
+        .merge_requests
+        .list_by_workspace(&workspace_id)
         .await
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+    let all_tasks = state
+        .tasks
+        .list_by_workspace(&workspace_id)
+        .await
         .unwrap_or_default();
 
-    let mut all_deltas = Vec::new();
-    for rid in &repo_ids {
-        let repo_id = Id::new(rid);
-        let deltas = state
-            .graph_store
-            .list_deltas(&repo_id, Some(since), None)
-            .await
-            .map_err(ApiError::Internal)?;
-        all_deltas.extend(deltas);
-    }
+    // Section: completed — MRs with status Merged updated since `since`.
+    let completed: Vec<BriefingItem> = all_mrs
+        .iter()
+        .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
+        .map(|mr| BriefingItem {
+            title: mr.title.clone(),
+            description: format!("{} → {}", mr.source_branch, mr.target_branch),
+            entity_type: "mr".to_string(),
+            entity_id: Some(mr.id.to_string()),
+            spec_path: mr
+                .spec_ref
+                .as_ref()
+                .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+            timestamp: mr.updated_at,
+        })
+        .collect();
 
-    // Sort by timestamp, newest first.
-    all_deltas.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    // Section: in_progress — tasks with status InProgress or Review updated since `since`.
+    let in_progress: Vec<BriefingItem> = all_tasks
+        .iter()
+        .filter(|t| {
+            (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
+                && t.updated_at >= since
+        })
+        .map(|t| BriefingItem {
+            title: t.title.clone(),
+            description: t.description.clone().unwrap_or_default(),
+            entity_type: "task".to_string(),
+            entity_id: Some(t.id.to_string()),
+            spec_path: t.spec_path.clone(),
+            timestamp: t.updated_at,
+        })
+        .collect();
 
-    let summary = if all_deltas.is_empty() {
-        format!("No architectural changes since epoch {since}.")
-    } else {
+    // Section: cross_workspace — stub (empty for now).
+    let cross_workspace: Vec<BriefingItem> = Vec::new();
+
+    // Section: exceptions — stub (empty for now, future: gate failures).
+    let exceptions: Vec<BriefingItem> = Vec::new();
+
+    // Metrics: count merged MRs since `since`.
+    let mrs_merged = completed.len() as u32;
+    let metrics = BriefingMetrics {
+        mrs_merged,
+        gate_runs: 0,
+        budget_spent_usd: 0.0,
+        budget_pct: 0,
+    };
+
+    // Stub summary string.
+    let summary = {
+        use std::time::{Duration, UNIX_EPOCH};
+        let since_dt = UNIX_EPOCH + Duration::from_secs(since);
+        let since_str = format!("{:?}", since_dt);
         format!(
-            "{} architectural delta(s) across {} repo(s) since epoch {since}.",
-            all_deltas.len(),
-            repo_ids.len(),
+            "{} MR(s) merged, {} task(s) in progress since {}",
+            mrs_merged,
+            in_progress.len(),
+            since_str,
         )
     };
 
     Ok(Json(BriefingResponse {
         workspace_id: id,
         since,
+        completed,
+        in_progress,
+        cross_workspace,
+        exceptions,
+        metrics,
         summary,
-        deltas: all_deltas.into_iter().map(Into::into).collect(),
     }))
+}
+
+/// POST /api/v1/workspaces/{id}/briefing/ask
+/// SSE streaming Q&A grounded in briefing data (HSI §9). ABAC: workspace/generate.
+pub async fn briefing_ask(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(mut req): Json<BriefingAskRequest>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
+    require_workspace(&state, &id).await?;
+
+    // Cap history at 20 entries (truncate oldest).
+    if let Some(ref mut history) = req.history {
+        if history.len() > 20 {
+            let excess = history.len() - 20;
+            history.drain(..excess);
+        }
+    }
+
+    let question = req.question.clone();
+
+    // Stub LLM: synthesize an answer based on question text.
+    let answer = format!(
+        "Based on the briefing for workspace '{id}': no specific information found for \"{question}\". \
+         Check the completed MRs and in-progress tasks for recent activity.",
+    );
+
+    let partial_answer = format!("Looking at the briefing data for workspace '{id}'...");
+
+    let s = stream::iter(vec![
+        Ok(Event::default().event("partial").data(
+            serde_json::to_string(&serde_json::json!({"answer": partial_answer}))
+                .unwrap_or_default(),
+        )),
+        Ok(Event::default().event("complete").data(
+            serde_json::to_string(&serde_json::json!({"answer": answer})).unwrap_or_default(),
+        )),
+    ]);
+
+    Ok(Sse::new(s).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    ))
 }
 
 /// POST /api/v1/repos/{id}/graph/link

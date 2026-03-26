@@ -645,6 +645,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/briefing",
             get(graph::get_workspace_briefing),
         )
+        .route(
+            "/api/v1/workspaces/:id/briefing/ask",
+            post(graph::briefing_ask),
+        )
         // Explorer views CRUD + LLM generation (S3.1)
         // NOTE: /generate must be registered BEFORE /:view_id to avoid "generate"
         //       being matched as a view_id parameter.
