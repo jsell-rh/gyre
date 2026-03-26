@@ -107,7 +107,7 @@
     flex: 0 0 40%;
     max-width: 40%;
     overflow: hidden;
-    animation: slideInRight var(--transition-normal) ease-out;
+    animation: slideInRight 200ms ease-out;
   }
 
   @keyframes slideInRight {

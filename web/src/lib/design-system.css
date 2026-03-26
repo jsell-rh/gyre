@@ -83,8 +83,8 @@
 
   /* --- Layout --- */
   --sidebar-width:     240px;
-  --sidebar-collapsed: 56px;
-  --topbar-height:     56px;
+  --sidebar-collapsed: 48px;
+  --topbar-height:     48px;
   --content-max-width: 1440px;
   --radius:            4px;
   --radius-sm:         2px;

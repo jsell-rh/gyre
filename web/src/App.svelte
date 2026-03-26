@@ -48,6 +48,7 @@
   // ── UI state ─────────────────────────────────────────────────────────
   let searchOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let userMenuOpen = $state(false);
 
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
@@ -204,9 +205,16 @@
     // Esc: close detail panel or go up one scope level
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; return; }
+      if (userMenuOpen) { userMenuOpen = false; return; }
       if (detailPanel.open) { closeDetailPanel(); return; }
       if (scope.type === 'repo') {
-        setScope({ type: 'workspace', workspaceId: scope.workspaceId });
+        // scope.workspaceId may be absent if navigated directly via URL;
+        // fall back to currentWorkspace or tenant scope.
+        if (scope.workspaceId || currentWorkspace) {
+          setScope({ type: 'workspace', workspaceId: scope.workspaceId ?? currentWorkspace?.id });
+        } else {
+          setScope({ type: 'tenant' }, 'explorer');
+        }
       } else if (scope.type === 'workspace') {
         setScope({ type: 'tenant' });
       }
@@ -340,6 +348,11 @@
     window.addEventListener('popstate', handlePopstate);
     window.addEventListener('keydown', handleKeydown);
 
+    function handleOutsideClick(e) {
+      if (!e.target.closest('.user-menu-wrap')) userMenuOpen = false;
+    }
+    window.addEventListener('click', handleOutsideClick, true);
+
     return () => {
       window.removeEventListener('popstate', handlePopstate);
       window.removeEventListener('keydown', handleKeydown);
@@ -402,21 +415,45 @@
           {/if}
         </button>
 
-        <!-- User avatar / token button -->
-        <button
-          class="user-btn"
-          class:auth-active={hasToken}
-          onclick={openTokenModal}
-          aria-label={hasToken ? 'Authenticated — configure API token' : 'No token — configure API token'}
-        >
-          <div class="user-avatar" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16">
-              <circle cx="12" cy="8" r="4"/>
-              <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-            </svg>
-          </div>
-          <span class="auth-dot" aria-hidden="true"></span>
-        </button>
+        <!-- User avatar dropdown -->
+        <div class="user-menu-wrap">
+          <button
+            class="user-btn"
+            class:auth-active={hasToken}
+            onclick={() => (userMenuOpen = !userMenuOpen)}
+            aria-haspopup="menu"
+            aria-expanded={userMenuOpen}
+            aria-label="User menu"
+          >
+            <div class="user-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16">
+                <circle cx="12" cy="8" r="4"/>
+                <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+              </svg>
+            </div>
+            <span class="auth-dot" aria-hidden="true"></span>
+          </button>
+
+          {#if userMenuOpen}
+            <div
+              class="user-dropdown"
+              role="menu"
+              aria-label="User menu"
+              onkeydown={(e) => { if (e.key === 'Escape') userMenuOpen = false; }}
+            >
+              <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('admin'); userMenuOpen = false; }}>
+                Profile
+              </button>
+              <button class="user-dropdown-item" role="menuitem" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
+                API Token
+              </button>
+              <div class="user-dropdown-divider" role="separator"></div>
+              <button class="user-dropdown-item" role="menuitem" onclick={() => { localStorage.removeItem('gyre_auth_token'); hasToken = false; userMenuOpen = false; }}>
+                Sign out
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
     </header>
 
@@ -587,11 +624,11 @@
     overflow: hidden;
   }
 
-  /* Topbar (48px) */
+  /* Topbar — height synced with --topbar-height (48px) */
   .topbar {
     display: flex;
     align-items: center;
-    height: 48px;
+    height: var(--topbar-height);
     padding: 0 var(--space-4);
     background: var(--color-surface);
     border-bottom: 1px solid var(--color-border);
@@ -716,6 +753,50 @@
     background: var(--color-danger);
     border: 2px solid var(--color-surface);
     transition: background var(--transition-fast);
+  }
+
+  /* User menu dropdown */
+  .user-menu-wrap {
+    position: relative;
+  }
+
+  .user-dropdown {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    right: 0;
+    z-index: 200;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    min-width: 160px;
+    padding: var(--space-1) 0;
+  }
+
+  .user-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    text-align: left;
+    transition: background var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .user-dropdown-item:hover {
+    background: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .user-dropdown-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: var(--space-1) 0;
   }
 
   .user-btn.auth-active .auth-dot {
