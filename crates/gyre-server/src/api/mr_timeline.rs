@@ -72,6 +72,32 @@ pub async fn get_mr_timeline(
     let workspace_id = mr.workspace_id.clone();
     let repo_id = mr.repository_id.clone();
 
+    // Pre-load quality gates for the repo to resolve gate names in GateResult events.
+    let repo_gates: std::collections::HashMap<String, String> = state
+        .quality_gates
+        .list_by_repo_id(repo_id.as_str())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| (g.id.to_string(), g.name))
+        .collect();
+
+    // Pre-load the author agent to resolve persona for AgentSpawned events.
+    // Agent.name is used as a best-effort proxy for persona (the exact persona
+    // field is not yet stored on Agent; this will be updated when persona tracking
+    // is added to the agent record).
+    let author_agent_name: Option<String> = if let Some(ref agent_id) = mr.author_agent_id {
+        state
+            .agents
+            .find_by_id(agent_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|a| a.name)
+    } else {
+        None
+    };
+
     // 2. Gate results → GateResult events.
     {
         let gate_results = state.gate_results.list_by_mr_id(&mr_id).await?;
@@ -86,11 +112,16 @@ pub async fn get_mr_timeline(
                 gyre_domain::GateStatus::Running => "running",
                 gyre_domain::GateStatus::Pending => "pending",
             };
+            // Resolve gate name; fall back to gate_id string if the gate record is missing.
+            let gate_name = repo_gates
+                .get(&result.gate_id.to_string())
+                .cloned()
+                .unwrap_or_else(|| result.gate_id.to_string());
             events.push(TimelineEvent {
                 timestamp: ts,
                 event_type: "GateResult".to_string(),
                 detail: serde_json::json!({
-                    "gate_id": result.gate_id.to_string(),
+                    "gate": gate_name,
                     "status": status_str,
                 }),
             });
@@ -117,12 +148,15 @@ pub async fn get_mr_timeline(
                 continue;
             }
             mr_commit_shas.insert(commit.commit_sha.clone());
+            // files_changed is not yet tracked in AgentCommit; will be populated
+            // once the field is added to the agent commit record.
             events.push(TimelineEvent {
                 timestamp: commit.timestamp,
                 event_type: "GitPush".to_string(),
                 detail: serde_json::json!({
                     "commit_sha": commit.commit_sha,
                     "agent_id": commit.agent_id.to_string(),
+                    "files_changed": null,
                 }),
             });
         }
@@ -160,11 +194,22 @@ pub async fn get_mr_timeline(
     {
         // We query from the MR's creation time with a generous window.
         let since_ts = mr.created_at.saturating_sub(60); // 60s before creation
-        let messages = state
+        let messages = match state
             .messages
             .list_by_workspace(&workspace_id, None, Some(since_ts), None, None, Some(500))
             .await
-            .unwrap_or_default();
+        {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                tracing::warn!(
+                    mr_id = %mr_id,
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "failed to load workspace messages for timeline; continuing without message events"
+                );
+                vec![]
+            }
+        };
 
         let author_agent_id_str = mr.author_agent_id.as_ref().map(|a| a.to_string());
 
@@ -174,9 +219,10 @@ pub async fn get_mr_timeline(
 
             match msg.kind {
                 MessageKind::SpecChanged => {
-                    // SpecLifecycleTrigger: all spec changes in the MR's lifetime in this repo.
+                    // SpecLifecycleTrigger: spec changes in this repo during the MR's lifetime.
+                    // Strictly filter by repo_id to avoid including unrelated spec changes.
                     let msg_repo_id = payload.get("repo_id").and_then(Value::as_str).unwrap_or("");
-                    if msg_repo_id == repo_id.as_str() || msg_repo_id.is_empty() {
+                    if msg_repo_id == repo_id.as_str() {
                         let spec_path = payload
                             .get("spec_path")
                             .and_then(Value::as_str)
@@ -205,11 +251,23 @@ pub async fn get_mr_timeline(
                         .and_then(Value::as_str)
                         .map(str::to_string);
                     if author_agent_id_str.is_some() && msg_agent_id == author_agent_id_str {
+                        // persona: prefer payload field if present (future), fall back to
+                        // agent.name (best-effort proxy until persona is stored on Agent).
+                        let persona: Value = payload
+                            .get("persona")
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                author_agent_name
+                                    .as_deref()
+                                    .map(|n| Value::String(n.to_string()))
+                                    .unwrap_or(Value::Null)
+                            });
                         events.push(TimelineEvent {
                             timestamp: ts,
                             event_type: "AgentSpawned".to_string(),
                             detail: serde_json::json!({
                                 "agent_id": msg_agent_id.unwrap_or_default(),
+                                "persona": persona,
                             }),
                         });
                     }
