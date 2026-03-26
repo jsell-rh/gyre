@@ -1,3 +1,4 @@
+pub mod completion;
 pub mod conversation;
 pub mod error;
 pub mod graph;
@@ -8,6 +9,7 @@ pub mod protocol;
 pub mod trace;
 pub mod view_spec;
 
+pub use completion::{AgentCompletionSummary, Decision};
 pub use conversation::{ConversationProvenance, TurnCommitLink};
 pub use error::GyreError;
 pub use graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility};

@@ -463,6 +463,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 spec_fully_approved,
                 author_agent_id: updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
                 conversation_sha,
+                // completion_summary is populated from the AgentCompleted message payload
+                // when the agent calls agent.complete with a summary. At merge time, the
+                // processor does not re-fetch the summary — it is stored at agent.complete time.
+                completion_summary: None,
             };
 
             let bundle =

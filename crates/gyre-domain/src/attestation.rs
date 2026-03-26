@@ -1,5 +1,6 @@
 //! Merge attestation domain types.
 
+use gyre_common::AgentCompletionSummary;
 use serde::{Deserialize, Serialize};
 
 /// Snapshot of a single gate result captured at merge time.
@@ -32,6 +33,10 @@ pub struct MergeAttestation {
     /// Populated from the KV store at merge time; None if the agent did not upload a conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_sha: Option<String>,
+    /// Agent completion summary (HSI §4) — populated when the agent calls `agent.complete`
+    /// with a `summary` field. Contains decisions, uncertainties, and conversation_sha.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_summary: Option<AgentCompletionSummary>,
 }
 
 /// Signed attestation bundle returned by `GET /api/v1/merge-requests/{id}/attestation`.

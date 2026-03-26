@@ -87,6 +87,12 @@ pub enum MessageKind {
     AgentCreated,
     AgentStatusChanged,
     AgentContainerSpawned,
+    /// Emitted by the server when an agent calls `agent.complete` (HSI §4).
+    /// server_only = true. Destination: Workspace(agent's workspace_id).
+    AgentCompleted,
+    /// Emitted when a meta-spec reconciliation run completes (HSI §4 / meta-spec-reconciliation §11).
+    /// server_only = true. Consumed by MessageConsumer to create priority-6 MetaSpecDrift notifications.
+    ReconciliationCompleted,
     TaskCreated,
     TaskTransitioned,
     MrCreated,
@@ -130,6 +136,8 @@ impl MessageKind {
             MessageKind::AgentCreated => "agent_created",
             MessageKind::AgentStatusChanged => "agent_status_changed",
             MessageKind::AgentContainerSpawned => "agent_container_spawned",
+            MessageKind::AgentCompleted => "agent_completed",
+            MessageKind::ReconciliationCompleted => "reconciliation_completed",
             MessageKind::TaskCreated => "task_created",
             MessageKind::TaskTransitioned => "task_transitioned",
             MessageKind::MrCreated => "mr_created",
@@ -166,6 +174,8 @@ impl MessageKind {
             MessageKind::AgentCreated
                 | MessageKind::AgentStatusChanged
                 | MessageKind::AgentContainerSpawned
+                | MessageKind::AgentCompleted
+                | MessageKind::ReconciliationCompleted
                 | MessageKind::TaskCreated
                 | MessageKind::TaskTransitioned
                 | MessageKind::MrCreated
@@ -199,6 +209,8 @@ impl MessageKind {
             MessageKind::AgentCreated
             | MessageKind::AgentStatusChanged
             | MessageKind::AgentContainerSpawned
+            | MessageKind::AgentCompleted
+            | MessageKind::ReconciliationCompleted
             | MessageKind::TaskCreated
             | MessageKind::TaskTransitioned
             | MessageKind::MrCreated
@@ -238,6 +250,8 @@ impl MessageKind {
             "agent_created" => MessageKind::AgentCreated,
             "agent_status_changed" => MessageKind::AgentStatusChanged,
             "agent_container_spawned" => MessageKind::AgentContainerSpawned,
+            "agent_completed" => MessageKind::AgentCompleted,
+            "reconciliation_completed" => MessageKind::ReconciliationCompleted,
             "task_created" => MessageKind::TaskCreated,
             "task_transitioned" => MessageKind::TaskTransitioned,
             "mr_created" => MessageKind::MrCreated,
@@ -505,6 +519,8 @@ mod tests {
             MessageKind::AgentCreated,
             MessageKind::AgentStatusChanged,
             MessageKind::AgentContainerSpawned,
+            MessageKind::AgentCompleted,
+            MessageKind::ReconciliationCompleted,
             MessageKind::TaskCreated,
             MessageKind::TaskTransitioned,
             MessageKind::MrCreated,

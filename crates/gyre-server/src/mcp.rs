@@ -225,11 +225,37 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_agent_complete",
-                "description": "Signal that an agent has completed its current task.",
+                "description": "Signal that an agent has completed its current task. Optionally include a completion summary with decisions, uncertainties, and conversation_sha.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent_id": { "type": "string", "description": "Agent ID" }
+                        "agent_id": { "type": "string", "description": "Agent ID" },
+                        "summary": {
+                            "type": "object",
+                            "description": "Optional completion summary (HSI §4). Include decisions made, uncertainties, and conversation SHA.",
+                            "properties": {
+                                "spec_ref": { "type": "string", "description": "Spec path this task implements" },
+                                "decisions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "what": { "type": "string" },
+                                            "why": { "type": "string" },
+                                            "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+                                            "alternatives_considered": { "type": "array", "items": { "type": "string" } }
+                                        },
+                                        "required": ["what", "why", "confidence"]
+                                    }
+                                },
+                                "uncertainties": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Open questions or areas where the spec was ambiguous"
+                                },
+                                "conversation_sha": { "type": "string", "description": "SHA-256 of the full conversation history" }
+                            }
+                        }
                     },
                     "required": ["agent_id"]
                 }
@@ -582,14 +608,41 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
     };
+
+    // Parse optional completion summary (HSI §4).
+    let summary: Option<gyre_common::AgentCompletionSummary> = args
+        .get("summary")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
     match state.agents.find_by_id(&Id::new(&agent_id)).await {
         Ok(Some(mut agent)) => {
             use gyre_domain::AgentStatus;
             if let Err(e) = agent.transition_status(AgentStatus::Idle) {
                 return tool_error(format!("Status transition failed: {e}"));
             }
-            // Record completion event via unified bus.
             let ws_id = agent.workspace_id.clone();
+
+            // ── Synchronous priority-1 notifications for uncertainties (HSI §4) ──────
+            // MUST happen before returning — reliability-critical, not via MessageConsumer.
+            if let Some(ref s) = summary {
+                if !s.uncertainties.is_empty() {
+                    create_uncertainty_notifications(state, &agent_id, &ws_id, s).await;
+                }
+            }
+
+            // ── Emit AgentCompleted Event-tier message (HSI §4) ──────────────────────
+            let payload = build_agent_completed_payload(&agent_id, &summary);
+            let ws_dest = gyre_common::Destination::Workspace(ws_id.clone());
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    ws_dest,
+                    gyre_common::MessageKind::AgentCompleted,
+                    Some(payload),
+                )
+                .await;
+
+            // ── Telemetry for real-time dashboard ────────────────────────────────────
             state.emit_telemetry(
                 ws_id,
                 gyre_common::message::MessageKind::AgentStatusChanged,
@@ -599,6 +652,7 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                     "reason": format!("Agent {} completed task", agent.name),
                 })),
             );
+
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),
@@ -703,6 +757,118 @@ async fn handle_conversation_upload(
     tool_result(format!(
         "Conversation uploaded: sha={sha}, backfilled {backfilled} turn links"
     ))
+}
+
+/// Build the `AgentCompleted` message payload (HSI §4).
+fn build_agent_completed_payload(
+    agent_id: &str,
+    summary: &Option<gyre_common::AgentCompletionSummary>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "agent_id": agent_id,
+    });
+    if let Some(s) = summary {
+        if let Some(ref spec_ref) = s.spec_ref {
+            payload["spec_ref"] = serde_json::Value::String(spec_ref.clone());
+        }
+        payload["decisions"] = serde_json::to_value(&s.decisions).unwrap_or_default();
+        payload["uncertainties"] = serde_json::to_value(&s.uncertainties).unwrap_or_default();
+        if let Some(ref sha) = s.conversation_sha {
+            payload["conversation_sha"] = serde_json::Value::String(sha.clone());
+        }
+    } else {
+        payload["decisions"] = serde_json::json!([]);
+        payload["uncertainties"] = serde_json::json!([]);
+    }
+    payload
+}
+
+/// Synchronously create priority-1 `AgentNeedsClarification` notifications for all
+/// workspace Admin and Developer members (HSI §4 — reliability-critical path).
+async fn create_uncertainty_notifications(
+    state: &AppState,
+    agent_id: &str,
+    workspace_id: &Id,
+    summary: &gyre_common::AgentCompletionSummary,
+) {
+    use gyre_common::{Id, Notification, NotificationType};
+    use gyre_domain::WorkspaceRole;
+
+    let members = match state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "agent_complete: failed to list workspace members for uncertainty notifications: {e}"
+            );
+            return;
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let uncertainty_titles: Vec<String> = summary
+        .uncertainties
+        .iter()
+        .enumerate()
+        .map(|(i, u)| format!("Agent uncertainty {}: {}", i + 1, u))
+        .collect();
+    let title = if summary.uncertainties.len() == 1 {
+        format!(
+            "Agent needs clarification: {}",
+            summary.uncertainties[0]
+                .chars()
+                .take(80)
+                .collect::<String>()
+        )
+    } else {
+        format!(
+            "Agent needs clarification ({} open questions)",
+            summary.uncertainties.len()
+        )
+    };
+    let body = serde_json::to_string(&serde_json::json!({
+        "uncertainties": &summary.uncertainties,
+        "spec_ref": &summary.spec_ref,
+    }))
+    .ok();
+
+    for member in &members {
+        // Only notify Admin and Developer role members (Owner counts as Admin-level).
+        if !matches!(
+            member.role,
+            WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+        ) {
+            continue;
+        }
+        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
+        let mut notif = Notification::new(
+            notif_id,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::AgentNeedsClarification,
+            title.clone(),
+            "default",
+            now,
+        );
+        notif.entity_ref = Some(agent_id.to_string());
+        notif.body = body.clone();
+
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(
+                "agent_complete: failed to create AgentNeedsClarification notification for user {}: {e}",
+                member.user_id
+            );
+        }
+    }
+
+    let _ = uncertainty_titles; // used to document intent
 }
 
 async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
@@ -1705,5 +1871,122 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── agent_complete tool advertises summary field in schema ────────────────
+
+    #[tokio::test]
+    async fn agent_complete_tool_schema_includes_summary() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 50,
+                "method": "tools/list",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let complete = tools
+            .iter()
+            .find(|t| t["name"] == "gyre_agent_complete")
+            .expect("gyre_agent_complete must be in tools list");
+        let props = &complete["inputSchema"]["properties"];
+        assert!(
+            props.get("summary").is_some(),
+            "gyre_agent_complete must advertise a 'summary' field in its inputSchema"
+        );
+    }
+
+    // ── agent_complete with unknown agent returns error ────────────────────────
+
+    #[tokio::test]
+    async fn agent_complete_unknown_agent_returns_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 51,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": {
+                        "agent_id": "nonexistent-agent",
+                        "summary": {
+                            "spec_ref": "specs/system/example.md",
+                            "decisions": [{"what": "used retry", "why": "spec says so", "confidence": "high"}],
+                            "uncertainties": ["timeout behavior undefined"],
+                            "conversation_sha": "abc123"
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not found") || text.contains("Agent not found"));
+    }
+
+    // ── AgentCompleted MessageKind roundtrips ─────────────────────────────────
+
+    #[test]
+    fn agent_completed_message_kind_roundtrip() {
+        use gyre_common::MessageKind;
+        let k = MessageKind::AgentCompleted;
+        assert_eq!(k.as_str(), "agent_completed");
+        assert!(k.server_only());
+        assert_eq!(k.tier(), gyre_common::MessageTier::Event);
+        let json = serde_json::to_string(&k).unwrap();
+        let back: MessageKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MessageKind::AgentCompleted);
+    }
+
+    #[test]
+    fn reconciliation_completed_message_kind_roundtrip() {
+        use gyre_common::MessageKind;
+        let k = MessageKind::ReconciliationCompleted;
+        assert_eq!(k.as_str(), "reconciliation_completed");
+        assert!(k.server_only());
+        assert_eq!(k.tier(), gyre_common::MessageTier::Event);
+        let json = serde_json::to_string(&k).unwrap();
+        let back: MessageKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MessageKind::ReconciliationCompleted);
+    }
+
+    // ── AgentCompletionSummary parsing in build_agent_completed_payload ───────
+
+    #[test]
+    fn build_agent_completed_payload_with_summary() {
+        use gyre_common::{AgentCompletionSummary, Decision};
+        let summary = AgentCompletionSummary {
+            spec_ref: Some("specs/system/example.md".to_string()),
+            decisions: vec![Decision {
+                what: "used retry".to_string(),
+                why: "spec says so".to_string(),
+                confidence: "high".to_string(),
+                alternatives_considered: Some(vec!["no retry".to_string()]),
+            }],
+            uncertainties: vec!["timeout behavior undefined".to_string()],
+            conversation_sha: Some("abc123".to_string()),
+        };
+        let payload = build_agent_completed_payload("agent-1", &Some(summary));
+        assert_eq!(payload["agent_id"], "agent-1");
+        assert_eq!(payload["spec_ref"], "specs/system/example.md");
+        assert_eq!(payload["decisions"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["conversation_sha"], "abc123");
+    }
+
+    #[test]
+    fn build_agent_completed_payload_without_summary() {
+        let payload = build_agent_completed_payload("agent-2", &None);
+        assert_eq!(payload["agent_id"], "agent-2");
+        assert_eq!(payload["decisions"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 0);
+        assert!(payload.get("spec_ref").is_none() || payload["spec_ref"].is_null());
     }
 }
