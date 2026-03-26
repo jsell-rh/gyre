@@ -18,6 +18,7 @@
 
   // List view sort
   let sortBy = $state('type'); // 'type' | 'name' | 'file'
+  let sortDir = $state('asc'); // 'asc' | 'desc'
   let filterType = $state('');
 
   let nodeTypes = $derived.by(() => {
@@ -45,10 +46,11 @@
       ? nodes.filter(n => conceptFilterIds.has(n.id))
       : nodes;
     if (filterType) result = result.filter(n => n.node_type === filterType);
+    const dir = sortDir === 'asc' ? 1 : -1;
     return [...result].sort((a, b) => {
-      if (sortBy === 'type') return (a.node_type ?? '').localeCompare(b.node_type ?? '');
-      if (sortBy === 'name') return (a.name ?? '').localeCompare(b.name ?? '');
-      if (sortBy === 'file') return (a.file_path ?? '').localeCompare(b.file_path ?? '');
+      if (sortBy === 'type') return dir * (a.node_type ?? '').localeCompare(b.node_type ?? '');
+      if (sortBy === 'name') return dir * (a.name ?? '').localeCompare(b.name ?? '');
+      if (sortBy === 'file') return dir * (a.file_path ?? '').localeCompare(b.file_path ?? '');
       return 0;
     });
   });
@@ -247,8 +249,8 @@
               <button
                 class="sort-btn"
                 class:active={sortBy === val}
-                onclick={() => (sortBy = val)}
-              >{label}</button>
+                onclick={() => { if (sortBy === val) { sortDir = sortDir === 'asc' ? 'desc' : 'asc'; } else { sortBy = val; sortDir = 'asc'; } }}
+              >{label}{sortBy === val ? (sortDir === 'asc' ? ' \u2191' : ' \u2193') : ''}</button>
             {/each}
           </div>
           <span class="list-count">{filteredNodes.length} nodes</span>

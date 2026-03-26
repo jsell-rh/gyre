@@ -341,6 +341,7 @@
       {#if searchQuery}
         <button class="search-clear" onclick={clearSearch} aria-label="Clear search" type="button">✕</button>
       {/if}
+      <kbd class="search-hint" aria-hidden="true">/</kbd>
     </div>
 
     <!-- LLM Ask input -->
@@ -608,6 +609,17 @@
   }
 
   .search-clear:hover { color: var(--color-text); }
+
+  .search-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+  .search-wrap:focus-within .search-hint { display: none; }
 
   /* LLM Ask */
   .ask-wrap {

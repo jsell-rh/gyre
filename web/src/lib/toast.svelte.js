@@ -13,6 +13,7 @@ export function toast(message, { type = 'info', duration = 4000 } = {}) {
 
   const id = nextId++;
   toasts.push({ id, message, type, addedAt: now });
+  while (toasts.length > 5) { toasts.shift(); }
 
   if (duration > 0) {
     setTimeout(() => dismiss(id), duration);

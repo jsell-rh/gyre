@@ -122,7 +122,9 @@
       await api.markNotificationRead(id);
       notifications = notifications.map(n => n.id === id ? { ...n, read: true } : n);
       unread = notifications.filter(n => !n.read).length;
-    } catch { /* ignore */ }
+    } catch {
+      showToast('Failed to mark notification as read', { type: 'error' });
+    }
   }
 
   function judgmentEventColor(ev) {
@@ -210,7 +212,7 @@
         <input class="field-input" bind:value={editForm.locale} placeholder="e.g. en-US" />
       </label>
       <div class="edit-actions">
-        <button class="btn-secondary" onclick={() => (editing = false)}>Cancel</button>
+        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
         <button class="btn-primary" onclick={saveEdit} disabled={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>
