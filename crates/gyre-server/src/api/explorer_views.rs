@@ -425,24 +425,31 @@ pub async fn generate_explorer_view(
         }
     }
 
-    // Build a stub view spec as the generated result.
-    // Real implementation would: read prompt template from specs/prompts/explorer-generate.md,
-    // get graph summary, call LLM via GYRE_LLM_MODEL, stream partial/complete events.
-    let generated_spec = json!({
-        "name": req.question,
-        "description": format!("Generated view for: {}", req.question),
-        "data": {
-            "node_types": [],
-            "edge_types": [],
-            "depth": 2,
-            "repo_id": req.repo_id
-        },
-        "layout": "graph",
-        "explanation": format!(
-            "Stub response: LLM integration not yet wired. Question: \"{}\"",
-            req.question
-        )
-    });
+    // Require LLM to be configured.
+    let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
+
+    let ws_id = Id::new(&workspace_id);
+
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&ws_id, "explorer-generate")
+        .await
+        .map_err(ApiError::Internal)?
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_EXPLORER_GENERATE.to_string());
+
+    let system_prompt = template_content.replace("{{question}}", &req.question);
+    let user_prompt = req.question.clone();
+
+    // Resolve model and call LLM for structured JSON output.
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(&state, &ws_id, "explorer-generate").await;
+    let view_spec = factory
+        .for_model(&model)
+        .predict_json(&system_prompt, &user_prompt)
+        .await
+        .map_err(ApiError::Internal)?;
 
     // Charge budget: record as llm_query cost entry.
     let cost_entry = CostEntry::new(
@@ -456,19 +463,13 @@ pub async fn generate_explorer_view(
     );
     let _ = state.costs.record(&cost_entry).await;
 
-    let partial_event = json!({
-        "explanation": "Generating view..."
-    });
-    let complete_event = json!({
-        "view_spec": generated_spec,
-        "explanation": format!(
-            "Stub response: LLM integration not yet wired. Question: \"{}\"",
-            req.question
-        )
-    });
-
-    let partial_data = serde_json::to_string(&partial_event).unwrap_or_default();
-    let complete_data = serde_json::to_string(&complete_event).unwrap_or_default();
+    let partial_data =
+        serde_json::to_string(&json!({"explanation": "Generating view..."})).unwrap_or_default();
+    let complete_data = serde_json::to_string(&json!({
+        "view_spec": view_spec,
+        "explanation": format!("Generated view for: {}", req.question)
+    }))
+    .unwrap_or_default();
 
     let events: Vec<Result<Event, std::convert::Infallible>> = vec![
         Ok(Event::default().event("partial").data(partial_data)),
@@ -538,10 +539,17 @@ async fn validate_repo_ownership(
 mod tests {
     use axum::{body::Body, http::Request};
     use http::StatusCode;
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn app() -> axum::Router {
         crate::build_router(crate::mem::test_state())
+    }
+
+    fn app_no_llm() -> axum::Router {
+        let mut s = (*crate::mem::test_state()).clone();
+        s.llm = None;
+        crate::build_router(Arc::new(s))
     }
 
     fn auth() -> &'static str {
@@ -752,6 +760,31 @@ mod tests {
             body1.as_array().unwrap().len(),
             body2.as_array().unwrap().len()
         );
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-503/explorer-views/generate")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"question":"What are the main components?"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "llm_unavailable");
     }
 
     #[tokio::test]

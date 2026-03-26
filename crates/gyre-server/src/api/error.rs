@@ -13,6 +13,8 @@ pub enum ApiError {
     TooManyRequests(String),
     /// Rate limit exceeded; carries `retry_after` seconds for the `Retry-After` header.
     RateLimited(u64),
+    /// LLM features are disabled (GYRE_VERTEX_PROJECT not configured).
+    LlmUnavailable,
     Internal(anyhow::Error),
 }
 
@@ -35,6 +37,17 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
+        if let ApiError::LlmUnavailable = self {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "llm_unavailable",
+                    "message": "LLM features are not configured on this server. Contact your administrator.",
+                    "hint": "Set GYRE_VERTEX_PROJECT and GOOGLE_APPLICATION_CREDENTIALS environment variables."
+                })),
+            )
+                .into_response();
+        }
         let (status, message) = match self {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::InvalidInput(msg) | ApiError::BadRequest(msg) => {
@@ -49,7 +62,7 @@ impl IntoResponse for ApiError {
                     "internal server error".to_string(),
                 )
             }
-            ApiError::RateLimited(_) => unreachable!(),
+            ApiError::RateLimited(_) | ApiError::LlmUnavailable => unreachable!(),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }
