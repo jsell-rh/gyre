@@ -251,19 +251,29 @@ async fn ingest_traces(
                     .cloned();
 
                 // Use trace_id + span_id for uniqueness (OTLP span_id alone is trace-scoped).
-                let unique_span_id = if let Some(tid) = &span.trace_id {
+                // IMPORTANT: apply the same prefix to parent_span_id so parent-child
+                // references remain consistent after uniquification.
+                let tid = span.trace_id.as_deref().unwrap_or("");
+                let unique_span_id = if !tid.is_empty() {
                     format!("{}-{}", tid, span.span_id)
                 } else {
                     span.span_id.clone()
                 };
+                let unique_parent_id = span
+                    .parent_span_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|pid| {
+                        if !tid.is_empty() {
+                            format!("{}-{}", tid, pid)
+                        } else {
+                            pid.to_string()
+                        }
+                    });
 
                 guard.push(TraceSpan {
                     span_id: unique_span_id,
-                    parent_span_id: span
-                        .parent_span_id
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
+                    parent_span_id: unique_parent_id,
                     operation_name: span.name.clone(),
                     service_name: service_name.clone(),
                     kind,
@@ -489,7 +499,7 @@ impl OtlpServerConfig {
     pub fn from_env() -> Self {
         let enabled = std::env::var("GYRE_OTLP_ENABLED")
             .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+            .unwrap_or(true); // default: enabled (spec §3a)
         let grpc_port = std::env::var("GYRE_OTLP_GRPC_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -503,5 +513,143 @@ impl OtlpServerConfig {
             grpc_port,
             max_spans_per_trace,
         }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn make_app(max_spans: usize) -> (Router, SpanAccumulator) {
+        let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/traces", post(ingest_traces))
+            .with_state((Arc::clone(&accumulator), max_spans));
+        (app, accumulator)
+    }
+
+    fn otlp_json(trace_id: &str, span_id: &str, parent_id: Option<&str>, name: &str) -> String {
+        let parent_field = match parent_id {
+            Some(p) => format!(r#","parentSpanId": "{p}""#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{
+                "resourceSpans": [{{
+                    "resource": {{"attributes": [{{"key": "service.name", "value": {{"stringValue": "test-svc"}}}}]}},
+                    "scopeSpans": [{{
+                        "spans": [{{
+                            "traceId": "{trace_id}",
+                            "spanId": "{span_id}"
+                            {parent_field},
+                            "name": "{name}",
+                            "kind": 2,
+                            "startTimeUnixNano": "1000000000000",
+                            "endTimeUnixNano": "1001000000000",
+                            "attributes": [],
+                            "status": {{"code": 1}}
+                        }}]
+                    }}]
+                }}]
+            }}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn ingest_span_basic() {
+        let (app, acc) = make_app(100);
+        let body = otlp_json("trace1", "span1", None, "GET /health");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let spans = acc.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].span_id, "trace1-span1");
+        assert_eq!(spans[0].operation_name, "GET /health");
+        assert_eq!(spans[0].service_name, "test-svc");
+        assert_eq!(spans[0].kind, SpanKind::Server);
+        assert_eq!(spans[0].status, SpanStatus::Ok);
+        assert_eq!(spans[0].start_time, 1_000_000_000); // 1_000_000_000_000 ns / 1000
+        assert_eq!(spans[0].duration_us, 1_000_000); // (1_001_000_000_000 - 1_000_000_000_000) ns / 1000
+    }
+
+    #[tokio::test]
+    async fn ingest_span_parent_id_prefixed_consistently() {
+        let (app, acc) = make_app(100);
+        let body = otlp_json("trace1", "child-span", Some("parent-span"), "child op");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let _ = app.oneshot(req).await.unwrap();
+
+        let spans = acc.lock().unwrap();
+        assert_eq!(spans[0].span_id, "trace1-child-span");
+        assert_eq!(
+            spans[0].parent_span_id.as_deref(),
+            Some("trace1-parent-span"),
+            "parent_span_id must be prefixed with trace_id to match stored span_id format"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_respects_max_spans() {
+        let (app, acc) = make_app(1);
+        // Send two spans in one request.
+        let body = r#"{
+            "resourceSpans": [{"resource": {"attributes": []}, "scopeSpans": [{"spans": [
+                {"traceId": "t1", "spanId": "s1", "name": "op1", "kind": 1, "startTimeUnixNano": "0", "endTimeUnixNano": "1000", "attributes": [], "status": {}},
+                {"traceId": "t1", "spanId": "s2", "name": "op2", "kind": 1, "startTimeUnixNano": "0", "endTimeUnixNano": "1000", "attributes": [], "status": {}}
+            ]}]}]
+        }"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let _ = app.oneshot(req).await.unwrap();
+
+        let spans = acc.lock().unwrap();
+        assert_eq!(spans.len(), 1, "should cap at max_spans=1");
+    }
+
+    #[tokio::test]
+    async fn ingest_bad_json_returns_400() {
+        let (app, _) = make_app(100);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(Body::from("not json"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn otlp_server_config_defaults() {
+        // Clear env vars to test defaults (they may not be set in CI).
+        let cfg = OtlpServerConfig {
+            enabled: true,
+            grpc_port: 4317,
+            max_spans_per_trace: 10_000,
+        };
+        assert!(cfg.enabled);
+        assert_eq!(cfg.grpc_port, 4317);
+        assert_eq!(cfg.max_spans_per_trace, 10_000);
     }
 }

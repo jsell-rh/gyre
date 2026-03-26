@@ -44,6 +44,7 @@ pub struct GateTraceResponse {
     pub gate_run_id: String,
     pub commit_sha: String,
     pub captured_at: u64,
+    pub span_count: usize,
     pub spans: Vec<TraceSpanResponse>,
     /// Top-level (root) span IDs — entry points for flow animation.
     pub root_spans: Vec<String>,
@@ -95,7 +96,7 @@ pub async fn get_trace_for_mr(
         .map(|s| s.span_id.clone())
         .collect();
 
-    let spans = trace
+    let spans: Vec<TraceSpanResponse> = trace
         .spans
         .into_iter()
         .map(|s| TraceSpanResponse {
@@ -120,6 +121,7 @@ pub async fn get_trace_for_mr(
         gate_run_id: trace.gate_run_id.as_str().to_string(),
         commit_sha: trace.commit_sha,
         captured_at: trace.captured_at,
+        span_count: spans.len(),
         spans,
         root_spans,
     }))

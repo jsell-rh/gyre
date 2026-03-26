@@ -537,13 +537,15 @@ async fn run_trace_capture_gate(
     mr_id: &Id,
     gate_run_id: &Id,
 ) -> (GateStatus, String) {
-    // Parse config from gate.command field (YAML or key=value format).
-    // The gate config is stored as JSON in the command field for TraceCapture gates.
-    let config = gate
+    // Parse config from gate.command field (JSON).
+    // Server-level OTLP config (env vars) provides the max_spans ceiling.
+    let mut config = gate
         .command
         .as_deref()
         .and_then(|c| serde_json::from_str::<TraceCaptureConfig>(c).ok())
         .unwrap_or_default();
+    // Enforce the server-level max_spans cap so operators can bound memory usage.
+    config.max_spans = config.max_spans.min(state.otlp_config.max_spans_per_trace);
 
     info!(
         gate_id = %gate.id,
