@@ -403,6 +403,12 @@ impl ResourceResolver {
                     "explorer_view",
                     None,
                 ),
+                // ── Presence (S1.5) ────────────────────────────────────────
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:workspace_id/presence",
+                    "workspace",
+                    None,
+                ),
                 // ── Meta-specs ─────────────────────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:path/blast-radius",

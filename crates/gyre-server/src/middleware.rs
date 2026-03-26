@@ -280,6 +280,10 @@ mod tests {
             user_workspace_state: base.user_workspace_state.clone(),
             last_seen_debounce: base.last_seen_debounce.clone(),
             llm_rate_limiter: base.llm_rate_limiter.clone(),
+            presence: base.presence.clone(),
+            ws_connections: base.ws_connections.clone(),
+            ws_connection_counter: base.ws_connection_counter.clone(),
+            ws_connection_workspaces: base.ws_connection_workspaces.clone(),
         });
         crate::build_router(state)
     }
