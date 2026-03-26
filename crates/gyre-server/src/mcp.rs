@@ -631,7 +631,8 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
             }
 
             // ── Emit AgentCompleted Event-tier message (HSI §4) ──────────────────────
-            let payload = build_agent_completed_payload(&agent_id, &summary);
+            let payload =
+                build_agent_completed_payload(&agent_id, agent.current_task_id.as_ref(), &summary);
             let ws_dest = gyre_common::Destination::Workspace(ws_id.clone());
             state
                 .emit_event(
@@ -641,6 +642,26 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                     Some(payload),
                 )
                 .await;
+
+            // ── Persist completion_summary to MR attestation bundle (HSI §4 step 1) ──
+            if let Some(ref s) = summary {
+                if let Ok(all_mrs) = state.merge_requests.list().await {
+                    for mr in all_mrs.into_iter().filter(|mr| {
+                        mr.author_agent_id.as_ref().map(|id| id.to_string())
+                            == Some(agent_id.clone())
+                    }) {
+                        let mr_id = mr.id.to_string();
+                        if let Ok(Some(mut bundle)) =
+                            state.attestation_store.find_by_mr_id(&mr_id).await
+                        {
+                            bundle.attestation.completion_summary = Some(s.clone());
+                            if let Err(e) = state.attestation_store.save(&mr_id, &bundle).await {
+                                tracing::warn!("agent_complete: failed to persist completion_summary to attestation for MR {mr_id}: {e}");
+                            }
+                        }
+                    }
+                }
+            }
 
             // ── Telemetry for real-time dashboard ────────────────────────────────────
             state.emit_telemetry(
@@ -762,11 +783,15 @@ async fn handle_conversation_upload(
 /// Build the `AgentCompleted` message payload (HSI §4).
 fn build_agent_completed_payload(
     agent_id: &str,
+    task_id: Option<&Id>,
     summary: &Option<gyre_common::AgentCompletionSummary>,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({
         "agent_id": agent_id,
     });
+    if let Some(tid) = task_id {
+        payload["task_id"] = serde_json::Value::String(tid.to_string());
+    }
     if let Some(s) = summary {
         if let Some(ref spec_ref) = s.spec_ref {
             payload["spec_ref"] = serde_json::Value::String(spec_ref.clone());
@@ -793,6 +818,21 @@ async fn create_uncertainty_notifications(
 ) {
     use gyre_common::{Id, Notification, NotificationType};
     use gyre_domain::WorkspaceRole;
+
+    // Resolve tenant_id from the workspace record (avoid hardcoding "default").
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            tracing::warn!("agent_complete: workspace {workspace_id} not found; skipping uncertainty notifications");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "agent_complete: failed to resolve workspace tenant for notifications: {e}"
+            );
+            return;
+        }
+    };
 
     let members = match state
         .workspace_memberships
@@ -854,7 +894,7 @@ async fn create_uncertainty_notifications(
             member.user_id.clone(),
             NotificationType::AgentNeedsClarification,
             title.clone(),
-            "default",
+            &tenant_id,
             now,
         );
         notif.entity_ref = Some(agent_id.to_string());
@@ -1973,8 +2013,10 @@ mod tests {
             uncertainties: vec!["timeout behavior undefined".to_string()],
             conversation_sha: Some("abc123".to_string()),
         };
-        let payload = build_agent_completed_payload("agent-1", &Some(summary));
+        let task_id = Id::new("task-abc");
+        let payload = build_agent_completed_payload("agent-1", Some(&task_id), &Some(summary));
         assert_eq!(payload["agent_id"], "agent-1");
+        assert_eq!(payload["task_id"], "task-abc");
         assert_eq!(payload["spec_ref"], "specs/system/example.md");
         assert_eq!(payload["decisions"].as_array().unwrap().len(), 1);
         assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 1);
@@ -1983,8 +2025,9 @@ mod tests {
 
     #[test]
     fn build_agent_completed_payload_without_summary() {
-        let payload = build_agent_completed_payload("agent-2", &None);
+        let payload = build_agent_completed_payload("agent-2", None, &None);
         assert_eq!(payload["agent_id"], "agent-2");
+        assert!(payload.get("task_id").is_none() || payload["task_id"].is_null());
         assert_eq!(payload["decisions"].as_array().unwrap().len(), 0);
         assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 0);
         assert!(payload.get("spec_ref").is_none() || payload["spec_ref"].is_null());
