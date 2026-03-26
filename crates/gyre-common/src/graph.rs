@@ -76,6 +76,8 @@ pub struct GraphNode {
     pub created_at: u64,
     pub complexity: Option<u32>,
     pub churn_count_30d: u32,
+    /// Test coverage ratio (0.0–1.0). `None` when coverage data is unavailable.
+    pub test_coverage: Option<f64>,
 }
 
 /// A directed edge between two graph nodes.

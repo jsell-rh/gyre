@@ -16,6 +16,7 @@ pub mod container;
 pub mod dependencies;
 pub mod discover;
 pub mod error;
+pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
@@ -37,6 +38,7 @@ pub mod search;
 pub mod spawn;
 pub mod spec_policy;
 pub mod specs;
+pub mod specs_assist;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
@@ -293,6 +295,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/specs/:path/revoke",
             post(specs::revoke_spec_approval),
         )
+        .route("/api/v1/specs/:path/reject", post(specs::reject_spec))
         .route(
             "/api/v1/specs/:path/history",
             get(specs::spec_approval_history),
@@ -301,6 +304,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/specs/:path/progress",
             get(specs::get_spec_progress),
+        )
+        // Spec editing backend (S3.3 — HSI §11 CLI/MCP parity)
+        .route(
+            "/api/v1/repos/:id/specs/assist",
+            post(specs_assist::assist_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/specs/save",
+            post(specs_assist::save_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/prompts/save",
+            post(specs_assist::save_prompt),
         )
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
@@ -610,15 +626,36 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/graph/predict",
-            get(graph::get_graph_predictions),
+            get(graph::predict_graph).post(graph::predict_graph),
         )
         .route(
             "/api/v1/workspaces/:id/graph",
             get(graph::get_workspace_graph),
         )
         .route(
+            "/api/v1/workspaces/:id/graph/concept/:concept_name",
+            get(graph::get_workspace_graph_concept),
+        )
+        .route(
             "/api/v1/workspaces/:id/briefing",
             get(graph::get_workspace_briefing),
+        )
+        // Explorer views CRUD + LLM generation (S3.1)
+        // NOTE: /generate must be registered BEFORE /:view_id to avoid "generate"
+        //       being matched as a view_id parameter.
+        .route(
+            "/api/v1/workspaces/:id/explorer-views",
+            get(explorer_views::list_explorer_views).post(explorer_views::create_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/generate",
+            post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/:view_id",
+            get(explorer_views::get_explorer_view)
+                .put(explorer_views::update_explorer_view)
+                .delete(explorer_views::delete_explorer_view),
         )
 }
 

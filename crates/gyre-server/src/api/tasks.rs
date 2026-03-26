@@ -93,6 +93,7 @@ fn task_status_str(s: &TaskStatus) -> String {
         TaskStatus::Review => "review",
         TaskStatus::Done => "done",
         TaskStatus::Blocked => "blocked",
+        TaskStatus::Cancelled => "cancelled",
     }
     .to_string()
 }
@@ -104,6 +105,7 @@ fn parse_task_status(s: &str) -> Result<TaskStatus, ApiError> {
         "review" => Ok(TaskStatus::Review),
         "done" => Ok(TaskStatus::Done),
         "blocked" => Ok(TaskStatus::Blocked),
+        "cancelled" | "canceled" => Ok(TaskStatus::Cancelled),
         _ => Err(ApiError::InvalidInput(format!("unknown task status: {s}"))),
     }
 }

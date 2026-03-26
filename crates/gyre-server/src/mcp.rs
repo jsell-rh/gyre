@@ -343,6 +343,7 @@ fn parse_status(s: &str) -> Option<TaskStatus> {
         "review" => Some(TaskStatus::Review),
         "done" => Some(TaskStatus::Done),
         "blocked" => Some(TaskStatus::Blocked),
+        "cancelled" | "canceled" => Some(TaskStatus::Cancelled),
         _ => None,
     }
 }

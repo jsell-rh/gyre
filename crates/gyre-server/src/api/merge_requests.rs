@@ -189,6 +189,7 @@ fn mr_status_str(s: &MrStatus) -> String {
         MrStatus::Approved => "approved",
         MrStatus::Merged => "merged",
         MrStatus::Closed => "closed",
+        MrStatus::Reverted => "reverted",
     }
     .to_string()
 }
@@ -199,6 +200,7 @@ fn parse_mr_status(s: &str) -> Result<MrStatus, ApiError> {
         "approved" => Ok(MrStatus::Approved),
         "merged" => Ok(MrStatus::Merged),
         "closed" => Ok(MrStatus::Closed),
+        "reverted" => Ok(MrStatus::Reverted),
         _ => Err(ApiError::InvalidInput(format!("unknown MR status: {s}"))),
     }
 }
