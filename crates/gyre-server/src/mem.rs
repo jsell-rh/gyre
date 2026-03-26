@@ -17,7 +17,8 @@ use gyre_ports::{
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
+    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1554,7 +1555,7 @@ impl TeamRepository for MemTeamRepository {
 // Notification
 // ──────────────────────────────────────────────────────────────────────────────
 
-use gyre_domain::Notification;
+use gyre_common::Notification;
 use gyre_ports::NotificationRepository;
 
 #[derive(Default)]
@@ -1569,54 +1570,142 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(())
     }
 
-    async fn find_by_id(&self, id: &Id) -> Result<Option<Notification>> {
+    async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>> {
         Ok(self
             .store
             .lock()
             .await
             .iter()
-            .find(|n| n.id == *id)
+            .find(|n| n.id == *id && n.user_id == *user_id)
             .cloned())
     }
 
-    async fn list_by_user(&self, user_id: &Id, unread_only: bool) -> Result<Vec<Notification>> {
-        Ok(self
-            .store
-            .lock()
-            .await
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
             .iter()
-            .filter(|n| n.user_id == *user_id && (!unread_only || !n.read))
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && min_priority.is_none_or(|min| n.priority >= min)
+                    && max_priority.is_none_or(|max| n.priority <= max)
+            })
             .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(b.created_at.cmp(&a.created_at))
+        });
+        Ok(items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
             .collect())
     }
 
-    async fn count_unread(&self, user_id: &Id) -> Result<u64> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .iter()
-            .filter(|n| n.user_id == *user_id && !n.read)
-            .count() as u64)
-    }
-
-    async fn mark_read(&self, id: &Id, now: u64) -> Result<()> {
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for n in self.store.lock().await.iter_mut() {
-            if n.id == *id {
-                n.mark_read(now);
+            if n.id == *id && n.user_id == *user_id {
+                n.dismissed_at = Some(now);
                 break;
             }
         }
         Ok(())
     }
 
-    async fn mark_all_read(&self, user_id: &Id, now: u64) -> Result<()> {
+    async fn resolve(&self, id: &Id, user_id: &Id, _action_taken: Option<&str>) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for n in self.store.lock().await.iter_mut() {
-            if n.user_id == *user_id && !n.read {
-                n.mark_read(now);
+            if n.id == *id && n.user_id == *user_id {
+                n.resolved_at = Some(now);
+                break;
             }
         }
         Ok(())
+    }
+
+    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+            })
+            .count() as u64)
+    }
+
+    async fn has_recent_dismissal(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        days: u32,
+    ) -> Result<bool> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - (days as i64 * 86400);
+        Ok(self.store.lock().await.iter().any(|n| {
+            n.workspace_id == *workspace_id
+                && n.user_id == *user_id
+                && n.notification_type.as_str() == notification_type
+                && n.dismissed_at.is_some_and(|d| d >= cutoff)
+        }))
+    }
+}
+
+// ── MemUserWorkspaceStateRepository ──────────────────────────────────────────
+
+/// In-memory user workspace state repository for tests and development.
+#[derive(Default)]
+pub struct MemUserWorkspaceStateRepository {
+    store: Mutex<HashMap<(String, String), i64>>,
+}
+
+#[async_trait]
+impl UserWorkspaceStateRepository for MemUserWorkspaceStateRepository {
+    async fn upsert_last_seen(
+        &self,
+        user_id: &str,
+        workspace_id: &str,
+        timestamp: i64,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert((user_id.to_owned(), workspace_id.to_owned()), timestamp);
+        Ok(())
+    }
+
+    async fn get_last_seen(&self, user_id: &str, workspace_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(&(user_id.to_owned(), workspace_id.to_owned()))
+            .copied())
     }
 }
 
@@ -2449,5 +2538,7 @@ pub fn test_state() -> Arc<crate::AppState> {
             tx
         },
         agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     })
 }

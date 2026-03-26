@@ -308,17 +308,18 @@ diesel::table! {
 diesel::table! {
     notifications (id) {
         id -> Text,
+        workspace_id -> Text,
         user_id -> Text,
         notification_type -> Text,
+        priority -> Integer,
         title -> Text,
-        body -> Text,
-        entity_type -> Nullable<Text>,
-        entity_id -> Nullable<Text>,
-        priority -> Text,
-        action_url -> Nullable<Text>,
-        read -> Integer,
-        read_at -> Nullable<BigInt>,
+        body -> Nullable<Text>,
+        entity_ref -> Nullable<Text>,
+        repo_id -> Nullable<Text>,
+        resolved_at -> Nullable<BigInt>,
+        dismissed_at -> Nullable<BigInt>,
         created_at -> BigInt,
+        tenant_id -> Text,
     }
 }
 
@@ -618,4 +619,13 @@ diesel::allow_tables_to_appear_in_same_query!(
     messages,
     meta_spec_sets,
     budget_call_records,
+    user_workspace_state,
 );
+
+diesel::table! {
+    user_workspace_state (user_id, workspace_id) {
+        user_id -> Text,
+        workspace_id -> Text,
+        last_seen_at -> BigInt,
+    }
+}

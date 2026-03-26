@@ -121,15 +121,17 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
             .await;
     }
 
-    // Notify MR author when gate fails (M22.8).
+    // Notify MR author when gate fails (HSI §2).
     if status == GateStatus::Failed {
         if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
             if let Some(ref author_id) = mr.author_agent_id {
                 crate::notifications::notify_gate_failure(
                     state.as_ref(),
                     author_id,
+                    &mr.workspace_id,
                     &mr_id.to_string(),
                     &gate.name,
+                    "default",
                 )
                 .await;
             }

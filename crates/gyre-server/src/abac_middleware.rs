@@ -424,12 +424,10 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/users/me/agents", "agent", None),
                 RouteResourceMapping::api("/api/v1/users/me/tasks", "task", None),
                 RouteResourceMapping::api("/api/v1/users/me/mrs", "merge_request", None),
-                RouteResourceMapping::api("/api/v1/users/me/notifications", "notification", None),
-                RouteResourceMapping::api(
-                    "/api/v1/users/me/notifications/:id/read",
-                    "notification",
-                    Some("write"),
-                ),
+                // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
+                RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/resolve"),
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
