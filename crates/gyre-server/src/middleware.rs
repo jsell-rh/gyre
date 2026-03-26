@@ -279,6 +279,7 @@ mod tests {
             agent_inbox_max: base.agent_inbox_max,
             user_workspace_state: base.user_workspace_state.clone(),
             last_seen_debounce: base.last_seen_debounce.clone(),
+            llm_rate_limiter: base.llm_rate_limiter.clone(),
         });
         crate::build_router(state)
     }
