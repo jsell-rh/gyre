@@ -33,6 +33,10 @@
   let customSince = $state(''); // ISO date string for custom range
 
   // --- Data ---
+  // Empty briefing state used as the graceful fallback when the API returns no data.
+  // Defined once here so all fallback sites stay in sync if the schema gains new fields.
+  const EMPTY_BRIEFING = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
+
   let loading = $state(true);
   let error = $state(null);
   let briefing = $state(null);
@@ -83,7 +87,7 @@
     try {
       if (scope === 'workspace' && workspaceId) {
         const raw = await api.getWorkspaceBriefing(workspaceId, since);
-        briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+        briefing = isEmpty(raw) ? EMPTY_BRIEFING : raw;
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
         const results = await Promise.allSettled(
@@ -120,14 +124,14 @@
           cost_usd:   costUsd,
           budget_pct: budgetN ? Math.round(budgetPct / budgetN) : null,
         };
-        briefing = isEmpty(merged) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : merged;
+        briefing = isEmpty(merged) ? EMPTY_BRIEFING : merged;
       } else {
         // Repo scope — no briefing endpoint yet; show empty state
-        briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
+        briefing = EMPTY_BRIEFING;
       }
     } catch (e) {
       // Graceful degradation: show empty state on 404 / network error
-      briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
+      briefing = EMPTY_BRIEFING;
       if (e.message && !e.message.includes('404')) {
         error = e.message;
       }
