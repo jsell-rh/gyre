@@ -1471,8 +1471,8 @@
   .filter-input:focus:not(:focus-visible) { outline: none; }
   .filter-input:focus-visible {
     outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-color: var(--color-focus, #4db0ff);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
   }
   .filter-input.full-width { width: 100%; box-sizing: border-box; }
   .textarea { resize: vertical; min-height: 72px; }
@@ -1714,5 +1714,5 @@
     font-family: var(--font-body);
   }
   .target-select.narrow { width: auto; min-width: 120px; }
-  .target-select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .target-select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 </style>

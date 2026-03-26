@@ -800,7 +800,7 @@
   .form input:focus:not(:focus-visible),
   .form select:focus:not(:focus-visible) { outline: none; }
   .form input:focus-visible,
-  .form select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .form select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; }
 

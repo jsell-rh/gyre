@@ -267,7 +267,7 @@
   .field-input:focus:not(:focus-visible),
   .field-textarea:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible,
-  .field-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-link); }
+  .field-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .field-hint {
     font-size: var(--text-xs);

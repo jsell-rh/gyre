@@ -174,9 +174,11 @@
   <div class="view-tabs" role="tablist" aria-label="View mode">
     <button
       class="view-tab"
+      id="tab-graph"
       class:active={activeView === 'graph'}
       role="tab"
       aria-selected={activeView === 'graph'}
+      aria-controls="tabpanel-graph"
       onclick={() => (activeView = 'graph')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -187,9 +189,11 @@
     </button>
     <button
       class="view-tab"
+      id="tab-list"
       class:active={activeView === 'list'}
       role="tab"
       aria-selected={activeView === 'list'}
+      aria-controls="tabpanel-list"
       onclick={() => (activeView = 'list')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -200,9 +204,11 @@
     </button>
     <button
       class="view-tab"
+      id="tab-timeline"
       class:active={activeView === 'timeline'}
       role="tab"
       aria-selected={activeView === 'timeline'}
+      aria-controls="tabpanel-timeline"
       onclick={() => (activeView = 'timeline')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -212,9 +218,11 @@
     </button>
     <button
       class="view-tab"
+      id="tab-flow"
       class:active={activeView === 'flow'}
       role="tab"
       aria-selected={activeView === 'flow'}
+      aria-controls="tabpanel-flow"
       onclick={() => (activeView = 'flow')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -226,7 +234,7 @@
   </div>
 
   <!-- View content -->
-  <div class="view-content">
+  <div class="view-content" role="tabpanel" id="tabpanel-{activeView}" aria-labelledby="tab-{activeView}">
     {#if activeView === 'graph'}
       <ExplorerCanvas nodes={displayNodes} edges={displayEdges} {repoId} {onSelectNode} />
 
@@ -286,7 +294,6 @@
                 {#each filteredNodes as node}
                   <tr
                     class="list-row"
-                    role="button"
                     tabindex="0"
                     aria-label="Select node {node.name}"
                     onclick={() => onSelectNode?.(node)}
@@ -347,7 +354,7 @@
           </div>
         {:else if timelineLoading}
           <div class="timeline-empty">
-            <div class="timeline-spinner" aria-label="Loading"></div>
+            <div class="timeline-spinner" role="status" aria-label="Loading timeline"></div>
           </div>
         {:else}
           <!-- Node list filtered by scrubber position -->
@@ -492,7 +499,7 @@
   }
 
   .view-tab:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -557,7 +564,7 @@
   }
 
   .sort-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 

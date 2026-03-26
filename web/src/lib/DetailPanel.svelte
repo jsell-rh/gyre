@@ -877,7 +877,7 @@
   }
 
   .panel-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -962,7 +962,7 @@
   }
 
   .start-interrogation:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -1094,7 +1094,7 @@
   }
 
   .spec-editor-textarea:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
   }
 
@@ -1272,7 +1272,7 @@
   }
 
   .llm-textarea:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
   }
 
@@ -1302,7 +1302,7 @@
   .llm-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .llm-send:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 

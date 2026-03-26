@@ -1302,7 +1302,7 @@
     min-width: 0;
   }
   .dep-input:focus:not(:focus-visible) { outline: none; }
-  .dep-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .dep-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
   .dep-add-btn {
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
