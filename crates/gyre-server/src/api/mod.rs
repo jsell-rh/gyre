@@ -37,6 +37,7 @@ pub mod search;
 pub mod spawn;
 pub mod spec_policy;
 pub mod specs;
+pub mod specs_assist;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
@@ -301,6 +302,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/specs/:path/progress",
             get(specs::get_spec_progress),
+        )
+        // Spec editing backend (S3.3 — HSI §11 CLI/MCP parity)
+        .route(
+            "/api/v1/repos/:id/specs/assist",
+            post(specs_assist::assist_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/specs/save",
+            post(specs_assist::save_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/prompts/save",
+            post(specs_assist::save_prompt),
         )
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
