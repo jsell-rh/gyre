@@ -174,6 +174,11 @@
     }
   });
 
+  // Guard: if entity is cleared through any code path, ensure expanded resets.
+  $effect(() => {
+    if (!entity) expanded = false;
+  });
+
   // ── Spec entity tab state (S4.5) ────────────────────────────────────────────
   // Lazy-loaded data for each tab when entity.type === 'spec'
   let specDetail = $state(null);
