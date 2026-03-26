@@ -291,8 +291,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_ne!(json["agent_id"].as_str().unwrap(), "forged-agent-id",
-            "audit event must not allow caller to forge agent_id (NEW-31)");
+        assert_ne!(
+            json["agent_id"].as_str().unwrap(),
+            "forged-agent-id",
+            "audit event must not allow caller to forge agent_id (NEW-31)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -323,7 +326,9 @@ mod tests {
                     .uri("/api/v1/audit/events")
                     .header("authorization", format!("Bearer {agent_token}"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"agent_id":"evil-agent","event_type":"file_access"}"#))
+                    .body(Body::from(
+                        r#"{"agent_id":"evil-agent","event_type":"file_access"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -334,8 +339,11 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // Must NOT be the forged value.
-        assert_ne!(json["agent_id"].as_str().unwrap(), "evil-agent",
-            "audit trail forgery must be prevented (NEW-31)");
+        assert_ne!(
+            json["agent_id"].as_str().unwrap(),
+            "evil-agent",
+            "audit trail forgery must be prevented (NEW-31)"
+        );
     }
 
     #[tokio::test]
