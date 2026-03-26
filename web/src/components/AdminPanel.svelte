@@ -1445,6 +1445,14 @@
   .kill-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .kill-btn.small { font-size: var(--text-xs); padding: var(--space-1) var(--space-2); }
 
+  .primary-btn:focus-visible,
+  .secondary-btn:focus-visible,
+  .kill-btn:focus-visible,
+  .refresh-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   /* Forms */
   .form-section {
     background: var(--color-surface);
@@ -1526,6 +1534,10 @@
     transition: border-color var(--transition-fast), background var(--transition-fast);
   }
   .trust-option:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .trust-option:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
   .trust-option.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
   .trust-radio {
     width: 18px;
@@ -1669,6 +1681,10 @@
     transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   }
   .chip:hover { border-color: var(--color-border-strong); color: var(--color-text); }
+  .chip:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
   .chip.selected { background: color-mix(in srgb, var(--color-primary) 10%, transparent); border-color: var(--color-primary); color: var(--color-primary); }
 
   /* Modal */

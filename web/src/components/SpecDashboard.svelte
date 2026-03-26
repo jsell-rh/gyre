@@ -757,8 +757,8 @@
     outline-offset: -2px;
   }
 
-  .spec-editor:focus {
-    border-color: var(--color-primary);
+  .spec-editor:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .modal-footer {
@@ -799,8 +799,8 @@
     outline-offset: -2px;
   }
 
-  .field-input:focus {
-    border-color: var(--color-primary);
+  .field-input:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
