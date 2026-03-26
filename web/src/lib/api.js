@@ -10,19 +10,31 @@ export function setAuthToken(token) {
 }
 
 async function request(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${getAuthToken()}`,
-      ...options.headers,
-    },
-    ...options,
-  });
-  if (!res.ok) {
-    throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+        ...options.headers,
+      },
+      ...options,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+    }
+    if (res.status === 204) return null;
+    return res.json();
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('Request timed out. Check your connection.');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
   }
-  if (res.status === 204) return null;
-  return res.json();
 }
 
 export const api = {

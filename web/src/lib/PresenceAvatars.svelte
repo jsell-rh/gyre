@@ -148,17 +148,21 @@
           {/if}
         </div>
 
-        {#if tooltipUserId === user.user_id}
-          <div class="avatar-tooltip" role="tooltip" id="presence-tooltip-{user.user_id}">
-            <span class="tooltip-name">{user.display_name}</span>
-            {#if user.views[0]}
-              <span class="tooltip-view">in {user.views[0]}</span>
-            {/if}
-            {#if user.sessions.length > 1}
-              <span class="tooltip-sessions">{user.sessions.length} tabs open</span>
-            {/if}
-          </div>
-        {/if}
+        <div
+          class="avatar-tooltip"
+          class:visible={tooltipUserId === user.user_id}
+          role="tooltip"
+          id="presence-tooltip-{user.user_id}"
+          aria-hidden={tooltipUserId !== user.user_id}
+        >
+          <span class="tooltip-name">{user.display_name}</span>
+          {#if user.views[0]}
+            <span class="tooltip-view">in {user.views[0]}</span>
+          {/if}
+          {#if user.sessions.length > 1}
+            <span class="tooltip-sessions">{user.sessions.length} tabs open</span>
+          {/if}
+        </div>
       </div>
     {/each}
   </div>
@@ -239,7 +243,14 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    opacity: 0;
     pointer-events: none;
+    transition: opacity 150ms;
+  }
+
+  .avatar-tooltip.visible {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .tooltip-name {
