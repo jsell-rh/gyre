@@ -1,9 +1,13 @@
--- BUG-2 fix: Ensure kv_store and budget_usages tables exist.
--- The original migration 2026-03-23-000009_kv_store_and_budget_usage had the same
--- version prefix as 2026-03-23-000009_persist_batch_a. Diesel's embed_migrations!
--- deduplicates by version prefix (YYYY-MM-DD-NNNNNN), keeping only the last entry
--- alphabetically ('persist_batch_a' > 'kv_store_and_budget_usage'), so the kv_store
--- table was never created. This migration restores it idempotently.
+-- Ensure kv_store and budget_usages tables exist on all deployments.
+--
+-- Previously filed as 2026-03-26-000026_kv_store_fix, which shared sequence number
+-- 000026 with 2026-03-25-000026_interrogation_agents. Diesel's version_from_string
+-- includes the date component, so these were technically distinct versions and both
+-- ran — but having two migrations with the same NNNNNN sequence number is confusing
+-- and error-prone. Re-issued as 000029 (next unused slot) for unambiguous ordering.
+--
+-- Idempotent: CREATE TABLE IF NOT EXISTS is safe to run on databases where
+-- 000009_kv_store_and_budget_usage already created these tables.
 
 CREATE TABLE IF NOT EXISTS kv_store (
     namespace   TEXT    NOT NULL,
