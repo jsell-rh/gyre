@@ -260,8 +260,6 @@ mod tests {
         // A Developer-role JWT should be rejected with 403 (NEW-26 fix).
         use crate::abac_middleware::seed_builtin_policies;
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
-        use axum::routing::{get, put};
-
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
