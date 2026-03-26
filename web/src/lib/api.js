@@ -428,6 +428,13 @@ export const api = {
   // LLM view generation (SSE — returns raw Response, not parsed JSON)
   generateExplorerView: (workspaceId, body) =>
     fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   // Specs View (S4.5)
   specsForWorkspace: (workspaceId) =>
     request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
