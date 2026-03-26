@@ -433,7 +433,7 @@
     margin-top: var(--space-4);
     padding: var(--space-2) var(--space-4);
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-surface, #fff);
     border: none;
     border-radius: var(--radius);
     font-size: var(--text-sm);
@@ -453,8 +453,13 @@
   .budget-form-fields { display: flex; flex-direction: column; gap: var(--space-3); }
   .budget-field { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); color: var(--color-text-secondary); }
   .budget-field input { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text); font-size: var(--text-sm); }
+  .budget-field input:focus-visible {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
   .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
-  .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: #fff; border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
+  .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
   .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-secondary:hover { color: var(--color-text); }
@@ -468,8 +473,8 @@
     border-radius: 999px;
     text-transform: capitalize;
   }
-  .trust-badge.trust-supervised { background: rgba(94, 64, 190, 0.15); color: var(--color-blocked); }
-  .trust-badge.trust-guided     { background: rgba(77, 176, 255, 0.15); color: var(--color-link); }
-  .trust-badge.trust-autonomous { background: rgba(99, 153, 61, 0.15);  color: var(--color-success); }
-  .trust-badge.trust-custom     { background: rgba(245, 146, 27, 0.15); color: var(--color-warning); }
+  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); }
+  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .trust-badge.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
+  .trust-badge.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 </style>

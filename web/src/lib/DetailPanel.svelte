@@ -411,6 +411,7 @@
   class:expanded
   class:open={!!entity}
   aria-label="Detail panel"
+  tabindex="-1"
   onkeydown={onkeydown}
   bind:this={panelEl}
 >
@@ -934,7 +935,7 @@
   .start-interrogation {
     padding: var(--space-3) var(--space-6);
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-surface, #fff);
     border: none;
     border-radius: var(--radius);
     font-family: var(--font-body);
@@ -1061,8 +1062,16 @@
     transition: border-color var(--transition-fast);
   }
 
-  .spec-editor-textarea:focus {
+  .spec-editor-textarea:focus:not(:focus-visible) {
     outline: none;
+  }
+
+  .spec-editor-textarea:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+  }
+
+  .spec-editor-textarea:focus {
     border-color: var(--color-primary);
   }
 
@@ -1231,8 +1240,16 @@
     transition: border-color var(--transition-fast);
   }
 
-  .llm-textarea:focus {
+  .llm-textarea:focus:not(:focus-visible) {
     outline: none;
+  }
+
+  .llm-textarea:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+  }
+
+  .llm-textarea:focus {
     border-color: var(--color-primary);
   }
 
@@ -1248,7 +1265,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-surface, #fff);
     cursor: pointer;
     flex-shrink: 0;
     transition: background var(--transition-fast);
@@ -1267,6 +1284,11 @@
 
   .spin { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation: none; }
+    .blink-cursor { animation: none; }
+  }
 
   /* Save bar */
   .save-bar {
@@ -1304,7 +1326,7 @@
 
   .progress-bar-fill {
     height: 100%;
-    background: var(--color-success, #3fb950);
+    background: var(--color-success);
     border-radius: 4px;
     transition: width var(--transition-slow, 0.3s);
   }

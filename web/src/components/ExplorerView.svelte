@@ -23,6 +23,7 @@
   let loading = $state(false);
   let reposLoading = $state(true);
   let selectedNode = $state(null);
+  let graphError = $state(null);
 
   // Concept search state
   let conceptQuery = $state('');
@@ -62,11 +63,13 @@
     if (!repoId) { graph = null; return; }
     loading = true;
     graph = null;
+    graphError = null;
     selectedNode = null;
     try {
       graph = await api.repoGraph(repoId);
     } catch (e) {
       showToast('Failed to load graph: ' + e.message, { type: 'error' });
+      graphError = e.message;
       graph = { nodes: [], edges: [] };
     } finally {
       loading = false;
@@ -258,6 +261,12 @@
           <p class="loading-msg">Fetching knowledge graph…</p>
         </div>
 
+      {:else if graphError}
+        <div class="graph-error" role="alert">
+          <p>Failed to load graph: {graphError}</p>
+          <button onclick={() => loadGraph(selectedRepoId)}>Retry</button>
+        </div>
+
       {:else if graph}
         <MoldableView
           nodes={graph.nodes ?? []}
@@ -434,7 +443,7 @@
 
   .go-admin-btn {
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-surface, #fff);
     border: none;
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-4);
@@ -533,6 +542,10 @@
     animation: spin 0.7s linear infinite;
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+  }
+
   .concept-chip {
     display: inline-flex;
     align-items: center;
@@ -547,7 +560,7 @@
   }
 
   .concept-chip.no-results {
-    background: rgba(100, 116, 139, 0.1);
+    background: color-mix(in srgb, var(--color-text-muted) 10%, transparent);
     border-color: var(--color-border-strong);
     color: var(--color-text-muted);
   }
@@ -565,4 +578,39 @@
   }
 
   .chip-clear:hover { opacity: 1; }
+
+  /* ── Graph error state ────────────────────────────────────────────────── */
+  .graph-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    text-align: center;
+    flex: 1;
+  }
+
+  .graph-error p {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-danger);
+  }
+
+  .graph-error button {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .graph-error button:hover {
+    background: var(--color-surface);
+    border-color: var(--color-primary);
+  }
 </style>
