@@ -92,8 +92,8 @@
     </div>
     <div class="header-right">
       <div class="view-toggle">
-        <button class="toggle-btn" class:active={viewMode === 'lanes'} onclick={() => switchView('lanes')}>Lanes</button>
-        <button class="toggle-btn" class:active={viewMode === 'dag'} onclick={() => switchView('dag')}>DAG</button>
+        <button class="toggle-btn" class:active={viewMode === 'lanes'} onclick={() => switchView('lanes')} aria-pressed={viewMode === 'lanes'}>Lanes</button>
+        <button class="toggle-btn" class:active={viewMode === 'dag'} onclick={() => switchView('dag')} aria-pressed={viewMode === 'dag'}>DAG</button>
       </div>
       <button class="refresh-btn" onclick={load} disabled={loading}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -112,7 +112,7 @@
         <Skeleton height="120px" />
       </div>
     {:else if error}
-      <div class="error-msg">
+      <div class="error-msg" role="alert">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
         {error}
       </div>
@@ -210,7 +210,7 @@
 
         <!-- Arrow -->
         <div class="flow-arrow">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20" aria-hidden="true">
             <path d="M5 12h14M12 5l7 7-7 7"/>
           </svg>
         </div>
@@ -252,7 +252,7 @@
 
         <!-- Arrow -->
         <div class="flow-arrow">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20" aria-hidden="true">
             <path d="M5 12h14M12 5l7 7-7 7"/>
           </svg>
         </div>
@@ -279,7 +279,7 @@
                       {entry.processed_at ? relativeTime(entry.processed_at) : relativeTime(entry.enqueued_at)}
                     </span>
                     {#if entry.error_message}
-                      <span class="error-hint" title={entry.error_message}>⚠ error</span>
+                      <span class="error-hint" title={entry.error_message} aria-label={entry.error_message}>⚠ error</span>
                     {/if}
                   </div>
                 </div>
@@ -301,7 +301,7 @@
                 <th>Status</th>
                 <th>Enqueued</th>
                 <th>Processed</th>
-                <th></th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -776,4 +776,6 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
