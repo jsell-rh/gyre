@@ -16,7 +16,11 @@ use gyre_domain::{MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
-use crate::AppState;
+use crate::{
+    auth::AuthenticatedAgent,
+    llm_rate_limit::{check_rate_limit, LLM_RATE_LIMIT, LLM_WINDOW_SECS},
+    AppState,
+};
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
@@ -95,16 +99,32 @@ fn spec_path_slug(spec_path: &str) -> String {
 pub async fn assist_spec(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    caller: AuthenticatedAgent,
     Json(req): Json<SpecAssistRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
     let repo_id_typed = Id::new(&repo_id);
-    let _repo = state
+    let repo = state
         .repos
         .find_by_id(&repo_id_typed)
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
+
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    {
+        let workspace_id = repo.workspace_id.to_string();
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &caller.agent_id,
+            &workspace_id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
 
     let explanation = format!(
         "Applying instruction to {}: {}",
@@ -300,6 +320,10 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn auth() -> &'static str {
+        "Bearer test-token"
+    }
+
     #[tokio::test]
     async fn assist_spec_not_found_returns_404() {
         let app = app();
@@ -312,6 +336,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/repos/no-such-repo/specs/assist")
+                    .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -319,6 +344,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn assist_spec_rate_limited_after_10_requests() {
+        let app = app();
+
+        // Create a repo so assist_spec can proceed past the 404 check.
+        let create_body = serde_json::json!({
+            "name": "rate-limit-test-repo",
+            "workspace_id": "ws-rate-test",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add a summary",
+        });
+
+        // First 10 requests must succeed.
+        for i in 0..10 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/{}/specs/assist", repo_id))
+                        .header("Authorization", auth())
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} should succeed");
+        }
+
+        // 11th request must be rate-limited.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/assist", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = resp
+            .headers()
+            .get("Retry-After")
+            .expect("Retry-After header");
+        let secs: u64 = retry_after.to_str().unwrap().parse().unwrap();
+        assert!(secs >= 1, "Retry-After must be at least 1 second");
     }
 
     #[tokio::test]

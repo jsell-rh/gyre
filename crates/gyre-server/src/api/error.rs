@@ -11,6 +11,8 @@ pub enum ApiError {
     BadRequest(String),
     Forbidden(String),
     TooManyRequests(String),
+    /// Rate limit exceeded; carries `retry_after` seconds for the `Retry-After` header.
+    RateLimited(u64),
     Internal(anyhow::Error),
 }
 
@@ -22,6 +24,17 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::RateLimited(retry_after) = self {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", retry_after.to_string())],
+                Json(json!({
+                    "error": "rate limit exceeded",
+                    "retry_after": retry_after
+                })),
+            )
+                .into_response();
+        }
         let (status, message) = match self {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::InvalidInput(msg) | ApiError::BadRequest(msg) => {
@@ -36,6 +49,7 @@ impl IntoResponse for ApiError {
                     "internal server error".to_string(),
                 )
             }
+            ApiError::RateLimited(_) => unreachable!(),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }
