@@ -36,12 +36,15 @@
 </script>
 
 {#if node && metrics && spanCount > 0}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_no_noninteractive_tabindex -->
   <g
     class="node-badge"
     transform="translate({bx},{by})"
     onmouseenter={() => (showTooltip = true)}
     onmouseleave={() => (showTooltip = false)}
+    onfocusin={() => (showTooltip = true)}
+    onfocusout={() => (showTooltip = false)}
+    tabindex="0"
     role="img"
     aria-label="Node {node.name ?? node.id}: {spanCount} spans, {(errorRate * 100).toFixed(1)}% errors, mean {formatDuration(meanDuration)}"
   >

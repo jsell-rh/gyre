@@ -122,6 +122,8 @@
   let memberModalEl = $state(null);
   let deleteConfirmModalEl = $state(null);
   let newWorkspaceModalEl = $state(null);
+  let gateModalEl = $state(null);
+  let computeModalEl = $state(null);
 
   $effect(() => {
     if (budgetModal) {
@@ -150,6 +152,18 @@
   $effect(() => {
     if (newWorkspaceModal) {
       tick().then(() => newWorkspaceModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (gateModal) {
+      tick().then(() => gateModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (computeModal) {
+      tick().then(() => computeModalEl?.focus());
     }
   });
 
@@ -1123,6 +1137,7 @@
 {#if gateModal}
   <div class="modal-backdrop" role="presentation" onclick={() => gateModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Gate"
+    bind:this={gateModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') gateModal = false; }}>
     <h3 class="modal-title">Add Gate</h3>
     <div class="form-field">
@@ -1150,6 +1165,7 @@
 {#if computeModal}
   <div class="modal-backdrop" role="presentation" onclick={() => computeModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Compute Target"
+    bind:this={computeModalEl}
     onkeydown={(e) => { if (e.key === 'Escape') computeModal = false; }}>
     <h3 class="modal-title">Add Compute Target</h3>
     <div class="form-field">
@@ -1642,4 +1658,5 @@
     font-family: var(--font-body);
   }
   .target-select.narrow { width: auto; min-width: 120px; }
+  .target-select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 </style>
