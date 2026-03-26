@@ -122,6 +122,7 @@
 
   <Tabs {tabs} bind:active={activeTab} />
 
+  <div role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
   {#if loading}
     <div class="tab-body">
       <Skeleton lines={5} />
@@ -281,6 +282,7 @@
       {/if}
     </div>
   {/if}
+  </div>
 </div>
 
 <style>

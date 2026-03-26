@@ -220,7 +220,7 @@
 
   <Tabs {tabs} bind:active={activeTab} />
 
-  <div class="tab-body">
+  <div class="tab-body" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
     {#if loading}
       <Skeleton lines={5} />
     {:else if activeTab === 'info'}

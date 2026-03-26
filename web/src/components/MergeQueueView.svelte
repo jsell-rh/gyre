@@ -504,16 +504,16 @@
   .queue-card:hover { border-color: var(--color-border-strong); }
 
   .queue-card.processing {
-    border-color: rgba(245, 146, 27, 0.4);
+    border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
     animation: processing-pulse 2s ease-in-out infinite;
   }
 
   @keyframes processing-pulse {
-    0%, 100% { border-color: rgba(245, 146, 27, 0.4); }
-    50%       { border-color: rgba(245, 146, 27, 0.8); }
+    0%, 100% { border-color: color-mix(in srgb, var(--color-warning) 40%, transparent); }
+    50%       { border-color: color-mix(in srgb, var(--color-warning) 80%, transparent); }
   }
 
-  .queue-card.failed { border-color: rgba(240, 86, 29, 0.4); }
+  .queue-card.failed { border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); }
 
   .card-top {
     display: flex;
@@ -548,8 +548,8 @@
   .card-actions { display: flex; gap: var(--space-2); }
 
   .cancel-btn {
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.3);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
     color: var(--color-danger);
     cursor: pointer;
@@ -559,7 +559,7 @@
     transition: background var(--transition-fast);
     width: 100%;
   }
-  .cancel-btn:hover:not(:disabled) { background: rgba(240, 86, 29, 0.2); }
+  .cancel-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
   .cancel-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* Flow arrows */
@@ -627,8 +627,8 @@
   .dim { color: var(--color-text-muted); font-size: var(--text-xs); }
 
   .cancel-btn-sm {
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.3);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius-sm);
     color: var(--color-danger);
     cursor: pointer;

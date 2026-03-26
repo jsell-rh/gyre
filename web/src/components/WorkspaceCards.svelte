@@ -147,7 +147,7 @@
         <div class="ws-card" role="listitem">
           <Card>
             {#snippet header()}
-              <span class="ws-name">{ws.name}</span>
+              <span class="ws-name" title={ws.name}>{ws.name}</span>
               {#if ws.trust_level}
                 <Badge value={ws.trust_level} variant={trustVariant(ws.trust_level)} />
               {:else}
@@ -157,7 +157,7 @@
 
             <div class="ws-body">
               {#if ws.description}
-                <p class="ws-desc">{ws.description}</p>
+                <p class="ws-desc" title={ws.description}>{ws.description}</p>
               {/if}
 
               <div class="ws-stats">

@@ -84,7 +84,7 @@
     return str.includes(q);
   }
 
-  let filteredBranches = $derived(() => {
+  let filteredBranches = $derived.by(() => {
     let rows = branches.filter(matchesFilter);
     rows.sort((a, b) => {
       const av = a[sortField] ?? '';
@@ -94,7 +94,7 @@
     return rows;
   });
 
-  let filteredMrs = $derived(() => {
+  let filteredMrs = $derived.by(() => {
     let rows = mrs.filter(matchesFilter);
     rows.sort((a, b) => {
       const av = a[sortField] ?? '';
@@ -104,7 +104,7 @@
     return rows;
   });
 
-  let filteredQueue = $derived(() => queue.filter(matchesFilter));
+  let filteredQueue = $derived.by(() => queue.filter(matchesFilter));
 
   function relativeTime(ts) {
     if (!ts) return '';
@@ -147,7 +147,7 @@
     {#if loading}
       <Skeleton lines={6} />
     {:else if subTab === 'branches'}
-      {#if filteredBranches().length === 0}
+      {#if filteredBranches.length === 0}
         <EmptyState title="No branches" message={filterQuery ? 'No branches match your filter.' : 'No branches found for this repository.'} />
       {:else}
         <table class="code-table">
@@ -160,7 +160,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredBranches() as branch}
+            {#each filteredBranches as branch}
               <tr class="table-row" onclick={() => onRowClick(branch, 'branch')} tabindex="0" role="button" aria-label="View branch {branch.name}">
                 <td class="mono">{branch.name}</td>
                 <td class="secondary">{branch.last_commit ? branch.last_commit.slice(0, 7) : '—'}</td>
@@ -173,7 +173,7 @@
       {/if}
 
     {:else if subTab === 'merge-requests'}
-      {#if filteredMrs().length === 0}
+      {#if filteredMrs.length === 0}
         <EmptyState title="No merge requests" message={filterQuery ? 'No MRs match your filter.' : 'No open merge requests for this repository.'} />
       {:else}
         <table class="code-table">
@@ -186,7 +186,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredMrs() as mr}
+            {#each filteredMrs as mr}
               <tr class="table-row" onclick={() => onRowClick(mr, 'mr')} tabindex="0" role="button" aria-label="View MR {mr.title}">
                 <td>{mr.title}</td>
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
@@ -199,7 +199,7 @@
       {/if}
 
     {:else if subTab === 'merge-queue'}
-      {#if filteredQueue().length === 0}
+      {#if filteredQueue.length === 0}
         <EmptyState title="Merge queue empty" message={filterQuery ? 'No entries match your filter.' : 'No entries in the merge queue for this repository.'} />
       {:else}
         <table class="code-table">
@@ -211,7 +211,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredQueue() as entry}
+            {#each filteredQueue as entry}
               <tr class="table-row" onclick={() => onRowClick(entry, 'mr')} tabindex="0" role="button" aria-label="View queue entry">
                 <td class="mono">{entry.merge_request_id ?? entry.mr_id ?? '—'}</td>
                 <td>{entry.priority ?? '—'}</td>
@@ -352,7 +352,7 @@
     color: var(--color-text-secondary);
   }
 
-  .status-badge.status-open { background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.4); color: #16a34a; }
-  .status-badge.status-merged { background: rgba(99, 102, 241, 0.1); border-color: rgba(99, 102, 241, 0.4); color: #6366f1; }
-  .status-badge.status-closed { background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.4); color: #dc2626; }
+  .status-badge.status-open { background: color-mix(in srgb, var(--color-success) 10%, transparent); border-color: color-mix(in srgb, var(--color-success) 40%, transparent); color: var(--color-success); }
+  .status-badge.status-merged { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-color: color-mix(in srgb, var(--color-info) 40%, transparent); color: var(--color-info); }
+  .status-badge.status-closed { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); color: var(--color-danger); }
 </style>

@@ -87,6 +87,7 @@
 
       <Tabs {tabs} bind:active={activeTab} />
 
+      <div role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
       {#if activeTab === 'info'}
         <div class="info-grid">
           <div class="info-row">
@@ -177,6 +178,7 @@
           {/if}
         </div>
       {/if}
+      </div>
     {/if}
   </div>
 </div>
@@ -356,4 +358,5 @@
   }
 
   .link-btn:hover { opacity: 0.8; }
+  .link-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 </style>

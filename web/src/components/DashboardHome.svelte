@@ -384,6 +384,8 @@
     background: var(--color-surface-elevated);
   }
 
+  .metric-card:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
   .metric-label {
     font-size: var(--text-xs);
     font-weight: 600;
@@ -505,8 +507,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 102, 204, 0.1);
-    border: 1px solid rgba(0, 102, 204, 0.3);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
     border-radius: var(--radius);
     font-size: var(--text-xs);
     font-family: var(--font-mono);
@@ -515,8 +517,8 @@
   }
 
   .queue-item.processing {
-    background: rgba(245, 146, 27, 0.1);
-    border-color: rgba(245, 146, 27, 0.3);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
     color: var(--color-warning);
     animation: pulse 1.5s ease-in-out infinite;
   }
@@ -546,6 +548,8 @@
   .view-all:hover {
     color: var(--color-link-hover);
   }
+
+  .view-all:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   @media (max-width: 900px) {
     .metrics { grid-template-columns: repeat(2, 1fr); }
