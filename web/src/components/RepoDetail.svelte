@@ -415,7 +415,7 @@
 <div class="page">
   <div class="page-hdr">
     <div class="breadcrumb">
-      <button class="back-btn" onclick={onBack}>← Projects</button>
+      <button class="back-btn" onclick={onBack} aria-label="Back to projects list">← Projects</button>
       <span class="sep">/</span>
       <h1 class="repo-name">{repo.name}</h1>
     </div>
@@ -425,14 +425,14 @@
   <div class="clone-bar">
     <span class="clone-label">Clone</span>
     <code class="clone-url-text">{cloneUrl}</code>
-    <button class="copy-btn" onclick={copyCloneUrl}>{cloneCopied ? 'Copied!' : 'Copy'}</button>
+    <button class="copy-btn" onclick={copyCloneUrl} aria-label="Copy clone URL">{cloneCopied ? 'Copied!' : 'Copy'}</button>
   </div>
 
   <div class="tabs-wrap">
     <Tabs {tabs} bind:active={activeTab} />
   </div>
 
-  <div class="tab-content">
+  <div class="tab-content" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
     {#if error}
       <div class="error-msg">Error: {error}</div>
     {:else if loading && (activeTab === 'branches' || activeTab === 'commits')}
@@ -540,7 +540,7 @@
         >
           {#snippet children()}
             {#each mrs as mr (mr.id)}
-              <tr class="clickable" onclick={() => onSelectMr(mr)}>
+              <tr class="clickable" onclick={() => onSelectMr(mr)} tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectMr(mr); } }}>
                 <td><Badge value={mr.status} /></td>
                 <td class="mr-title-cell">{mr.title}</td>
                 <td class="secondary-cell">{mr.author ?? '—'}</td>
@@ -734,6 +734,7 @@
                       class="gate-del-btn"
                       onclick={() => deleteGate(gate.id)}
                       disabled={deletingGateId === gate.id}
+                      aria-label="Delete gate"
                     >
                       {deletingGateId === gate.id ? '…' : 'Delete'}
                     </button>
@@ -1344,8 +1345,8 @@
     padding: var(--space-4);
   }
   .gate-del-btn {
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.3);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius-sm);
     color: var(--color-danger);
     cursor: pointer;

@@ -291,6 +291,7 @@
   // ── Pan/zoom handlers ──────────────────────────────────────────────────────
   function onMouseDown(e) {
     if (e.button !== 0) return;
+    closeContextMenu();
     if (e.target.closest('.graph-node')) return;
     isPanning = true;
     panStart = { x: e.clientX, y: e.clientY };
@@ -517,9 +518,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="canvas-wrap" onclick={closeContextMenu}>
+<div class="canvas-wrap">
   {#if !nodes.length}
     <EmptyState title="No graph data" message="Select a repository to view its knowledge graph. Graph nodes are extracted on push." />
   {:else if showListFallback}
@@ -858,8 +857,8 @@
     display: flex; align-items: center; gap: var(--space-2);
     padding: var(--space-2) var(--space-4); font-size: var(--text-xs); flex-shrink: 0;
   }
-  .threshold-banner.info { background: rgba(59,130,246,0.1); border-bottom: 1px solid rgba(59,130,246,0.3); color: #60a5fa; }
-  .threshold-banner.warning { background: rgba(234,179,8,0.1); border-bottom: 1px solid rgba(234,179,8,0.3); color: #fbbf24; }
+  .threshold-banner.info { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent); color: #60a5fa; }
+  .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: #fbbf24; }
   .banner-action {
     margin-left: var(--space-2); background: transparent; border: 1px solid currentColor; color: inherit;
     border-radius: var(--radius-sm); padding: 1px 6px; font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
@@ -867,8 +866,8 @@
   .banner-action:hover { opacity: 1; }
   .explanation-banner {
     display: flex; align-items: flex-start; gap: var(--space-2);
-    padding: var(--space-2) var(--space-4); background: rgba(167,139,250,0.06);
-    border-bottom: 1px solid rgba(167,139,250,0.2); font-size: var(--text-xs);
+    padding: var(--space-2) var(--space-4); background: color-mix(in srgb, var(--color-info) 6%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-info) 20%, transparent); font-size: var(--text-xs);
     color: var(--color-text-secondary); flex-shrink: 0; font-style: italic;
   }
   .list-fallback-wrap { flex: 1; overflow: auto; background: var(--color-surface); }
@@ -898,8 +897,8 @@
     font-family: var(--font-body); transition: border-color var(--transition-fast), color var(--transition-fast);
   }
   .tool-btn:hover { border-color: var(--color-primary); color: var(--color-text); }
-  .tool-btn.active { background: rgba(34,197,94,0.12); border-color: #22c55e; color: #22c55e; }
-  .risk-toggle.active { background: rgba(234,179,8,0.12); border-color: #eab308; color: #eab308; }
+  .tool-btn.active { background: color-mix(in srgb, var(--color-success) 12%, transparent); border-color: #22c55e; color: #22c55e; }
+  .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: #eab308; color: #eab308; }
 
   .layout-switcher {
     display: flex; align-items: center; gap: 2px;
@@ -949,7 +948,7 @@
   .ctx-menu {
     position: fixed; z-index: 1000; background: var(--color-surface-elevated, #1e293b);
     border: 1px solid var(--color-border-strong, #334155); border-radius: var(--radius, 4px);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4); min-width: 160px; padding: 4px 0;
+    box-shadow: 0 8px 24px color-mix(in srgb, black 40%, transparent); min-width: 160px; padding: 4px 0;
     font-size: var(--text-sm, 13px); font-family: var(--font-body);
   }
   .ctx-item {
@@ -964,7 +963,7 @@
 
   .spec-legend {
     position: absolute; bottom: var(--space-4); left: var(--space-4);
-    background: rgba(15,23,42,0.9); border: 1px solid var(--color-border);
+    background: color-mix(in srgb, black 90%, transparent); border: 1px solid var(--color-border);
     border-radius: var(--radius); padding: var(--space-3); display: flex;
     flex-direction: column; gap: var(--space-2); min-width: 160px;
     backdrop-filter: blur(4px); pointer-events: none;
@@ -1011,7 +1010,7 @@
   .sort-col:hover { color: var(--color-text); }
   .risk-row { cursor: pointer; border-bottom: 1px solid var(--color-border); transition: background var(--transition-fast); }
   .risk-row:hover { background: var(--color-surface-elevated); }
-  .risk-row.highlighted { background: rgba(234,179,8,0.08); }
+  .risk-row.highlighted { background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
   .risk-row td { padding: var(--space-1) var(--space-2); vertical-align: middle; color: var(--color-text); }
   .risk-name { font-family: var(--font-mono); font-size: var(--text-xs); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .risk-score-chip { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: var(--radius-sm); border: 1px solid transparent; }
