@@ -919,7 +919,7 @@
 
 <!-- TRUST CONFIRM MODAL -->
 {#if trustConfirmModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={cancelTrustChange}></div>
+  <div class="modal-backdrop" role="presentation" onclick={cancelTrustChange}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Change Trust Level"
     onkeydown={(e) => { if (e.key === 'Escape') cancelTrustChange(); }}>
     <h3 class="modal-title">Change Trust Level</h3>
@@ -935,7 +935,7 @@
 
 <!-- BUDGET MODAL -->
 {#if budgetModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => budgetModal = false}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => budgetModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Adjust Budget Limit"
     onkeydown={(e) => { if (e.key === 'Escape') budgetModal = false; }}>
     <h3 class="modal-title">Adjust Budget Limit</h3>
@@ -954,7 +954,7 @@
 
 <!-- ADD MEMBER MODAL -->
 {#if newMemberModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => newMemberModal = false}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => newMemberModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Member"
     onkeydown={(e) => { if (e.key === 'Escape') newMemberModal = false; }}>
     <h3 class="modal-title">Add Member</h3>
@@ -975,7 +975,7 @@
 
 <!-- POLICY EDITOR MODAL -->
 {#if policyModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => policyModal = null}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => policyModal = null}></div>
   <div class="modal modal-lg" role="dialog" aria-modal="true" tabindex="-1" aria-label="Policy Editor"
     onkeydown={(e) => { if (e.key === 'Escape') policyModal = null; }}>
     <h3 class="modal-title">{policyModal.mode === 'create' ? 'New Policy' : 'Edit Policy'}</h3>
@@ -1024,7 +1024,7 @@
 
 <!-- DESTRUCTIVE ACTION CONFIRM -->
 {#if deleteConfirmModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => deleteConfirmModal = null}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => deleteConfirmModal = null}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
     aria-label={deleteConfirmModal.kind === 'member' ? 'Remove Member' : deleteConfirmModal.kind === 'gate' ? 'Remove Gate' : deleteConfirmModal.kind === 'compute' ? 'Delete Compute Target' : 'Delete Policy'}
     onkeydown={(e) => { if (e.key === 'Escape') deleteConfirmModal = null; }}>
@@ -1049,7 +1049,7 @@
 
 <!-- NEW WORKSPACE MODAL -->
 {#if newWorkspaceModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => newWorkspaceModal = false}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => newWorkspaceModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="New Workspace"
     onkeydown={(e) => { if (e.key === 'Escape') newWorkspaceModal = false; }}>
     <h3 class="modal-title">New Workspace</h3>
@@ -1072,7 +1072,7 @@
 
 <!-- GATE MODAL -->
 {#if gateModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => gateModal = false}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => gateModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Gate"
     onkeydown={(e) => { if (e.key === 'Escape') gateModal = false; }}>
     <h3 class="modal-title">Add Gate</h3>
@@ -1099,7 +1099,7 @@
 
 <!-- COMPUTE MODAL -->
 {#if computeModal}
-  <div class="modal-backdrop" aria-hidden="true" onclick={() => computeModal = false}></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => computeModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Compute Target"
     onkeydown={(e) => { if (e.key === 'Escape') computeModal = false; }}>
     <h3 class="modal-title">Add Compute Target</h3>
@@ -1188,8 +1188,8 @@
     gap: var(--space-2);
     color: var(--color-danger);
     font-size: var(--text-sm);
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.3);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
     padding: var(--space-3) var(--space-4);
   }
@@ -1281,7 +1281,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-surface, #fff);
     cursor: pointer;
     font-size: var(--text-sm);
     padding: var(--space-3) var(--space-4);
@@ -1310,8 +1310,8 @@
   .secondary-btn.small { font-size: var(--text-xs); padding: var(--space-1) var(--space-2); }
 
   .kill-btn {
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.3);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
     color: var(--color-danger);
     cursor: pointer;
@@ -1321,7 +1321,7 @@
     transition: background var(--transition-fast);
     white-space: nowrap;
   }
-  .kill-btn:hover:not(:disabled) { background: rgba(240, 86, 29, 0.2); }
+  .kill-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
   .kill-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .kill-btn.small { font-size: var(--text-xs); padding: var(--space-1) var(--space-2); }
 
@@ -1348,14 +1348,19 @@
     font-family: var(--font-body);
     transition: border-color var(--transition-fast);
   }
-  .filter-input:focus { outline: none; border-color: var(--color-link); }
+  .filter-input:focus:not(:focus-visible) { outline: none; }
+  .filter-input:focus-visible {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
   .filter-input.full-width { width: 100%; box-sizing: border-box; }
   .textarea { resize: vertical; min-height: 72px; }
 
   /* Danger zone */
   .danger-zone {
-    background: rgba(240, 86, 29, 0.05);
-    border: 1px solid rgba(240, 86, 29, 0.25);
+    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
     border-radius: var(--radius-lg);
     padding: var(--space-6);
     display: flex;
@@ -1401,7 +1406,7 @@
     transition: border-color var(--transition-fast), background var(--transition-fast);
   }
   .trust-option:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .trust-option.selected { border-color: var(--color-primary); background: rgba(238, 0, 0, 0.04); }
+  .trust-option.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
   .trust-radio {
     width: 18px;
     height: 18px;
@@ -1444,16 +1449,16 @@
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
   }
-  .trust-badge.trust-supervised { background: rgba(94, 64, 190, 0.15); color: var(--color-blocked); }
-  .trust-badge.trust-guided     { background: rgba(77, 176, 255, 0.15); color: var(--color-link); }
-  .trust-badge.trust-autonomous { background: rgba(99, 153, 61, 0.15);  color: var(--color-success); }
-  .trust-badge.trust-custom     { background: rgba(245, 146, 27, 0.15); color: var(--color-warning); }
+  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); }
+  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .trust-badge.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
+  .trust-badge.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 
   /* Members */
   .member-row { display: flex; align-items: center; gap: var(--space-3); }
   .member-avatar {
     width: 28px; height: 28px; border-radius: 50%;
-    background: var(--color-primary); color: #fff;
+    background: var(--color-primary); color: var(--color-surface, #fff);
     display: flex; align-items: center; justify-content: center;
     font-size: var(--text-xs); font-weight: 700; flex-shrink: 0;
   }
@@ -1482,8 +1487,8 @@
     border-radius: var(--radius-sm);
   }
   .policy-prefix-badge.builtin { background: var(--color-bg); color: var(--color-text-muted); border: 1px solid var(--color-border); }
-  .policy-prefix-badge.trust   { background: rgba(77, 176, 255, 0.15); color: var(--color-link); }
-  .policy-prefix-badge.custom  { background: rgba(99, 153, 61, 0.15);  color: var(--color-success); }
+  .policy-prefix-badge.trust   { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .policy-prefix-badge.custom  { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
   .policy-row {
     display: flex;
     align-items: center;
@@ -1525,9 +1530,9 @@
   .simulator-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-secondary); margin: 0; }
   .simulator-row { display: flex; align-items: flex-end; gap: var(--space-3); flex-wrap: wrap; }
   .simulate-result { font-size: var(--text-sm); padding: var(--space-3) var(--space-3); border-radius: var(--radius); }
-  .simulate-result.allow { background: rgba(99, 153, 61, 0.15); color: var(--color-success); }
-  .simulate-result.deny  { background: rgba(240, 86, 29, 0.1);  color: var(--color-danger); }
-  .simulate-result.error { background: rgba(240, 86, 29, 0.1);  color: var(--color-danger); }
+  .simulate-result.allow { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+  .simulate-result.deny  { background: color-mix(in srgb, var(--color-danger) 10%, transparent);  color: var(--color-danger); }
+  .simulate-result.error { background: color-mix(in srgb, var(--color-danger) 10%, transparent);  color: var(--color-danger); }
 
   /* Chip multi-select */
   .chip-group { display: flex; flex-wrap: wrap; gap: var(--space-2); }
@@ -1543,13 +1548,13 @@
     transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   }
   .chip:hover { border-color: var(--color-border-strong); color: var(--color-text); }
-  .chip.selected { background: rgba(238, 0, 0, 0.1); border-color: var(--color-primary); color: var(--color-primary); }
+  .chip.selected { background: color-mix(in srgb, var(--color-primary) 10%, transparent); border-color: var(--color-primary); color: var(--color-primary); }
 
   /* Modal */
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--color-surface, #0a0a0a) 60%, transparent);
     z-index: 100;
   }
   .modal {

@@ -359,7 +359,7 @@
     width: 48px;
     height: 48px;
     border-radius: 50%;
-    background: rgba(238, 0, 0, 0.15);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
     color: var(--color-primary);
     font-weight: 700;
     font-size: var(--text-xl);
@@ -390,7 +390,7 @@
     top: -4px;
     right: -6px;
     background: var(--color-danger);
-    color: #fff;
+    color: var(--color-surface, #fff);
     border-radius: 999px;
     font-size: 9px;
     padding: 0 4px;
@@ -419,7 +419,12 @@
     font-size: var(--text-sm);
     font-family: var(--font-body);
   }
-  .field-input:focus { outline: none; border-color: var(--color-primary); }
+  .field-input:focus:not(:focus-visible) { outline: none; }
+  .field-input:focus-visible {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
 
   .edit-actions { display: flex; gap: var(--space-2); align-items: center; }
 
@@ -428,7 +433,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-surface, #fff);
     font-size: var(--text-sm);
     cursor: pointer;
   }
