@@ -134,8 +134,7 @@ impl PromptRepository for SqliteStorage {
             if let Some(existing_row) = existing {
                 // Update existing.
                 diesel::update(
-                    prompt_templates::table
-                        .filter(prompt_templates::id.eq(&existing_row.id)),
+                    prompt_templates::table.filter(prompt_templates::id.eq(&existing_row.id)),
                 )
                 .set((
                     prompt_templates::content.eq(&content),
@@ -204,8 +203,7 @@ impl PromptRepository for SqliteStorage {
             if let Some(existing_row) = existing {
                 // Update existing.
                 diesel::update(
-                    prompt_templates::table
-                        .filter(prompt_templates::id.eq(&existing_row.id)),
+                    prompt_templates::table.filter(prompt_templates::id.eq(&existing_row.id)),
                 )
                 .set((
                     prompt_templates::content.eq(&content),
@@ -246,11 +244,7 @@ impl PromptRepository for SqliteStorage {
         .await?
     }
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()> {
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.as_str().to_string();
         let fkey = function_key.to_string();
@@ -322,7 +316,10 @@ mod tests {
         let tmpl = result.expect("should fall back to tenant default");
         assert_eq!(tmpl.function_key, "graph-predict");
         assert_eq!(tmpl.content, "Tenant default");
-        assert_eq!(tmpl.workspace_id, None, "tenant default has no workspace_id");
+        assert_eq!(
+            tmpl.workspace_id, None,
+            "tenant default has no workspace_id"
+        );
     }
 
     #[tokio::test]

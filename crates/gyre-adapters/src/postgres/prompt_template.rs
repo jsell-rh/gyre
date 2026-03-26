@@ -132,8 +132,7 @@ impl PromptRepository for PgStorage {
 
             if let Some(existing_row) = existing {
                 diesel::update(
-                    prompt_templates::table
-                        .filter(prompt_templates::id.eq(&existing_row.id)),
+                    prompt_templates::table.filter(prompt_templates::id.eq(&existing_row.id)),
                 )
                 .set((
                     prompt_templates::content.eq(&content),
@@ -199,8 +198,7 @@ impl PromptRepository for PgStorage {
 
             if let Some(existing_row) = existing {
                 diesel::update(
-                    prompt_templates::table
-                        .filter(prompt_templates::id.eq(&existing_row.id)),
+                    prompt_templates::table.filter(prompt_templates::id.eq(&existing_row.id)),
                 )
                 .set((
                     prompt_templates::content.eq(&content),
@@ -240,11 +238,7 @@ impl PromptRepository for PgStorage {
         .await?
     }
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()> {
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.as_str().to_string();
         let fkey = function_key.to_string();

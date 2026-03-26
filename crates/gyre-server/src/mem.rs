@@ -2780,10 +2780,9 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
     ) -> Result<Option<gyre_domain::PromptTemplate>> {
         let guard = self.templates.read().await;
         // Workspace override first
-        if let Some(t) = guard
-            .iter()
-            .find(|t| t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key)
-        {
+        if let Some(t) = guard.iter().find(|t| {
+            t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key
+        }) {
             return Ok(Some(t.clone()));
         }
         // Tenant default
@@ -2869,11 +2868,7 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
         Ok(tmpl)
     }
 
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()> {
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
         let mut guard = self.templates.write().await;
         guard.retain(|t| {
             !(t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key)

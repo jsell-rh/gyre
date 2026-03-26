@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{LLM_FUNCTION_KEYS, UserRole};
+use gyre_domain::{UserRole, LLM_FUNCTION_KEYS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -126,7 +126,9 @@ pub async fn upsert_workspace_prompt(
         )));
     }
     if body.content.trim().is_empty() {
-        return Err(ApiError::BadRequest("content must not be empty".to_string()));
+        return Err(ApiError::BadRequest(
+            "content must not be empty".to_string(),
+        ));
     }
 
     let ws_id = Id::new(&workspace_id);
@@ -190,9 +192,7 @@ pub async fn list_tenant_defaults(
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<PromptTemplateResponse>>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
-        return Err(ApiError::Forbidden(
-            "admin role required".to_string(),
-        ));
+        return Err(ApiError::Forbidden("admin role required".to_string()));
     }
 
     // Use a sentinel workspace ID that will never match a workspace override;
@@ -227,9 +227,7 @@ pub async fn upsert_tenant_default(
     Json(body): Json<UpsertPromptBody>,
 ) -> Result<(StatusCode, Json<PromptTemplateResponse>), ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
-        return Err(ApiError::Forbidden(
-            "admin role required".to_string(),
-        ));
+        return Err(ApiError::Forbidden("admin role required".to_string()));
     }
     if !LLM_FUNCTION_KEYS.contains(&function_key.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -239,7 +237,9 @@ pub async fn upsert_tenant_default(
         )));
     }
     if body.content.trim().is_empty() {
-        return Err(ApiError::BadRequest("content must not be empty".to_string()));
+        return Err(ApiError::BadRequest(
+            "content must not be empty".to_string(),
+        ));
     }
 
     let caller_id = Id::new(&auth.agent_id);

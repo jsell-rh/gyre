@@ -33,9 +33,5 @@ pub trait PromptRepository: Send + Sync {
     ) -> Result<PromptTemplate>;
 
     /// Delete workspace override — reverts to tenant/hardcoded default.
-    async fn delete_workspace_override(
-        &self,
-        workspace_id: &Id,
-        function_key: &str,
-    ) -> Result<()>;
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()>;
 }

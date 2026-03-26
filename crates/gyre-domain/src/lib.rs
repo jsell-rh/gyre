@@ -64,7 +64,7 @@ pub use policy::{
     builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
     PolicyDecision, PolicyEffect, PolicyScope,
 };
-pub use prompt_template::{LLM_FUNCTION_KEYS, PromptTemplate};
+pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
 pub use repository::Repository;
 pub use review::{Review, ReviewComment, ReviewDecision};
