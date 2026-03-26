@@ -8,17 +8,20 @@
 </script>
 
 {#if lines > 1}
-  <div class="skeleton-lines">
+  <div class="skeleton-lines" role="status" aria-label="Loading">
     {#each Array(lines) as _, i}
       <div
         class="skeleton"
         style="width:{i === lines - 1 ? '70%' : '100%'}; height:{height}; border-radius:{radius}"
+        aria-hidden="true"
       ></div>
     {/each}
   </div>
 {:else}
   <div
     class="skeleton"
+    role="status"
+    aria-label="Loading"
     style="width:{width}; height:{height}; border-radius:{radius}"
   ></div>
 {/if}
@@ -45,5 +48,11 @@
   @keyframes shimmer {
     from { background-position: 200% 0; }
     to   { background-position: -200% 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton {
+      animation: none;
+    }
   }
 </style>

@@ -25,7 +25,7 @@
 
 </script>
 
-<div
+<main
   class="content-area"
   class:full-width={effectiveLayout === 'full-width'}
   class:split={effectiveLayout === 'split'}
@@ -41,7 +41,7 @@
       <DetailPanel entity={detailPanel.entity} onclose={onclosePanel} />
     </aside>
   {/if}
-</div>
+</main>
 
 <style>
   .content-area {
@@ -102,7 +102,7 @@
     flex: 0 0 40%;
     max-width: 40%;
     overflow: hidden;
-    animation: slideInRight 200ms ease-out;
+    animation: slideInRight 150ms ease-out;
   }
 
   @keyframes slideInRight {
@@ -113,6 +113,16 @@
     to {
       transform: translateX(0);
       opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .detail-panel-container {
+      animation: none;
+    }
+
+    .content-main {
+      transition: none;
     }
   }
 </style>

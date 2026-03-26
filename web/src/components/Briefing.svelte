@@ -133,7 +133,9 @@
     } catch (e) {
       // Graceful degradation: show empty state on 404 / network error
       briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
-      if (e.message && !e.message.includes('404')) {
+      if (e.message && e.message.includes('404')) {
+        error = 'Briefing data not yet available';
+      } else if (e.message) {
         error = e.message;
       }
     } finally {
@@ -232,7 +234,11 @@
 
     {#if error}
       <div class="error-banner" role="alert" data-testid="error-banner">
-        Could not load live briefing: {error}. Showing cached data.
+        {#if !isEmpty(briefing)}
+          Could not load live briefing: {error}. Showing cached data.
+        {:else}
+          Unable to load briefing data: {error}. Check your connection.
+        {/if}
       </div>
     {/if}
 
@@ -610,9 +616,17 @@
     background-size: 10px;
   }
 
-  .range-select:focus {
+  .range-select:focus:not(:focus-visible) {
     outline: none;
+  }
+
+  .range-select:focus {
     border-color: var(--color-primary);
+  }
+
+  .range-select:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .date-input {
@@ -629,7 +643,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-sm);
@@ -823,6 +837,13 @@
   .action-btn.danger:hover {
     background: color-mix(in srgb, var(--color-danger) 25%, transparent);
     border-color: var(--color-danger);
+  }
+
+  .action-btn:focus-visible,
+  .apply-btn:focus-visible,
+  .entity-ref:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .exceptions-section {
