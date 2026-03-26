@@ -15,6 +15,7 @@ pub mod procfs_monitor;
 
 pub(crate) mod health;
 pub mod jobs;
+pub mod llm_rate_limit;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -303,6 +304,9 @@ pub struct AppState {
     /// Debounce cache for last-seen middleware: (user_id, workspace_id) -> last upsert Instant.
     pub last_seen_debounce:
         Arc<std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>>,
+    /// Per-(user_id, workspace_id) sliding-window rate limiter for LLM endpoints.
+    /// Enforces 10 requests/60 s per user per workspace (ui-layout.md §2).
+    pub llm_rate_limiter: Arc<tokio::sync::Mutex<llm_rate_limit::LlmRateLimiterMap>>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -846,6 +850,7 @@ pub fn build_state(
             mem::MemUserWorkspaceStateRepository::default()
         ),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     })
 }
 
@@ -916,6 +921,21 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
             "registered default container compute target (M25)"
         );
     }
+}
+
+/// Spawn a background task that evicts stale LLM rate-limiter entries every 60 seconds.
+///
+/// Prevents unbounded map growth: entries for users who have been idle for a full window
+/// are removed. Safe to call once on server startup.
+pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
+    use llm_rate_limit::{evict_stale_entries, LLM_WINDOW_SECS};
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(LLM_WINDOW_SECS)).await;
+            let mut limiter = state.llm_rate_limiter.lock().await;
+            evict_stale_entries(&mut limiter, LLM_WINDOW_SECS);
+        }
+    });
 }
 
 /// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).

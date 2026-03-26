@@ -2540,5 +2540,6 @@ pub fn test_state() -> Arc<crate::AppState> {
         agent_inbox_max: 1000,
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     })
 }
