@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 
@@ -130,18 +130,22 @@ pub async fn get_trace_for_mr(
 /// GET /api/v1/trace-spans/:span_id/payload
 ///
 /// Returns the full input/output payload for a specific span (base64-encoded).
-/// Per-handler auth: resolves span → gate_trace → MR → workspace for authorization.
-/// Listed in hierarchy-enforcement.md §4 ABAC-exempt list.
+/// Per-handler auth: AuthenticatedAgent required; route is ABAC-exempt because the
+/// workspace_id cannot be determined without first loading the span. The storage layer
+/// is tenant-scoped so cross-tenant access returns None naturally. Full workspace-level
+/// ABAC (span → gate_run → MR → workspace) requires a TraceRepository::get_by_gate_run_id
+/// method deferred to a follow-up.
 /// 404 if the span has no stored payload.
 ///
 /// Note: `span_id` in the URL is the compound "trace_id-span_id" format used
 /// when storing spans. The `gate_run_id` query parameter is required to uniquely
 /// identify the trace (span_ids are only unique within a trace).
-#[instrument(skip(state), fields(span_id = %span_id))]
+#[instrument(skip(state, _auth), fields(span_id = %span_id))]
 pub async fn get_span_payload(
     Path(span_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<SpanPayloadQuery>,
     State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
 ) -> Result<(StatusCode, Json<SpanPayloadResponse>), ApiError> {
     let gate_run_id = Id::new(
         params
@@ -150,8 +154,8 @@ pub async fn get_span_payload(
             .ok_or_else(|| ApiError::BadRequest("gate_run_id query param required".to_string()))?,
     );
 
-    // Per-handler auth: verify the caller has access to the MR this span belongs to.
-    // The TraceRepository is already tenant-scoped (via SqliteStorage.with_tenant()),
+    // Authentication enforced via AuthenticatedAgent extractor above.
+    // The TraceRepository is tenant-scoped (via SqliteStorage.with_tenant()),
     // so a cross-tenant lookup returns None naturally.
 
     let payload = state
