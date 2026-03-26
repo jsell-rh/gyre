@@ -22,6 +22,7 @@ pub mod federation;
 pub mod gates;
 pub mod graph;
 pub mod jj;
+pub mod llm_prompts;
 pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
@@ -544,6 +545,25 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:workspace_id/presence",
             get(workspaces::get_workspace_presence),
+        )
+        // LLM prompt templates (Slice 2)
+        .route(
+            "/api/v1/workspaces/:id/llm/prompts",
+            get(llm_prompts::list_workspace_prompts),
+        )
+        .route(
+            "/api/v1/workspaces/:id/llm/prompts/:function",
+            get(llm_prompts::get_effective_prompt)
+                .put(llm_prompts::upsert_workspace_prompt)
+                .delete(llm_prompts::delete_workspace_prompt),
+        )
+        .route(
+            "/api/v1/admin/llm/prompts",
+            get(llm_prompts::list_tenant_defaults),
+        )
+        .route(
+            "/api/v1/admin/llm/prompts/:function",
+            put(llm_prompts::upsert_tenant_default),
         )
         // Meta-spec blast radius (M32)
         .route(

@@ -2715,6 +2715,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         // Use a non-existent path that unit tests will never actually access via real git.
         // NoopGitOps does not create files; commits_since() on a missing path returns 0.
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
+        prompt_templates: Arc::new(MemPromptRepository::default()),
     })
 }
 
@@ -2759,6 +2760,119 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
 
     async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
         self.store.lock().await.remove(mr_id.as_str());
+        Ok(())
+    }
+}
+
+// ── In-memory PromptRepository ────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemPromptRepository {
+    templates: Arc<tokio::sync::RwLock<Vec<gyre_domain::PromptTemplate>>>,
+}
+
+#[async_trait]
+impl gyre_ports::PromptRepository for MemPromptRepository {
+    async fn get_effective(
+        &self,
+        workspace_id: &Id,
+        function_key: &str,
+    ) -> Result<Option<gyre_domain::PromptTemplate>> {
+        let guard = self.templates.read().await;
+        // Workspace override first
+        if let Some(t) = guard.iter().find(|t| {
+            t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key
+        }) {
+            return Ok(Some(t.clone()));
+        }
+        // Tenant default
+        Ok(guard
+            .iter()
+            .find(|t| t.workspace_id.is_none() && t.function_key == function_key)
+            .cloned())
+    }
+
+    async fn list_by_workspace(
+        &self,
+        workspace_id: &Id,
+    ) -> Result<Vec<gyre_domain::PromptTemplate>> {
+        let guard = self.templates.read().await;
+        Ok(guard
+            .iter()
+            .filter(|t| t.workspace_id.as_ref() == Some(workspace_id))
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_workspace(
+        &self,
+        workspace_id: &Id,
+        function_key: &str,
+        content: &str,
+        created_by: &Id,
+    ) -> Result<gyre_domain::PromptTemplate> {
+        let mut guard = self.templates.write().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Some(existing) = guard.iter_mut().find(|t| {
+            t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key
+        }) {
+            existing.content = content.to_string();
+            existing.updated_at = now;
+            return Ok(existing.clone());
+        }
+        let tmpl = gyre_domain::PromptTemplate {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            workspace_id: Some(workspace_id.clone()),
+            function_key: function_key.to_string(),
+            content: content.to_string(),
+            created_by: created_by.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        guard.push(tmpl.clone());
+        Ok(tmpl)
+    }
+
+    async fn upsert_tenant_default(
+        &self,
+        function_key: &str,
+        content: &str,
+        created_by: &Id,
+    ) -> Result<gyre_domain::PromptTemplate> {
+        let mut guard = self.templates.write().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Some(existing) = guard
+            .iter_mut()
+            .find(|t| t.workspace_id.is_none() && t.function_key == function_key)
+        {
+            existing.content = content.to_string();
+            existing.updated_at = now;
+            return Ok(existing.clone());
+        }
+        let tmpl = gyre_domain::PromptTemplate {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            workspace_id: None,
+            function_key: function_key.to_string(),
+            content: content.to_string(),
+            created_by: created_by.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        guard.push(tmpl.clone());
+        Ok(tmpl)
+    }
+
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
+        let mut guard = self.templates.write().await;
+        guard.retain(|t| {
+            !(t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key)
+        });
         Ok(())
     }
 }

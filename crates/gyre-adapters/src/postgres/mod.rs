@@ -25,6 +25,7 @@ pub mod meta_spec_set;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
+pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;

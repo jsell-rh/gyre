@@ -740,3 +740,15 @@ diesel::table! {
         delta_json -> Text,
     }
 }
+
+diesel::table! {
+    prompt_templates (id) {
+        id -> Text,
+        workspace_id -> Nullable<Text>,
+        function_key -> Text,
+        content -> Text,
+        created_by -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
