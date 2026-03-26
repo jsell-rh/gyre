@@ -399,6 +399,8 @@ pub async fn git_receive_pack(
     let attestation_level_clone = attestation_level.to_string();
     let default_branch_clone = default_branch;
     let conversation_turn_clone = conversation_turn;
+    let push_tenant_id = auth.tenant_id.clone();
+    let push_workspace_id = repo_workspace_id.clone();
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
@@ -482,13 +484,48 @@ pub async fn git_receive_pack(
             )
             .await;
             // Knowledge graph: extract Rust symbols and architecture (M30b).
+            // When the push is from an agent with a task, enrich the delta with
+            // agent context and run a post-extraction divergence check (HSI §8).
             let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            let agent_push_ctx = if !agent_id.is_empty() {
+                // Look up the agent's current task to obtain the spec_ref.
+                let spec_ref = if let Some(ref tid) = task_id_clone {
+                    state_clone
+                        .tasks
+                        .find_by_id(&gyre_common::Id::new(tid.clone()))
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|t| t.spec_path)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if spec_ref.is_empty() {
+                    None
+                } else {
+                    Some(crate::graph_extraction::AgentPushContext {
+                        agent_id: agent_id.clone(),
+                        spec_ref,
+                        workspace_id: push_workspace_id.to_string(),
+                        tenant_id: push_tenant_id.clone(),
+                    })
+                }
+            } else {
+                None
+            };
+            let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+                notification_repo: state_clone.notifications.as_ref(),
+                membership_repo: state_clone.workspace_memberships.as_ref(),
+            });
             crate::graph_extraction::extract_and_store_graph(
                 &repo_path_clone,
                 &repo_id_clone,
                 &update.new_sha,
                 state_clone.graph_store.as_ref(),
                 &git_bin,
+                agent_push_ctx,
+                divergence_ports,
             )
             .await;
         }
