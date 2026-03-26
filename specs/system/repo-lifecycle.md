@@ -118,7 +118,7 @@ Response 201:
 4. If the repo has a `specs/manifest.yaml`, parses and registers specs
 5. If no manifest, creates an empty one on the default branch
 
-**API:** `POST /api/v1/repos/mirror` (existing endpoint)
+**API:** `POST /api/v1/repos/mirror` (exists in code, not previously specced)
 
 **Mirror sync:** `POST /api/v1/repos/:id/mirror/sync` triggers an immediate sync. The periodic sync job also runs on the configured interval.
 
@@ -189,7 +189,7 @@ Archiving a repo makes it read-only. No new agents can be spawned, no new MRs cr
 1. Repo status set to `Archived`
 2. All active agents in the repo are gracefully stopped (60-second grace period)
 3. All open MRs are closed with reason "Repo archived"
-4. All non-terminal tasks (`InProgress` and `Backlog`) are cancelled
+4. All non-terminal tasks (`InProgress`, `Backlog`, and `Blocked`) are cancelled
 5. Git push hook rejects new pushes
 6. Agent spawn rejects new agents scoped to this repo
 7. Repo appears grayed out in Explorer and repo lists
@@ -281,7 +281,7 @@ pub struct Repository {
 |---|---|
 | `platform-model.md` §Repository | Add `description`, `status`, `updated_at` fields to `Repository` struct. Add `RepoStatus` enum. |
 | `human-system-interface.md` §1 Admin row | Add "Repos" to workspace-scope Admin tabs. Clarify repo creation lives here. |
-| `hierarchy-enforcement.md` §4 | Add `PUT /api/v1/repos/:id`, `DELETE /api/v1/repos/:id`, `POST /api/v1/repos/:id/archive`, `POST /api/v1/repos/:id/unarchive` to route table with ABAC resource mappings. |
+| `hierarchy-enforcement.md` §4 | Add `PUT /api/v1/repos/:id`, `DELETE /api/v1/repos/:id`, `POST /api/v1/repos/:id/archive`, `POST /api/v1/repos/:id/unarchive`, `POST /api/v1/repos/mirror`, `POST /api/v1/repos/:id/mirror/sync` to route table with ABAC resource mappings. Archive/unarchive use `action_override: "archive"` (same action for both — same privilege level controls both operations). |
 
 **Depends on:**
 - `platform-model.md` — Repository struct, workspace hierarchy

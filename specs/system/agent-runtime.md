@@ -38,7 +38,7 @@ Both are agents with built-in personas (`workspace-orchestrator`, `repo-orchestr
 
 ### Phase 2: Agent Spawn
 
-For each task, the repo orchestrator spawns a worker agent via the `agent.spawn` MCP tool (per `platform-model.md` §4's rule that all agent-to-server interaction is via MCP). This tool wraps `POST /api/v1/agents/spawn` internally. **Amendment to `platform-model.md` §4 MCP tools:** add `agent.spawn` (scope: workspace) — spawns a new agent for a task. The server:
+For each task, the repo orchestrator spawns a worker agent via the `agent.spawn` MCP tool (per `platform-model.md` §4's rule that all agent-to-server interaction is via MCP). This tool wraps `POST /api/v1/agents/spawn` internally. **Amendment to `platform-model.md` §4 MCP tools:** add `agent.spawn` (scope: repo) — spawns a new agent for a task within the caller's repo scope. The repo orchestrator's repo-scoped JWT is sufficient since worker agents are spawned within the same repo. The workspace orchestrator (workspace-scoped JWT) can also call `agent.spawn` for cross-repo operations. The server:
 
 1. Creates the agent record (`Active` status). **Agent status enum:** `Active` (executing), `Idle` (completed successfully), `Failed` (max iterations or spawn failure), `Stopped` (manually stopped or cascaded shutdown). Amendment to `platform-model.md` §6: define `AgentStatus` enum alongside existing `TaskStatus`.
 2. Mints an OIDC JWT (EdDSA-signed, per `platform-model.md` §1 Token Scoping) scoped to the agent's repo
@@ -55,7 +55,7 @@ The agent works autonomously:
 - Reads task details and spec refs via MCP
 - Edits files, runs tests, makes commits
 - Pushes to its branch
-- Calls `gyre_agent_complete` when done
+- Calls `agent.complete` MCP tool when done
 
 The agent has no knowledge of other agents, the merge queue, or the broader system state. It sees its task, its spec, and its repo.
 
@@ -176,7 +176,7 @@ When an agent is spawned for a task bound to a spec, the prompt set is assembled
 3. Spec-level bindings (author's explicit selections, at pinned versions)
 ```
 
-All are concatenated into the agent's system prompt context. No "concern" matching or deduplication — ordered inclusion.
+All are concatenated into the agent's system prompt context. No "concern" matching — ordered inclusion. **Deduplication:** If a required meta-spec also appears in spec-level bindings (same `meta_spec_id`), it is included only once (in the required section). The spec-level binding is treated as redundant and skipped.
 
 ### Versioning and Attestation
 
@@ -351,7 +351,7 @@ Budget is tracked per repo and aggregated to workspace. The repo-level budget (d
 | Threshold | Action | Mechanism |
 |---|---|---|
 | **80%** | Warn | `BudgetWarning` notification created (Inbox priority 7). Agents continue running. |
-| **100%** | Graceful stop | All active agents in the workspace receive a `BudgetExhausted` message in their inbox. Agents have 60 seconds to commit current work and call `agent_complete`. After 60 seconds, agents are killed via `ComputeTarget::kill_process()`. |
+| **100%** | Graceful stop | All active agents in the workspace receive a `BudgetExhausted` message in their inbox. Agents have 60 seconds to commit current work and call `agent.complete`. After 60 seconds, agents are killed via `ComputeTarget::kill_process()`. Agents that complete within the grace period are marked `Idle`. Agents killed after the grace period are marked `Stopped`. |
 | **Beyond limit** | Hard kill | `ComputeTarget::kill_process()` called immediately. Worktree preserved for recovery. No MR created. Task remains `InProgress` for human review. "Beyond limit" means the workspace budget was reduced below current usage (e.g., tenant admin lowered the tenant ceiling, or workspace admin reduced the workspace budget while agents are running). The 100% threshold handles normal exhaustion; beyond-limit handles external budget changes. |
 
 ### What's Tracked
@@ -403,7 +403,7 @@ When an agent is spawned, it receives this prompt structure:
   - MCP tool usage (available tools and their purposes)
   - Heartbeat requirement (every 60 seconds)
   - Escalation rules (when to call agent.escalate)
-  - Completion signaling (gyre_agent_complete)
+  - Completion signaling (agent.complete)
 ```
 
 The **protocol** section is system-managed and not part of the meta-spec registry. It defines how agents interact with Gyre infrastructure. Users don't edit this.
@@ -428,7 +428,7 @@ The **task context** is assembled at spawn time from the task, spec, and any gat
 | `platform-model.md` §1 Workspace | Add `compute_target_id: Option<Id>` field to Workspace struct. References a `ComputeTargetConfig` entity defined in this spec §3. |
 | `meta-spec-reconciliation.md` | Meta-spec registry model (tenant/workspace levels, `required` flag, DB-backed versioning) defined here. Reconciliation spec defers to this for registry semantics. The `PUT /api/v1/workspaces/{id}/meta-spec-set` endpoint is replaced by updating `required` flags and spec-level bindings via the meta-spec API. Reconciliation is triggered when a required meta-spec's approved version changes — the server detects specs with stale pins and creates reconciliation tasks. The `MetaSpecSnapshot` from reconciliation spec uses `content_sha` (from this spec) instead of git SHA. |
 | `platform-model.md` §2 Persona | The `Persona` struct gains `content`, `version`, `content_sha`, `required` fields from this spec. Existing fields (`slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`, `approval_status`, `approved_by`, `approved_at`) are preserved. The bootstrap persona list in `platform-model.md` §2 is superseded by the bootstrap table in this spec §2. |
-| `platform-model.md` §6 | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`. |
+| `platform-model.md` §1 or §3 Agent entity | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`. Add `status: AgentStatus` field to the Agent entity (not currently defined as a struct in platform-model — define it alongside Task/MR/Repository). |
 | `agent-gates.md` | Gate failure → Ralph loop re-spawn defined here. `agent-gates.md` retains gate type definitions and execution mechanics. `MergeAttestation` amended to include `meta_specs_used` array. |
 | `hierarchy-enforcement.md` §4 | Add compute target CRUD endpoints to route table. Add `meta_spec_versions`, `meta_spec_bindings`, `compute_targets` tables to tenant-filter configuration. |
 | `human-system-interface.md` §5 | Attestation bundle schema amended to include `meta_specs_used` array with full content SHAs. |
