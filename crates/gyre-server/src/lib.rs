@@ -348,6 +348,11 @@ pub struct AppState {
     pub repos_root: String,
     /// Prompt template repository (DB-backed, per-workspace + tenant defaults).
     pub prompt_templates: Arc<dyn gyre_ports::PromptRepository>,
+    /// LLM inference factory. None = LLM disabled (GYRE_VERTEX_PROJECT not set).
+    ///
+    /// When None, all LLM endpoints return HTTP 503 with a structured error.
+    /// Tests wire `MockLlmPortFactory` so this is always `Some(...)` in tests.
+    pub llm: Option<Arc<dyn gyre_ports::LlmPortFactory>>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -919,6 +924,27 @@ pub fn build_state(
             dyn gyre_ports::PromptRepository,
             mem::MemPromptRepository::default()
         ),
+        llm: match std::env::var("GYRE_VERTEX_PROJECT") {
+            Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
+                Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize Vertex AI LLM adapter: {e}. \
+                             LLM features are DISABLED."
+                    );
+                    None
+                }
+            },
+            Err(_) => {
+                tracing::warn!(
+                    "GYRE_VERTEX_PROJECT is not set — LLM features are DISABLED. \
+                     Endpoints POST /graph/predict, /briefing/ask, /specs/assist, \
+                     /explorer-views/generate will return HTTP 503. \
+                     Set GYRE_VERTEX_PROJECT (and GOOGLE_APPLICATION_CREDENTIALS) to enable."
+                );
+                None
+            }
+        },
     })
 }
 
