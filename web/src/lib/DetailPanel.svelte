@@ -29,6 +29,7 @@
   let activeTab = $state('info');
   let panelEl = $state(null);
   let interrogationLoading = $state(false);
+  let interrogationAgentId = $state(null);
 
   // Compute which tabs to show based on entity type.
   // Spec: ui-layout.md §2 "Detail panel tabs (contextual)"
@@ -111,8 +112,9 @@
       return;
     }
     interrogationLoading = true;
+    interrogationAgentId = null;
     try {
-      await api.spawnAgent({
+      const result = await api.spawnAgent({
         name: `interrogation-${entity.type}-${entity.id}`,
         repo_id: repoId,
         task_id: taskId,
@@ -120,6 +122,7 @@
         agent_type: 'interrogation',
         conversation_sha: conversationSha,
       });
+      interrogationAgentId = result?.agent?.id ?? null;
       toastSuccess('Interrogation agent spawned.');
     } catch (e) {
       toastError('Failed to spawn interrogation agent: ' + (e?.message ?? String(e)));
@@ -768,10 +771,14 @@
               class="start-interrogation"
               onclick={startInterrogation}
               disabled={interrogationLoading}
+              aria-describedby="ask-why-hint"
             >
-              {interrogationLoading ? 'Starting…' : 'Start interrogation'}
+              {interrogationLoading ? 'Starting…' : 'Ask Why — Spawn Review Agent'}
             </button>
-            <p class="ask-why-hint">Spawns an interrogation agent to answer questions about this entity's decision history.</p>
+            <p class="ask-why-hint" id="ask-why-hint">Spawns an interrogation agent to answer questions about this entity's decision history.</p>
+            {#if interrogationAgentId}
+              <a class="view-spawned-link" href="/explorer?detail=agent:{interrogationAgentId}">View spawned agent &rarr;</a>
+            {/if}
           {:else}
             <p class="ask-why-unavailable">Conversation unavailable — no conversation SHA recorded for this entity.</p>
           {/if}
@@ -963,6 +970,18 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin: var(--space-3) 0 0;
+  }
+
+  .view-spawned-link {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    margin-top: var(--space-2);
+  }
+
+  .view-spawned-link:hover {
+    opacity: 0.8;
   }
 
   .ask-why-unavailable {

@@ -24,6 +24,8 @@
   /* Link blue updated from #0066cc (2.96:1 — WCAG fail) to #4db0ff (7.5:1 on dark surface — WCAG AA pass) */
   --color-link:             #4db0ff;
   --color-link-hover:       #79c8ff;
+  /* Focus ring — blue (~7.5:1 contrast on dark) instead of red primary */
+  --color-focus:            #4db0ff;
 
   /* Status */
   --color-success:          #63993d;
@@ -228,7 +230,7 @@ a:hover {
 
 /* Global focus-visible indicator — WCAG 2.4.7 */
 :focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-focus, #4db0ff);
   outline-offset: 2px;
 }
 

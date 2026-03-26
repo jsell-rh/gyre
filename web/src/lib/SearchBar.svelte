@@ -6,19 +6,19 @@
   let inputEl = $state(null);
   let apiResults = $state([]);
   let searching = $state(false);
+  let searchError = $state(false);
   let searchTimer = null;
 
   const ENTITY_ICONS = { task: 'T', agent: 'G', mr: 'M', spec: 'S' };
 
   const SHORTCUTS = [
-    { label: 'Dashboard', view: 'dashboard', icon: 'H' },
-    { label: 'Activity Feed', view: 'activity', icon: 'A' },
-    { label: 'Agents', view: 'agents', icon: 'G' },
-    { label: 'Task Board', view: 'tasks', icon: 'T' },
-    { label: 'Projects', view: 'projects', icon: 'P' },
-    { label: 'Merge Queue', view: 'merge-queue', icon: 'Q' },
-    { label: 'Analytics', view: 'analytics', icon: 'N' },
-    { label: 'Admin Panel', view: 'admin', icon: 'D' },
+    { label: 'Inbox', view: 'inbox', icon: '1' },
+    { label: 'Briefing', view: 'briefing', icon: '2' },
+    { label: 'Explorer', view: 'explorer', icon: '3' },
+    { label: 'Specs', view: 'specs', icon: '4' },
+    { label: 'Meta-specs', view: 'meta-specs', icon: '5' },
+    { label: 'Admin', view: 'admin', icon: '6' },
+    { label: 'My Profile', view: 'profile', icon: 'P' },
   ];
 
   // Combined results: API entity hits + nav shortcuts.
@@ -48,15 +48,19 @@
     const q = query.trim();
     if (q.length < 2) {
       apiResults = [];
+      searchError = false;
       return;
     }
     clearTimeout(searchTimer);
+    searchError = false;
     searchTimer = setTimeout(async () => {
       searching = true;
       try {
         const data = await api.search({ q, limit: 8 });
         apiResults = data?.results ?? [];
+        searchError = false;
       } catch {
+        searchError = true;
         apiResults = [];
       } finally {
         searching = false;
@@ -178,7 +182,7 @@
         {/each}
       </ul>
     {:else if query.trim().length >= 2 && !searching}
-      <div class="search-empty" role="status">No results for "{query}"</div>
+      <div class="search-empty" role="status">{searchError ? 'Search failed — check your connection' : `No results for "${query}"`}</div>
     {/if}
 
     <div class="search-footer" aria-hidden="true">

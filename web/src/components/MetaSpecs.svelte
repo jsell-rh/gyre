@@ -19,7 +19,7 @@
   import Modal from '../lib/Modal.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import DiffSuggestion from '../lib/DiffSuggestion.svelte';
-  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+  import { toastSuccess, toastError, toastInfo } from '../lib/toast.svelte.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -176,7 +176,7 @@
       });
       usedPreviewId = res?.preview_id ?? null;
       if (res && !usedPreviewId) previewApiResult = res;
-    } catch { /* stub not implemented */ }
+    } catch { toastInfo('Preview not available from server — showing example layout'); }
 
     if (usedPreviewId) {
       previewId = usedPreviewId;
@@ -432,6 +432,11 @@
           {:else}
             <!-- State 3: Impact panel -->
             <div class="impact-panel" data-testid="preview-complete">
+              {#if isSimulatedPreview}
+                <div class="sim-banner" role="status">
+                  ⚠ Preview unavailable — showing example layout only. Results are not based on real data.
+                </div>
+              {/if}
               <div class="impact-tabs">
                 <button class="impact-tab" class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
                 <button class="impact-tab" class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
@@ -791,6 +796,7 @@
   .code-diff-path { padding: 0.3rem 0.6rem; background: var(--color-surface-elevated, #1a1a1a); font-family: var(--font-mono, monospace); font-size: 0.8rem; color: var(--color-text-muted, #888); border-bottom: 1px solid var(--color-border, #333); }
   .code-diff-body { margin: 0; padding: 0.5rem 0.75rem; font-family: var(--font-mono, monospace); font-size: 0.8rem; color: var(--color-text, #eee); line-height: 1.5; }
   .impact-unavailable { display: flex; flex-direction: column; gap: 0.75rem; }
+  .sim-banner { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-3) var(--space-3) 0; }
   .impact-unavailable-label { font-size: 0.78rem; color: var(--color-text-muted, #888); font-style: italic; }
   .impact-empty { font-size: 0.85rem; color: var(--color-text-muted, #888); }
 

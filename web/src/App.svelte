@@ -18,6 +18,7 @@
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
+  import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Primary navigation state ─────────────────────────────────────────
   // One of: 'inbox' | 'briefing' | 'explorer' | 'specs' | 'meta-specs' | 'admin'
@@ -313,6 +314,13 @@
 
   let trustLevel = $derived(currentWorkspace?.trust_level ?? null);
 
+  // ── Page title ─────────────────────────────────────────────────────
+  $effect(() => {
+    const navLabel = currentNav ? currentNav.charAt(0).toUpperCase() + currentNav.slice(1).replace('-', ' ') : 'Gyre';
+    const wsName = scope?.type === 'workspace' ? (currentWorkspace?.name ?? '') : '';
+    document.title = wsName ? `${navLabel} — ${wsName} | Gyre` : `${navLabel} | Gyre`;
+  });
+
   let currentLayout = $derived.by(() => {
     if (detailPanel.open) return 'split';
     if (currentNav === 'explorer' && scope.type !== 'tenant') return 'canvas-controls';
@@ -328,6 +336,10 @@
 
     // 2. Determine initial scope from URL or entrypoint flow
     const fromUrl = parseUrl(window.location.pathname);
+
+    if (!fromUrl && window.location.pathname !== '/') {
+      showToast('Page not found \u2014 redirecting to home', { type: 'info' });
+    }
 
     if (fromUrl) {
       // URL-driven navigation
@@ -481,6 +493,7 @@
             <div
               class="user-dropdown"
               role="menu"
+              tabindex="-1"
               aria-label="User menu"
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}

@@ -22,6 +22,22 @@
   let budgetSaving = $state(false);
   let budgetForm = $state({ max_tokens_per_day: '', max_cost_per_day: '', max_concurrent_agents: '', max_agent_lifetime_secs: '' });
 
+  const TRUST_LEVELS = ['supervised', 'guided', 'autonomous', 'custom'];
+  let trustSaving = $state(false);
+
+  async function saveTrustLevel(newLevel) {
+    trustSaving = true;
+    try {
+      await api.updateWorkspace(workspace.id, { trust_level: newLevel });
+      workspace.trust_level = newLevel;
+      showToast('Trust level updated', { type: 'success' });
+    } catch (e) {
+      showToast('Failed to update trust level: ' + e.message, { type: 'error' });
+    } finally {
+      trustSaving = false;
+    }
+  }
+
   async function saveBudget() {
     budgetSaving = true;
     try {
@@ -110,9 +126,24 @@
     <div class="ws-title">
       <div class="ws-name-row">
         <h2>{workspace?.name ?? 'Workspace'}</h2>
-        {#if workspace?.trust_level}
-          <span class="trust-badge trust-{(workspace.trust_level).toLowerCase()}">{workspace.trust_level}</span>
-        {/if}
+        <div class="trust-selector-group">
+          <label class="trust-label" for="trust-select">Trust Level</label>
+          <select
+            id="trust-select"
+            class="trust-select trust-{(workspace?.trust_level ?? 'supervised').toLowerCase()}"
+            value={workspace?.trust_level ?? 'supervised'}
+            onchange={(e) => saveTrustLevel(e.target.value)}
+            disabled={trustSaving}
+            aria-label="Workspace trust level"
+          >
+            {#each TRUST_LEVELS as level}
+              <option value={level}>{level}</option>
+            {/each}
+          </select>
+          {#if trustSaving}
+            <span class="trust-saving" aria-label="Saving...">...</span>
+          {/if}
+        </div>
       </div>
       {#if workspace?.description}
         <p class="ws-desc">{workspace.description}</p>
@@ -480,8 +511,32 @@
     border-radius: 999px;
     text-transform: capitalize;
   }
-  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); }
-  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
-  .trust-badge.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
-  .trust-badge.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .trust-selector-group {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .trust-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+  .trust-select {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    text-transform: capitalize;
+    border: 1px solid var(--color-border-strong);
+    cursor: pointer;
+    background: var(--color-surface);
+    color: var(--color-text);
+  }
+  .trust-select:disabled { opacity: 0.5; cursor: not-allowed; }
+  .trust-select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .trust-select.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-info, #8b5cf6) 30%, transparent); }
+  .trust-select.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); border-color: color-mix(in srgb, var(--color-info, #60a5fa) 30%, transparent); }
+  .trust-select.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }
+  .trust-select.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, transparent); }
+  .trust-saving { font-size: var(--text-xs); color: var(--color-text-muted); }
 </style>

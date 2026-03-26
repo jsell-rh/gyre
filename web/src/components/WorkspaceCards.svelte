@@ -14,6 +14,7 @@
   const navigate = getContext('navigate');
 
   let workspaces = $state([]);
+  let wsFilter = $state('');
   let loading = $state(true);
   let error = $state(null);
   // Per-workspace enrichment keyed by id
@@ -96,6 +97,12 @@
     return 'muted';
   }
 
+  const visibleWs = $derived(
+    wsFilter.trim()
+      ? workspaces.filter(ws => ws.name?.toLowerCase().includes(wsFilter.toLowerCase()))
+      : workspaces
+  );
+
   function handleEnter(ws) {
     if (onSelectWorkspace) {
       // Parent handles workspace selection + navigation (old shell / tests)
@@ -141,8 +148,11 @@
     </div>
 
   {:else}
+    <div class="ws-filter-wrap">
+      <input type="text" bind:value={wsFilter} placeholder="Filter workspaces…" class="ws-filter" aria-label="Filter workspaces" />
+    </div>
     <div class="cards-grid" role="list" aria-label="Workspaces">
-      {#each workspaces as ws (ws.id)}
+      {#each visibleWs as ws (ws.id)}
         {@const info = enrichment[ws.id]}
         <div class="ws-card" role="listitem">
           <Card>
@@ -260,6 +270,32 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
+  }
+
+  .ws-filter-wrap {
+    padding: var(--space-4) var(--space-6) 0;
+    flex-shrink: 0;
+  }
+
+  .ws-filter {
+    width: 100%;
+    max-width: 320px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    box-sizing: border-box;
+    transition: border-color var(--transition-fast);
+  }
+
+  .ws-filter:focus:not(:focus-visible) { outline: none; }
+  .ws-filter:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-color: var(--color-primary);
   }
 
   .cards-grid {
