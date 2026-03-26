@@ -11,11 +11,8 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_common::Id;
-use gyre_domain::{
-    notification::{Notification, NotificationPriority, NotificationType},
-    MergeRequest, MrStatus,
-};
+use gyre_common::{Id, Notification, NotificationType};
+use gyre_domain::{MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
@@ -220,21 +217,20 @@ pub async fn save_spec(
         .await
         .map_err(ApiError::Internal)?;
 
-    // Priority-2 (High) "Spec pending approval" notification.
-    // user_id placeholder: real impl resolves workspace Admin/Developer members
-    // from the MR's workspace_id and fans out per-user notifications.
+    // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
+    // user_id/tenant_id are placeholders — real impl resolves workspace
+    // Admin/Developer members from workspace_id and fans out per-user.
     let notif_id = new_id();
     let mut notif = Notification::new(
         notif_id,
-        Id::new("system"),
-        NotificationType::SpecApprovalRequested,
-        "Spec pending approval",
+        repo.workspace_id.clone(),
+        Id::new("system"), // placeholder; real impl fans out to workspace members
+        NotificationType::SpecPendingApproval,
         format!("Spec pending approval: {}", req.spec_path),
-        NotificationPriority::High,
-        now,
+        "system", // placeholder; real impl resolves from workspace lookup
+        now as i64,
     );
-    notif.entity_type = Some("mr".to_string());
-    notif.entity_id = Some(mr_id.to_string());
+    notif.entity_ref = Some(mr_id.to_string());
     // Non-fatal — MR is created even if notification fails.
     let _ = state.notifications.create(&notif).await;
 
