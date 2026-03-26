@@ -218,6 +218,12 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api("/api/v1/merge-requests/:id/gates", "gate", None),
+                // MR SDLC timeline (S2.5 — HSI §3)
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/timeline",
+                    "merge_request",
+                    None,
+                ),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/dependencies",
                     "dependency",
