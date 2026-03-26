@@ -19,7 +19,15 @@ pub async fn notify(
         .as_secs() as i64;
 
     let id = Id::new(uuid::Uuid::new_v4().to_string());
-    let notif = Notification::new(id, workspace_id, user_id, notification_type, title, tenant_id, now);
+    let notif = Notification::new(
+        id,
+        workspace_id,
+        user_id,
+        notification_type,
+        title,
+        tenant_id,
+        now,
+    );
 
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");

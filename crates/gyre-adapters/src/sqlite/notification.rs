@@ -31,7 +31,7 @@ struct NotificationRow {
 
 impl NotificationRow {
     fn into_notification(self) -> Result<Notification> {
-        let ntype = NotificationType::from_str(&self.notification_type)
+        let ntype = NotificationType::parse(&self.notification_type)
             .ok_or_else(|| anyhow!("unknown notification_type: {}", self.notification_type))?;
         Ok(Notification {
             id: Id::new(self.id),

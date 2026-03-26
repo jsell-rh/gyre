@@ -1593,13 +1593,17 @@ impl NotificationRepository for MemNotificationRepository {
             .iter()
             .filter(|n| {
                 n.user_id == *user_id
-                    && workspace_id.map_or(true, |ws| n.workspace_id == *ws)
-                    && min_priority.map_or(true, |min| n.priority >= min)
-                    && max_priority.map_or(true, |max| n.priority <= max)
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && min_priority.is_none_or(|min| n.priority >= min)
+                    && max_priority.is_none_or(|max| n.priority <= max)
             })
             .cloned()
             .collect();
-        items.sort_by(|a, b| a.priority.cmp(&b.priority).then(b.created_at.cmp(&a.created_at)));
+        items.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(b.created_at.cmp(&a.created_at))
+        });
         Ok(items
             .into_iter()
             .skip(offset as usize)
@@ -1643,7 +1647,7 @@ impl NotificationRepository for MemNotificationRepository {
             .iter()
             .filter(|n| {
                 n.user_id == *user_id
-                    && workspace_id.map_or(true, |ws| n.workspace_id == *ws)
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && n.resolved_at.is_none()
                     && n.dismissed_at.is_none()
             })
@@ -1666,7 +1670,7 @@ impl NotificationRepository for MemNotificationRepository {
             n.workspace_id == *workspace_id
                 && n.user_id == *user_id
                 && n.notification_type.as_str() == notification_type
-                && n.dismissed_at.map_or(false, |d| d >= cutoff)
+                && n.dismissed_at.is_some_and(|d| d >= cutoff)
         }))
     }
 }

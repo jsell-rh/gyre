@@ -57,7 +57,7 @@ impl NotificationType {
     }
 
     /// Parses from the DB string representation.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "AgentNeedsClarification" => Some(Self::AgentNeedsClarification),
             "SpecPendingApproval" => Some(Self::SpecPendingApproval),
@@ -160,10 +160,16 @@ mod tests {
 
     #[test]
     fn default_priorities_match_spec() {
-        assert_eq!(NotificationType::AgentNeedsClarification.default_priority(), 1);
+        assert_eq!(
+            NotificationType::AgentNeedsClarification.default_priority(),
+            1
+        );
         assert_eq!(NotificationType::SpecPendingApproval.default_priority(), 2);
         assert_eq!(NotificationType::GateFailure.default_priority(), 3);
-        assert_eq!(NotificationType::CrossWorkspaceSpecChange.default_priority(), 4);
+        assert_eq!(
+            NotificationType::CrossWorkspaceSpecChange.default_priority(),
+            4
+        );
         assert_eq!(NotificationType::SuggestedSpecLink.default_priority(), 10);
     }
 
@@ -183,7 +189,7 @@ mod tests {
             NotificationType::SuggestedSpecLink,
         ];
         for v in &variants {
-            assert_eq!(NotificationType::from_str(v.as_str()).as_ref(), Some(v));
+            assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
         }
     }
 
