@@ -195,7 +195,8 @@
   onMount(load);
 </script>
 
-<div class="briefing" data-testid="briefing-view" aria-live="polite">
+<div class="briefing" data-testid="briefing-view">
+    <span class="sr-only" aria-live="polite">{loading ? '' : 'Briefing loaded'}</span>
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
@@ -627,10 +628,6 @@
   }
 
   .range-select:focus-visible {
-    border-color: var(--color-focus, #4db0ff);
-  }
-
-  .range-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
@@ -902,4 +899,6 @@
     padding: var(--space-4);
     background: var(--color-surface);
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

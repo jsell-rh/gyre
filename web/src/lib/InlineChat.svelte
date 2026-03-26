@@ -375,7 +375,6 @@
 
   .chat-input:focus:not(:focus-visible) {
     outline: none;
-    border-color: var(--color-focus, #4db0ff);
   }
 
   .chat-input:focus-visible {

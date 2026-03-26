@@ -637,7 +637,7 @@
   }
 
   .inbox-card.expanded {
-    border-color: var(--color-primary);
+    border-color: var(--color-focus);
   }
 
   .inbox-card.dismissed {
@@ -682,7 +682,7 @@
     font-size: var(--text-xs);
     font-weight: 700;
     flex-shrink: 0;
-    background: var(--color-danger, #ef4444);
+    background: var(--color-danger);
     color: var(--color-text-inverse, #fff);
     font-family: var(--font-mono);
   }
@@ -690,14 +690,14 @@
   .priority-badge[data-priority='4'],
   .priority-badge[data-priority='5'],
   .priority-badge[data-priority='6'] {
-    background: var(--color-warning, #f59e0b);
+    background: var(--color-warning);
   }
 
   .priority-badge[data-priority='7'],
   .priority-badge[data-priority='8'],
   .priority-badge[data-priority='9'],
   .priority-badge[data-priority='10'] {
-    background: var(--color-text-muted, #6b7280);
+    background: var(--color-text-muted);
   }
 
   .card-header-text {
@@ -774,7 +774,7 @@
     border-radius: var(--radius);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-danger, #ef4444);
+    color: var(--color-danger);
     white-space: pre-wrap;
     word-break: break-all;
   }
