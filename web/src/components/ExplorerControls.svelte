@@ -45,11 +45,11 @@
   let askExplanation = $state('');
   let askError = $state('');
   let generatedViewSpec = $state(null);
-  let askInputEl = null;
+  let askInputEl = $state(null);
 
   // Search state
   let searchQuery = $state('');
-  let searchInputEl = null;
+  let searchInputEl = $state(null);
 
   // Playback state (flow layout)
   let playbackSpeed = $state('1x');
@@ -141,32 +141,50 @@
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (line.startsWith('event: partial')) continue;
-          if (line.startsWith('event: error')) {
-            askError = 'LLM connection failed';
+
+        // SSE events are separated by blank lines (\n\n).
+        // Split on double-newline to get complete event blocks.
+        const eventBlocks = buffer.split('\n\n');
+        // Keep the last (potentially incomplete) block in the buffer.
+        buffer = eventBlocks.pop() ?? '';
+
+        for (const block of eventBlocks) {
+          if (!block.trim()) continue;
+          const lines = block.split('\n');
+          let eventType = 'message'; // default SSE event type
+          let dataPayload = '';
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              dataPayload += (dataPayload ? '\n' : '') + line.slice(6);
+            }
           }
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
+
+          if (eventType === 'error') {
+            // LLM connection failure — no fallback available
+            askError = dataPayload || 'LLM connection failed';
+          } else if (eventType === 'partial') {
+            // Incremental explanation text chunk (not structured JSON)
+            askExplanation += dataPayload;
+          } else if (eventType === 'complete' || eventType === 'message') {
+            // Final JSON response
             try {
-              const parsed = JSON.parse(data);
+              const parsed = JSON.parse(dataPayload);
               if (parsed.explanation) askExplanation = parsed.explanation;
               if ('view_spec' in parsed) {
                 if (parsed.view_spec) {
                   generatedViewSpec = parsed.view_spec;
                   onViewChange?.(parsed.view_spec);
-                } else if (parsed.explanation) {
-                  // null view_spec = unanswerable or invalid
-                  askError = parsed.explanation;
+                } else {
+                  // null view_spec = unanswerable question or invalid generated spec
+                  askError = parsed.explanation || 'Could not generate a view for that question';
                 }
               }
             } catch {
-              // partial text chunk
-              if (data && !data.startsWith('{')) {
-                askExplanation += data;
-              }
+              // Malformed JSON in complete event — treat as plain text explanation
+              if (dataPayload) askExplanation = dataPayload;
             }
           }
         }
