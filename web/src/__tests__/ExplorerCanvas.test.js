@@ -354,6 +354,17 @@ describe('ExplorerCanvas — viewSpec grammar', () => {
 });
 
 describe('MoldableView', () => {
+  beforeEach(() => {
+    // FlowRenderer uses ResizeObserver which is not available in jsdom
+    if (!global.ResizeObserver) {
+      global.ResizeObserver = class ResizeObserver {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+    }
+  });
+
   it('renders without throwing', () => {
     expect(() => render(MoldableView)).not.toThrow();
   });
@@ -364,10 +375,10 @@ describe('MoldableView', () => {
     expect(activeTab?.textContent?.trim()).toContain('Graph');
   });
 
-  it('renders all three view tabs', () => {
+  it('renders all four view tabs', () => {
     render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const tabs = document.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(3);
+    expect(tabs.length).toBe(4);
   });
 
   it('switches to list view', async () => {
@@ -440,5 +451,15 @@ describe('MoldableView', () => {
         expect(card.innerHTML).toContain(sha.slice(0, 7));
       }
     }
+  });
+
+  it('switches to flow view and renders flow-renderer', async () => {
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
+    const flowTab = Array.from(container.querySelectorAll('.view-tab'))
+      .find(el => el.textContent.includes('Flow'));
+    expect(flowTab).toBeTruthy();
+    flowTab.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(container.querySelector('[data-testid="flow-renderer"]')).toBeTruthy();
   });
 });
