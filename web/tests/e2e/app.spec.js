@@ -47,7 +47,7 @@ test.describe('App shell', () => {
     // All 6 nav items should be present
     const navItems = ['Inbox', 'Briefing', 'Explorer', 'Specs', 'Meta-specs', 'Admin'];
     for (const label of navItems) {
-      const btn = sidebar.getByRole('button', { name: label });
+      const btn = sidebar.getByRole('button', { name: label, exact: true });
       await expect(btn).toBeVisible({ timeout: 3000 });
     }
   });
@@ -59,7 +59,7 @@ test.describe('App shell', () => {
     await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
 
     // Navigate to Specs — active state should move
-    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs' });
+    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs', exact: true });
     await specsBtn.click();
     await page.waitForLoadState('networkidle');
     await expect(specsBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
@@ -300,7 +300,7 @@ test.describe('Specs view', () => {
   test('specs_sidebar_item_is_active', async ({ page }) => {
     await navigateTo(page, 'specs');
 
-    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs' });
+    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs', exact: true });
     await expect(specsBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
 
