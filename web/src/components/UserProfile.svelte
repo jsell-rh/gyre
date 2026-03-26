@@ -122,7 +122,9 @@
       await api.markNotificationRead(id);
       notifications = notifications.map(n => n.id === id ? { ...n, read: true } : n);
       unread = notifications.filter(n => !n.read).length;
-    } catch { /* ignore */ }
+    } catch {
+      showToast('Failed to mark notification as read', { type: 'error' });
+    }
   }
 
   function judgmentEventColor(ev) {
@@ -201,16 +203,16 @@
   {#if editing}
     <div class="edit-form">
       <label class="field-label">Display Name
-        <input class="field-input" bind:value={editForm.display_name} placeholder="Your display name" />
+        <input class="field-input" bind:value={editForm.display_name} placeholder="Your display name" autocomplete="name" />
       </label>
       <label class="field-label">Timezone
-        <input class="field-input" bind:value={editForm.timezone} placeholder="e.g. America/New_York" />
+        <input class="field-input" bind:value={editForm.timezone} placeholder="e.g. America/New_York" autocomplete="off" />
       </label>
       <label class="field-label">Locale
-        <input class="field-input" bind:value={editForm.locale} placeholder="e.g. en-US" />
+        <input class="field-input" bind:value={editForm.locale} placeholder="e.g. en-US" autocomplete="off" />
       </label>
       <div class="edit-actions">
-        <button class="btn-secondary" onclick={() => (editing = false)}>Cancel</button>
+        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
         <button class="btn-primary" onclick={saveEdit} disabled={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>

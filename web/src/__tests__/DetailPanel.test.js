@@ -187,11 +187,11 @@ describe('DetailPanel', () => {
       },
     };
 
-    it('shows "Start interrogation" button in Ask Why tab', async () => {
+    it('shows "Ask Why — Spawn Review Agent" button in Ask Why tab', async () => {
       render(DetailPanel, { props: { entity: interrogationEntity } });
       const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
       await fireEvent.click(askWhyTab);
-      expect(screen.getByRole('button', { name: /start interrogation/i })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /ask why.*spawn review/i })).toBeTruthy();
     });
 
     it('calls spawnAgent with correct payload on click', async () => {
@@ -203,7 +203,7 @@ describe('DetailPanel', () => {
       render(DetailPanel, { props: { entity: interrogationEntity } });
       const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
       await fireEvent.click(askWhyTab);
-      const btn = screen.getByRole('button', { name: /start interrogation/i });
+      const btn = screen.getByRole('button', { name: /ask why.*spawn review/i });
       await fireEvent.click(btn);
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/agents/spawn'),
@@ -225,7 +225,7 @@ describe('DetailPanel', () => {
       render(DetailPanel, { props: { entity: noContextEntity } });
       const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
       await fireEvent.click(askWhyTab);
-      const btn = screen.getByRole('button', { name: /start interrogation/i });
+      const btn = screen.getByRole('button', { name: /ask why.*spawn review/i });
       await fireEvent.click(btn);
       expect(global.fetch).not.toHaveBeenCalled();
     });

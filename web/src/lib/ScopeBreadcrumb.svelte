@@ -103,6 +103,8 @@
       {tenant.name}
     </button>
     <span class="sep" aria-hidden="true">›</span>
+  {:else if !workspace}
+    <span class="crumb home-crumb">Gyre</span>
   {/if}
 
   {#if workspace}
@@ -207,6 +209,11 @@
     color: var(--color-text-muted);
   }
   .tenant-crumb:hover { color: var(--color-text-secondary); }
+
+  .home-crumb {
+    color: var(--color-text-muted);
+    cursor: default;
+  }
 
   .workspace-crumb {
     color: var(--color-text-secondary);
