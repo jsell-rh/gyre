@@ -57,7 +57,7 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 | **Explorer** | At repo scope, the Explorer has two tabs in its control bar: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue). The Code tab is part of the Explorer, not a separate nav item. At other scopes: Workspace cards with summary stats. This is a **card grid**, not a graph canvas — click a workspace card to enter the graph-based Explorer. Data sourced from `GET /api/v1/workspaces` (list) + `GET /api/v1/workspaces/:id/budget` (usage stats) — no new endpoint needed. Repo count and active agent count derived from existing list endpoints with workspace filter. | Realized architecture (C4 progressive drill-down per `system-explorer.md`) | Repo-level architecture detail |
 | **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
 | **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
-| **Admin** | Users, compute, tenant budget, audit, **workspace creation** (+ New Workspace button) | Workspace settings, budget, trust level, teams, **Policies** (ABAC editor for Custom trust) | Repo settings, gates, policies |
+| **Admin** | Users, compute, tenant budget, audit, **workspace creation** (+ New Workspace button) | Workspace settings, budget, trust level, teams, **Policies** (ABAC editor — see §2a for trust integration) | Repo settings, gates, policies |
 
 **Meta-specs at workspace scope** is the primary location for the preview loop from `meta-spec-reconciliation.md`: edit a persona → select target specs → preview agents implement on throwaway branches → view diff → iterate → publish. Reconciliation progress tracking also lives here. At tenant scope, Meta-specs shows a catalog of all personas/principles/standards across workspaces. At repo scope, it redirects to the workspace scope (meta-specs are workspace-scoped, not repo-scoped).
 
@@ -66,6 +66,20 @@ Each segment is clickable — click "Payments" to zoom out to workspace scope. T
 **Where old views live:** Task Board, Merge Queue, Agent List, MR Detail, Repo Detail, Persona Management, Activity Feed, and other entity views from `platform-model.md` are **contextual drill-downs**. The Activity Feed is accessible via the Explorer's Change View or Admin's Audit tab. **Agent discovery:** At workspace scope, the Explorer's Boundary View shows active agent count per repo on each node card. Clicking the agent count opens a filtered agent list in the detail panel. This ensures agents are always discoverable even when no Inbox items or Briefing sections reference them. Other entity views — accessed by clicking an entity reference anywhere in the UI (agent name → slide-in panel, MR link → detail view, etc.). They are not primary navigation items. The Code tab (branches, commits, MRs, merge queue) is accessed via the Explorer at repo scope, not as a separate nav item.
 
 The content adapts. The sidebar doesn't.
+
+### Workspace Attribution on Items
+
+**Principle:** When a view aggregates data across workspaces (tenant scope), every item must show which workspace it belongs to. Without attribution, cross-workspace views are disorienting — the user sees a list of items with no way to know which workspace each came from.
+
+**Rules:**
+- **Inbox at tenant scope:** Each notification item displays a workspace badge (workspace name, not UUID). The badge links to the workspace-scoped Inbox.
+- **Briefing at tenant scope:** Each section and item displays its source workspace. Cross-workspace items (from spec link notifications) display both source and target workspace.
+- **Explorer at tenant scope:** Workspace cards already provide attribution by definition (one card per workspace).
+- **Specs at tenant scope:** Each spec row shows the workspace and repo it belongs to.
+
+**At workspace or repo scope:** Attribution is unnecessary — the scope breadcrumb already establishes context. The exception: cross-workspace spec link notifications always show the source workspace regardless of current scope.
+
+**Implementation:** The `workspace_id` on notifications, briefing sections, and spec records already exists in the data model. The UI must surface it as a visible badge — this is a rendering requirement, not a data model change.
 
 A **status bar** at the bottom of the application shows trust level, budget usage, WebSocket status, and presence avatars for the current workspace. See `ui-layout.md` §1 for dimensions and layout. Presence updates are sent **immediately after WebSocket connection is established** (so the user appears present to others without waiting for the first timer tick), then on **both** a 30-second timer AND on view changes (sidebar nav click or scope transition), debounced to at most one update per 5 seconds. **Graceful disconnect:** The client sends a `UserPresence` with `view: "disconnected"` on `beforeunload` (browser tab close) so the server can evict the session immediately without waiting for the 60-second timeout. The server evicts entries after 60 seconds without an update. **Multi-tab:** Each browser tab opens its own WebSocket connection (connections are NOT shared across tabs). The presence map is keyed by `(user_id, session_id)` where `session_id` is a random UUID generated per browser tab. The server maps `session_id` to the specific WebSocket connection via the `Subscribe` message, enabling targeted `PresenceEvicted` delivery to the correct tab. The server caps at 5 sessions per user (oldest evicted first) to prevent flooding. Evicted sessions receive a `{"type": "PresenceEvicted", "session_id": "<evicted-uuid>"}` WebSocket message — the client checks if the session_id matches its own tab and stops heartbeating only for that tab. The server maps `session_id` to WebSocket connections by including `session_id` in the initial `Subscribe` message (amending `message-bus.md`'s `Subscribe` payload with a required `session_id` field — required for user connections that send `UserPresence`, optional for agent connections that don't use presence). Multiple tabs show the user as present multiple times. The UI collapses these into a single avatar with a badge count if the same user appears in multiple views.
 
@@ -228,6 +242,24 @@ The Custom trust editor grays out immutable policies with tooltip: "This policy 
 Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
 **Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor queries `GET /api/v1/policies?scope=Workspace&scope_id=<workspace_id>` to list policies for this workspace. The editor uses the Full-Width layout (per `ui-layout.md` §2) with three sections: (1) a policy list table grouped by prefix (`builtin:` / `trust:` / user-created), (2) a visual condition builder panel (form-based, not raw YAML) for creating/editing policies, (3) a dry-run simulator panel where users can test "would this request be allowed?" against the current policy set. Immutable policies are grayed out with tooltip. Layout details follow the standard Full-Width pattern — no custom layout needed.
+
+### 2a. Policies ↔ Trust Level Integration
+
+The Trust Level and Policies tabs in Admin are conceptually linked — changing trust level changes which policies are active. The UI must make this relationship visible:
+
+**Trust Level tab shows implied policies:**
+- Below the trust level radio buttons, a read-only summary lists the `trust:` policies that the selected preset creates (or would create if switching). Format: a compact list showing policy name, effect (Allow/Deny), and target (e.g., "trust:require-human-mr-review — Deny merge by system"). This is informational — the user understands what "Supervised" means in policy terms without needing to visit the Policies tab.
+- A "View all policies" link navigates to the Policies tab (same Admin view, different tab).
+
+**Policies tab shows trust origin:**
+- Policies with `trust:` prefix display a badge indicating which trust preset created them (e.g., "From: Supervised"). This is derived at display time — if the workspace's current `trust_level` is `Supervised` and the policy has a `trust:` prefix, show the badge.
+- When trust level is NOT Custom, the Policies tab shows a banner: "Trust level: {level} — policies are preset-managed. Switch to Custom to edit." with a link back to the Trust Level tab.
+- When trust level IS Custom, the banner changes to: "Custom trust — full policy editor enabled."
+
+**Cross-linking:**
+- Trust Level tab → "View all policies" link → Policies tab
+- Policies tab → "Change trust level" link → Trust Level tab
+- Both links stay within the Admin view (tab switch, not navigation change)
 
 ### Trust Suggestions
 
@@ -1340,6 +1372,63 @@ This table is not exhaustive — it establishes the pattern. The REST API is the
 
 ---
 
+## 12. User Profile
+
+### The Problem
+
+The user avatar dropdown needs a destination. It's tempting to link to Admin, but Admin is workspace configuration — not the human's view of themselves. The profile must reflect what humans actually do in Gyre: direct via specs, oversee agent work, and accumulate judgment.
+
+### What the Profile Is
+
+The User Profile is a **lean settings + judgment ledger** view. It is NOT an activity hub — Inbox, Briefing, and Explorer already serve that role. It is NOT a traditional developer profile — humans don't author code, MRs, or tasks.
+
+**URL:** `/profile`
+
+**Sections:**
+
+**Identity & Access**
+- Display name, avatar, email, timezone, locale (editable via `PUT /api/v1/users/me`)
+- API tokens for CLI and MCP access (create, revoke, list — `POST /api/v1/users/me/tokens`, `DELETE /api/v1/users/me/tokens/:id`, `GET /api/v1/users/me/tokens`)
+- Auth provider info (OIDC issuer, last login — read-only)
+
+**Notification Preferences**
+- Per-notification-type toggles (enable/disable each of the 10 `NotificationType` variants)
+- Delivery channel preference (in-app only for now; email/webhook are future extension points)
+- Stored in a `user_notification_preferences` table:
+```sql
+CREATE TABLE user_notification_preferences (
+    user_id TEXT NOT NULL,
+    notification_type TEXT NOT NULL,  -- matches NotificationType enum
+    enabled INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, notification_type)
+);
+```
+- The Inbox query filters out disabled notification types before returning results. Default: all enabled.
+
+**Workspace Memberships**
+- List of workspaces the user belongs to, with their role in each (Owner, Admin, Developer, Viewer)
+- Quick-switch: clicking a workspace navigates to that workspace's Inbox
+- Data sourced from existing workspace membership endpoints — no new API needed
+
+**Judgment Ledger**
+- Chronological log of the human's judgment decisions across all workspaces:
+  - Spec approvals and rejections (with spec path, timestamp, workspace)
+  - Gate approval overrides (with MR reference, gate type)
+  - Trust level changes (from → to, workspace)
+  - Meta-spec edits published (persona/principle/standard, workspace)
+- This is the human's **compounding asset** — the record of every decision that shaped the system
+- Endpoint: `GET /api/v1/users/me/judgments` — returns a paginated, reverse-chronological list aggregated from existing tables (spec_approvals, gate overrides, workspace audit log, meta-spec commit history). Query params: `?workspace_id=`, `?type=` (approval/gate/trust/meta-spec), `?since=`, `?limit=`, `?offset=`
+- ABAC: per-handler auth (user-scoped, like `/users/me/notifications`)
+
+### What the Profile Is NOT
+
+- **Not "My Tasks"** — tasks are agent work units, not human artifacts
+- **Not "My MRs"** — humans don't author MRs; they approve or reject them (that's in the judgment ledger)
+- **Not "My Specs"** — specs owned by the user are discoverable via the Specs view with an `?owner=me` filter (no separate surface needed)
+- **Not "My Agents"** — agents are system machinery; humans interrogate them (via Inbox) but don't manage them
+
+---
+
 ## Relationship to Existing Specs
 
 **Upstream Amendments Applied** (all amendments from this spec have been applied to the listed specs in this PR):
@@ -1348,7 +1437,7 @@ This table is not exhaustive — it establishes the pattern. The REST API is the
 |---|---|
 | `system-explorer.md` §1 | `Cmd+K` → global search (not canvas-scoped). Canvas search uses `/`. Explorer "Sidebar" layout (Boundaries/Interfaces/Data/Specs subsections) becomes an in-view filter panel (200px, collapsible), not part of the app sidebar — update layout diagrams. §3 ghost overlays are **Phase 1 priority** (fast structural prediction via `graph/predict` ships before the thorough Editor Split preview). The Editor Split preview in `ui-layout.md` §9 is Phase 2 — complements ghost overlays with certainty after prediction builds intuition. |
 | `hierarchy-enforcement.md` §4 ABAC-exempt additions | Add `GET /api/v1/trace-spans/:span_id/payload` to the ABAC-exempt list (per-handler auth — resolves MR → workspace from span's gate run). |
-| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`. Add `user_workspace_state` to `check-tenant-filter.sh` skip list. |
+| `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`, `GET /api/v1/users/me/judgments`, `GET /api/v1/users/me/tokens`, `POST /api/v1/users/me/tokens`, `DELETE /api/v1/users/me/tokens/:id`. Add `user_workspace_state` and `user_notification_preferences` to `check-tenant-filter.sh` skip list. |
 | `api-conventions.md` §6 | Acknowledge per-handler auth as a third authorization mechanism alongside "no auth (public)" and "ABAC middleware." Per-handler auth is used for endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4. |
 | `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
@@ -1366,6 +1455,8 @@ This table is not exhaustive — it establishes the pattern. The REST API is the
 | `platform-model.md` §4 MCP resources | Add `conversation://context` resource (scope: agent, read-only) — provides the original agent's conversation history to interrogation agents. The server populates this resource at spawn time from `ConversationRepository::get`. |
 | `platform-model.md` §9 UI Pages | Note that standalone entity views (Task Board, Agent List, etc.) are contextual drill-downs, not primary navigation. |
 | `spec-links.md` §target format | Cross-repo/cross-workspace targets use `@` prefix for disambiguation. Clarify that `{workspace}` segment uses **slug** (not name). Add `?repo_id=` query parameter to `GET /specs/:path/links` for path disambiguation (same pattern as `/history` and `/progress`). **Resolution:** The `@workspace_slug/repo_name/spec_path` composite is resolved at manifest parse time (push hook) — the server resolves slug→workspace_id→repo_id and stores the resolved `target_repo_id` UUID in the `spec_links` table. Add `target_display TEXT` column (preserves original composite path for human readability) and make `target_repo_id` nullable (`TEXT` instead of `TEXT NOT NULL`) for unresolved links. If a workspace slug is renamed, existing links remain functional (they use `target_repo_id`, not the slug) but `target_display` becomes stale — the staleness checker should also verify `target_display` matches the current slug and update it if not. If the target workspace or repo does not exist at push time, the push hook logs a warning and stores the link with `target_repo_id: NULL` — the link is marked as `unresolved` and the staleness checker resolves it when the target becomes available. |
+| `abac-policy-engine.md` §UI | Clarify that workspace-scoped policy management uses global endpoints with `?scope=Workspace&scope_id=` query params — no separate `/workspaces/:id/abac-policies` endpoints exist. Simulator uses `POST /api/v1/policies/evaluate`. |
+| `spec-lifecycle.md` §API or `realized-model.md` §API | Add `?owner=me` query parameter to `GET /api/v1/specs` — filters specs to those owned by the authenticated user. Required by the Specs view "My Specs" filter (§12). |
 | `vision.md` §"Relationship to Other Specs" | Replace `ui-journeys.md` references with `human-system-interface.md` in the principles governance table. |
 | `message-bus.md` `WsMessage` enum | Add `UserPresence` variant (bidirectional, payload: user_id, session_id, workspace_id, view, timestamp) and `PresenceEvicted` variant (server→client, signals tab should stop heartbeating). |
 | `platform-model.md` §1 `Workspace` struct | Add `trust_level: TrustLevel` field (enum: Supervised, Guided, Autonomous, Custom). Add `llm_model: Option<String>` field (per-workspace LLM model selection, defaults to `GYRE_LLM_MODEL` env var — see `ui-layout.md` §2). |
