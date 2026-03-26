@@ -123,6 +123,11 @@
     cursor: not-allowed;
   }
 
+  .tab-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
   .tab-count {
     display: inline-flex;
     align-items: center;

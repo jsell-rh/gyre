@@ -239,6 +239,7 @@
         {:else}
           Unable to load briefing data: {error}. Check your connection.
         {/if}
+        <button class="action-btn" onclick={load}>Retry</button>
       </div>
     {/if}
 
@@ -252,8 +253,8 @@
     {:else if briefing}
       <!-- COMPLETED -->
       {#if briefing.completed?.length}
-        <section class="briefing-section" data-testid="section-completed">
-          <h2 class="section-heading">
+        <section class="briefing-section" data-testid="section-completed" aria-labelledby="briefing-completed">
+          <h2 class="section-heading" id="briefing-completed">
             <span class="section-icon completed-icon" aria-hidden="true">✓</span>
             COMPLETED
           </h2>
@@ -296,8 +297,8 @@
 
       <!-- IN PROGRESS -->
       {#if briefing.in_progress?.length}
-        <section class="briefing-section" data-testid="section-in-progress">
-          <h2 class="section-heading">
+        <section class="briefing-section" data-testid="section-in-progress" aria-labelledby="briefing-inprogress">
+          <h2 class="section-heading" id="briefing-inprogress">
             <span class="section-icon inprogress-icon" aria-hidden="true">◐</span>
             IN PROGRESS
           </h2>
@@ -375,8 +376,8 @@
 
       <!-- CROSS-WORKSPACE -->
       {#if briefing.cross_workspace?.length}
-        <section class="briefing-section" data-testid="section-cross-workspace">
-          <h2 class="section-heading">
+        <section class="briefing-section" data-testid="section-cross-workspace" aria-labelledby="briefing-crossworkspace">
+          <h2 class="section-heading" id="briefing-crossworkspace">
             <span class="section-icon cross-icon" aria-hidden="true">↔</span>
             CROSS-WORKSPACE
           </h2>
@@ -422,8 +423,8 @@
 
       <!-- EXCEPTIONS -->
       {#if briefing.exceptions?.length}
-        <section class="briefing-section exceptions-section" data-testid="section-exceptions">
-          <h2 class="section-heading">
+        <section class="briefing-section exceptions-section" data-testid="section-exceptions" aria-labelledby="briefing-exceptions">
+          <h2 class="section-heading" id="briefing-exceptions">
             <span class="section-icon exception-icon" aria-hidden="true">✗</span>
             EXCEPTIONS
           </h2>
@@ -841,7 +842,8 @@
 
   .action-btn:focus-visible,
   .apply-btn:focus-visible,
-  .entity-ref:focus-visible {
+  .entity-ref:focus-visible,
+  .date-input:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }
