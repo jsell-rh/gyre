@@ -265,6 +265,7 @@
       notifications = data.sort((a, b) => a.priority - b.priority);
     } catch (e) {
       // Fall back to mock data on API failure
+      error = e.message || 'Failed to load notifications';
       notifications = MOCK_NOTIFICATIONS;
     } finally {
       loading = false;
@@ -444,6 +445,13 @@
         <Button variant="ghost" size="sm" onclick={loadNotifications}>Refresh</Button>
       </div>
     </div>
+
+    {#if error}
+      <div class="error-banner" role="alert">
+        {error}
+        <button class="retry-btn" onclick={loadNotifications}>Retry</button>
+      </div>
+    {/if}
 
     {#if loading}
       <div class="inbox-list">
@@ -626,7 +634,7 @@
                       >
                         {state?.loading ? 'Retrying…' : 'Retry'}
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => {}}>Override</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>Override</Button>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -651,9 +659,9 @@
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         View Both
                       </Button>
-                      <Button variant="primary" size="sm" onclick={() => {}}>Pick A</Button>
-                      <Button variant="primary" size="sm" onclick={() => {}}>Pick B</Button>
-                      <Button variant="ghost" size="sm" onclick={() => {}}>Reconcile</Button>
+                      <Button variant="primary" size="sm" disabled title="Coming soon">Pick A</Button>
+                      <Button variant="primary" size="sm" disabled title="Coming soon">Pick B</Button>
+                      <Button variant="ghost" size="sm" disabled title="Coming soon">Reconcile</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
                         variant="primary"
@@ -675,8 +683,8 @@
                         Adjust Meta-spec
                       </Button>
                     {:else if n.notification_type === 'budget_warning'}
-                      <Button variant="primary" size="sm" onclick={() => {}}>Increase Limit</Button>
-                      <Button variant="ghost" size="sm" onclick={() => {}}>Pause Work</Button>
+                      <Button variant="primary" size="sm" onclick={() => navigate?.('admin')}>Increase Limit</Button>
+                      <Button variant="ghost" size="sm" disabled title="Coming soon">Pause Work</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
                         variant="primary"
@@ -771,7 +779,7 @@
     height: 22px;
     padding: 0 var(--space-1);
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     border-radius: 999px;
     font-size: var(--text-xs);
     font-weight: 700;
@@ -862,7 +870,7 @@
     font-weight: 700;
     flex-shrink: 0;
     background: var(--color-danger, #ef4444);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     font-family: var(--font-mono);
   }
 
@@ -980,6 +988,11 @@
     opacity: 0.8;
   }
 
+  .ref-link:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
   .ref-info {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
@@ -992,6 +1005,37 @@
     gap: var(--space-2);
     padding-top: var(--space-2);
     border-top: 1px solid var(--color-border);
+  }
+
+  .error-banner {
+    background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-warning, #d97706);
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    white-space: nowrap;
+  }
+
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
   }
 
   .action-feedback {

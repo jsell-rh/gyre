@@ -222,7 +222,7 @@
   }
 
   .nav-item.active {
-    background: rgba(238, 0, 0, 0.08);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
     color: var(--color-text);
     border-left-color: var(--color-primary);
     font-weight: 500;
@@ -250,7 +250,7 @@
     height: 18px;
     padding: 0 4px;
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     border-radius: 999px;
     font-size: 0.6rem;
     font-weight: 700;
@@ -306,7 +306,7 @@
 
   .version-dot.connected {
     background: var(--color-success);
-    box-shadow: 0 0 5px rgba(99, 153, 61, 0.6);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--color-success) 60%, transparent);
   }
 
   .version-dot.error {

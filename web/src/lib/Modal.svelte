@@ -139,6 +139,12 @@
     to   { opacity: 1; transform: scale(1) translateY(0); }
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    .modal {
+      animation: none;
+    }
+  }
+
   .modal-sm { max-width: 400px; }
   .modal-md { max-width: 560px; }
   .modal-lg { max-width: 800px; }
