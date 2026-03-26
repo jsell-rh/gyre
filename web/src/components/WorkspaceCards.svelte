@@ -94,9 +94,13 @@
   }
 
   function handleEnter(ws) {
-    onSelectWorkspace?.(ws);
-    // In new shell: navigate to inbox at workspace scope
-    navigate?.('inbox', { type: 'workspace', workspaceId: ws.id });
+    if (onSelectWorkspace) {
+      // Parent handles workspace selection + navigation (old shell / tests)
+      onSelectWorkspace(ws);
+    } else {
+      // New shell: navigate directly via context
+      navigate?.('inbox', { type: 'workspace', workspaceId: ws.id });
+    }
   }
 </script>
 
