@@ -6,19 +6,19 @@ use gyre_common::Id;
 use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
-    DependencyEdge, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
-    Persona, PersonaScope, Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
-    Tenant, User, Workspace,
+    DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest,
+    MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
+    ReviewDecision, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceRepository, WorktreeRepository,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
+    NetworkPeerRepository, PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2300,6 +2300,115 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+// ── MemLlmConfigRepository ────────────────────────────────────────────────────
+
+type LlmConfigKey = (Option<String>, String); // (workspace_id, function_key)
+
+#[derive(Default)]
+pub struct MemLlmConfigRepository {
+    store: Arc<Mutex<HashMap<LlmConfigKey, LlmFunctionConfig>>>,
+}
+
+#[async_trait]
+impl LlmConfigRepository for MemLlmConfigRepository {
+    async fn get_effective(
+        &self,
+        workspace_id: &Id,
+        function_key: &str,
+    ) -> Result<Option<LlmFunctionConfig>> {
+        let guard = self.store.lock().await;
+        // Workspace override first.
+        if let Some(cfg) = guard.get(&(
+            Some(workspace_id.as_str().to_string()),
+            function_key.to_string(),
+        )) {
+            return Ok(Some(cfg.clone()));
+        }
+        // Tenant default.
+        Ok(guard.get(&(None, function_key.to_string())).cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<LlmFunctionConfig>> {
+        let guard = self.store.lock().await;
+        let ws_str = workspace_id.as_str().to_string();
+        Ok(guard
+            .values()
+            .filter(|cfg| cfg.workspace_id.as_ref().map(|id| id.as_str()) == Some(ws_str.as_str()))
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_workspace(
+        &self,
+        workspace_id: &Id,
+        function_key: &str,
+        model_name: &str,
+        max_tokens: Option<u32>,
+        updated_by: &Id,
+    ) -> Result<LlmFunctionConfig> {
+        let cfg = LlmFunctionConfig {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            workspace_id: Some(workspace_id.clone()),
+            function_key: function_key.to_string(),
+            model_name: model_name.to_string(),
+            max_tokens,
+            updated_by: updated_by.clone(),
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let key = (
+            Some(workspace_id.as_str().to_string()),
+            function_key.to_string(),
+        );
+        self.store.lock().await.insert(key, cfg.clone());
+        Ok(cfg)
+    }
+
+    async fn upsert_tenant_default(
+        &self,
+        function_key: &str,
+        model_name: &str,
+        max_tokens: Option<u32>,
+        updated_by: &Id,
+    ) -> Result<LlmFunctionConfig> {
+        let cfg = LlmFunctionConfig {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            workspace_id: None,
+            function_key: function_key.to_string(),
+            model_name: model_name.to_string(),
+            max_tokens,
+            updated_by: updated_by.clone(),
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let key = (None, function_key.to_string());
+        self.store.lock().await.insert(key, cfg.clone());
+        Ok(cfg)
+    }
+
+    async fn delete_workspace_override(&self, workspace_id: &Id, function_key: &str) -> Result<()> {
+        let key = (
+            Some(workspace_id.as_str().to_string()),
+            function_key.to_string(),
+        );
+        self.store.lock().await.remove(&key);
+        Ok(())
+    }
+
+    async fn list_tenant_defaults(&self) -> Result<Vec<LlmFunctionConfig>> {
+        let guard = self.store.lock().await;
+        Ok(guard
+            .values()
+            .filter(|cfg| cfg.workspace_id.is_none())
+            .cloned()
+            .collect())
+    }
+}
+
 /// sha -> (agent_id, workspace_id, tenant_id, blob)
 type ConvMap = Arc<Mutex<HashMap<String, (String, String, String, Vec<u8>)>>>;
 
@@ -2699,6 +2808,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_configs: Arc::new(MemLlmConfigRepository::default()),
         presence: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ws_connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
