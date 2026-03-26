@@ -346,6 +346,8 @@ pub struct AppState {
     /// Root directory for bare git repositories. Defaults to `./repos`.
     /// Stored here so unit tests can override it without touching env vars.
     pub repos_root: String,
+    /// Prompt template repository (DB-backed, per-workspace + tenant defaults).
+    pub prompt_templates: Arc<dyn gyre_ports::PromptRepository>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -913,6 +915,10 @@ pub fn build_state(
             mem::MemConversationRepository::default()
         ),
         repos_root: std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string()),
+        prompt_templates: store!(
+            dyn gyre_ports::PromptRepository,
+            mem::MemPromptRepository::default()
+        ),
     })
 }
 

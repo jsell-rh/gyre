@@ -288,6 +288,7 @@ mod tests {
             otlp_config: base.otlp_config.clone(),
             conversations: base.conversations.clone(),
             repos_root: base.repos_root.clone(),
+            prompt_templates: base.prompt_templates.clone(),
         });
         crate::build_router(state)
     }
