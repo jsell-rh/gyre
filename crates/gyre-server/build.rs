@@ -25,7 +25,12 @@ fn main() {
     }
 
     // Watch top-level config files individually
-    for name in &["package.json", "package-lock.json", "vite.config.js"] {
+    for name in &[
+        "package.json",
+        "package-lock.json",
+        "vite.config.js",
+        "index.html",
+    ] {
         println!("cargo:rerun-if-changed={}", web_dir.join(name).display());
     }
 
