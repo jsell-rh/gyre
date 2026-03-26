@@ -128,8 +128,8 @@
     clearTimeout(debounceTimer);
   }
 
-  let selectedRepo = $derived(() => repos.find(r => r.id === selectedRepoId) ?? null);
-  let conceptFilterIds = $derived(() =>
+  let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
+  let conceptFilterIds = $derived.by(() =>
     conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
   );
 </script>
@@ -264,7 +264,7 @@
       {:else if graphError}
         <div class="graph-error" role="alert">
           <p>Failed to load graph: {graphError}</p>
-          <button onclick={() => loadGraph(selectedRepoId)}>Retry</button>
+          <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">Retry</button>
         </div>
 
       {:else if graph}
@@ -273,7 +273,7 @@
           edges={graph.edges ?? []}
           repoId={selectedRepoId}
           onSelectNode={onSelectNode}
-          conceptFilterIds={conceptFilterIds()}
+          conceptFilterIds={conceptFilterIds}
           conceptQuery={conceptQuery.trim()}
         />
       {/if}
