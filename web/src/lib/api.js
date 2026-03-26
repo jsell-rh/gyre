@@ -428,6 +428,19 @@ export const api = {
   // LLM view generation (SSE — returns raw Response, not parsed JSON)
   generateExplorerView: (workspaceId, body) =>
     fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
+  // Specs View (S4.5)
+  specsForWorkspace: (workspaceId) =>
+    request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
+  specContent: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specProgress: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}/progress${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specLinks: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}/links${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specHistoryRepo: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}/history${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specsAssist: (repoId, body) =>
+    fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -435,4 +448,6 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
+  specsSave: (repoId, data) =>
+    request(`/repos/${repoId}/specs/save`, { method: 'POST', body: JSON.stringify(data) }),
 };
