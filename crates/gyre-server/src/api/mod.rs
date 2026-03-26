@@ -293,6 +293,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/specs/:path/revoke",
             post(specs::revoke_spec_approval),
         )
+        .route("/api/v1/specs/:path/reject", post(specs::reject_spec))
         .route(
             "/api/v1/specs/:path/history",
             get(specs::spec_approval_history),

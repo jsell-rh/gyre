@@ -1398,6 +1398,8 @@ mod tests {
             budget: None,
             max_repos: None,
             max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
             created_at: 0,
         };
         state.workspaces.create(&ws).await.unwrap();

@@ -72,6 +72,8 @@ fn approval_status_str(s: &ApprovalStatus) -> &'static str {
         ApprovalStatus::Pending => "pending",
         ApprovalStatus::Approved => "approved",
         ApprovalStatus::Deprecated => "deprecated",
+        ApprovalStatus::Revoked => "revoked",
+        ApprovalStatus::Rejected => "rejected",
     }
 }
 

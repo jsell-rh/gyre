@@ -14,6 +14,8 @@ pub enum MrStatus {
     Approved,
     Merged,
     Closed,
+    /// MR was merged then reverted via the recovery protocol.
+    Reverted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

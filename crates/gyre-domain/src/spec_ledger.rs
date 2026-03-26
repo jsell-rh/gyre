@@ -9,6 +9,10 @@ pub enum ApprovalStatus {
     Pending,
     Approved,
     Deprecated,
+    /// Approval was explicitly revoked (approval withdrawn after being granted).
+    Revoked,
+    /// Spec was rejected by a human reviewer (never approved).
+    Rejected,
 }
 
 impl std::fmt::Display for ApprovalStatus {
@@ -17,6 +21,8 @@ impl std::fmt::Display for ApprovalStatus {
             ApprovalStatus::Pending => write!(f, "pending"),
             ApprovalStatus::Approved => write!(f, "approved"),
             ApprovalStatus::Deprecated => write!(f, "deprecated"),
+            ApprovalStatus::Revoked => write!(f, "revoked"),
+            ApprovalStatus::Rejected => write!(f, "rejected"),
         }
     }
 }
