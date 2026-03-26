@@ -104,6 +104,7 @@ fn make_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         created_at: now,
         complexity: None,
         churn_count_30d: 0,
+        test_coverage: None,
     }
 }
 
@@ -736,4 +737,129 @@ async fn test_push_triggers_graph_extraction() {
         !deltas.is_empty(),
         "expected at least one architectural delta after push"
     );
+}
+
+// ── New endpoints: S3.5 workspace-scoped graph endpoints ─────────────────────
+
+/// GET /api/v1/repos/{id}/graph?concept= — concept query param filters by substring.
+#[tokio::test]
+async fn test_full_graph_concept_query_param() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-concept-qp").await;
+
+    let auth_node = make_node(&repo_id, "AuthService", NodeType::Type);
+    let task_node = make_node(&repo_id, "TaskProcessor", NodeType::Type);
+    ctx.state.graph_store.create_node(auth_node).await.unwrap();
+    ctx.state.graph_store.create_node(task_node).await.unwrap();
+
+    // Filter for "auth" — only AuthService should match.
+    let resp = ctx
+        .get(&format!("/api/v1/repos/{repo_id}/graph?concept=auth"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let nodes = body["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1, "expected only AuthService");
+    assert_eq!(nodes[0]["name"], "AuthService");
+
+    // No filter — all nodes returned.
+    let resp_all = ctx.get(&format!("/api/v1/repos/{repo_id}/graph")).await;
+    assert_eq!(resp_all.status(), 200);
+    let body_all: Value = resp_all.json().await.unwrap();
+    assert_eq!(body_all["nodes"].as_array().unwrap().len(), 2);
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concept/{name} — workspace-scoped concept search.
+#[tokio::test]
+async fn test_workspace_graph_concept() {
+    use gyre_domain::Workspace;
+    let ctx = Ctx::new().await;
+
+    let ws_id = Id::new(uuid::Uuid::new_v4().to_string());
+    let slug = format!("ws-{}", &ws_id.as_str()[..8]);
+    let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), &slug, &slug, 0);
+    ctx.state.workspaces.create(&ws).await.unwrap();
+
+    // Create two repos and populate nodes.
+    let repo1_id = create_repo(&ctx, "ws-concept-proj-1").await;
+    let repo2_id = create_repo(&ctx, "ws-concept-proj-2").await;
+
+    // Register both repos in the workspace kv store.
+    let repos_json = serde_json::to_string(&[&repo1_id, &repo2_id]).unwrap();
+    ctx.state
+        .kv_store
+        .kv_set("workspace_repos", ws_id.as_str(), repos_json)
+        .await
+        .ok();
+
+    let n1 = make_node(&repo1_id, "AuthToken", NodeType::Type);
+    let n2 = make_node(&repo2_id, "AuthMiddleware", NodeType::Function);
+    let n3 = make_node(&repo1_id, "TaskQueue", NodeType::Type);
+    ctx.state.graph_store.create_node(n1).await.unwrap();
+    ctx.state.graph_store.create_node(n2).await.unwrap();
+    ctx.state.graph_store.create_node(n3).await.unwrap();
+
+    let resp = ctx
+        .get(&format!("/api/v1/workspaces/{ws_id}/graph/concept/auth"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let nodes = body["nodes"].as_array().unwrap();
+    // AuthToken (repo1) and AuthMiddleware (repo2) match; TaskQueue does not.
+    assert_eq!(
+        nodes.len(),
+        2,
+        "expected 2 auth-matching nodes across repos"
+    );
+    let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"AuthToken"));
+    assert!(names.contains(&"AuthMiddleware"));
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concept/{name} — 404 for unknown workspace.
+#[tokio::test]
+async fn test_workspace_graph_concept_not_found() {
+    let ctx = Ctx::new().await;
+    let resp = ctx
+        .get("/api/v1/workspaces/no-such-ws/graph/concept/auth")
+        .await;
+    assert_eq!(resp.status(), 404);
+}
+
+/// POST /api/v1/repos/{id}/graph/predict — POST method returns empty predictions.
+#[tokio::test]
+async fn test_graph_predict_post() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-predict-post").await;
+
+    let resp = ctx
+        .post_json(
+            &format!("/api/v1/repos/{repo_id}/graph/predict"),
+            json!({"spec_path": "specs/system/search.md", "draft_content": "# draft"}),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["predictions"].as_array().unwrap().is_empty());
+    assert_eq!(body["repo_id"], repo_id);
+}
+
+/// GraphNodeResponse includes test_coverage field (null when not set).
+#[tokio::test]
+async fn test_graph_node_response_includes_test_coverage() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-test-cov").await;
+
+    let mut node = make_node(&repo_id, "CoveredModule", NodeType::Module);
+    node.test_coverage = Some(0.85);
+    ctx.state.graph_store.create_node(node).await.unwrap();
+
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/graph")).await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let nodes = body["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    // test_coverage field should be present and equal to 0.85.
+    let cov = nodes[0]["test_coverage"].as_f64().unwrap();
+    assert!((cov - 0.85).abs() < 1e-9, "expected 0.85 got {cov}");
 }

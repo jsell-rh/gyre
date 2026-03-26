@@ -364,6 +364,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/graph", "graph", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/graph/concept/:concept_name",
+                    "graph",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "graph", None),
                 // ── Meta-specs ─────────────────────────────────────────────
                 RouteResourceMapping::api(
