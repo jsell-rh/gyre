@@ -133,6 +133,7 @@
           style="--avatar-hue: {avatarHue(user.user_id)}"
           role="img"
           aria-label="{user.display_name} — {user.views[0] ?? 'online'}"
+          aria-describedby="presence-tooltip-{user.user_id}"
         >
           {initials(user)}
           {#if user.sessions.length > 1}
@@ -143,7 +144,7 @@
         </div>
 
         {#if tooltipUserId === user.user_id}
-          <div class="avatar-tooltip" role="tooltip">
+          <div class="avatar-tooltip" role="tooltip" id="presence-tooltip-{user.user_id}">
             <span class="tooltip-name">{user.display_name}</span>
             {#if user.views[0]}
               <span class="tooltip-view">in {user.views[0]}</span>
@@ -162,7 +163,11 @@
   .presence-avatars {
     display: flex;
     align-items: center;
-    gap: calc(var(--space-1) * -1);  /* slight overlap */
+  }
+
+  /* Slight overlap effect: negative margin on all but first avatar */
+  .avatar-wrap + .avatar-wrap {
+    margin-left: -4px;
   }
 
   .avatar-wrap {

@@ -18,12 +18,18 @@
   function onkeydown(e, id, index) {
     if (e.key === 'ArrowRight') {
       e.preventDefault();
-      const next = tabs[(index + 1) % tabs.length];
-      if (!next.disabled) select(next.id);
+      // Skip disabled tabs — find next non-disabled tab clockwise.
+      for (let i = 1; i <= tabs.length; i++) {
+        const t = tabs[(index + i) % tabs.length];
+        if (!t.disabled) { select(t.id); break; }
+      }
     } else if (e.key === 'ArrowLeft') {
       e.preventDefault();
-      const prev = tabs[(index - 1 + tabs.length) % tabs.length];
-      if (!prev.disabled) select(prev.id);
+      // Skip disabled tabs — find next non-disabled tab counter-clockwise.
+      for (let i = 1; i <= tabs.length; i++) {
+        const t = tabs[(index - i + tabs.length) % tabs.length];
+        if (!t.disabled) { select(t.id); break; }
+      }
     } else if (e.key === 'Home') {
       e.preventDefault();
       const first = tabs.find(t => !t.disabled);
