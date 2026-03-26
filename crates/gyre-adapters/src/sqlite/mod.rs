@@ -26,6 +26,7 @@ pub mod meta_spec_set;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
+pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
@@ -215,6 +216,7 @@ mod tests {
             "graph_deltas",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
+            "prompt_templates",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;
