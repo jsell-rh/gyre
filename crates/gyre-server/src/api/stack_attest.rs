@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 
@@ -216,12 +216,22 @@ pub async fn get_stack_policy(
 }
 
 /// PUT /api/v1/repos/:id/stack-policy — set (or clear) the required stack fingerprint.
-/// Admin only.
+///
+/// Admin only: stack attestation pins the required build environment for a repo.
+/// Allowing agents to modify or clear this requirement would let agents bypass
+/// stack integrity enforcement (NEW-39).
 pub async fn set_stack_policy(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(repo_id): Path<String>,
     Json(req): Json<SetStackPolicyRequest>,
 ) -> Result<Json<StackPolicyResponse>, ApiError> {
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update stack attestation policy".to_string(),
+        ));
+    }
+
     state
         .repos
         .find_by_id(&Id::new(&repo_id))
@@ -476,6 +486,60 @@ mod tests {
         let fp2 = stack.fingerprint();
         assert_eq!(fp1, fp2);
         assert_eq!(fp1.len(), 64);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_role_cannot_set_stack_policy() {
+        // NEW-39 regression: Agent role must be rejected with 403.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-jwt"),
+            gyre_common::Id::new("proj-1"),
+            "jwt-repo",
+            "/tmp/jwt-repo",
+            0,
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.repos.create(&repo))
+                .unwrap();
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "rogue-agent",
+                "preferred_username": "rogue-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let body = serde_json::json!({ "required_fingerprint": null });
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-jwt/stack-policy")
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent role must not modify stack attestation policy (NEW-39)"
+        );
     }
 
     #[test]
