@@ -65,7 +65,23 @@ use retention::RetentionStore;
 use siem::SiemStore;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
+
+/// In-memory presence entry for a single browser-tab session.
+#[derive(Clone)]
+pub struct PresenceEntry {
+    /// Workspace this session is viewing.
+    pub workspace_id: String,
+    /// Current view name (e.g. "inbox", "explorer", "specs").
+    pub view: String,
+    /// Client-supplied epoch milliseconds (informational only — NOT used for eviction).
+    pub timestamp: u64,
+    /// Server-recorded epoch milliseconds of the last `UserPresence` heartbeat.
+    /// Used for idle eviction to prevent client clock manipulation.
+    pub server_last_seen: u64,
+    /// Connection ID — used to route `PresenceEvicted` to the right WS sender.
+    pub connection_id: u64,
+}
 
 /// Configuration for the WireGuard coordination plane (M26.1).
 #[derive(Clone)]
@@ -307,6 +323,17 @@ pub struct AppState {
     /// Per-(user_id, workspace_id) sliding-window rate limiter for LLM endpoints.
     /// Enforces 10 requests/60 s per user per workspace (ui-layout.md §2).
     pub llm_rate_limiter: Arc<tokio::sync::Mutex<llm_rate_limit::LlmRateLimiterMap>>,
+    /// In-memory presence map: (user_id, session_id) → PresenceEntry.
+    /// Not persisted — evicted after 60 s of inactivity or on graceful disconnect.
+    pub presence: Arc<RwLock<HashMap<(String, String), PresenceEntry>>>,
+    /// Active WebSocket connections for targeted message delivery (e.g. PresenceEvicted).
+    /// connection_id → mpsc::Sender<serialized WsMessage JSON>.
+    pub ws_connections: Arc<RwLock<HashMap<u64, tokio::sync::mpsc::Sender<String>>>>,
+    /// Monotonically increasing counter for assigning unique connection IDs.
+    pub ws_connection_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// Workspace subscriptions per connection — used to scope UserPresence broadcasts.
+    /// connection_id → list of subscribed workspace IDs.
+    pub ws_connection_workspaces: Arc<RwLock<HashMap<u64, Vec<gyre_common::Id>>>>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -851,7 +878,55 @@ pub fn build_state(
         ),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        presence: Arc::new(RwLock::new(HashMap::new())),
+        ws_connections: Arc::new(RwLock::new(HashMap::new())),
+        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
     })
+}
+
+/// Spawn a background task that evicts stale presence entries every 30 seconds.
+///
+/// An entry is stale if server_last_seen is more than 60 seconds old.
+/// The evicted connection (if still open) receives a `PresenceEvicted` message.
+pub fn spawn_presence_eviction(state: Arc<AppState>) {
+    use gyre_common::WsMessage;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let stale: Vec<((String, String), u64)> = {
+                let map = state.presence.read().await;
+                map.iter()
+                    .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
+                    .map(|(key, entry)| (key.clone(), entry.connection_id))
+                    .collect()
+            };
+
+            for ((user_id, session_id), conn_id) in stale {
+                state
+                    .presence
+                    .write()
+                    .await
+                    .remove(&(user_id, session_id.clone()));
+
+                let evict_msg = WsMessage::PresenceEvicted {
+                    session_id: session_id.clone(),
+                };
+                if let Ok(payload) = serde_json::to_string(&evict_msg) {
+                    let conns = state.ws_connections.read().await;
+                    if let Some(tx) = conns.get(&conn_id) {
+                        let _ = tx.try_send(payload);
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
