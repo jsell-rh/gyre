@@ -3,11 +3,11 @@
 //! Starts a live gyre-server on a random port and exercises all 13 graph
 //! endpoints via reqwest. Tests run in parallel — each spawns its own server.
 
+use gyre_adapters::MockLlmPortFactory;
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
     Id,
 };
-use gyre_adapters::MockLlmPortFactory;
 use gyre_ports::LlmPortFactory;
 use gyre_server::{abac_middleware, build_router, build_state};
 use serde_json::{json, Value};
