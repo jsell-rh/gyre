@@ -25,15 +25,20 @@ Human writes spec (LLM assistant available)
 
 ### Phase 1: Spec Triggers Orchestration
 
-When a spec is approved (new SHA recorded in the spec approval ledger), the server creates a `SpecChanged` message on the message bus. The workspace orchestrator agent — which is always running or spawned on demand — receives this message in its inbox.
+When a spec is approved (new SHA recorded in the spec approval ledger), the server creates a `SpecChanged` message on the message bus. The **workspace orchestrator** receives this message in its inbox.
 
-The orchestrator reads the spec content, decomposes it into tasks, and creates each task via the `task.create` MCP tool. The orchestrator is itself an agent with a special built-in persona (`workspace-orchestrator`). It does not implement code — it decomposes and delegates.
+Gyre uses a **two-level orchestration model** (per `platform-model.md` §3):
 
-**Orchestrator spawn:** If no orchestrator is active for the workspace, the server spawns one automatically when a `SpecChanged` message has no active consumer. The orchestrator uses the workspace's configured compute target.
+- **Workspace orchestrator:** Coordinates across repos. Receives `SpecChanged` messages. Decides which repo a spec belongs to. Spawns or messages the repo orchestrator. Handles cross-repo spec escalation.
+- **Repo orchestrator:** Decomposes specs into tasks within a single repo. Spawns worker agents. Manages the Ralph loop lifecycle for its repo's tasks. Escalates cross-repo needs to the workspace orchestrator.
+
+Both are agents with built-in personas (`workspace-orchestrator`, `repo-orchestrator`). Neither implements code — they decompose and delegate.
+
+**Orchestrator spawn:** If no workspace orchestrator is active, the server spawns one automatically when a `SpecChanged` message has no active consumer. The workspace orchestrator is spawned on demand (not long-lived) — it receives messages, processes them, and completes. If new messages arrive after completion, a new session is spawned. Repo orchestrators are spawned by the workspace orchestrator when a repo needs task decomposition. Both use the workspace's configured compute target.
 
 ### Phase 2: Agent Spawn
 
-For each task, the orchestrator calls `agent.spawn` (via MCP). The server:
+For each task, the repo orchestrator spawns a worker agent via `POST /api/v1/agents/spawn` (REST). The server:
 
 1. Creates the agent record (`Active` status)
 2. Mints an EdDSA JWT scoped to the agent's repo
@@ -80,7 +85,13 @@ When the agent signals completion:
 5. Gates run again
 6. Loop continues until convergence or `max_iterations` reached
 
-**Max iterations reached:** Task marked `Blocked`. Orchestrator notified. Orchestrator may re-decompose the task, adjust the spec, or escalate to a human via a priority-1 notification ("Agent needs clarification").
+**Max iterations reached:** Task marked `Blocked`. Agent marked `Failed`. JWT revoked. Orchestrator notified via inbox message. Orchestrator may re-decompose the task, adjust the spec, or escalate to a human via a priority-1 notification ("Agent needs clarification").
+
+**Spawn failure:** If `ComputeTarget::spawn_process()` fails (Docker not running, SSH unreachable, K8s API down), the server:
+1. Marks the agent `Failed` with error details
+2. Retries up to 3 times with exponential backoff (1s, 5s, 30s)
+3. If all retries fail: task marked `Blocked`, orchestrator notified, priority-1 notification created for workspace admins ("Compute target unavailable: {target_name}")
+4. No fallback to a different compute target — the workspace's selected target is authoritative
 
 **Key property:** Each iteration is a fresh session. The agent has no memory of previous attempts — only the gate failure messages and the current state of the code on its branch. This is deliberate: fresh context prevents the agent from repeating the same mistakes and forces it to reason from first principles each time.
 
@@ -106,6 +117,12 @@ Meta-specs — personas, principles, standards, process norms — are the instru
 
 There is no separate "prompt configuration." The meta-spec registry IS the prompt configuration.
 
+**Relationship to existing Persona model:** `platform-model.md` §2 defines a `Persona` entity with fields like `slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`. This spec **extends** that model — the `Persona` struct gains the `MetaSpec` fields below (content versioning, required flag, content SHA). The existing `PersonaScope` enum (Tenant, Workspace, Repo) is preserved but simplified for prompt assembly: only Tenant and Workspace meta-specs participate in the required/optional injection model. Repo-scoped personas continue to work as nearest-scope-wins overrides per `platform-model.md` §2, but cannot be marked `required` (only tenant/workspace admins can enforce meta-specs across all agents).
+
+The `Persona` struct's operational fields (`model`, `temperature`, `max_tokens`, `budget`) remain separate from the prompt content. A persona is both a prompt (the `content` field injected into the agent) and a configuration (the operational fields that control agent execution parameters).
+
+Principles, standards, and process norms are new meta-spec kinds that extend the registry beyond personas. They follow the same versioning and attestation model but have no operational fields — they are pure prompt text.
+
 ### Registry Levels
 
 Meta-specs exist at two levels in the registry, plus spec-level binding:
@@ -116,29 +133,22 @@ Tenant registry (org-wide conventions)
         └── Spec-level bindings (per-spec selections from either registry)
 ```
 
-Each registry entry:
+Each registry entry adds these fields to the existing entity model:
 ```rust
-pub struct MetaSpec {
-    pub id: Id,
-    pub kind: MetaSpecKind,           // Persona, Principle, Standard, Process
-    pub name: String,
-    pub content: String,              // the actual prompt text
-    pub version: u32,                 // auto-incremented on each edit
-    pub content_sha: String,          // SHA-256 of content (content-addressable)
-    pub scope: MetaSpecScope,         // Tenant | Workspace
-    pub scope_id: Id,                 // tenant_id or workspace_id
-    pub required: bool,               // if true, always injected — cannot be opted out
-    pub created_by: Id,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
+// Extension fields for all meta-spec kinds (Persona, Principle, Standard, Process)
+pub content: String,              // the actual prompt text
+pub version: u32,                 // auto-incremented on each edit
+pub content_sha: String,          // SHA-256 of content (content-addressable)
+pub required: bool,               // if true, always injected — cannot be opted out
 ```
 
-**DB-backed, not repo-backed.** Meta-specs span repos and workspaces. They use content-addressable SHA-256 hashes (computed from `content`) for versioning, not git SHAs. All edits are stored in the database. Full version history is retained in a `meta_spec_versions` table.
+For `Persona` kind, these extend the existing `Persona` struct from `platform-model.md`. For `Principle`, `Standard`, and `Process` kinds, a new `MetaSpec` struct carries these fields plus `id`, `kind`, `name`, `scope`, `scope_id`, `created_by`, `created_at`, `updated_at`.
+
+**DB-backed, not repo-backed.** Meta-specs span repos and workspaces. They use content-addressable SHA-256 hashes (computed from `content`) for versioning, not git SHAs. All edits are stored in the database. Full version history is retained in a `meta_spec_versions` table. This supersedes the git-backed meta-spec model from `meta-spec-reconciliation.md` §1 — the reconciliation spec's registry semantics are replaced by this DB-backed model, while the preview loop and reconciliation execution mechanics remain unchanged.
 
 ### Required vs Optional
 
-- **Required** meta-specs (tenant or workspace level): always injected into every agent spawned in that scope. Admins set the `required` flag. Spec authors cannot opt out.
+- **Required** meta-specs (tenant or workspace level): always injected into every agent spawned in that scope. Spec authors cannot opt out. **Who can set `required`:** Only admins at the meta-spec's own scope level — tenant admins for tenant meta-specs, workspace admins (Owner/Admin role) for workspace meta-specs. A workspace admin cannot mark a tenant meta-spec as required (that would be privilege escalation). The `required` flag coexists with `platform-model.md`'s nearest-scope-wins resolution: `required` meta-specs bypass scope resolution entirely — they are always included regardless of whether a lower-scope meta-spec exists with the same name.
 - **Optional** meta-specs: available in the registry for spec authors to explicitly select via spec-level bindings. Not auto-applied.
 
 ### Spec-Level Binding
@@ -209,8 +219,11 @@ Gyre ships with default meta-specs seeded at first startup:
 | Kind | Name | Scope | Required | Purpose |
 |---|---|---|---|---|
 | Persona | `default-worker` | Tenant | No | General-purpose implementation agent |
-| Persona | `workspace-orchestrator` | Tenant | No | Task decomposition and delegation |
+| Persona | `workspace-orchestrator` | Tenant | No | Cross-repo coordination and delegation |
+| Persona | `repo-orchestrator` | Tenant | No | Spec decomposition into tasks, worker dispatch |
 | Persona | `spec-reviewer` | Tenant | No | Spec-vs-code gate review |
+| Persona | `accountability` | Tenant | No | Gate agent: accountability review |
+| Persona | `security` | Tenant | No | Gate agent: security review |
 | Principle | `conventional-commits` | Tenant | Yes | Commit message conventions |
 | Standard | `test-coverage` | Tenant | No | Test writing standards |
 
@@ -220,13 +233,15 @@ These can be edited, cloned, or replaced by the user. The `required` flag can be
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /api/v1/meta-specs` | GET | List meta-specs (filtered by `?scope=`, `?scope_id=`, `?kind=`, `?required=`) |
-| `POST /api/v1/meta-specs` | POST | Create meta-spec (admin at scope level) |
+| `GET /api/v1/meta-specs` | GET | List meta-specs (filtered by `?scope=`, `?scope_id=`, `?kind=`, `?required=`). ABAC: scope_id extracted from query param for tenant/workspace authorization. |
+| `POST /api/v1/meta-specs` | POST | Create meta-spec. Request body includes `scope` and `scope_id`. ABAC: `action: write`, resource resolved from body `scope_id`. |
 | `GET /api/v1/meta-specs/:id` | GET | Get meta-spec with current content |
 | `PUT /api/v1/meta-specs/:id` | PUT | Update meta-spec (creates new version, old version retained) |
 | `DELETE /api/v1/meta-specs/:id` | DELETE | Delete meta-spec (fails if any spec bindings reference it) |
 | `GET /api/v1/meta-specs/:id/versions` | GET | List all versions of a meta-spec |
 | `GET /api/v1/meta-specs/:id/versions/:version` | GET | Get specific version content |
+
+**Note on flat routes:** These endpoints use flat routes (`/meta-specs`) rather than scoped routes (`/workspaces/:id/meta-specs`) because meta-specs span both tenant and workspace scopes — a single entity type with two possible parents. The `scope` and `scope_id` fields in query params and request bodies provide the ABAC context. This follows the same pattern as `/api/v1/policies` (flat routes with `?scope=&scope_id=` filtering).
 
 ---
 
@@ -310,8 +325,8 @@ The workspace's `compute_target_id` field determines where all agents in that wo
 **API:**
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `GET /api/v1/compute-targets` | GET | List available targets for this tenant |
-| `POST /api/v1/compute-targets` | POST | Register a new target (tenant admin) |
+| `GET /api/v1/compute-targets` | GET | List available targets for the authenticated user's tenant. Tenant context extracted from auth (same pattern as `/api/v1/policies`). |
+| `POST /api/v1/compute-targets` | POST | Register a new target (tenant admin). `tenant_id` set from auth context. |
 | `GET /api/v1/compute-targets/:id` | GET | Get target details |
 | `PUT /api/v1/compute-targets/:id` | PUT | Update target config |
 | `DELETE /api/v1/compute-targets/:id` | DELETE | Remove target (fails if workspaces reference it) |
@@ -325,10 +340,11 @@ The workspace's `compute_target_id` field determines where all agents in that wo
 ```
 Tenant budget (absolute ceiling)
   └── Workspace budget (cannot exceed tenant)
-        └── Per-agent enforcement (charged to workspace)
+        └── Repo budget (cannot exceed workspace, per platform-model.md §5)
+              └── Per-agent enforcement (charged to repo, rolled up to workspace)
 ```
 
-Budget is tracked per workspace. Individual agents don't have separate budgets — their usage charges against the workspace total.
+Budget is tracked per repo and aggregated to workspace. The repo-level budget (defined in `repo-lifecycle.md` §3) provides fine-grained control — a workspace admin can give a critical repo a larger share of the workspace budget. When no repo-level budget is set, the repo inherits the workspace limit. Agent usage charges against the repo's budget, which rolls up to the workspace total. The `max_agents` field on `Repository` (per `repo-lifecycle.md` §3) is enforced at agent spawn time: the server checks the count of `Active` agents scoped to the repo before provisioning a new one. If at the limit, spawn returns `429 Too Many Requests` with a message indicating the repo's concurrent agent limit.
 
 ### Enforcement Levels
 
@@ -401,7 +417,7 @@ The **task context** is assembled at spawn time from the task, spec, and any gat
 ## Relationship to Existing Specs
 
 **Supersedes:**
-- `ralph-loop.md` — replaced by this spec's §1 and §5 (complete lifecycle including gate-driven re-spawn)
+- `ralph-loop.md` — replaced by this spec's §1 and §5 (complete lifecycle including gate-driven re-spawn). All cross-references to `ralph-loop.md` in other specs (e.g., `agent-gates.md`) should be updated to reference `agent-runtime.md` §1.
 - `docs/agent-protocol.md` — consolidated into this spec
 
 **Amends:**

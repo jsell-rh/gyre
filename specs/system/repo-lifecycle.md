@@ -193,8 +193,9 @@ Archiving a repo makes it read-only. No new agents can be spawned, no new MRs cr
 5. Git push hook rejects new pushes
 6. Agent spawn rejects new agents scoped to this repo
 7. Repo appears grayed out in Explorer and repo lists
+8. If `is_mirror: true`, the periodic mirror sync job is **paused** (no upstream fetches while archived)
 
-**Unarchive:** Reverses the above. "Unarchive Repo" button appears in Danger Zone when archived.
+**Unarchive:** Reverses the above — resumes mirror sync if applicable. "Unarchive Repo" button appears in Danger Zone when archived.
 
 **API:** `POST /api/v1/repos/:id/archive`, `POST /api/v1/repos/:id/unarchive`
 
@@ -210,8 +211,9 @@ Deleting a repo permanently removes it. This is destructive and irreversible.
 
 **What happens:**
 1. All repo data removed from database (tasks, MRs, agents, specs, graph, gates)
-2. Bare git repo removed from filesystem
-3. Workspace repo count decremented
+2. If `is_mirror: true`, stored mirror credentials (PAT, SSH key) are deleted from the credential store
+3. Bare git repo removed from filesystem
+4. Workspace repo count decremented
 
 **API:** `DELETE /api/v1/repos/:id` (new endpoint, requires archived status)
 
@@ -243,18 +245,14 @@ pub enum RepoStatus {
     Archived,   // Read-only, no new agents/MRs/pushes
 }
 
+// Only NEW and CHANGED fields shown. Existing fields from platform-model.md
+// (id, workspace_id, name, path, default_branch, budget, max_agents, is_mirror,
+// created_at) and implementation-specific fields (mirror_url, mirror_interval_secs,
+// last_mirror_sync) are retained unchanged.
 pub struct Repository {
-    pub id: Id,
-    pub workspace_id: Id,
-    pub name: String,
+    // ... existing fields ...
     pub description: Option<String>,   // NEW
-    pub path: String,
-    pub default_branch: String,
-    pub budget: BudgetConfig,
-    pub max_agents: Option<u32>,
-    pub is_mirror: bool,
-    pub status: RepoStatus,            // NEW
-    pub created_at: u64,
+    pub status: RepoStatus,            // NEW (default: Active)
     pub updated_at: u64,               // NEW
 }
 ```
