@@ -1048,11 +1048,7 @@ async fn test_divergence_detection_creates_notifications() {
         spec_ref: Some(spec_ref.to_string()),
         delta_json: agent_b_delta_json,
     };
-    ctx.state
-        .graph_store
-        .record_delta(delta_b)
-        .await
-        .unwrap();
+    ctx.state.graph_store.record_delta(delta_b).await.unwrap();
 
     // Now simulate agent-A's delta (the "current" push) with conflicting node types.
     let agent_a_nodes = vec![
@@ -1158,8 +1154,7 @@ async fn test_divergence_detection_creates_notifications() {
     );
 
     // Body should contain resolution options and commit SHA references.
-    let body: Value =
-        serde_json::from_str(admin_notifs[0].body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(admin_notifs[0].body.as_deref().unwrap()).unwrap();
     assert!(body["resolution_options"].is_array());
     assert_eq!(body["agent_a"], "agent-a");
     assert_eq!(body["agent_b"], "agent-b");
@@ -1209,11 +1204,7 @@ async fn test_divergence_below_threshold_no_notifications() {
         spec_ref: Some(spec_ref.to_string()),
         delta_json: delta_b_json,
     };
-    ctx.state
-        .graph_store
-        .record_delta(delta_b)
-        .await
-        .unwrap();
+    ctx.state.graph_store.record_delta(delta_b).await.unwrap();
 
     let current_delta_json = serde_json::json!({
         "nodes_extracted": 1,
