@@ -22,6 +22,7 @@ pub mod federation;
 pub mod gates;
 pub mod graph;
 pub mod jj;
+pub mod llm_config;
 pub mod llm_prompts;
 pub mod merge_deps;
 pub mod merge_queue;
@@ -535,6 +536,25 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
             get(meta_specs::get_meta_spec_preview_status),
+        )
+        // LLM function config (LLM integration §4)
+        .route(
+            "/api/v1/workspaces/:id/llm/config",
+            get(llm_config::list_workspace_llm_configs),
+        )
+        .route(
+            "/api/v1/workspaces/:id/llm/config/:function",
+            get(llm_config::get_effective_llm_config)
+                .put(llm_config::put_workspace_llm_config)
+                .delete(llm_config::delete_workspace_llm_config),
+        )
+        .route(
+            "/api/v1/admin/llm/config",
+            get(llm_config::list_tenant_llm_defaults),
+        )
+        .route(
+            "/api/v1/admin/llm/config/:function",
+            put(llm_config::put_tenant_llm_default),
         )
         // Message bus (Phase 3)
         .route(
