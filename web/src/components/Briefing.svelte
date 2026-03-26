@@ -195,7 +195,7 @@
   onMount(load);
 </script>
 
-<div class="briefing" data-testid="briefing-view">
+<div class="briefing" data-testid="briefing-view" aria-live="polite">
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
@@ -216,7 +216,7 @@
             class="range-select"
             value={selectedRange}
             onchange={(e) => onRangeChange(e.target.value)}
-            aria-label="Time range"
+            aria-label="Briefing time range"
           >
             {#each TIME_RANGES as opt}
               <option value={opt.value}>{opt.label}</option>
@@ -416,6 +416,7 @@
                   class="action-btn secondary"
                   onclick={() => handleDismiss(item)}
                   data-testid="dismiss-btn"
+                  aria-label="Dismiss: {item.description ?? item.spec_ref ?? 'item'}"
                 >
                   Dismiss
                 </button>
