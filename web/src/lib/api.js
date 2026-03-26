@@ -409,4 +409,14 @@ export const api = {
     request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
   publishPersona: (workspaceId, personaId, data) =>
     request(`/workspaces/${workspaceId}/personas/${personaId}/publish`, { method: 'POST', body: JSON.stringify(data) }),
+  // Workspace admin (S4.7)
+  updateWorkspace: (id, data) =>
+    request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  workspaceAbacPolicies: (id) => request(`/workspaces/${id}/abac-policies`),
+  createWorkspaceAbacPolicy: (id, data) =>
+    request(`/workspaces/${id}/abac-policies`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteWorkspaceAbacPolicy: (id, policyId) =>
+    request(`/workspaces/${id}/abac-policies/${policyId}`, { method: 'DELETE' }),
+  simulateAbacPolicy: (id, data) =>
+    request(`/workspaces/${id}/abac-policies/simulate`, { method: 'POST', body: JSON.stringify(data) }),
 };
