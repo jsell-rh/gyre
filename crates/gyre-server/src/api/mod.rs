@@ -26,6 +26,7 @@ pub mod merge_queue;
 pub mod merge_requests;
 pub mod messages;
 pub mod meta_specs;
+pub mod mr_timeline;
 pub mod network;
 pub mod personas;
 pub mod policies;
@@ -264,6 +265,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/merge-requests/:id/gates",
             get(gates::list_mr_gate_results),
+        )
+        // MR SDLC timeline (S2.5 — HSI §3 System Trace View)
+        .route(
+            "/api/v1/merge-requests/:id/timeline",
+            get(mr_timeline::get_mr_timeline),
         )
         // MR dependency graph (TASK-100)
         .route(
