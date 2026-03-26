@@ -159,11 +159,15 @@ mod tests {
         let (_tmp, storage) = tmp_storage();
         let mut conn = storage.pool.get().unwrap();
         let tables = [
+            // Core schema (from schema.rs — Diesel-managed tables)
             "repositories",
             "agents",
             "tasks",
             "merge_requests",
             "activity_events",
+            "review_comments",
+            "reviews",
+            "merge_queue",
             "agent_commits",
             "agent_worktrees",
             "users",
@@ -171,7 +175,27 @@ mod tests {
             "analytics_events",
             "cost_entries",
             "audit_events",
+            "spawn_log",
+            "revoked_tokens",
             "network_peers",
+            "workspaces",
+            "personas",
+            "teams",
+            "workspace_memberships",
+            "notifications",
+            "policies",
+            "policy_decisions",
+            "spec_approvals",
+            "dependency_edges",
+            "budget_configs",
+            "quality_gates",
+            "gate_results",
+            "repo_push_gates",
+            "spec_policies",
+            "attestation_bundles",
+            "container_audit_records",
+            "spec_ledger_entries",
+            "spec_approval_events",
             "tenants",
             "messages",
             "meta_spec_sets",
@@ -179,13 +203,17 @@ mod tests {
             "trace_spans",
             "conversations",
             "turn_commit_links",
+            "budget_call_records",
+            "user_workspace_state",
             // Previously shadowed by duplicate version prefixes — regression guard
+            // (these tables were silently skipped on fresh installs before the fix)
             "kv_store",
             "budget_usages",
             "graph_nodes",
             "graph_edges",
             "graph_deltas",
-            "user_workspace_state",
+            // Raw-SQL tables (not in schema.rs but created by migrations)
+            "explorer_views",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;
