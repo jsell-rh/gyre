@@ -714,8 +714,8 @@
     resize: vertical;
     box-sizing: border-box;
   }
-  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-primary, #ee0000); }
-  .persona-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary, #ee0000); }
+  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-focus, #4db0ff); }
+  .persona-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .persona-diff {
     min-height: 280px;
@@ -825,7 +825,7 @@
   .detail-tab:focus-visible,
   .link-btn:focus-visible,
   .persona-select:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 </style>

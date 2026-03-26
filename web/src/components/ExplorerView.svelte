@@ -386,7 +386,7 @@
   }
 
   .ws-repo-card:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -569,7 +569,7 @@
     transition: opacity var(--transition-fast);
   }
   .go-admin-btn:hover { opacity: 0.85; }
-  .go-admin-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .go-admin-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .loading-wrap {
     padding: var(--space-6);
@@ -610,7 +610,7 @@
   }
 
   .search-input-wrap:focus-within {
-    border-color: var(--color-primary);
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .search-icon {
@@ -695,7 +695,7 @@
   }
 
   .chip-clear:hover { opacity: 1; }
-  .chip-clear:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .chip-clear:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {
@@ -730,7 +730,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 
@@ -770,7 +770,7 @@
   }
 
   .graph-error button:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 </style>

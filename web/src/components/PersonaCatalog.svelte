@@ -351,7 +351,7 @@
   }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .btn-primary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -363,7 +363,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
   }
-  .btn-secondary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .btn-danger-sm {
     padding: var(--space-1) var(--space-2);
@@ -375,7 +375,7 @@
     cursor: pointer;
   }
   .btn-danger-sm:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
-  .btn-danger-sm:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .btn-danger-sm:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .btn-approve-sm {
     padding: var(--space-1) var(--space-2);
@@ -387,7 +387,7 @@
     cursor: pointer;
   }
   .btn-approve-sm:hover { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
-  .btn-approve-sm:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .btn-approve-sm:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
@@ -401,7 +401,7 @@
     font-size: var(--text-sm);
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
-  .field-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .field-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
   .field-textarea { min-height: 80px; resize: vertical; font-family: var(--font-mono); }
 
   .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; display: block; }

@@ -388,7 +388,7 @@
   }
   .filter-select:focus-visible,
   .filter-input:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
 

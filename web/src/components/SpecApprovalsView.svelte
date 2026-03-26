@@ -278,7 +278,7 @@
   }
 
   .filter-input:focus:not(:focus-visible) { outline: none; }
-  .filter-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .filter-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .table-wrap {
     flex: 1;
@@ -391,7 +391,7 @@
   .field-input:focus:not(:focus-visible),
   .field-textarea:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible,
-  .field-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .field-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .modal-actions {
     display: flex;
