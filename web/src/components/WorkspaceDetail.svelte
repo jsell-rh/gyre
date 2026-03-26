@@ -337,7 +337,7 @@
 
   .budget-bars { display: flex; flex-direction: column; gap: var(--space-5); max-width: 640px; }
 
-  .budget-bar-row { display: flex; flex-direction: column; gap: var(--space-1); }
+  .budget-bar-row { display: flex; flex-direction: column; gap: var(--space-2); }
 
   .bar-label {
     display: flex;
@@ -375,7 +375,7 @@
 
   .data-table th {
     text-align: left;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-3);
     border-bottom: 1px solid var(--color-border);
     color: var(--color-text-muted);
     font-weight: 500;
@@ -417,7 +417,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: var(--space-4);
+    padding: var(--space-6);
   }
 
   .team-name { font-weight: 600; color: var(--color-text); margin-bottom: var(--space-1); }
