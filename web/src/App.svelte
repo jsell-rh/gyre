@@ -121,7 +121,7 @@
   }
 
   function pushUrl(nav, s) {
-    window.history.pushState({ nav, scope: s }, '', urlFor(nav, s));
+    window.history.pushState({ nav, scope: { ...s } }, '', urlFor(nav, s));
   }
 
   // ── Navigation ────────────────────────────────────────────────────────
@@ -327,7 +327,7 @@
     }
 
     // Replace history state with canonical URL
-    window.history.replaceState({ nav: currentNav, scope }, '', urlFor(currentNav, scope));
+    window.history.replaceState({ nav: currentNav, scope: { ...scope } }, '', urlFor(currentNav, scope));
 
     // 3. Load inbox badge, refresh every 60s
     loadInboxBadge();
