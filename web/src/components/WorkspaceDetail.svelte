@@ -141,7 +141,7 @@
             {/each}
           </select>
           {#if trustSaving}
-            <span class="trust-saving" aria-label="Saving...">...</span>
+            <span class="trust-saving" role="status" aria-live="polite">Saving…</span>
           {/if}
         </div>
       </div>
@@ -208,9 +208,9 @@
             <EmptyState title="No budget limits configured for this workspace." />
           {/if}
           {#if !budgetFormOpen}
-            <button class="configure-budget-btn" onclick={() => { budgetFormOpen = true; budgetForm = { max_tokens_per_day: budget.config?.max_tokens_per_day ?? '', max_cost_per_day: budget.config?.max_cost_per_day ?? '', max_concurrent_agents: budget.config?.max_concurrent_agents ?? '', max_agent_lifetime_secs: budget.config?.max_agent_lifetime_secs ?? '' }; }}>Configure Budget</button>
+            <button class="configure-budget-btn" aria-expanded={budgetFormOpen} aria-controls="budget-form" onclick={() => { budgetFormOpen = true; budgetForm = { max_tokens_per_day: budget.config?.max_tokens_per_day ?? '', max_cost_per_day: budget.config?.max_cost_per_day ?? '', max_concurrent_agents: budget.config?.max_concurrent_agents ?? '', max_agent_lifetime_secs: budget.config?.max_agent_lifetime_secs ?? '' }; }}>Configure Budget</button>
           {:else}
-            <form class="budget-form" onsubmit={(e) => { e.preventDefault(); saveBudget(); }}>
+            <form id="budget-form" class="budget-form" onsubmit={(e) => { e.preventDefault(); saveBudget(); }}>
               <h4 class="budget-form-title">Set Budget Limits</h4>
               <div class="budget-form-fields">
                 <label class="budget-field">

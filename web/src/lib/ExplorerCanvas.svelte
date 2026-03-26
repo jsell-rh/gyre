@@ -559,7 +559,7 @@
     {/if}
 
     <div class="canvas-toolbar">
-      <button class="tool-btn" onclick={resetView} title="Reset view">
+      <button class="tool-btn" onclick={resetView} title="Reset view" aria-label="Reset view">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/></svg>
         Reset
       </button>
@@ -575,7 +575,7 @@
       <div class="layout-switcher" role="group" aria-label="Layout engine">
         {#each Object.entries(LAYOUT_LABELS) as [eng, label]}
           <button class="layout-btn" class:active={layoutEngine === eng}
-            onclick={() => (layoutEngine = eng)} aria-pressed={layoutEngine === eng} title="Switch to {label} layout">
+            onclick={() => (layoutEngine = eng)} aria-pressed={layoutEngine === eng} title="Switch to {label} layout" aria-label="Switch to {label} layout">
             {label}
           </button>
         {/each}
@@ -583,16 +583,16 @@
       </div>
 
       <button class="tool-btn" class:active={specLinkageOn} onclick={() => (specLinkageOn = !specLinkageOn)}
-        title="Toggle spec linkage overlay" aria-pressed={specLinkageOn}>Spec Linkage</button>
+        title="Toggle spec linkage overlay" aria-label="Toggle spec linkage overlay" aria-pressed={specLinkageOn}>Spec Linkage</button>
       {#if specLinkageOn}
         <button class="tool-btn" class:active={showUnspeccedOnly} onclick={() => (showUnspeccedOnly = !showUnspeccedOnly)}
-          title="Show only unspecced nodes" aria-pressed={showUnspeccedOnly}>
+          title="Show only unspecced nodes" aria-label="Show only unspecced nodes" aria-pressed={showUnspeccedOnly}>
           Unspecced only ({specCounts.unspecced})
         </button>
       {/if}
 
       <button class="tool-btn risk-toggle" class:active={showRiskHeatmap} onclick={() => (showRiskHeatmap = !showRiskHeatmap)}
-        title={showRiskHeatmap ? 'Disable risk heat-map' : 'Enable risk heat-map'} aria-pressed={showRiskHeatmap}>
+        title={showRiskHeatmap ? 'Disable risk heat-map' : 'Enable risk heat-map'} aria-label={showRiskHeatmap ? 'Disable risk heat-map' : 'Enable risk heat-map'} aria-pressed={showRiskHeatmap}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
           <circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/><path d="M8 12h1M15 12h1M12 8v1M12 15v1"/>
         </svg>
@@ -688,13 +688,13 @@
               {@const ann = viewSpec.annotations.find(a => a.node_name === node.name)}
               {#if ann}
                 <text text-anchor="middle" dominant-baseline="auto" y="-24" font-size="8"
-                  fill="#94a3b8" font-family="var(--font-mono)" pointer-events="none" style="user-select:none">
+                  fill="#94a3b8" pointer-events="none" style="font-family: var(--font-mono); user-select:none">
                   {ann.text.substring(0, 30)}
                 </text>
               {/if}
             {/if}
             <text text-anchor="middle" dominant-baseline="middle" font-size="9" fill="#f1f5f9"
-              font-family="var(--font-mono)" pointer-events="none" style="user-select:none">
+              pointer-events="none" style="font-family: var(--font-mono); user-select:none">
               {encodedNodeLabel(node)}
             </text>
             {#if isSelected}
@@ -751,7 +751,7 @@
                       aria-label="Highlight node {entry.name} on canvas"
                       onclick={() => panToNode(entry.id)} onkeydown={(e) => e.key === 'Enter' && panToNode(entry.id)}>
                       <td class="risk-name" title={entry.name}>{entry.name.substring(0, 14)}</td>
-                      <td><span class="risk-score-chip" style="background:{fill}20; color:{fill}; border-color:{fill}40">{entry.score.toFixed(2)}</span></td>
+                      <td><span class="risk-score-chip" style="background: color-mix(in srgb, {fill} 12%, transparent); color: {fill}; border-color: color-mix(in srgb, {fill} 25%, transparent)">{entry.score.toFixed(2)}</span></td>
                       <td class="risk-num">{typeof entry.churn_rate === 'number' ? entry.churn_rate.toFixed(2) : entry.churn_rate}</td>
                       <td class="risk-num">{entry.fan_out}</td>
                     </tr>
@@ -972,8 +972,8 @@
   .spec-legend-item { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--color-text-secondary); }
   .spec-legend-counts { display: flex; gap: var(--space-3); padding-top: var(--space-1); border-top: 1px solid var(--color-border); margin-top: var(--space-1); }
   .spec-count { font-size: var(--text-xs); font-family: var(--font-mono); font-weight: 600; }
-  .spec-count.specced { color: #22c55e; }
-  .spec-count.unspecced { color: #ef4444; }
+  .spec-count.specced { color: var(--color-success); }
+  .spec-count.unspecced { color: var(--color-danger); }
 
   .detail-panel { width: 280px; flex-shrink: 0; background: var(--color-surface); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; overflow: hidden; }
   .panel-header { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; }

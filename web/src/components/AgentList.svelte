@@ -298,10 +298,10 @@
               </select>
             </label>
             {/if}
-            {#if spawnError}<p class="form-error">{spawnError}</p>{/if}
+            {#if spawnError}<p class="form-error" role="alert">{spawnError}</p>{/if}
             <div class="form-actions">
               <button class="modal-btn secondary" onclick={closeSpawnModal}>Cancel</button>
-              <button class="modal-btn primary" onclick={doSpawn} disabled={spawnLoading}>
+              <button class="modal-btn primary" onclick={doSpawn} disabled={spawnLoading} aria-busy={spawnLoading}>
                 {spawnLoading ? 'Spawning...' : 'Spawn'}
               </button>
             </div>
@@ -874,5 +874,10 @@
   .close-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  :global(tr[tabindex]:focus-visible td) {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
   }
 </style>

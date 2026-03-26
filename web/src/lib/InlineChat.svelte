@@ -183,7 +183,7 @@
     <div class="chat-error" role="alert">{error}</div>
   {/if}
 
-  <div class="chat-input-area">
+  <div class="chat-input-area" aria-busy={streaming}>
     {#if recipientLabel}
       <div class="recipient-line" aria-label="Sending to: {recipient}">
         {recipientLabel}
