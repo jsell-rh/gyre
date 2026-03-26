@@ -15,6 +15,7 @@
 
   let workspaces = $state([]);
   let loading = $state(true);
+  let error = $state(null);
   // Per-workspace enrichment keyed by id
   let enrichment = $state({});
 
@@ -24,9 +25,11 @@
 
   async function load() {
     loading = true;
+    error = null;
     try {
       workspaces = (await api.workspaces()) ?? [];
     } catch (e) {
+      error = e.message;
       showToast('Failed to load workspaces: ' + e.message, { type: 'error' });
       workspaces = [];
     } finally {
@@ -117,6 +120,12 @@
       {/each}
     </div>
 
+  {:else if error}
+    <div class="error-banner" role="alert">
+      <p>Failed to load workspaces: {error}</p>
+      <button class="retry-btn" onclick={load}>Retry</button>
+    </div>
+
   {:else if workspaces.length === 0}
     <div class="empty-wrap">
       <EmptyState
@@ -197,7 +206,7 @@
                     <span class="budget-pct budget-unknown">—</span>
                   {/if}
                 </div>
-                <div class="budget-bar-track" role="progressbar" aria-valuenow={info?.budgetPct ?? 0} aria-valuemin="0" aria-valuemax="100">
+                <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-valuenow={info?.budgetPct ?? 0} aria-valuemin="0" aria-valuemax="100">
                   <div
                     class="budget-bar-fill"
                     style="width: {info?.budgetPct ?? 0}%; background: {budgetBarColor(info?.budgetPct ?? null)}"
@@ -423,5 +432,47 @@
 
   .btn-secondary:hover {
     border-color: var(--color-text-muted);
+  }
+
+  .enter-btn:focus-visible,
+  .btn-secondary:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  .error-banner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    text-align: center;
+    color: var(--color-danger);
+  }
+
+  .error-banner p {
+    margin: 0;
+    font-size: var(--text-sm);
+  }
+
+  .retry-btn {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+
+  .retry-btn:hover {
+    border-color: var(--color-text-muted);
+  }
+
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 </style>

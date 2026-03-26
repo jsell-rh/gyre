@@ -23,8 +23,11 @@
     class: extraClass = '',
   } = $props();
 
+  import { tick } from 'svelte';
+
   let dropdownOpen = $state(false);
   let dropdownEl = $state(null);
+  let dropdownListEl = $state(null);
 
   function clickTenant() {
     onnavigate?.('explorer', { scope: 'tenant' });
@@ -46,6 +49,39 @@
 
   function clickRepo() {
     onnavigate?.('explorer', { scope: 'repo', repo });
+  }
+
+  // Focus active option when dropdown opens.
+  $effect(() => {
+    if (dropdownOpen && dropdownListEl) {
+      tick().then(() => {
+        const active = dropdownListEl.querySelector('.ws-option.active')
+          ?? dropdownListEl.querySelector('.ws-option');
+        active?.focus();
+      });
+    }
+  });
+
+  function onDropdownKeydown(e) {
+    const options = Array.from(dropdownListEl?.querySelectorAll('.ws-option') ?? []);
+    const current = options.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      options[(current + 1) % options.length]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      options[(current - 1 + options.length) % options.length]?.focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      dropdownOpen = false;
+      dropdownEl?.querySelector('.workspace-crumb')?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      options[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      options[options.length - 1]?.focus();
+    }
   }
 
   // Close dropdown when clicking outside.
@@ -92,7 +128,7 @@
       </button>
 
       {#if dropdownOpen && workspaces.length > 1}
-        <ul class="ws-dropdown" role="listbox" aria-label="Select workspace">
+        <ul class="ws-dropdown" role="listbox" aria-label="Select workspace" bind:this={dropdownListEl} onkeydown={onDropdownKeydown}>
           {#each workspaces as ws}
             <li role="presentation">
               <button
@@ -155,6 +191,16 @@
     transition: color 150ms ease-out, opacity 150ms ease-out;
     white-space: nowrap;
     border-radius: var(--radius-sm);
+  }
+
+  .crumb:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  .ws-option:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
   }
 
   .tenant-crumb {

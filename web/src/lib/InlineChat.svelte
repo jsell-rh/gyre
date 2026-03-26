@@ -373,9 +373,20 @@
     box-sizing: border-box;
   }
 
-  .chat-input:focus {
+  .chat-input:focus:not(:focus-visible) {
     outline: none;
     border-color: var(--color-primary);
+  }
+
+  .chat-input:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -1px;
+  }
+
+  .send-btn:focus-visible,
+  .clear-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .chat-input:disabled {
@@ -393,7 +404,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-surface, #fff);
     cursor: pointer;
     flex-shrink: 0;
     transition: background var(--transition-fast);
