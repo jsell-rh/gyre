@@ -121,9 +121,10 @@ How Gyre gets built - process and standards for the agent team.
 | M30: Knowledge Graph | [`milestones/m30-knowledge-graph.md`](milestones/m30-knowledge-graph.md) | Live knowledge graph extracted from source code: `GraphNode`/`GraphEdge` domain types, `RustExtractor` (syn-based AST), 13 graph API endpoints, push-triggered automatic extraction (M30b) |
 | M31: UI Journeys | [`milestones/m31-ui-journeys.md`](milestones/m31-ui-journeys.md) | Intent-centric dashboard: Inbox (action queue), Briefing (narrative digest), System Explorer Canvas (MoldableView SVG graph), navigation restructure, keyboard shortcuts `i`/`b` |
 | M32: Meta-Spec Reconciliation | [`milestones/m32-meta-spec-reconciliation.md`](milestones/m32-meta-spec-reconciliation.md) | Spec `kind` field (meta:persona/principle/standard/process), workspace meta-spec-set bindings, blast-radius endpoint, `meta_spec_set_sha` in spawn provenance, MetaSpecs UI |
-| M33: Project Removal | _(inline — see M34 hierarchy)_ | Project entity removed; Workspace becomes the primary grouping entity. All APIs migrated to use `workspace_id` directly. |
+| M33: Project Removal | [`milestones/m33-project-removal.md`](milestones/m33-project-removal.md) | Project entity removed; Workspace becomes the primary grouping entity. All APIs migrated to use `workspace_id` directly. |
 | M34: Hierarchy Enforcement | [`milestones/m34-hierarchy-enforcement.md`](milestones/m34-hierarchy-enforcement.md) | Load-bearing ownership hierarchy: Tenant entity, non-optional workspace_id, ABAC middleware, tenant isolation, auth gap fixes, URL restructure |
-| M35: Unified Message Bus | (see [`system/message-bus.md`](system/message-bus.md)) | Signed message envelope replacing REST inbox + domain events + activity store. Depends on M34 Slice 3. |
+| M35: Unified Message Bus | [`milestones/m35-message-bus.md`](milestones/m35-message-bus.md) | Signed message envelope replacing REST inbox + domain events + activity store. Three-tier model: directed (acked, persisted), telemetry (ring buffer), broadcast (fan-out). |
+| HSI: Human-System Interface | [`milestones/hsi-human-system-interface.md`](milestones/hsi-human-system-interface.md) | Trust gradient, progressive Explorer (C4 + LLM views), agent interrogation, conversation provenance, MR timeline, gate traces, completion summaries, divergence detection, full Svelte UI rewrite (6-view model: Inbox/Briefing/Explorer/Specs/Meta-specs/Admin), 50 E2E tests. 29 PRs. |
 
 ## Open Questions
 
