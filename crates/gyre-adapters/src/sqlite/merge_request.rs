@@ -15,6 +15,7 @@ fn status_to_str(s: &MrStatus) -> &'static str {
         MrStatus::Approved => "Approved",
         MrStatus::Merged => "Merged",
         MrStatus::Closed => "Closed",
+        MrStatus::Reverted => "Reverted",
     }
 }
 
@@ -24,6 +25,7 @@ fn str_to_status(s: &str) -> Result<MrStatus> {
         "Approved" => Ok(MrStatus::Approved),
         "Merged" => Ok(MrStatus::Merged),
         "Closed" => Ok(MrStatus::Closed),
+        "Reverted" => Ok(MrStatus::Reverted),
         other => Err(anyhow!("unknown MR status: {}", other)),
     }
 }
