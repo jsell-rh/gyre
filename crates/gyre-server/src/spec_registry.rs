@@ -291,6 +291,7 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 /// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted".
 /// - Cross-workspace `@` targets: resolved to target_repo_id via workspace slug lookup.
 ///   Unresolved targets stored with `status = "unresolved"` and `target_repo_id = None`.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,

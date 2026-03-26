@@ -318,7 +318,9 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "cross_workspace_link_staleness_check".to_string(),
-                description: "Re-resolves cross-workspace spec links and marks stale entries (HSI §6)".to_string(),
+                description:
+                    "Re-resolves cross-workspace spec links and marks stale entries (HSI §6)"
+                        .to_string(),
                 interval_secs: 86400,
                 enabled: true,
             },

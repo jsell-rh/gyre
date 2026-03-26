@@ -330,10 +330,7 @@ pub async fn admin_kill_agent(
 
     // HSI §4: Clean up interrogation ABAC policies on admin kill.
     crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
-    let _ = state
-        .kv_store
-        .kv_remove("interrogation_context", &id)
-        .await;
+    let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
