@@ -334,6 +334,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register trust_suggestion_check job (runs daily, HSI §2)
+    registry
+        .register(
+            JobDefinition {
+                name: "trust_suggestion_check".to_string(),
+                description:
+                    "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
+                     notifications for Admin/Owner members when criteria are met (HSI §2)"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |state| async move { crate::trust_suggestion::run_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
