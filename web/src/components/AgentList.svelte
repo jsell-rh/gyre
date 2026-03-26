@@ -857,4 +857,16 @@
   }
 
   .link-btn:hover { opacity: 0.8; }
+
+  .toggle-btn:focus-visible,
+  .spawn-btn:focus-visible,
+  .pill:focus-visible,
+  .modal-btn:focus-visible,
+  .link-btn:focus-visible,
+  .dtab:focus-visible,
+  .agent-card:focus-visible,
+  .close-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 </style>
