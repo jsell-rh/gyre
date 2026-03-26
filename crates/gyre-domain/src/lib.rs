@@ -10,6 +10,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod llm_config;
 pub mod agent_card;
 pub mod agent_tracking;
 pub mod analytics;
@@ -55,6 +56,7 @@ pub use container_audit::ContainerAuditRecord;
 pub use dependency::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
+pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use message_type::MessageType;

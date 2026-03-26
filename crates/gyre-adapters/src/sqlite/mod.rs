@@ -19,6 +19,7 @@ pub mod conversation;
 pub mod dependency;
 pub mod graph;
 pub mod kv_store;
+pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message;
@@ -214,6 +215,8 @@ mod tests {
             "graph_nodes",
             "graph_edges",
             "graph_deltas",
+            // LLM function config (migration 000031)
+            "llm_function_configs",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",

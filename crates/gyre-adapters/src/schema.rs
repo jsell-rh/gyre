@@ -658,6 +658,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     trace_spans,
     conversations,
     turn_commit_links,
+    llm_function_configs,
+    graph_nodes,
+    graph_edges,
+    graph_deltas,
 );
 
 diesel::table! {
@@ -749,6 +753,17 @@ diesel::table! {
         content -> Text,
         created_by -> Text,
         created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    llm_function_configs (id) {
+        id -> Text,
+        workspace_id -> Nullable<Text>,
+        function_key -> Text,
+        model_name -> Text,
+        max_tokens -> Nullable<Integer>,
+        updated_by -> Text,
         updated_at -> BigInt,
     }
 }

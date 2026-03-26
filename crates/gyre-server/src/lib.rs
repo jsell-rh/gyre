@@ -15,6 +15,7 @@ pub mod procfs_monitor;
 
 pub(crate) mod health;
 pub mod jobs;
+pub mod llm_helpers;
 pub mod llm_rate_limit;
 pub(crate) mod mcp;
 pub(crate) mod mem;
@@ -54,11 +55,11 @@ use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
     ContainerAuditRepository, ConversationRepository, CostRepository, DependencyRepository,
-    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository,
-    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
-    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
-    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
+    PushGateRepository, QualityGateRepository, RepoRepository, ReviewRepository,
+    SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
     SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
     UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
     WorktreeRepository,
@@ -326,6 +327,8 @@ pub struct AppState {
     /// Per-(user_id, workspace_id) sliding-window rate limiter for LLM endpoints.
     /// Enforces 10 requests/60 s per user per workspace (ui-layout.md §2).
     pub llm_rate_limiter: Arc<tokio::sync::Mutex<llm_rate_limit::LlmRateLimiterMap>>,
+    /// Per-function, per-workspace LLM model configuration (LLM integration §4).
+    pub llm_configs: Arc<dyn LlmConfigRepository>,
     /// In-memory presence map: (user_id, session_id) → PresenceEntry.
     /// Not persisted — evicted after 60 s of inactivity or on graceful disconnect.
     pub presence: Arc<RwLock<HashMap<(String, String), PresenceEntry>>>,
@@ -909,6 +912,10 @@ pub fn build_state(
         ),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_configs: store!(
+            dyn LlmConfigRepository,
+            mem::MemLlmConfigRepository::default()
+        ),
         presence: Arc::new(RwLock::new(HashMap::new())),
         ws_connections: Arc::new(RwLock::new(HashMap::new())),
         ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),

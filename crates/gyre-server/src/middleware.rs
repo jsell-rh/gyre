@@ -280,6 +280,7 @@ mod tests {
             user_workspace_state: base.user_workspace_state.clone(),
             last_seen_debounce: base.last_seen_debounce.clone(),
             llm_rate_limiter: base.llm_rate_limiter.clone(),
+            llm_configs: base.llm_configs.clone(),
             presence: base.presence.clone(),
             ws_connections: base.ws_connections.clone(),
             ws_connection_counter: base.ws_connection_counter.clone(),
