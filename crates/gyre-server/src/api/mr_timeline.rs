@@ -718,6 +718,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timeline_graph_extraction_events() {
+        use gyre_common::graph::ArchitecturalDelta;
+        use gyre_domain::AgentCommit;
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+
+        let body = serde_json::json!({
+            "repository_id": repo_id,
+            "title": "Delta MR",
+            "source_branch": "feat/delta",
+            "target_branch": "main",
+            "author_agent_id": "agent-delta",
+        });
+        let resp = app
+            .clone()
+            .oneshot(authed_post("/api/v1/merge-requests", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let mr_id = json["id"].as_str().unwrap().to_string();
+        // Capture the MR's created_at so we can set timestamps after it.
+        let mr_created_at = json["created_at"].as_u64().unwrap_or(0);
+        let ts_commit = mr_created_at + 10;
+        let ts_delta = mr_created_at + 20;
+
+        // Record a commit that will be picked up by the handler.
+        let commit = AgentCommit::new(
+            Id::new("c-delta"),
+            Id::new("agent-delta"),
+            Id::new(&repo_id),
+            "delta-sha",
+            "feat/delta",
+            ts_commit,
+        );
+        state.agent_commits.record(&commit).await.unwrap();
+
+        // Record a delta for the same commit SHA in the same repo.
+        let delta = ArchitecturalDelta {
+            id: Id::new("d-1"),
+            repo_id: Id::new(&repo_id),
+            commit_sha: "delta-sha".to_string(),
+            timestamp: ts_delta,
+            agent_id: Some(Id::new("agent-delta")),
+            spec_ref: None,
+            delta_json: r#"{"nodes_added": 2, "nodes_modified": 1}"#.to_string(),
+        };
+        state.graph_store.record_delta(delta).await.unwrap();
+
+        let resp = app
+            .oneshot(authed_get(&format!(
+                "/api/v1/merge-requests/{mr_id}/timeline"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let events = json["events"].as_array().unwrap();
+
+        let graph_events: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "GraphExtraction")
+            .collect();
+        assert_eq!(graph_events.len(), 1, "expected exactly 1 GraphExtraction event");
+        assert_eq!(graph_events[0]["detail"]["commit_sha"], "delta-sha");
+        assert_eq!(graph_events[0]["detail"]["nodes_added"], 2);
+        assert_eq!(graph_events[0]["detail"]["nodes_modified"], 1);
+        assert_eq!(graph_events[0]["timestamp"], ts_delta);
+    }
+
+    #[tokio::test]
+    async fn timeline_git_push_filters_wrong_branch() {
+        use gyre_domain::AgentCommit;
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+
+        let body = serde_json::json!({
+            "repository_id": repo_id,
+            "title": "Filter MR",
+            "source_branch": "feat/correct",
+            "target_branch": "main",
+            "author_agent_id": "agent-filter",
+        });
+        let resp = app
+            .clone()
+            .oneshot(authed_post("/api/v1/merge-requests", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let mr_id = json["id"].as_str().unwrap().to_string();
+
+        // Commit on the CORRECT branch — should appear.
+        let good_commit = AgentCommit::new(
+            Id::new("c-good"),
+            Id::new("agent-filter"),
+            Id::new(&repo_id),
+            "sha-good",
+            "feat/correct",
+            5000,
+        );
+        state.agent_commits.record(&good_commit).await.unwrap();
+
+        // Commit on a WRONG branch — must NOT appear.
+        let bad_commit = AgentCommit::new(
+            Id::new("c-bad"),
+            Id::new("agent-filter"),
+            Id::new(&repo_id),
+            "sha-bad",
+            "feat/wrong-branch",
+            5001,
+        );
+        state.agent_commits.record(&bad_commit).await.unwrap();
+
+        let resp = app
+            .oneshot(authed_get(&format!(
+                "/api/v1/merge-requests/{mr_id}/timeline"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let events = json["events"].as_array().unwrap();
+        let push_events: Vec<_> = events.iter().filter(|e| e["type"] == "GitPush").collect();
+        assert_eq!(push_events.len(), 1, "only correct-branch commit should appear");
+        assert_eq!(push_events[0]["detail"]["commit_sha"], "sha-good");
+    }
+
+    #[tokio::test]
+    async fn timeline_git_push_filters_wrong_repo() {
+        use gyre_domain::AgentCommit;
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, repo_id2) = create_repo(app).await; // second repo
+
+        let body = serde_json::json!({
+            "repository_id": repo_id,
+            "title": "Repo Filter MR",
+            "source_branch": "feat/repo-filter",
+            "target_branch": "main",
+            "author_agent_id": "agent-repofilt",
+        });
+        let resp = app
+            .clone()
+            .oneshot(authed_post("/api/v1/merge-requests", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let mr_id = json["id"].as_str().unwrap().to_string();
+
+        // Commit in the MR's repo — should appear.
+        let good = AgentCommit::new(
+            Id::new("c-repo-good"),
+            Id::new("agent-repofilt"),
+            Id::new(&repo_id),
+            "sha-repo-good",
+            "feat/repo-filter",
+            6000,
+        );
+        state.agent_commits.record(&good).await.unwrap();
+
+        // Same agent, same branch name, but DIFFERENT repo — must NOT appear.
+        let bad = AgentCommit::new(
+            Id::new("c-repo-bad"),
+            Id::new("agent-repofilt"),
+            Id::new(&repo_id2),
+            "sha-repo-bad",
+            "feat/repo-filter",
+            6001,
+        );
+        state.agent_commits.record(&bad).await.unwrap();
+
+        let resp = app
+            .oneshot(authed_get(&format!(
+                "/api/v1/merge-requests/{mr_id}/timeline"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let events = json["events"].as_array().unwrap();
+        let push_events: Vec<_> = events.iter().filter(|e| e["type"] == "GitPush").collect();
+        assert_eq!(push_events.len(), 1, "only same-repo commit should appear");
+        assert_eq!(push_events[0]["detail"]["commit_sha"], "sha-repo-good");
+    }
+
+    #[tokio::test]
+    async fn timeline_merged_dedup_exactly_one_merged_event() {
+        // The status transition to Merged emits one MrMerged bus message automatically.
+        // The handler also has a status-based fallback. Together they could produce two
+        // Merged events without dedup logic. Verify exactly one appears.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, mr_id) = create_mr(app, &repo_id).await;
+
+        // Transition MR to Merged (Open → Approved → Merged).
+        // The server emits MrMerged to the workspace message bus on this transition.
+        let approve = app
+            .clone()
+            .oneshot(authed_put(
+                &format!("/api/v1/merge-requests/{mr_id}/status"),
+                serde_json::json!({"status": "approved"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(approve.status(), StatusCode::OK);
+        let merge = app
+            .clone()
+            .oneshot(authed_put(
+                &format!("/api/v1/merge-requests/{mr_id}/status"),
+                serde_json::json!({"status": "merged"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(merge.status(), StatusCode::OK);
+
+        // Now the timeline has: 1 Merged from bus message (step 5) and the fallback
+        // (step 6) would add another if dedup is broken. Verify exactly one.
+        let resp = app
+            .oneshot(authed_get(&format!(
+                "/api/v1/merge-requests/{mr_id}/timeline"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let events = json["events"].as_array().unwrap();
+        let merged_events: Vec<_> = events.iter().filter(|e| e["type"] == "Merged").collect();
+        assert_eq!(merged_events.len(), 1, "dedup: status fallback must not duplicate bus-message Merged event");
+    }
+
+    #[tokio::test]
     async fn parse_delta_counts_handles_malformed_json() {
         let (a, m) = parse_delta_counts("not json at all");
         assert_eq!(a, 0);
