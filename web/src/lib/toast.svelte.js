@@ -6,8 +6,13 @@ export function getToasts() {
 }
 
 export function toast(message, { type = 'info', duration = 4000 } = {}) {
+  // Deduplicate: skip if same message + type shown recently
+  const now = Date.now();
+  const recent = toasts.find(t => t.message === message && t.type === type && (now - t.addedAt) < 2000);
+  if (recent) return recent.id;
+
   const id = nextId++;
-  toasts.push({ id, message, type });
+  toasts.push({ id, message, type, addedAt: now });
 
   if (duration > 0) {
     setTimeout(() => dismiss(id), duration);

@@ -51,6 +51,7 @@
   let shortcutsOpen = $state(false);
   let shortcutsModalEl = $state(null);
   let userMenuOpen = $state(false);
+  let userMenuEl = $state(null);
 
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
@@ -183,6 +184,31 @@
 
   function closeDetailPanel() {
     detailPanel = { open: false, entity: null };
+  }
+
+  // ── User menu keyboard navigation ───────────────────────────────────
+  function onUserMenuKeydown(e) {
+    const items = userMenuEl?.querySelectorAll('[role="menuitem"]');
+    if (!items?.length) return;
+    const arr = Array.from(items);
+    const current = arr.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      arr[(current + 1) % arr.length]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      arr[(current - 1 + arr.length) % arr.length]?.focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      userMenuOpen = false;
+      document.querySelector('.user-btn')?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      arr[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      arr[arr.length - 1]?.focus();
+    }
   }
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
@@ -450,7 +476,8 @@
               class="user-dropdown"
               role="menu"
               aria-label="User menu"
-              onkeydown={(e) => { if (e.key === 'Escape') userMenuOpen = false; }}
+              bind:this={userMenuEl}
+              onkeydown={onUserMenuKeydown}
             >
               <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
                 Profile
@@ -720,6 +747,12 @@
     background: var(--color-surface-elevated);
   }
 
+  .search-trigger:focus-visible,
+  .inbox-badge-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
   .inbox-count {
     position: absolute;
     top: 2px;
@@ -728,7 +761,7 @@
     height: 14px;
     padding: 0 3px;
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-surface, #fff);
     border-radius: 999px;
     font-size: 0.55rem;
     font-weight: 700;
@@ -898,7 +931,7 @@
 
   .status-ws.connected .ws-dot {
     background: var(--color-success);
-    box-shadow: 0 0 4px rgba(99, 153, 61, 0.5);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--color-success, #22c55e) 50%, transparent);
   }
 
   .status-ws.error .ws-dot {
@@ -913,7 +946,7 @@
     z-index: 9999;
     padding: var(--space-2) var(--space-4);
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-surface, #fff);
     border-radius: 0 0 var(--radius) var(--radius);
     font-size: var(--text-sm);
     text-decoration: none;
@@ -929,7 +962,7 @@
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, #000 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1091,7 +1124,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-surface, #fff);
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
@@ -1113,4 +1146,16 @@
   }
 
   .btn-secondary:hover { border-color: var(--color-text-muted); }
+
+  .btn-primary:focus-visible,
+  .btn-secondary:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .btn-primary:active {
+    opacity: 0.85;
+  }
+  .btn-secondary:active {
+    opacity: 0.85;
+  }
 </style>

@@ -11,7 +11,7 @@
 
   let modalEl = $state(null);
   let previousFocus = $state(null);
-  let titleId = $derived(`modal-title-${Math.random().toString(36).slice(2, 8)}`);
+  const titleId = 'modal-title-' + Math.random().toString(36).slice(2);
 
   function close() {
     open = false;
@@ -116,7 +116,7 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--color-surface, #0a0a0a) 60%, transparent);
     backdrop-filter: blur(2px);
   }
 
