@@ -248,7 +248,7 @@
           {#each workspaces as ws}
             <div class="membership-item">
               <div class="membership-info">
-                <span class="membership-name">{ws.name ?? ws.slug ?? ws.id}</span>
+                <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? ws.id}</span>
                 {#if ws.role}
                   <Badge value={ws.role} color="neutral" />
                 {/if}
@@ -279,7 +279,7 @@
             <div class="ledger-item">
               <div class="ledger-row">
                 <Badge value={judgmentLabel(j)} color={judgmentEventColor(judgmentLabel(j))} />
-                <span class="ledger-target mono">{judgmentTarget(j)}</span>
+                <span class="ledger-target mono" title={judgmentTarget(j)}>{judgmentTarget(j)}</span>
                 <span class="ledger-time muted">{rel(j.timestamp ?? j.created_at ?? j.approved_at)}</span>
               </div>
               <div class="ledger-meta">

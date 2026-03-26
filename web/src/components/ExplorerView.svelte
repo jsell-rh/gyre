@@ -19,6 +19,7 @@
   // ── Workspace-scope repo list ──────────────────────────────────────────
   let wsRepos = $state([]);
   let wsReposLoading = $state(true);
+  let wsReposError = $state(null);
 
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
@@ -57,9 +58,11 @@
 
   async function loadWsRepos() {
     wsReposLoading = true;
+    wsReposError = null;
     try {
       wsRepos = await api.allRepos();
-    } catch {
+    } catch (e) {
+      wsReposError = e.message ?? 'Failed to load repositories';
       wsRepos = [];
     } finally {
       wsReposLoading = false;
@@ -172,6 +175,11 @@
         <Skeleton height="80px" />
         <Skeleton height="80px" />
         <Skeleton height="80px" />
+      </div>
+    {:else if wsReposError}
+      <div class="error-banner" role="alert">
+        <span>{wsReposError}</span>
+        <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">Retry</button>
       </div>
     {:else if wsRepos.length === 0}
       <EmptyState title="No repositories" description="Create a repository in this workspace to explore its architecture." />
@@ -688,6 +696,43 @@
 
   .chip-clear:hover { opacity: 1; }
   .chip-clear:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
+  /* ── Workspace repo error ─────────────────────────────────────────────── */
+  .error-banner {
+    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-danger, #ef4444);
+    font-size: var(--text-sm);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    white-space: nowrap;
+  }
+
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 
   /* ── Graph error state ────────────────────────────────────────────────── */
   .graph-error {

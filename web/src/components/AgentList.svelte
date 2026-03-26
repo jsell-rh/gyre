@@ -330,7 +330,7 @@
         {#each filtered as a}
           <button class="agent-card" class:selected={selected?.id === a.id} onclick={() => selectAgent(a)}>
             <div class="card-top">
-              <span class="agent-name">{a.name}</span>
+              <span class="agent-name" title={a.name}>{a.name}</span>
               <Badge value={a.status} />
             </div>
             <div class="card-fields">
@@ -585,6 +585,10 @@
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
 
   .card-fields { display: flex; flex-direction: column; gap: var(--space-2); }

@@ -797,7 +797,7 @@
   .detail-panel.open {
     width: 40%;
     min-width: 320px;
-    max-width: 480px;
+    max-width: 560px;
   }
 
   .detail-panel.expanded {
@@ -1027,8 +1027,6 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     background: var(--color-surface-elevated);
-    overflow: auto;
-    max-height: 380px;
   }
 
   .spec-content-pre {

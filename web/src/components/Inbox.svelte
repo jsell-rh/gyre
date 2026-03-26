@@ -144,7 +144,7 @@
   async function handleApproveSpec(n) {
     const body = getBody(n);
     if (!body.spec_path || !body.spec_sha) return;
-    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
     try {
       await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
       notifications = notifications.map(item =>
@@ -165,7 +165,7 @@
   async function handleRejectSpec(n) {
     const body = getBody(n);
     if (!body.spec_path) return;
-    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
     try {
       await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected from inbox');
       notifications = notifications.map(item =>
@@ -422,7 +422,7 @@
                         disabled={state?.loading}
                         onclick={() => handleApproveSpec(n)}
                       >
-                        {state?.loading ? 'Approving…' : 'Approve'}
+                        {state?.loading && state?.action === 'approve' ? 'Approving…' : 'Approve'}
                       </Button>
                       <Button
                         variant="ghost"
@@ -430,7 +430,7 @@
                         disabled={state?.loading}
                         onclick={() => handleRejectSpec(n)}
                       >
-                        {state?.loading ? 'Rejecting…' : 'Reject'}
+                        {state?.loading && state?.action === 'reject' ? 'Rejecting…' : 'Reject'}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         Open Spec

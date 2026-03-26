@@ -304,7 +304,7 @@
             onclick={() => handleRowClick(spec)}
             onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
           >
-            <span class="spec-path">{spec.path}</span>
+            <span class="spec-path" title={spec.path}>{spec.path}</span>
             <span class="spec-status-inline {statusColor(spec.approval_status)}">
               {statusIcon(spec.approval_status)} {spec.approval_status ?? 'unknown'}
             </span>
@@ -354,7 +354,7 @@
               aria-selected={selectedPath === spec.path}
             >
               <td class="col-path">
-                <span class="spec-path">{spec.path}</span>
+                <span class="spec-path" title={spec.path}>{spec.path}</span>
               </td>
               <td>
                 <Badge
@@ -595,7 +595,10 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
-    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
   }
 
   .col-kind,
