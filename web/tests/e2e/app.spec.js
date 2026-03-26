@@ -523,32 +523,32 @@ test.describe('Keyboard shortcuts', () => {
     await expect(dialog).not.toBeVisible({ timeout: 3000 });
   });
 
-  test('cmd_1_navigates_to_inbox', async ({ page }) => {
+  test('cmd_1_navigates_to_briefing', async ({ page }) => {
     await page.goto('/explorer');
     await page.waitForLoadState('networkidle');
 
     await page.keyboard.press('Control+1');
 
-    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
-    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+    const briefingBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Briefing' });
+    await expect(briefingBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
 
-  test('cmd_3_navigates_to_explorer', async ({ page }) => {
+  test('cmd_2_navigates_to_explorer', async ({ page }) => {
     await page.goto('/inbox');
     await page.waitForLoadState('networkidle');
 
-    await page.keyboard.press('Control+3');
+    await page.keyboard.press('Control+2');
 
     const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
     await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
 
-  test('cmd_5_navigates_to_meta_specs', async ({ page }) => {
+  test('cmd_4_navigates_to_meta_specs', async ({ page }) => {
     // meta-specs is the only hyphenated nav ID — test it explicitly
     await page.goto('/inbox');
     await page.waitForLoadState('networkidle');
 
-    await page.keyboard.press('Control+5');
+    await page.keyboard.press('Control+4');
 
     const metaBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Meta-specs' });
     await expect(metaBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });

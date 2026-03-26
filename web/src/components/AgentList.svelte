@@ -190,7 +190,7 @@
     </div>
     <div class="page-actions">
       <div class="view-toggle">
-        <button class="toggle-btn" class:active={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Grid view">
+        <button class="toggle-btn" class:active={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Grid view" aria-label="Grid view" aria-pressed={viewMode === 'grid'}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <rect x="1" y="1" width="6" height="6" rx="1"/>
             <rect x="9" y="1" width="6" height="6" rx="1"/>
@@ -198,7 +198,7 @@
             <rect x="9" y="9" width="6" height="6" rx="1"/>
           </svg>
         </button>
-        <button class="toggle-btn" class:active={viewMode === 'table'} onclick={() => (viewMode = 'table')} title="Table view">
+        <button class="toggle-btn" class:active={viewMode === 'table'} onclick={() => (viewMode = 'table')} title="Table view" aria-label="Table view" aria-pressed={viewMode === 'table'}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <rect x="1" y="2" width="14" height="2" rx="1"/>
             <rect x="1" y="7" width="14" height="2" rx="1"/>
@@ -362,7 +362,7 @@
       <div class="detail-panel">
         <div class="detail-header">
           <h3>Agent: {selected.name}</h3>
-          <button class="close-btn" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
+          <button class="close-btn" aria-label="Close agent detail" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
         </div>
         <div class="detail-tabs">
           <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')}>Info</button>
@@ -498,7 +498,7 @@
 
   .spawn-btn {
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     border: none;
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-4);
@@ -529,7 +529,7 @@
   }
 
   .pill:hover { border-color: var(--color-border-strong); color: var(--color-text); }
-  .pill.active { background: rgba(238,0,0,0.12); border-color: var(--color-primary); color: var(--color-primary); }
+  .pill.active { background: color-mix(in srgb, var(--color-primary) 12%, transparent); border-color: var(--color-primary); color: var(--color-primary); }
 
   .content {
     flex: 1;
@@ -541,7 +541,7 @@
 
   .agent-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: var(--space-6);
   }
 
@@ -561,7 +561,7 @@
   }
 
   .agent-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .agent-card.selected { border-color: var(--color-primary); background: rgba(238,0,0,0.04); }
+  .agent-card.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
   .skeleton-card { cursor: default; }
   .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
 
@@ -597,7 +597,7 @@
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .muted { color: var(--color-text-secondary); font-size: var(--text-xs); }
 
-  :global(tr.row-selected td) { background: rgba(238,0,0,0.04); }
+  :global(tr.row-selected td) { background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
 
   .detail-panel {
     background: var(--color-surface);
@@ -676,8 +676,8 @@
   }
 
   .tty-panel { height: 360px; }
-  .tty-output { background: #0d0d0d; }
-  .tty-output .log-line { color: #d4d4d4; }
+  .tty-output { background: var(--color-bg, #0d0d0d); }
+  .tty-output .log-line { color: var(--color-text-secondary, #d4d4d4); }
 
   .close-btn {
     background: none;
@@ -726,7 +726,7 @@
 
   /* Modal */
   .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000;
+    position: fixed; inset: 0; background: color-mix(in srgb, black 60%, transparent); z-index: 1000;
     display: flex; align-items: center; justify-content: center;
   }
 
@@ -780,7 +780,10 @@
     transition: border-color var(--transition-fast);
   }
 
-  .form input:focus, .form select:focus { outline: none; border-color: var(--color-primary); }
+  .form input:focus:not(:focus-visible),
+  .form select:focus:not(:focus-visible) { outline: none; }
+  .form input:focus-visible,
+  .form select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; }
 
@@ -800,7 +803,7 @@
     transition: all var(--transition-fast);
   }
 
-  .modal-btn.primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+  .modal-btn.primary { background: var(--color-primary); color: var(--color-text-inverse, #fff); border-color: var(--color-primary); }
   .modal-btn.primary:hover { background: var(--color-primary-hover); }
   .modal-btn.secondary:hover { background: var(--color-surface-elevated); }
   .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }

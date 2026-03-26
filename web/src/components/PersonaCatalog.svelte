@@ -396,7 +396,8 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
   }
-  .field-input:focus { outline: none; border-color: var(--color-primary); }
+  .field-input:focus:not(:focus-visible) { outline: none; }
+  .field-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
   .field-textarea { min-height: 80px; resize: vertical; font-family: var(--font-mono); }
 
   .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; display: block; }

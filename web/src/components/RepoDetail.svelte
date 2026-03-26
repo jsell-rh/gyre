@@ -1304,7 +1304,8 @@
     padding: var(--space-2) var(--space-3);
   }
 
-  .policy-input:focus { outline: none; border-color: var(--color-primary); }
+  .policy-input:focus:not(:focus-visible) { outline: none; }
+  .policy-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   .policy-op-label {
     font-size: var(--text-sm);

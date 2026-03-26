@@ -1297,7 +1297,8 @@
     padding: var(--space-1) var(--space-2);
     min-width: 0;
   }
-  .dep-input:focus { outline: none; border-color: var(--color-primary); }
+  .dep-input:focus:not(:focus-visible) { outline: none; }
+  .dep-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
   .dep-add-btn {
     background: rgba(0,102,204,0.1);
     border: 1px solid rgba(0,102,204,0.3);

@@ -276,10 +276,8 @@
     font-size: var(--text-sm);
   }
 
-  .filter-input:focus {
-    outline: none;
-    border-color: var(--color-primary);
-  }
+  .filter-input:focus:not(:focus-visible) { outline: none; }
+  .filter-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   .table-wrap {
     flex: 1;
@@ -389,11 +387,10 @@
 
   .field-input.mono { font-family: var(--font-mono); }
 
-  .field-input:focus,
-  .field-textarea:focus {
-    outline: none;
-    border-color: var(--color-primary);
-  }
+  .field-input:focus:not(:focus-visible),
+  .field-textarea:focus:not(:focus-visible) { outline: none; }
+  .field-input:focus-visible,
+  .field-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   .modal-actions {
     display: flex;

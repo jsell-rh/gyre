@@ -264,10 +264,10 @@
     line-height: 1.5;
   }
 
-  .field-input:focus, .field-textarea:focus {
-    outline: none;
-    border-color: var(--color-link);
-  }
+  .field-input:focus:not(:focus-visible),
+  .field-textarea:focus:not(:focus-visible) { outline: none; }
+  .field-input:focus-visible,
+  .field-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-link); }
 
   .field-hint {
     font-size: var(--text-xs);
