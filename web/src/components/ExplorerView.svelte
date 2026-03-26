@@ -5,7 +5,15 @@
   import EmptyState from '../lib/EmptyState.svelte';
   import Badge from '../lib/Badge.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import WorkspaceCards from './WorkspaceCards.svelte';
 
+  // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
+  // Defaults to tenant scope for backwards compatibility with old App.svelte.
+  let { scope = { type: 'tenant' }, onSelectWorkspace = null } = $props();
+
+  let scopeType = $derived(scope?.type ?? 'tenant');
+
+  // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
   let selectedRepoId = $state('');
   let graph = $state(null);
@@ -20,9 +28,20 @@
   let conceptEdges = $state(null);
   let debounceTimer = null;
 
-  // Load repos on mount
+  // Load repos when in workspace/repo scope (graph dropdown)
   $effect(() => {
-    loadRepos();
+    if (scopeType !== 'tenant') {
+      loadRepos();
+    }
+  });
+
+  // Auto-select repo when scope.repoId is set
+  $effect(() => {
+    if (scopeType === 'repo' && scope.repoId && scope.repoId !== selectedRepoId) {
+      selectedRepoId = scope.repoId;
+      clearConceptSearch();
+      loadGraph(scope.repoId);
+    }
   });
 
   async function loadRepos() {
@@ -109,125 +128,180 @@
   );
 </script>
 
-<div class="explorer-view">
-  <!-- Header -->
-  <div class="explorer-header">
-    <div class="header-left">
-      <h2>System Explorer</h2>
-      <p class="subtitle">Realized architecture — navigate the living knowledge graph</p>
-    </div>
-    <div class="header-right">
-      {#if reposLoading}
-        <div class="repo-selector-skeleton">
-          <Skeleton lines={1} />
-        </div>
-      {:else}
-        <div class="repo-select-wrap">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="repo-icon" aria-hidden="true">
-            <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
-          </svg>
-          <select
-            class="repo-select"
-            value={selectedRepoId}
-            onchange={onRepoChange}
-            aria-label="Select repository to explore"
-          >
-            <option value="">Select a repository…</option>
-            {#each repos as repo}
-              <option value={repo.id}>{repo.name}</option>
-            {/each}
-          </select>
-        </div>
-      {/if}
+{#if scopeType === 'tenant'}
+  <!-- Tenant scope: workspace cards grid (S4.4a) -->
+  <WorkspaceCards {onSelectWorkspace} />
 
-      {#if graph}
-        <div class="graph-stats">
-          <span class="stat">
-            <span class="stat-val">{graph.nodes?.length ?? 0}</span>
-            <span class="stat-label">nodes</span>
-          </span>
-          <span class="stat-sep">·</span>
-          <span class="stat">
-            <span class="stat-val">{graph.edges?.length ?? 0}</span>
-            <span class="stat-label">edges</span>
-          </span>
-        </div>
-      {/if}
+{:else if scopeType === 'workspace'}
+  <!-- Workspace scope: realized architecture canvas — S4.4b -->
+  <div class="canvas-placeholder">
+    <div class="placeholder-inner">
+      <svg viewBox="0 0 48 48" fill="none" width="48" height="48" aria-hidden="true">
+        <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
+        <circle cx="24" cy="24" r="6" stroke="currentColor" stroke-width="2"/>
+        <path d="M24 4v14M24 30v14M4 24h14M30 24h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <p class="placeholder-title">Workspace canvas</p>
+      <p class="placeholder-sub">Architecture graph — S4.4b</p>
     </div>
   </div>
 
-  <!-- Concept search bar — shown when a repo + graph is loaded -->
-  {#if selectedRepoId && graph}
-    <div class="concept-search-bar">
-      <div class="search-input-wrap">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="search-icon" aria-hidden="true">
-          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-        </svg>
-        <input
-          type="search"
-          class="concept-input"
-          placeholder="Search concepts…"
-          value={conceptQuery}
-          oninput={onSearchInput}
-          onkeydown={onSearchKeydown}
-          aria-label="Search concepts by name or qualified name"
-        />
+{:else}
+  <!-- Repo scope: architecture + code — existing graph view (S4.4b/c) -->
+  <div class="explorer-view">
+    <!-- Header -->
+    <div class="explorer-header">
+      <div class="header-left">
+        <h2>System Explorer</h2>
+        <p class="subtitle">Realized architecture — navigate the living knowledge graph</p>
       </div>
-
-      {#if conceptLoading}
-        <span class="search-loading" aria-live="polite">
-          <span class="spinner" aria-hidden="true"></span>
-          Searching…
-        </span>
-      {:else if conceptNodes !== null && conceptQuery.trim()}
-        {#if conceptNodes.length > 0}
-          <span class="concept-chip">
-            {conceptNodes.length} nodes matching '{conceptQuery.trim()}'
-            <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
-          </span>
+      <div class="header-right">
+        {#if reposLoading}
+          <div class="repo-selector-skeleton">
+            <Skeleton lines={1} />
+          </div>
         {:else}
-          <span class="concept-chip no-results">
-            No nodes matching '{conceptQuery.trim()}'
-            <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
-          </span>
+          <div class="repo-select-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="repo-icon" aria-hidden="true">
+              <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
+            </svg>
+            <select
+              class="repo-select"
+              value={selectedRepoId}
+              onchange={onRepoChange}
+              aria-label="Select repository to explore"
+            >
+              <option value="">Select a repository…</option>
+              {#each repos as repo}
+                <option value={repo.id}>{repo.name}</option>
+              {/each}
+            </select>
+          </div>
         {/if}
+
+        {#if graph}
+          <div class="graph-stats">
+            <span class="stat">
+              <span class="stat-val">{graph.nodes?.length ?? 0}</span>
+              <span class="stat-label">nodes</span>
+            </span>
+            <span class="stat-sep">·</span>
+            <span class="stat">
+              <span class="stat-val">{graph.edges?.length ?? 0}</span>
+              <span class="stat-label">edges</span>
+            </span>
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <!-- Concept search bar — shown when a repo + graph is loaded -->
+    {#if selectedRepoId && graph}
+      <div class="concept-search-bar">
+        <div class="search-input-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="search-icon" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input
+            type="search"
+            class="concept-input"
+            placeholder="Search concepts…"
+            value={conceptQuery}
+            oninput={onSearchInput}
+            onkeydown={onSearchKeydown}
+            aria-label="Search concepts by name or qualified name"
+          />
+        </div>
+
+        {#if conceptLoading}
+          <span class="search-loading" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            Searching…
+          </span>
+        {:else if conceptNodes !== null && conceptQuery.trim()}
+          {#if conceptNodes.length > 0}
+            <span class="concept-chip">
+              {conceptNodes.length} nodes matching '{conceptQuery.trim()}'
+              <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
+            </span>
+          {:else}
+            <span class="concept-chip no-results">
+              No nodes matching '{conceptQuery.trim()}'
+              <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
+            </span>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Main content -->
+    <div class="explorer-body">
+      {#if !selectedRepoId}
+        <div class="empty-state-wrap">
+          <EmptyState
+            title="Select a repository"
+            description="Choose a repository above to explore its realized architecture — types, traits, functions, endpoints, and their relationships."
+          />
+          {#if repos.length === 0 && !reposLoading}
+            <p class="hint">No repositories found. Create a project and repository to get started.</p>
+          {/if}
+        </div>
+
+      {:else if loading}
+        <div class="loading-wrap">
+          <Skeleton lines={8} />
+          <p class="loading-msg">Fetching knowledge graph…</p>
+        </div>
+
+      {:else if graph}
+        <MoldableView
+          nodes={graph.nodes ?? []}
+          edges={graph.edges ?? []}
+          repoId={selectedRepoId}
+          onSelectNode={onSelectNode}
+          conceptFilterIds={conceptFilterIds()}
+          conceptQuery={conceptQuery.trim()}
+        />
       {/if}
     </div>
-  {/if}
-
-  <!-- Main content -->
-  <div class="explorer-body">
-    {#if !selectedRepoId}
-      <div class="empty-state-wrap">
-        <EmptyState
-          title="Select a repository"
-          message="Choose a repository above to explore its realized architecture — types, traits, functions, endpoints, and their relationships."
-        />
-        {#if repos.length === 0 && !reposLoading}
-          <p class="hint">No repositories found. Create a project and repository to get started.</p>
-        {/if}
-      </div>
-
-    {:else if loading}
-      <div class="loading-wrap">
-        <Skeleton lines={8} />
-        <p class="loading-msg">Fetching knowledge graph…</p>
-      </div>
-
-    {:else if graph}
-      <MoldableView
-        nodes={graph.nodes ?? []}
-        edges={graph.edges ?? []}
-        repoId={selectedRepoId}
-        onSelectNode={onSelectNode}
-        conceptFilterIds={conceptFilterIds()}
-        conceptQuery={conceptQuery.trim()}
-      />
-    {/if}
   </div>
-</div>
+{/if}
 
 <style>
+  /* ── Workspace scope placeholder ────────────────────────────────────── */
+  .canvas-placeholder {
+    display: flex;
+    flex: 1;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+  }
+
+  .placeholder-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    text-align: center;
+    opacity: 0.5;
+  }
+
+  .placeholder-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+  }
+
+  .placeholder-sub {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  /* ── Repo scope: graph view styles ───────────────────────────────────── */
   .explorer-view {
     display: flex;
     flex-direction: column;
