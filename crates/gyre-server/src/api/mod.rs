@@ -65,9 +65,9 @@ use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
 use users::{
-    create_team, delete_team, get_me, get_my_agents, get_my_mrs, get_my_notifications,
-    get_my_tasks, invite_member, list_members, list_teams, mark_notification_read, remove_member,
-    update_me, update_member_role, update_team,
+    create_team, delete_team, dismiss_notification, get_me, get_my_agents, get_my_mrs,
+    get_my_notifications, get_my_tasks, invite_member, list_members, list_teams, remove_member,
+    resolve_notification, update_me, update_member_role, update_team,
 };
 
 use crate::AppState;
@@ -555,10 +555,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users/me/agents", get(get_my_agents))
         .route("/api/v1/users/me/tasks", get(get_my_tasks))
         .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        // Notifications (HSI §2) — per-handler auth, ABAC-exempt
         .route("/api/v1/users/me/notifications", get(get_my_notifications))
         .route(
-            "/api/v1/users/me/notifications/:id/read",
-            put(mark_notification_read),
+            "/api/v1/notifications/:id/dismiss",
+            post(dismiss_notification),
+        )
+        .route(
+            "/api/v1/notifications/:id/resolve",
+            post(resolve_notification),
         )
         // Workspace members (M22.8)
         .route(

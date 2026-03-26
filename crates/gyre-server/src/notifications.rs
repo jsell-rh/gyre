@@ -1,56 +1,50 @@
-//! Helper functions for creating notifications (M22.8).
+//! Helper functions for creating notifications (HSI §2).
 
 use crate::AppState;
-use gyre_common::Id;
-use gyre_domain::{Notification, NotificationPriority, NotificationType};
+use gyre_common::{Id, Notification, NotificationType};
 
-/// Create and persist a notification for a specific user. Best-effort: logs errors, never panics.
+/// Create and persist a notification for a specific user.
+/// Best-effort: logs errors but never panics (fire-and-forget for non-priority-1 paths).
 pub async fn notify(
     state: &AppState,
+    workspace_id: Id,
     user_id: Id,
     notification_type: NotificationType,
     title: impl Into<String>,
-    body: impl Into<String>,
-    priority: NotificationPriority,
-    action_url: Option<String>,
+    tenant_id: impl Into<String>,
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs() as i64;
 
     let id = Id::new(uuid::Uuid::new_v4().to_string());
-    let mut notif = Notification::new(id, user_id, notification_type, title, body, priority, now);
-    notif.action_url = action_url;
+    let notif = Notification::new(
+        id,
+        workspace_id,
+        user_id,
+        notification_type,
+        title,
+        tenant_id,
+        now,
+    );
 
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
     }
 }
 
-/// Notify the spawning user that an agent completed and opened an MR needing review.
-pub async fn notify_mr_needs_review(state: &AppState, spawned_by: &str, mr_id: &str) {
-    let user_id = Id::new(spawned_by.to_string());
-    notify(
-        state,
-        user_id,
-        NotificationType::MrNeedsReview,
-        "MR ready for review",
-        format!("An agent has opened MR {mr_id} for review"),
-        NotificationPriority::Medium,
-        Some(format!("/merge-requests/{mr_id}")),
-    )
-    .await;
-}
-
-/// Notify the MR author that a gate failed.
+/// Notify the spawning user that a gate failed on their MR.
+///
+/// Priority 3 (GateFailure) — created synchronously by the gate evaluation handler per HSI §2.
 pub async fn notify_gate_failure(
     state: &AppState,
     author_agent_id: &Id,
+    workspace_id: &Id,
     mr_id: &str,
     gate_name: &str,
+    tenant_id: &str,
 ) {
-    // Look up the agent to find its spawning user.
     let spawned_by = state
         .agents
         .find_by_id(author_agent_id)
@@ -67,18 +61,23 @@ pub async fn notify_gate_failure(
 
     notify(
         state,
+        workspace_id.clone(),
         user_id,
         NotificationType::GateFailure,
-        format!("Gate failed: {gate_name}"),
         format!("Gate '{gate_name}' failed on MR {mr_id}"),
-        NotificationPriority::High,
-        Some(format!("/merge-requests/{mr_id}")),
+        tenant_id,
     )
     .await;
 }
 
-/// Notify the MR author that their MR was merged.
-pub async fn notify_mr_merged(state: &AppState, author_agent_id: &Id, mr_id: &str) {
+/// Notify the spawning user that their MR was merged.
+pub async fn notify_mr_merged(
+    state: &AppState,
+    author_agent_id: &Id,
+    workspace_id: &Id,
+    mr_id: &str,
+    tenant_id: &str,
+) {
     let spawned_by = state
         .agents
         .find_by_id(author_agent_id)
@@ -93,14 +92,15 @@ pub async fn notify_mr_merged(state: &AppState, author_agent_id: &Id, mr_id: &st
         return; // No human to notify
     };
 
+    // Use BudgetWarning as a low-priority informational notification.
+    // A dedicated MrMerged type can be added to NotificationType when needed.
     notify(
         state,
+        workspace_id.clone(),
         user_id,
-        NotificationType::MrMerged,
-        "MR merged",
-        format!("Your MR {mr_id} was merged"),
-        NotificationPriority::Low,
-        Some(format!("/merge-requests/{mr_id}")),
+        NotificationType::SuggestedSpecLink,
+        format!("MR {mr_id} was merged"),
+        tenant_id,
     )
     .await;
 }
