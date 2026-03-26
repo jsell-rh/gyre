@@ -275,7 +275,10 @@
       </div>
 
     {:else if error}
-      <EmptyState title="Failed to load specs" description={error} />
+      <div class="error-state">
+        <EmptyState title="Failed to load specs" description={error} />
+        <button class="retry-btn" onclick={load}>Retry</button>
+      </div>
 
     {:else if filtered().length === 0}
       <EmptyState
@@ -616,7 +619,7 @@
 
   .spec-row:hover { background: var(--color-surface-elevated); }
 
-  .spec-row.selected { background: rgba(238, 0, 0, 0.06); }
+  .spec-row.selected { background: color-mix(in srgb, var(--color-primary) 6%, transparent); }
 
   .spec-row .spec-path {
     flex: 1;
@@ -659,7 +662,7 @@
 
   .progress-fill {
     height: 100%;
-    background: var(--color-success, #3fb950);
+    background: var(--color-success);
     border-radius: 3px;
     transition: width var(--transition-slow, 0.3s);
   }
@@ -725,8 +728,16 @@
     transition: border-color var(--transition-fast);
   }
 
-  .spec-editor:focus {
+  .spec-editor:focus:not(:focus-visible) {
     outline: none;
+  }
+
+  .spec-editor:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+  }
+
+  .spec-editor:focus {
     border-color: var(--color-primary);
   }
 
@@ -759,10 +770,42 @@
 
   .field-input.mono { font-family: var(--font-mono); }
 
-  .field-input:focus {
+  .field-input:focus:not(:focus-visible) {
     outline: none;
+  }
+
+  .field-input:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+  }
+
+  .field-input:focus {
     border-color: var(--color-primary);
   }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  /* ── Error state ──────────────────────────────────────────────────────── */
+  .error-state {
+    text-align: center;
+    padding: var(--space-4);
+  }
+
+  .retry-btn {
+    margin-top: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .retry-btn:hover {
+    background: var(--color-surface);
+    border-color: var(--color-primary);
+  }
 </style>
