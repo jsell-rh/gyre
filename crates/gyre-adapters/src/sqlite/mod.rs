@@ -232,4 +232,45 @@ mod tests {
         SqliteStorage::new(path).unwrap();
         SqliteStorage::new(path).unwrap();
     }
+
+    /// Guard: detect duplicate migration version prefixes before they shadow each other.
+    ///
+    /// Diesel's `embed_migrations!` deduplicates by version prefix (YYYYMMDD-NNNNNN).
+    /// When two migration directories share the same prefix, only one runs — silently
+    /// dropping tables or columns. This test fails at CI time so the defect is caught
+    /// before it reaches a deployed database.
+    #[test]
+    fn no_duplicate_migration_version_prefixes() {
+        let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+        let mut prefixes = std::collections::HashMap::<String, Vec<String>>::new();
+
+        let entries = std::fs::read_dir(migrations_dir)
+            .expect("migrations directory should exist");
+
+        for entry in entries {
+            let entry = entry.expect("valid dir entry");
+            let name = entry.file_name().into_string().expect("valid UTF-8");
+            // Migration directories are named: YYYY-MM-DD-NNNNNN_description
+            // The version prefix is the first 17 chars: YYYY-MM-DD-NNNNNN
+            if name.len() >= 17 {
+                let prefix = name[..17].to_string();
+                prefixes.entry(prefix).or_default().push(name);
+            }
+        }
+
+        let duplicates: Vec<_> = prefixes
+            .into_iter()
+            .filter(|(_, names)| names.len() > 1)
+            .collect();
+
+        assert!(
+            duplicates.is_empty(),
+            "Duplicate migration version prefixes detected — Diesel will silently skip one:\n{}",
+            duplicates
+                .iter()
+                .map(|(prefix, names)| format!("  prefix {}: {:?}", prefix, names))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
 }
