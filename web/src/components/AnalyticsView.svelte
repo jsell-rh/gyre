@@ -237,5 +237,5 @@
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
-  .retry-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 </style>

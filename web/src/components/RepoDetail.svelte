@@ -1306,7 +1306,7 @@
   }
 
   .policy-input:focus:not(:focus-visible) { outline: none; }
-  .policy-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
+  .policy-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .policy-op-label {
     font-size: var(--text-sm);
