@@ -604,8 +604,8 @@
 
 <!-- Keyboard shortcut overlay -->
 {#if shortcutsOpen}
-  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl}>
+  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => e.key === 'Escape' && (shortcutsOpen = false)}>
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="presentation">
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
@@ -1019,6 +1019,11 @@
     cursor: pointer;
     font-size: var(--text-base);
     padding: 0;
+  }
+
+  .shortcuts-header button:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 
   .shortcuts-body {
