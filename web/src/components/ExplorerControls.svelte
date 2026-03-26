@@ -65,6 +65,7 @@
     function onKeydown(e) {
       if (e.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
         e.preventDefault();
+        e.stopPropagation();
         searchInputEl?.focus();
       }
     }
@@ -229,7 +230,7 @@
   }
 
   // Derived label for view selector
-  let viewLabel = $derived(() => {
+  let viewLabel = $derived.by(() => {
     const b = BUILTIN_VIEWS.find(v => v.id === currentView);
     if (b) return b.label;
     const s = savedViews.find(v => v.id === currentView);
@@ -648,14 +649,14 @@
 
   /* Save view button */
   .save-view-btn {
-    background: rgba(34, 197, 94, 0.1);
-    border-color: rgba(34, 197, 94, 0.4);
-    color: #16a34a;
+    background: color-mix(in srgb, var(--color-success, #22c55e) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success, #22c55e) 40%, transparent);
+    color: var(--color-success, #16a34a);
   }
 
   .save-view-btn:hover:not(:disabled) {
-    background: rgba(34, 197, 94, 0.2);
-    border-color: #16a34a;
+    background: color-mix(in srgb, var(--color-success, #22c55e) 20%, transparent);
+    border-color: var(--color-success, #16a34a);
   }
 
   /* Playback controls */
@@ -686,7 +687,13 @@
   }
 
   .ask-error {
-    color: #ef4444;
+    color: var(--color-danger);
+  }
+
+  .tab-btn:focus-visible,
+  .ctrl-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   /* Spinner */

@@ -9,12 +9,12 @@
   let collapsed = $state(false);
 
   const NAV_ITEMS = [
-    { id: 'inbox',      label: 'Inbox',      shortcut: '1' },
-    { id: 'briefing',   label: 'Briefing',   shortcut: '2' },
-    { id: 'explorer',   label: 'Explorer',   shortcut: '3' },
-    { id: 'specs',      label: 'Specs',      shortcut: '4' },
-    { id: 'meta-specs', label: 'Meta-specs', shortcut: '5' },
-    { id: 'admin',      label: 'Admin',      shortcut: '6' },
+    { id: 'briefing',   label: 'Briefing',   shortcut: '1' },
+    { id: 'explorer',   label: 'Explorer',   shortcut: '2' },
+    { id: 'specs',      label: 'Specs',      shortcut: '3' },
+    { id: 'meta-specs', label: 'Meta-specs', shortcut: '4' },
+    { id: 'admin',      label: 'Admin',      shortcut: '5' },
+    { id: 'inbox',      label: 'Inbox',      shortcut: '6' },
   ];
 
   function nav(id) {
@@ -319,6 +319,12 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     white-space: nowrap;
+  }
+
+  .nav-item:focus-visible,
+  .collapse-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .sr-only {

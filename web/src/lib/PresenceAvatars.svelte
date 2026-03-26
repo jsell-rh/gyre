@@ -121,12 +121,18 @@
 </script>
 
 {#if collapsed.length > 0}
-  <div class="presence-avatars" aria-label="Active users in this workspace">
+  <div class="presence-avatars" role="group" aria-label="Active users in this workspace">
     {#each collapsed as user}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="avatar-wrap"
+        tabindex="0"
+        aria-describedby="presence-tooltip-{user.user_id}"
         onmouseenter={() => (tooltipUserId = user.user_id)}
         onmouseleave={() => (tooltipUserId = null)}
+        onfocus={() => (tooltipUserId = user.user_id)}
+        onblur={() => (tooltipUserId = null)}
       >
         <div
           class="avatar"
@@ -143,7 +149,7 @@
         </div>
 
         {#if tooltipUserId === user.user_id}
-          <div class="avatar-tooltip" role="tooltip">
+          <div class="avatar-tooltip" role="tooltip" id="presence-tooltip-{user.user_id}">
             <span class="tooltip-name">{user.display_name}</span>
             {#if user.views[0]}
               <span class="tooltip-view">in {user.views[0]}</span>
@@ -188,7 +194,14 @@
     transition: transform var(--transition-fast);
   }
 
-  .avatar-wrap:hover .avatar {
+  .avatar-wrap:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: 50%;
+  }
+
+  .avatar-wrap:hover .avatar,
+  .avatar-wrap:focus-visible .avatar {
     transform: translateY(-2px);
     z-index: 10;
   }

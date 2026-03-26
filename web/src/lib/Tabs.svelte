@@ -4,6 +4,7 @@
     active = $bindable(''),
     onchange = undefined,
     panelId = undefined,
+    ariaLabel = '',
   } = $props();
 
   $effect(() => {
@@ -15,32 +16,54 @@
     onchange?.(id);
   }
 
+  function focusTab(id) {
+    document.querySelector('[role="tab"][data-id="' + id + '"]')?.focus();
+  }
+
+  function findNext(index) {
+    for (let step = 1; step < tabs.length; step++) {
+      const candidate = tabs[(index + step) % tabs.length];
+      if (!candidate.disabled) return candidate;
+    }
+    return null;
+  }
+
+  function findPrev(index) {
+    for (let step = 1; step < tabs.length; step++) {
+      const candidate = tabs[(index - step + tabs.length) % tabs.length];
+      if (!candidate.disabled) return candidate;
+    }
+    return null;
+  }
+
   function onkeydown(e, id, index) {
+    let target = null;
     if (e.key === 'ArrowRight') {
       e.preventDefault();
-      const next = tabs[(index + 1) % tabs.length];
-      if (!next.disabled) select(next.id);
+      target = findNext(index);
     } else if (e.key === 'ArrowLeft') {
       e.preventDefault();
-      const prev = tabs[(index - 1 + tabs.length) % tabs.length];
-      if (!prev.disabled) select(prev.id);
+      target = findPrev(index);
     } else if (e.key === 'Home') {
       e.preventDefault();
-      const first = tabs.find(t => !t.disabled);
-      if (first) select(first.id);
+      target = tabs.find(t => !t.disabled) ?? null;
     } else if (e.key === 'End') {
       e.preventDefault();
-      const last = [...tabs].reverse().find(t => !t.disabled);
-      if (last) select(last.id);
+      target = [...tabs].reverse().find(t => !t.disabled) ?? null;
+    }
+    if (target) {
+      select(target.id);
+      focusTab(target.id);
     }
   }
 </script>
 
-<div class="tabs-bar" role="tablist">
+<div class="tabs-bar" role="tablist" aria-label={ariaLabel || undefined}>
   {#each tabs as tab, i}
     <button
       role="tab"
       id="tab-{tab.id}"
+      data-id={tab.id}
       aria-selected={active === tab.id}
       aria-controls={panelId ?? `tabpanel-${tab.id}`}
       tabindex={active === tab.id ? 0 : -1}
@@ -115,7 +138,7 @@
   }
 
   .tab-btn.active .tab-count {
-    background: rgba(238, 0, 0, 0.12);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
     color: var(--color-primary);
   }
 

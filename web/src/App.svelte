@@ -187,8 +187,8 @@
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   const NAV_SHORTCUTS = {
-    '1': 'inbox', '2': 'briefing', '3': 'explorer',
-    '4': 'specs', '5': 'meta-specs', '6': 'admin',
+    '1': 'briefing', '2': 'explorer', '3': 'specs',
+    '4': 'meta-specs', '5': 'admin', '6': 'inbox',
   };
 
   function handleKeydown(e) {
@@ -567,12 +567,12 @@
       <div class="shortcuts-body">
         <dl class="shortcuts-list">
           <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>Global search</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘1</kbd></dt><dd>Inbox</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘2</kbd></dt><dd>Briefing</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘3</kbd></dt><dd>Explorer</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘4</kbd></dt><dd>Specs</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘5</kbd></dt><dd>Meta-specs</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘6</kbd></dt><dd>Admin</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘1</kbd></dt><dd>Briefing</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘2</kbd></dt><dd>Explorer</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘3</kbd></dt><dd>Specs</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘4</kbd></dt><dd>Meta-specs</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘5</kbd></dt><dd>Admin</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘6</kbd></dt><dd>Inbox</dd></div>
           <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / go up scope</dd></div>
           <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>Focus search</dd></div>
           <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd></div>
