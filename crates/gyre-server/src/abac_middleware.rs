@@ -381,7 +381,12 @@ impl ResourceResolver {
                     "graph",
                     None,
                 ),
-                RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "graph", None),
+                RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "workspace", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/briefing/ask",
+                    "workspace",
+                    Some("generate"),
+                ),
                 // ── Explorer views (S3.1) ───────────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/explorer-views",
