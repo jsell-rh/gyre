@@ -324,6 +324,16 @@ export const api = {
     const qs = params.toString();
     return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
   },
+  // Briefing Q&A SSE (S4.3) — returns a fetch Response; caller handles SSE
+  briefingAsk: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/briefing/ask`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   // Tenants (M34)
   tenants: () => request('/tenants'),
   tenant: (id) => request(`/tenants/${id}`),

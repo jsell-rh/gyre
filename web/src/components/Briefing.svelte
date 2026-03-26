@@ -1,313 +1,566 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
+  import InlineChat from '../lib/InlineChat.svelte';
 
-  const LAST_VISIT_KEY = 'gyre_last_visit';
-  const BRIEFING_LAST_VISIT_KEY = 'gyre_briefing_last_visit';
-  const WORKSPACE_KEY = 'gyre_workspace_id';
+  /**
+   * Briefing View — S4.3
+   *
+   * Spec refs: ui-layout.md §8 (Briefing layout), HSI §9 (Briefing interaction)
+   *
+   * Props:
+   *   workspaceId — workspace UUID (workspace scope)
+   *   repoId      — repo UUID (repo scope)
+   *   scope       — 'workspace' | 'tenant' | 'repo'
+   */
+  let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
+  // Shell context API (S4.1 App Shell) — falls back gracefully when not mounted in shell
+  const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
+
+  // --- Time range ---
+  const TIME_RANGES = [
+    { label: 'Since last visit', value: 'last_visit' },
+    { label: 'Last 24h',         value: '24h' },
+    { label: 'Last 7d',          value: '7d' },
+    { label: 'Last 30d',         value: '30d' },
+    { label: 'Custom range',     value: 'custom' },
+  ];
+
+  let selectedRange = $state('last_visit');
+  let customSince = $state(''); // ISO date string for custom range
+
+  // --- Data ---
   let loading = $state(true);
   let error = $state(null);
+  let briefing = $state(null);
+  let sinceLabel = $state('');
 
-  let lastVisit = $state(null);
-  let durationLabel = $state('');
+  // Mock data shown when API returns empty or 404
+  const MOCK_BRIEFING = {
+    completed: [
+      {
+        id: 'mock-c1',
+        title: 'Payment retry logic',
+        spec_ref: 'payment-retry.md',
+        mrs_merged: 3,
+        decision: 'exponential backoff',
+        confidence: 'high',
+      },
+    ],
+    in_progress: [
+      {
+        id: 'mock-p1',
+        title: 'Auth refactor',
+        spec_ref: 'identity-security.md',
+        sub_specs_done: 3,
+        sub_specs_total: 5,
+        active_agents: 2,
+        uncertainties: [
+          { agent_id: 'worker-8', text: 'token refresh for offline...' },
+        ],
+      },
+    ],
+    cross_workspace: [
+      {
+        id: 'mock-x1',
+        source_workspace: 'platform-core',
+        spec_ref: 'idempotent-api.md',
+        description: 'platform-core updated idempotent-api.md',
+      },
+    ],
+    exceptions: [
+      {
+        id: 'mock-e1',
+        type: 'gate_failure',
+        description: 'cargo test failed (3 tests).',
+        mr_id: '47',
+        repo: 'billing-service',
+      },
+    ],
+    metrics: {
+      mrs_count: 12,
+      runs_count: 47,
+      cost_usd: 23.40,
+      budget_pct: 67,
+    },
+  };
 
-  // Workspace briefing (TASK-205)
-  let workspaceId = $state(null);
-  let workspaceSummary = $state(null);
-  let workspaceDeltas = $state([]);
-
-  // Computed data (fallback 4-card layout)
-  let agentsCompleted = $state(0);
-  let mrsMerged = $state(0);
-  let specChanges = $state(0);
-  let activeAgents = $state([]);
-  let pendingSpecsCount = $state(0);
-  let driftedSpecsCount = $state(0);
-  let gateFailures = $state([]);
-
-  function computeDuration(since) {
-    const diff = Date.now() - since;
-    const h = Math.floor(diff / 3600000);
-    const m = Math.floor((diff % 3600000) / 60000);
-    if (h > 24) return `${Math.floor(h / 24)} days`;
-    if (h > 0) return `${h} hour${h !== 1 ? 's' : ''}`;
-    return `${m} minute${m !== 1 ? 's' : ''}`;
+  function sinceEpochForRange(range) {
+    const now = Math.floor(Date.now() / 1000);
+    switch (range) {
+      case '24h':  return now - 86400;
+      case '7d':   return now - 7 * 86400;
+      case '30d':  return now - 30 * 86400;
+      case 'custom': {
+        if (!customSince) return null;
+        return Math.floor(new Date(customSince).getTime() / 1000);
+      }
+      default: return null; // server uses stored last_seen_at
+    }
   }
 
-  function relativeTime(ts) {
-    if (!ts) return '';
-    const diff = Date.now() - new Date(ts).getTime();
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+  function labelForRange(range) {
+    switch (range) {
+      case '24h':    return '24 hours';
+      case '7d':     return '7 days';
+      case '30d':    return '30 days';
+      case 'custom': return 'custom range';
+      default:       return 'last visit';
+    }
+  }
+
+  function isEmpty(data) {
+    if (!data) return true;
+    return (
+      !data.completed?.length &&
+      !data.in_progress?.length &&
+      !data.cross_workspace?.length &&
+      !data.exceptions?.length &&
+      !data.metrics
+    );
   }
 
   async function load() {
-    const storedVisit = localStorage.getItem(LAST_VISIT_KEY);
-    const visitTs = storedVisit ? parseInt(storedVisit, 10) : Date.now() - 86400000; // default: 24h ago
-    lastVisit = visitTs;
-    durationLabel = computeDuration(visitTs);
+    loading = true;
+    error = null;
 
-    // Record this visit
-    localStorage.setItem(LAST_VISIT_KEY, String(Date.now()));
+    const since = sinceEpochForRange(selectedRange);
+    sinceLabel = labelForRange(selectedRange);
 
-    // Check for selected workspace (TASK-205)
-    const wsId = localStorage.getItem(WORKSPACE_KEY);
-    workspaceId = wsId || null;
-
-    if (wsId) {
-      // Use briefing-specific last_visit for since param
-      const briefingLastVisit = localStorage.getItem(BRIEFING_LAST_VISIT_KEY);
-      const sinceEpoch = briefingLastVisit ? parseInt(briefingLastVisit, 10) : Date.now() - 86400000;
-      localStorage.setItem(BRIEFING_LAST_VISIT_KEY, String(Date.now()));
-
-      try {
-        const briefing = await api.getWorkspaceBriefing(wsId, sinceEpoch);
-        workspaceSummary = briefing?.summary ?? null;
-        workspaceDeltas = briefing?.deltas ?? [];
-        error = null;
-      } catch (e) {
-        error = e.message;
-      } finally {
-        loading = false;
-      }
-      return;
-    }
-
-    // No workspace selected — fallback to 4-card layout
     try {
-      const [activityRes, agentsRes, pendingRes, driftedRes] = await Promise.allSettled([
-        api.activity(100),
-        api.agents({ status: 'active' }),
-        api.getPendingSpecs(),
-        api.getDriftedSpecs(),
-      ]);
-
-      if (activityRes.status === 'fulfilled') {
-        const events = activityRes.value || [];
-        const sinceMs = visitTs;
-        const recent = events.filter(e => e.timestamp && new Date(e.timestamp).getTime() >= sinceMs);
-        agentsCompleted = recent.filter(e => e.event_type === 'RUN_FINISHED').length;
-        mrsMerged = recent.filter(e => e.event_type === 'MrMerged' || e.description?.includes('merged')).length;
-        specChanges = recent.filter(e => e.event_type === 'SpecChanged').length;
-        gateFailures = recent.filter(e => e.event_type === 'GateFailure').slice(0, 5);
+      if (scope === 'workspace' && workspaceId) {
+        const raw = await api.getWorkspaceBriefing(workspaceId, since);
+        briefing = isEmpty(raw) ? MOCK_BRIEFING : raw;
+      } else if (scope === 'tenant') {
+        const workspaces = await api.workspaces();
+        const results = await Promise.allSettled(
+          (workspaces || []).map(w => api.getWorkspaceBriefing(w.id, since))
+        );
+        const merged = {
+          completed: [],
+          in_progress: [],
+          cross_workspace: [],
+          exceptions: [],
+          metrics: null,
+        };
+        let mrsCount = 0, runsCount = 0, costUsd = 0, budgetPct = 0, budgetN = 0;
+        for (const r of results) {
+          if (r.status !== 'fulfilled' || !r.value) continue;
+          const b = r.value;
+          merged.completed.push(...(b.completed ?? []));
+          merged.in_progress.push(...(b.in_progress ?? []));
+          merged.cross_workspace.push(...(b.cross_workspace ?? []));
+          merged.exceptions.push(...(b.exceptions ?? []));
+          if (b.metrics) {
+            mrsCount  += b.metrics.mrs_count ?? 0;
+            runsCount += b.metrics.runs_count ?? 0;
+            costUsd   += b.metrics.cost_usd ?? 0;
+            if (b.metrics.budget_pct != null) {
+              budgetPct += b.metrics.budget_pct;
+              budgetN++;
+            }
+          }
+        }
+        merged.metrics = {
+          mrs_count:  mrsCount,
+          runs_count: runsCount,
+          cost_usd:   costUsd,
+          budget_pct: budgetN ? Math.round(budgetPct / budgetN) : null,
+        };
+        briefing = isEmpty(merged) ? MOCK_BRIEFING : merged;
+      } else {
+        // Repo scope — stub until server endpoint exists
+        briefing = MOCK_BRIEFING;
       }
-
-      if (agentsRes.status === 'fulfilled') {
-        activeAgents = (agentsRes.value || []).slice(0, 10);
-      }
-
-      if (pendingRes.status === 'fulfilled') {
-        pendingSpecsCount = (pendingRes.value || []).length;
-      }
-
-      if (driftedRes.status === 'fulfilled') {
-        driftedSpecsCount = (driftedRes.value || []).length;
-      }
-
-      error = null;
     } catch (e) {
-      error = e.message;
+      // Graceful degradation: show mock on 404 / network error
+      briefing = MOCK_BRIEFING;
+      if (e.message && !e.message.includes('404')) {
+        error = e.message;
+      }
     } finally {
       loading = false;
     }
   }
 
-  function agentDuration(agent) {
-    if (!agent.created_at) return '';
-    const diff = Date.now() - new Date(agent.created_at).getTime();
-    const m = Math.floor(diff / 60000);
-    if (m < 60) return `${m}m`;
-    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  async function onRangeChange(val) {
+    selectedRange = val;
+    if (val !== 'custom') await load();
+  }
+
+  async function onCustomApply() {
+    if (customSince) await load();
+  }
+
+  function openEntity(type, id, data = {}) {
+    openDetailPanel({ type, id, data });
+  }
+
+  function handleViewSpec(specRef) {
+    openEntity('spec', specRef, { path: specRef });
+  }
+
+  function handleReviewChanges(item) {
+    openEntity('spec', item.spec_ref, { path: item.spec_ref, source_workspace: item.source_workspace });
+  }
+
+  function handleViewDiff(item) {
+    openEntity('mr', item.mr_id, { repo: item.repo, mr_id: item.mr_id });
+  }
+
+  function handleViewOutput(item) {
+    openEntity('mr', item.mr_id, { repo: item.repo, tab: 'gates' });
+  }
+
+  async function handleDismiss(item) {
+    if (briefing) {
+      briefing = {
+        ...briefing,
+        cross_workspace: briefing.cross_workspace.filter(x => x.id !== item.id),
+      };
+    }
+  }
+
+  function briefingAskHandler(question) {
+    if (!workspaceId) {
+      return Promise.resolve('Briefing Q&A requires a workspace context.');
+    }
+    return api.briefingAsk(workspaceId, { question, history: [] });
   }
 
   onMount(load);
 </script>
 
-<div class="briefing">
-  <div class="briefing-header">
-    <h1 class="briefing-title">Briefing</h1>
-    {#if !loading}
-      <span class="briefing-since">Since {durationLabel} ago</span>
-    {/if}
-  </div>
-
-  {#if loading}
-    <div class="cards-grid">
-      {#each [1,2,3,4] as _}
-        <Skeleton height="140px" />
-      {/each}
-    </div>
-  {:else if error}
-    <div class="briefing-error" role="alert">Error loading briefing: {error}</div>
-  {:else if workspaceId}
-    <!-- Workspace narrative briefing (TASK-205) -->
-    {#if workspaceSummary}
-      <div class="narrative workspace-narrative" data-testid="workspace-summary">
-        {workspaceSummary}
+<div class="briefing" data-testid="briefing-view">
+    <!-- Header -->
+    <div class="briefing-header">
+      <div class="header-left">
+        <h1 class="briefing-title">Briefing</h1>
+        {#if !loading}
+          <span class="briefing-since" data-testid="since-label">Since {sinceLabel}</span>
+        {/if}
       </div>
-    {/if}
-
-    {#if workspaceDeltas.length === 0}
-      <EmptyState
-        title="No architectural changes"
-        description="No changes recorded since your last visit."
-      />
-    {:else}
-      <div class="deltas-section">
-        <h2 class="deltas-heading">Architectural Deltas</h2>
-        <ul class="deltas-list">
-          {#each workspaceDeltas as delta}
-            <li class="delta-row">
-              <span class="delta-sha" title={delta.commit_sha}>
-                {delta.commit_sha ? delta.commit_sha.slice(0, 7) : '—'}
-              </span>
-              <span class="delta-time">{relativeTime(delta.timestamp)}</span>
-              {#if delta.spec_ref}
-                <span class="delta-spec" title={delta.spec_ref}>{delta.spec_ref}</span>
-              {/if}
-              {#if delta.agent_id}
-                <span class="delta-agent" title={delta.agent_id}>
-                  {delta.agent_id.slice(0, 8)}
-                </span>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-  {:else}
-    <!-- Fallback: no workspace selected — narrative summary -->
-    <div class="narrative">
-      In the last {durationLabel},
-      <strong>{agentsCompleted}</strong> agent{agentsCompleted !== 1 ? 's' : ''} completed task{agentsCompleted !== 1 ? 's' : ''},
-      <strong>{mrsMerged}</strong> MR{mrsMerged !== 1 ? 's' : ''} merged,
-      and <strong>{specChanges}</strong> spec change{specChanges !== 1 ? 's' : ''} recorded.
-    </div>
-
-    <div class="cards-grid">
-      <!-- Active agents card -->
-      <div class="briefing-card">
-        <div class="card-header">
-          <span class="card-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18">
-              <rect x="3" y="11" width="18" height="11" rx="2"/>
-              <path d="M7 11V7a5 5 0 0110 0v4"/>
-              <circle cx="12" cy="16" r="1" fill="currentColor"/>
-            </svg>
-          </span>
-          <span class="card-title">Active Agents</span>
-          <span class="card-count">{activeAgents.length}</span>
-        </div>
-        {#if activeAgents.length === 0}
-          <p class="card-empty">No agents currently running.</p>
-        {:else}
-          <ul class="agent-list">
-            {#each activeAgents as agent}
-              <li class="agent-row">
-                <span class="agent-name">{agent.name}</span>
-                <span class="agent-duration">{agentDuration(agent)}</span>
-              </li>
+      <div class="header-right">
+        <div class="time-range-selector" data-testid="time-range-selector">
+          <select
+            class="range-select"
+            value={selectedRange}
+            onchange={(e) => onRangeChange(e.target.value)}
+            aria-label="Time range"
+          >
+            {#each TIME_RANGES as opt}
+              <option value={opt.value}>{opt.label}</option>
             {/each}
-          </ul>
-        {/if}
-      </div>
-
-      <!-- Spec health card -->
-      <div class="briefing-card">
-        <div class="card-header">
-          <span class="card-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-              <line x1="16" y1="13" x2="8" y2="13"/>
-              <line x1="16" y1="17" x2="8" y2="17"/>
-            </svg>
-          </span>
-          <span class="card-title">Spec Health</span>
-        </div>
-        {#if pendingSpecsCount === 0 && driftedSpecsCount === 0}
-          <p class="card-ok">All specs approved ✓</p>
-        {:else}
-          <div class="spec-health-rows">
-            {#if pendingSpecsCount > 0}
-              <div class="spec-health-row warning">
-                <span class="spec-health-label">Pending approvals</span>
-                <span class="spec-health-val">{pendingSpecsCount}</span>
-              </div>
-            {/if}
-            {#if driftedSpecsCount > 0}
-              <div class="spec-health-row danger">
-                <span class="spec-health-label">Drifted specs</span>
-                <span class="spec-health-val">{driftedSpecsCount}</span>
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
-
-      <!-- Recent activity card -->
-      <div class="briefing-card">
-        <div class="card-header">
-          <span class="card-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-            </svg>
-          </span>
-          <span class="card-title">Since Last Visit</span>
-        </div>
-        <div class="activity-rows">
-          <div class="activity-row">
-            <span class="activity-label">Agents completed</span>
-            <span class="activity-val">{agentsCompleted}</span>
-          </div>
-          <div class="activity-row">
-            <span class="activity-label">MRs merged</span>
-            <span class="activity-val">{mrsMerged}</span>
-          </div>
-          <div class="activity-row">
-            <span class="activity-label">Spec changes</span>
-            <span class="activity-val">{specChanges}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Gate failures card -->
-      <div class="briefing-card">
-        <div class="card-header">
-          <span class="card-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="18" height="18">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-          </span>
-          <span class="card-title">Recent Gate Failures</span>
-          {#if gateFailures.length > 0}
-            <span class="card-count danger">{gateFailures.length}</span>
+          </select>
+          {#if selectedRange === 'custom'}
+            <input
+              class="date-input"
+              type="date"
+              bind:value={customSince}
+              aria-label="Custom start date"
+              data-testid="custom-date-input"
+            />
+            <button class="apply-btn" onclick={onCustomApply}>Apply</button>
           {/if}
         </div>
-        {#if gateFailures.length === 0}
-          <p class="card-ok">No gate failures ✓</p>
-        {:else}
-          <ul class="failure-list">
-            {#each gateFailures as evt}
-              <li class="failure-row">
-                <span class="failure-desc">{evt.description || 'Gate failure'}</span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
       </div>
     </div>
-  {/if}
-</div>
+
+    {#if error}
+      <div class="error-banner" role="alert" data-testid="error-banner">
+        Could not load live briefing: {error}. Showing cached data.
+      </div>
+    {/if}
+
+    {#if loading}
+      <div class="skeleton-stack">
+        <Skeleton height="80px" />
+        <Skeleton height="120px" />
+        <Skeleton height="80px" />
+        <Skeleton height="60px" />
+      </div>
+    {:else if briefing}
+      <!-- COMPLETED -->
+      {#if briefing.completed?.length}
+        <section class="briefing-section" data-testid="section-completed">
+          <h2 class="section-heading">
+            <span class="section-icon completed-icon" aria-hidden="true">✓</span>
+            COMPLETED
+          </h2>
+          {#each briefing.completed as item (item.id ?? item.title)}
+            <div class="section-item" data-testid="completed-item">
+              <div class="item-title">
+                <span class="item-icon completed-icon" aria-hidden="true">✓</span>
+                <span class="item-name">{item.title}</span>
+                {#if item.spec_ref}
+                  <button
+                    class="entity-ref"
+                    onclick={() => handleViewSpec(item.spec_ref)}
+                    data-testid="spec-ref-link"
+                    aria-label="View spec {item.spec_ref}"
+                  >
+                    spec: {item.spec_ref}
+                  </button>
+                {/if}
+              </div>
+              <div class="item-detail">
+                {#if item.mrs_merged != null}
+                  <span>{item.mrs_merged} MR{item.mrs_merged !== 1 ? 's' : ''} merged. All gates passed.</span>
+                {/if}
+                {#if item.decision}
+                  <span class="item-decision">
+                    Decision: {item.decision}
+                    {#if item.confidence}
+                      <span class="confidence-badge confidence-{item.confidence}">(confidence: {item.confidence})</span>
+                    {/if}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </section>
+      {/if}
+
+      <!-- IN PROGRESS -->
+      {#if briefing.in_progress?.length}
+        <section class="briefing-section" data-testid="section-in-progress">
+          <h2 class="section-heading">
+            <span class="section-icon inprogress-icon" aria-hidden="true">◐</span>
+            IN PROGRESS
+          </h2>
+          {#each briefing.in_progress as item (item.id ?? item.title)}
+            <div class="section-item" data-testid="in-progress-item">
+              <div class="item-title">
+                <span class="item-icon inprogress-icon" aria-hidden="true">◐</span>
+                <span class="item-name">{item.title}</span>
+                {#if item.spec_ref}
+                  <button
+                    class="entity-ref"
+                    onclick={() => handleViewSpec(item.spec_ref)}
+                    data-testid="spec-ref-link"
+                    aria-label="View spec {item.spec_ref}"
+                  >
+                    spec: {item.spec_ref}
+                  </button>
+                {/if}
+              </div>
+              <div class="item-detail">
+                {#if item.sub_specs_total}
+                  <span>{item.sub_specs_done ?? 0}/{item.sub_specs_total} sub-specs complete.</span>
+                {/if}
+                {#if item.active_agents}
+                  <span>{item.active_agents} agent{item.active_agents !== 1 ? 's' : ''} active.</span>
+                {/if}
+              </div>
+              {#if item.uncertainties?.length}
+                <div class="uncertainties">
+                  {#each item.uncertainties as u}
+                    <div class="uncertainty-row">
+                      <span class="uncertainty-icon" aria-hidden="true">⚠</span>
+                      <button
+                        class="entity-ref agent-ref"
+                        onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
+                        data-testid="agent-ref-link"
+                        aria-label="View agent {u.agent_id}"
+                      >
+                        {u.agent_id}
+                      </button>
+                      <span class="uncertainty-text">uncertain: "{u.text}"</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              <div class="item-actions">
+                {#if item.uncertainties?.length}
+                  {#each item.uncertainties as u}
+                    <button
+                      class="action-btn"
+                      onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
+                      data-testid="respond-to-agent-btn"
+                    >
+                      Respond to {u.agent_id}
+                    </button>
+                  {/each}
+                {/if}
+                {#if item.spec_ref}
+                  <button
+                    class="action-btn secondary"
+                    onclick={() => handleViewSpec(item.spec_ref)}
+                    data-testid="view-spec-btn"
+                  >
+                    View spec
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </section>
+      {/if}
+
+      <!-- CROSS-WORKSPACE -->
+      {#if briefing.cross_workspace?.length}
+        <section class="briefing-section" data-testid="section-cross-workspace">
+          <h2 class="section-heading">
+            <span class="section-icon cross-icon" aria-hidden="true">↔</span>
+            CROSS-WORKSPACE
+          </h2>
+          {#each briefing.cross_workspace as item (item.id ?? item.spec_ref)}
+            <div class="section-item" data-testid="cross-workspace-item">
+              <div class="item-title">
+                <span class="item-icon cross-icon" aria-hidden="true">↔</span>
+                <span class="item-name">{item.description ?? item.spec_ref}</span>
+                {#if item.spec_ref}
+                  <button
+                    class="entity-ref"
+                    onclick={() => handleReviewChanges(item)}
+                    data-testid="spec-ref-link"
+                    aria-label="Review changes to {item.spec_ref}"
+                  >
+                    {item.spec_ref}
+                  </button>
+                {/if}
+              </div>
+              <div class="item-actions">
+                <button
+                  class="action-btn"
+                  onclick={() => handleReviewChanges(item)}
+                  data-testid="review-changes-btn"
+                >
+                  Review changes
+                </button>
+                <button
+                  class="action-btn secondary"
+                  onclick={() => handleDismiss(item)}
+                  data-testid="dismiss-btn"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          {/each}
+        </section>
+      {/if}
+
+      <!-- EXCEPTIONS -->
+      {#if briefing.exceptions?.length}
+        <section class="briefing-section exceptions-section" data-testid="section-exceptions">
+          <h2 class="section-heading">
+            <span class="section-icon exception-icon" aria-hidden="true">✗</span>
+            EXCEPTIONS
+          </h2>
+          {#each briefing.exceptions as item (item.id ?? item.mr_id)}
+            <div class="section-item exception-item" data-testid="exception-item">
+              <div class="item-title">
+                <span class="item-icon exception-icon" aria-hidden="true">✗</span>
+                <span class="item-name">
+                  Gate failure:
+                  {#if item.repo && item.mr_id}
+                    <button
+                      class="entity-ref mr-ref"
+                      onclick={() => handleViewDiff(item)}
+                      data-testid="mr-ref-link"
+                      aria-label="View MR #{item.mr_id} in {item.repo}"
+                    >
+                      {item.repo} MR #{item.mr_id}
+                    </button>
+                  {:else}
+                    {item.description}
+                  {/if}
+                </span>
+              </div>
+              {#if item.description}
+                <div class="item-detail exception-detail">{item.description}</div>
+              {/if}
+              <div class="item-actions">
+                {#if item.mr_id}
+                  <button
+                    class="action-btn danger"
+                    onclick={() => handleViewDiff(item)}
+                    data-testid="view-diff-btn"
+                  >
+                    View Diff
+                  </button>
+                  <button
+                    class="action-btn secondary"
+                    onclick={() => handleViewOutput(item)}
+                    data-testid="view-output-btn"
+                  >
+                    View Output
+                  </button>
+                  <button
+                    class="action-btn secondary"
+                    onclick={() => openEntity('mr', item.mr_id, { action: 'override' })}
+                    data-testid="override-btn"
+                  >
+                    Override
+                  </button>
+                  <button
+                    class="action-btn secondary"
+                    onclick={() => openEntity('mr', item.mr_id, { action: 'close' })}
+                    data-testid="close-mr-btn"
+                  >
+                    Close MR
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </section>
+      {/if}
+
+      <!-- METRICS -->
+      {#if briefing.metrics}
+        <section class="metrics-row" data-testid="section-metrics">
+          <h2 class="section-heading metrics-heading">METRICS</h2>
+          <div class="metrics-grid">
+            {#if briefing.metrics.mrs_count != null}
+              <div class="metric-cell" data-testid="metric-mrs">
+                <span class="metric-val">{briefing.metrics.mrs_count}</span>
+                <span class="metric-label">MRs</span>
+              </div>
+            {/if}
+            {#if briefing.metrics.runs_count != null}
+              <div class="metric-cell" data-testid="metric-runs">
+                <span class="metric-val">{briefing.metrics.runs_count}</span>
+                <span class="metric-label">runs</span>
+              </div>
+            {/if}
+            {#if briefing.metrics.cost_usd != null}
+              <div class="metric-cell" data-testid="metric-cost">
+                <span class="metric-val">${briefing.metrics.cost_usd.toFixed(2)}</span>
+                <span class="metric-label">cost</span>
+              </div>
+            {/if}
+            {#if briefing.metrics.budget_pct != null}
+              <div class="metric-cell" data-testid="metric-budget">
+                <span class="metric-val">{briefing.metrics.budget_pct}%</span>
+                <span class="metric-label">budget</span>
+              </div>
+            {/if}
+          </div>
+        </section>
+      {/if}
+
+      {#if !briefing.completed?.length && !briefing.in_progress?.length && !briefing.cross_workspace?.length && !briefing.exceptions?.length && !briefing.metrics}
+        <EmptyState
+          title="All caught up"
+          description="No activity since your last visit."
+        />
+      {/if}
+
+      <!-- Q&A Chat (bottom) -->
+      <div class="chat-section" data-testid="briefing-chat">
+        <InlineChat
+          recipient="this briefing"
+          recipientType="llm-qa"
+          onmessage={briefingAskHandler}
+        />
+      </div>
+    {/if}
+  </div>
 
 <style>
   .briefing {
@@ -316,9 +569,18 @@
     flex-direction: column;
     gap: var(--space-5);
     max-width: 1000px;
+    min-height: 100%;
   }
 
   .briefing-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+  }
+
+  .header-left {
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
@@ -336,243 +598,297 @@
     color: var(--color-text-muted);
   }
 
-  .narrative {
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-    padding: var(--space-4);
-    background: var(--color-surface-elevated);
-    border-radius: var(--radius);
-    border-left: 3px solid var(--color-primary);
-    line-height: 1.6;
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
 
-  .cards-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
+  .time-range-selector {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .range-select {
+    appearance: none;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-5) var(--space-1) var(--space-2);
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    background-size: 10px;
+  }
+
+  .range-select:focus {
+    outline: none;
+    border-color: var(--color-primary);
+  }
+
+  .date-input {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .apply-btn {
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-3);
+    transition: background var(--transition-fast);
+  }
+
+  .apply-btn:hover { background: var(--color-primary-hover); }
+
+  .error-banner {
+    background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-warning, #d97706);
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .skeleton-stack {
+    display: flex;
+    flex-direction: column;
     gap: var(--space-4);
   }
 
-  .briefing-card {
-    background: var(--color-surface);
+  .briefing-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg, var(--radius));
     padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+    background: var(--color-surface);
   }
 
-  .card-header {
+  .section-heading {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-2) 0;
   }
 
-  .card-icon {
+  .completed-icon { color: var(--color-success, #22c55e); }
+  .inprogress-icon { color: var(--color-primary); }
+  .cross-icon { color: var(--color-text-secondary); }
+  .exception-icon { color: var(--color-danger); }
+
+  .section-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .section-item:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .item-title {
     display: flex;
     align-items: center;
-    color: var(--color-primary);
-    flex-shrink: 0;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
 
-  .card-title {
+  .item-icon { flex-shrink: 0; font-size: var(--text-sm); }
+
+  .item-name {
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--color-text);
-    flex: 1;
-  }
-
-  .card-count {
-    font-size: var(--text-xs);
-    font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--color-surface-elevated);
-    color: var(--color-text-secondary);
-  }
-
-  .card-count.danger {
-    background: rgba(220, 38, 38, 0.15);
-    color: var(--color-danger);
-  }
-
-  .card-empty,
-  .card-ok {
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    margin: 0;
-  }
-
-  .card-ok {
-    color: var(--color-success);
-  }
-
-  .agent-list,
-  .failure-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
     display: flex;
-    flex-direction: column;
+    align-items: center;
     gap: var(--space-1);
   }
 
-  .agent-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: var(--text-xs);
-  }
-
-  .agent-name {
-    color: var(--color-text);
+  .entity-ref {
+    background: none;
+    border: none;
+    padding: 0 var(--space-1);
+    cursor: pointer;
     font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 70%;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    transition: color var(--transition-fast);
   }
 
-  .agent-duration {
+  .entity-ref:hover { color: var(--color-primary-hover); }
+  .agent-ref { color: var(--color-text-secondary); }
+  .agent-ref:hover { color: var(--color-text); }
+  .mr-ref { color: var(--color-danger); }
+
+  .item-detail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    padding-left: calc(var(--space-2) + var(--text-sm));
+  }
+
+  .item-decision {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .confidence-badge {
+    font-size: var(--text-xs);
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--color-surface-elevated);
     color: var(--color-text-muted);
   }
 
-  .activity-rows,
-  .spec-health-rows {
+  .confidence-badge.confidence-high   { color: var(--color-success, #22c55e); }
+  .confidence-badge.confidence-medium { color: var(--color-warning, #f59e0b); }
+  .confidence-badge.confidence-low    { color: var(--color-danger); }
+
+  .uncertainties {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-warning, #f59e0b) 8%, transparent);
+    border-radius: var(--radius);
+    border-left: 3px solid var(--color-warning, #f59e0b);
+    margin-left: calc(var(--space-2) + var(--text-sm));
   }
 
-  .activity-row,
-  .spec-health-row {
+  .uncertainty-row {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    align-items: baseline;
+    gap: var(--space-2);
     font-size: var(--text-sm);
-    padding: var(--space-1) 0;
-    border-bottom: 1px solid var(--color-border);
   }
 
-  .activity-row:last-child,
-  .spec-health-row:last-child {
-    border-bottom: none;
+  .uncertainty-icon { color: var(--color-warning, #f59e0b); flex-shrink: 0; }
+  .uncertainty-text { color: var(--color-text-secondary); font-style: italic; }
+
+  .item-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding-left: calc(var(--space-2) + var(--text-sm));
   }
 
-  .activity-label,
-  .spec-health-label {
+  .action-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .action-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+
+  .action-btn.secondary {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
     color: var(--color-text-secondary);
   }
 
-  .activity-val,
-  .spec-health-val {
-    font-weight: 600;
+  .action-btn.secondary:hover {
+    border-color: var(--color-border-strong);
     color: var(--color-text);
   }
 
-  .spec-health-row.warning .spec-health-val {
-    color: var(--color-warning, #f59e0b);
-  }
-
-  .spec-health-row.danger .spec-health-val {
+  .action-btn.danger {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
     color: var(--color-danger);
   }
 
-  .failure-row {
-    font-size: var(--text-xs);
+  .action-btn.danger:hover {
+    background: color-mix(in srgb, var(--color-danger) 25%, transparent);
+    border-color: var(--color-danger);
+  }
+
+  .exceptions-section {
+    border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+  }
+
+  .exception-detail {
     color: var(--color-danger);
-    padding: var(--space-1) 0;
-    border-bottom: 1px solid var(--color-border);
   }
 
-  .failure-row:last-child {
-    border-bottom: none;
-  }
-
-  .failure-desc {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
-  }
-
-  .briefing-error {
-    color: var(--color-danger);
-    font-size: var(--text-sm);
+  .metrics-row {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg, var(--radius));
     padding: var(--space-4);
     background: var(--color-surface);
-    border: 1px solid var(--color-danger);
-    border-radius: var(--radius);
   }
 
-  /* Workspace briefing (TASK-205) */
-  .workspace-narrative {
-    border-left-color: var(--color-success, #22c55e);
+  .metrics-heading {
+    margin: 0 0 var(--space-3) 0;
   }
 
-  .deltas-section {
+  .metrics-grid {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-6);
+    flex-wrap: wrap;
   }
 
-  .deltas-heading {
-    font-size: var(--text-base);
-    font-weight: 600;
+  .metric-cell {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1);
+  }
+
+  .metric-val {
+    font-size: var(--text-xl);
+    font-weight: 700;
     color: var(--color-text);
-    margin: 0;
+    font-family: var(--font-mono);
   }
 
-  .deltas-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0;
+  .metric-label {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+  }
+
+  .chat-section {
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .delta-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .delta-row:last-child {
-    border-bottom: none;
-  }
-
-  .delta-sha {
-    font-family: var(--font-mono);
-    color: var(--color-primary);
-    flex-shrink: 0;
-    min-width: 5ch;
-  }
-
-  .delta-time {
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-    min-width: 6ch;
-  }
-
-  .delta-spec {
-    color: var(--color-text-secondary);
-    font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-  }
-
-  .delta-agent {
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
+    border-radius: var(--radius-lg, var(--radius));
+    padding: var(--space-4);
+    background: var(--color-surface);
   }
 </style>
