@@ -1,10 +1,9 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
-  import DetailPanelShell from '../lib/DetailPanelShell.svelte';
 
   /**
    * Briefing View — S4.3
@@ -17,6 +16,9 @@
    *   scope       — 'workspace' | 'tenant' | 'repo'
    */
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
+
+  // Shell context API (S4.1 App Shell) — falls back gracefully when not mounted in shell
+  const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
 
   // --- Time range ---
   const TIME_RANGES = [
@@ -35,9 +37,6 @@
   let error = $state(null);
   let briefing = $state(null);
   let sinceLabel = $state('');
-
-  // --- Detail panel ---
-  let panelEntity = $state(null);
 
   // Mock data shown when API returns empty or 404
   const MOCK_BRIEFING = {
@@ -197,7 +196,7 @@
   }
 
   function openEntity(type, id, data = {}) {
-    panelEntity = { type, id, data };
+    openDetailPanel({ type, id, data });
   }
 
   function handleViewSpec(specRef) {
@@ -235,8 +234,7 @@
   onMount(load);
 </script>
 
-<DetailPanelShell bind:entity={panelEntity}>
-  <div class="briefing" data-testid="briefing-view">
+<div class="briefing" data-testid="briefing-view">
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
@@ -563,7 +561,6 @@
       </div>
     {/if}
   </div>
-</DetailPanelShell>
 
 <style>
   .briefing {

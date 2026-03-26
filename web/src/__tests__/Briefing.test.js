@@ -198,28 +198,44 @@ describe('Briefing S4.3', () => {
   });
 
   describe('Entity reference → detail panel', () => {
-    it('clicking spec-ref-link renders shell container', async () => {
-      const { container } = render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+    it('clicking spec-ref-link calls openDetailPanel with spec entity', async () => {
+      const openDetailPanel = vi.fn();
+      render(Briefing, {
+        props: { workspaceId: 'ws-1', scope: 'workspace' },
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
       await waitFor(() => screen.getByTestId('section-completed'));
       const specLinks = screen.getAllByTestId('spec-ref-link');
       await fireEvent.click(specLinks[0]);
-      expect(container.querySelector('.shell')).toBeTruthy();
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'spec' })
+      );
     });
 
-    it('clicking agent-ref-link renders shell container', async () => {
-      const { container } = render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+    it('clicking agent-ref-link calls openDetailPanel with agent entity', async () => {
+      const openDetailPanel = vi.fn();
+      render(Briefing, {
+        props: { workspaceId: 'ws-1', scope: 'workspace' },
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
       await waitFor(() => screen.getByTestId('section-in-progress'));
-      const agentLink = screen.getByTestId('agent-ref-link');
-      await fireEvent.click(agentLink);
-      expect(container.querySelector('.shell')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('agent-ref-link'));
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'agent' })
+      );
     });
 
-    it('clicking mr-ref-link renders shell container', async () => {
-      const { container } = render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+    it('clicking mr-ref-link calls openDetailPanel with mr entity', async () => {
+      const openDetailPanel = vi.fn();
+      render(Briefing, {
+        props: { workspaceId: 'ws-1', scope: 'workspace' },
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
       await waitFor(() => screen.getByTestId('section-exceptions'));
-      const mrLink = screen.getByTestId('mr-ref-link');
-      await fireEvent.click(mrLink);
-      expect(container.querySelector('.shell')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('mr-ref-link'));
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'mr' })
+      );
     });
   });
 
