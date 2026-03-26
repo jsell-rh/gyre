@@ -36,19 +36,22 @@
 </script>
 
 {#if node && metrics && spanCount > 0}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_no_noninteractive_tabindex -->
   <g
     class="node-badge"
     transform="translate({bx},{by})"
     onmouseenter={() => (showTooltip = true)}
     onmouseleave={() => (showTooltip = false)}
+    onfocusin={() => (showTooltip = true)}
+    onfocusout={() => (showTooltip = false)}
+    tabindex="0"
     role="img"
     aria-label="Node {node.name ?? node.id}: {spanCount} spans, {(errorRate * 100).toFixed(1)}% errors, mean {formatDuration(meanDuration)}"
   >
     <!-- Background ring (border) -->
     <circle
       r={RADIUS}
-      fill="rgba(15,23,42,0.7)"
+      fill="color-mix(in srgb, var(--color-bg, #0f172a) 70%, transparent)"
       stroke="var(--color-border, #334155)"
       stroke-width="2.5"
     />
@@ -79,7 +82,7 @@
           x="-4" y="-14"
           width="80" height="36"
           rx="3"
-          fill="rgba(15,23,42,0.95)"
+          fill="color-mix(in srgb, var(--color-bg, #0f172a) 95%, transparent)"
           stroke="var(--color-border, #334155)"
           stroke-width="1"
         />

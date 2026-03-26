@@ -321,8 +321,8 @@
   }
 
   @keyframes ws-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(99, 153, 61, 0.4); }
-    50%       { box-shadow: 0 0 0 4px rgba(99, 153, 61, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 40%, transparent); }
+    50%       { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success) 0%, transparent); }
   }
 
   .ws-dot.pulse {
@@ -460,8 +460,16 @@
     cursor: pointer;
   }
 
-  .lang-select:focus {
+  .lang-select:focus:not(:focus-visible) {
     outline: none;
     border-color: var(--color-primary);
+  }
+  .lang-select:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ws-dot.pulse { animation: none; }
   }
 </style>

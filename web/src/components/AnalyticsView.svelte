@@ -66,7 +66,7 @@
   </div>
 
   {#if error}
-    <div class="error">{error}</div>
+    <div class="error" role="alert">{error}</div>
   {:else if loading}
     <div class="loading">Loading…</div>
   {:else}
@@ -217,5 +217,5 @@
 
   .empty { color: var(--text-dim); font-size: 0.85rem; }
   .loading { color: var(--text-muted); padding: 1rem; }
-  .error { background: #f8717118; border: 1px solid #f87171; color: #f87171; border-radius: 6px; padding: 0.75rem; }
+  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; }
 </style>

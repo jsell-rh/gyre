@@ -79,7 +79,7 @@
   </div>
 
   {#if error}
-    <div class="error">{error}</div>
+    <div class="error" role="alert">{error}</div>
   {:else if loading}
     <div class="loading">Loading…</div>
   {:else}
@@ -176,25 +176,26 @@
     gap: 0.5rem;
   }
 
-  h2 { font-size: 1.1rem; font-weight: 600; color: var(--text); }
-  h3 { font-size: 0.95rem; font-weight: 600; color: var(--text); margin-bottom: 0.75rem; }
+  h2 { font-size: 1.1rem; font-weight: 600; color: var(--color-text); }
+  h3 { font-size: 0.95rem; font-weight: 600; color: var(--color-text); margin-bottom: 0.75rem; }
 
   .actions { display: flex; gap: 0.5rem; }
 
   button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
     border-radius: 4px;
     padding: 0.3rem 0.6rem;
     font-size: 0.85rem;
     cursor: pointer;
   }
-  button:hover { background: var(--surface-hover); }
+  button:hover { background: var(--color-surface-elevated); }
+  button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .summary-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 1rem 1.5rem;
     display: flex;
@@ -202,12 +203,12 @@
     gap: 1.5rem;
   }
 
-  .summary-label { color: var(--text-muted); font-size: 0.85rem; }
-  .summary-amount { font-size: 1.8rem; font-weight: 700; color: var(--accent); font-family: monospace; }
+  .summary-label { color: var(--color-text-muted); font-size: 0.85rem; }
+  .summary-amount { font-size: 1.8rem; font-weight: 700; color: var(--color-primary); font-family: monospace; }
 
   .panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 1rem;
     overflow: auto;
@@ -217,24 +218,24 @@
   th {
     text-align: left;
     padding: 0.4rem 0.5rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     font-size: 0.8rem;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--color-border);
   }
   th.right { text-align: right; }
   td { padding: 0.4rem 0.5rem; font-size: 0.85rem; }
 
-  .agent-id, .cost-type { font-family: monospace; font-size: 0.82rem; color: var(--text); }
+  .agent-id, .cost-type { font-family: monospace; font-size: 0.82rem; color: var(--color-text); }
   .right { text-align: right; }
-  .amount { color: var(--accent); font-family: monospace; }
-  .currency, .task-id, .time { color: var(--text-muted); font-size: 0.8rem; }
+  .amount { color: var(--color-primary); font-family: monospace; }
+  .currency, .task-id, .time { color: var(--color-text-muted); font-size: 0.8rem; }
 
   .bar-cell { width: 120px; }
-  .bar { height: 10px; background: var(--accent); border-radius: 2px; min-width: 2px; }
+  .bar { height: 10px; background: var(--color-primary); border-radius: 2px; min-width: 2px; }
 
   .detail-btn { font-size: 0.75rem; padding: 0.15rem 0.4rem; }
 
-  .empty { color: var(--text-dim); font-size: 0.85rem; }
-  .loading { color: var(--text-muted); padding: 1rem; }
-  .error { background: #f8717118; border: 1px solid #f87171; color: #f87171; border-radius: 6px; padding: 0.75rem; }
+  .empty { color: var(--color-text-secondary); font-size: 0.85rem; }
+  .loading { color: var(--color-text-muted); padding: 1rem; }
+  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; }
 </style>
