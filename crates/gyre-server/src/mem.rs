@@ -17,7 +17,8 @@ use gyre_ports::{
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
+    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1675,6 +1676,39 @@ impl NotificationRepository for MemNotificationRepository {
     }
 }
 
+// ── MemUserWorkspaceStateRepository ──────────────────────────────────────────
+
+/// In-memory user workspace state repository for tests and development.
+#[derive(Default)]
+pub struct MemUserWorkspaceStateRepository {
+    store: Mutex<HashMap<(String, String), i64>>,
+}
+
+#[async_trait]
+impl UserWorkspaceStateRepository for MemUserWorkspaceStateRepository {
+    async fn upsert_last_seen(
+        &self,
+        user_id: &str,
+        workspace_id: &str,
+        timestamp: i64,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert((user_id.to_owned(), workspace_id.to_owned()), timestamp);
+        Ok(())
+    }
+
+    async fn get_last_seen(&self, user_id: &str, workspace_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(&(user_id.to_owned(), workspace_id.to_owned()))
+            .copied())
+    }
+}
+
 // ── MemKvStore ────────────────────────────────────────────────────────────────
 
 /// In-memory implementation of KvJsonStore for tests and development.
@@ -2504,5 +2538,7 @@ pub fn test_state() -> Arc<crate::AppState> {
             tx
         },
         agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     })
 }

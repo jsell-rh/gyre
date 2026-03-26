@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::{error::ApiError, new_id, now_secs};
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 // ── Response / Request types ─────────────────────────────────────────────────
 
@@ -648,14 +648,31 @@ pub async fn get_workspace_graph(
 
 /// GET /api/v1/workspaces/{id}/briefing
 /// Returns a template-based narrative summary of recent architectural changes.
+/// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
+/// Falls back to 24 hours ago if no row exists (first visit).
 pub async fn get_workspace_briefing(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Query(q): Query<BriefingQuery>,
 ) -> Result<Json<BriefingResponse>, ApiError> {
     require_workspace(&state, &id).await?;
 
-    let since = q.since.unwrap_or(0);
+    // Resolve `since`: explicit param > last_seen_at > 24h fallback.
+    let since: u64 = if let Some(s) = q.since {
+        s
+    } else if let Some(uid) = &auth.user_id {
+        let last_seen = state
+            .user_workspace_state
+            .get_last_seen(uid.as_str(), &id)
+            .await
+            .unwrap_or(None);
+        last_seen
+            .map(|ts| ts as u64)
+            .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
+    } else {
+        now_secs().saturating_sub(24 * 3600)
+    };
 
     let repo_ids: Vec<String> = state
         .kv_store
