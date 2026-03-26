@@ -249,6 +249,18 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/:path/history", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/links", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/progress", "spec", None),
+                // ── Spec editing backend (S3.3) ────────────────────────────
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/specs/assist",
+                    "spec",
+                    Some("generate"),
+                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/specs/save", "spec", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/prompts/save",
+                    "spec",
+                    Some("generate"),
+                ),
                 // ── Merge Queue ────────────────────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/merge-queue/enqueue",
