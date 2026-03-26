@@ -1,4 +1,5 @@
 <script>
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import MoldableView from '../lib/MoldableView.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -6,6 +7,8 @@
   import Badge from '../lib/Badge.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
   import WorkspaceCards from './WorkspaceCards.svelte';
+
+  const navigate = getContext('navigate');
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
@@ -141,8 +144,8 @@
         <circle cx="24" cy="24" r="6" stroke="currentColor" stroke-width="2"/>
         <path d="M24 4v14M24 30v14M4 24h14M30 24h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
       </svg>
-      <p class="placeholder-title">Workspace canvas</p>
-      <p class="placeholder-sub">Architecture graph — S4.4b</p>
+      <p class="placeholder-title">Workspace Architecture</p>
+      <p class="placeholder-sub">Select a repository below to explore its knowledge graph</p>
     </div>
   </div>
 
@@ -196,7 +199,7 @@
     </div>
 
     <!-- Concept search bar — shown when a repo + graph is loaded -->
-    {#if selectedRepoId && graph}
+    {#if selectedRepoId}
       <div class="concept-search-bar">
         <div class="search-input-wrap">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="search-icon" aria-hidden="true">
@@ -205,7 +208,8 @@
           <input
             type="search"
             class="concept-input"
-            placeholder="Search concepts…"
+            placeholder="Search concepts… (/)"
+            disabled={loading}
             value={conceptQuery}
             oninput={onSearchInput}
             onkeydown={onSearchKeydown}
@@ -244,6 +248,7 @@
           />
           {#if repos.length === 0 && !reposLoading}
             <p class="hint">No repositories found. Create a project and repository to get started.</p>
+            <button class="go-admin-btn" onclick={() => navigate?.('admin')}>Go to Admin</button>
           {/if}
         </div>
 
@@ -284,7 +289,6 @@
     align-items: center;
     gap: var(--space-3);
     text-align: center;
-    opacity: 0.5;
   }
 
   .placeholder-title {
@@ -428,6 +432,19 @@
     margin: 0;
   }
 
+  .go-admin-btn {
+    background: var(--color-primary);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
+  }
+  .go-admin-btn:hover { opacity: 0.85; }
+
   .loading-wrap {
     padding: var(--space-6);
     display: flex;
@@ -521,8 +538,8 @@
     align-items: center;
     gap: var(--space-2);
     padding: 2px var(--space-2) 2px var(--space-3);
-    background: rgba(238, 0, 0, 0.1);
-    border: 1px solid rgba(238, 0, 0, 0.3);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
     border-radius: 999px;
     font-size: var(--text-xs);
     color: var(--color-primary);
