@@ -654,7 +654,7 @@
                 <div class="abac-card">
                   <div class="abac-card-hdr">
                     <span class="abac-name">{policy.resource_type || `Policy ${idx + 1}`}</span>
-                    <button class="abac-remove-btn" onclick={() => removeAbacPolicy(idx)} disabled={policySaving}>Remove</button>
+                    <button class="abac-remove-btn" onclick={() => removeAbacPolicy(idx)} disabled={policySaving} aria-label="Remove ABAC policy {idx + 1}">Remove</button>
                   </div>
                   <div class="abac-rules">
                     {#each Object.entries(policy.required_claims ?? {}) as [claim, value], ri (ri)}
@@ -694,12 +694,12 @@
         <!-- Quality gates -->
         <div class="gates-section-hdr">
           <h3 class="gates-section-title">Quality Gates</h3>
-          <button class="jj-btn primary" onclick={() => showGateForm = !showGateForm}>
+          <button class="jj-btn primary" onclick={() => showGateForm = !showGateForm} aria-expanded={showGateForm} aria-controls="gate-form">
             {showGateForm ? 'Cancel' : '+ New Gate'}
           </button>
         </div>
         {#if showGateForm}
-          <div class="gate-form">
+          <div class="gate-form" id="gate-form">
             <input class="branch-select" placeholder="Gate name" bind:value={newGateName} />
             <select class="branch-select" bind:value={newGateType} aria-label="Gate type">
               {#each GATE_TYPES as t (t)}
@@ -734,7 +734,7 @@
                       class="gate-del-btn"
                       onclick={() => deleteGate(gate.id)}
                       disabled={deletingGateId === gate.id}
-                      aria-label="Delete gate"
+                      aria-label="Delete gate {gate.name}"
                     >
                       {deletingGateId === gate.id ? '…' : 'Delete'}
                     </button>

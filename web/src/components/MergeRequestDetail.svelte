@@ -174,14 +174,14 @@
 
   <!-- Tab bar -->
   <div class="tab-bar" role="tablist" aria-label="Merge request tabs">
-    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'} id="tab-overview">Overview</button>
-    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'} id="tab-files">
+    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'} id="tab-overview" aria-controls="tabpanel-overview">Overview</button>
+    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'} id="tab-files" aria-controls="tabpanel-files">
       Files
       {#if mr.diff_stats}<span class="tab-badge">{mr.diff_stats.files_changed}</span>{/if}
     </button>
   </div>
 
-  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
+  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}" aria-busy={loading}>
     {#if activeTab === 'overview'}
     <!-- Two-column layout -->
     <div class="two-col">
@@ -300,6 +300,7 @@
               <input
                 class="dep-input"
                 placeholder="MR UUID"
+                aria-label="Add dependency MR UUID"
                 bind:value={addDepInput}
                 onkeydown={(e) => e.key === 'Enter' && addDep()}
               />

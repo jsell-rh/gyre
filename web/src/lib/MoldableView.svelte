@@ -257,6 +257,7 @@
               <button
                 class="sort-btn"
                 class:active={sortBy === val}
+                aria-pressed={sortBy === val}
                 onclick={() => { if (sortBy === val) { sortDir = sortDir === 'asc' ? 'desc' : 'asc'; } else { sortBy = val; sortDir = 'asc'; } }}
               >{label}{sortBy === val ? (sortDir === 'asc' ? ' \u2191' : ' \u2193') : ''}</button>
             {/each}
@@ -391,7 +392,7 @@
               <div class="delta-card-header">
                 <code class="delta-sha">{selectedDelta.commit_sha?.slice(0, 7) ?? '???????'}</code>
                 <span class="delta-time">{relativeTime(selectedDelta.timestamp)}</span>
-                <button class="delta-close" onclick={() => (selectedDelta = null)} aria-label="Close delta card">✕</button>
+                <button class="delta-close" onclick={() => (selectedDelta = null)} aria-label="Close delta card" title="Close">✕</button>
               </div>
               {#if selectedDelta.spec_ref}
                 <div class="delta-row">
