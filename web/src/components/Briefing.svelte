@@ -38,56 +38,6 @@
   let briefing = $state(null);
   let sinceLabel = $state('');
 
-  // Mock data shown when API returns empty or 404
-  const MOCK_BRIEFING = {
-    completed: [
-      {
-        id: 'mock-c1',
-        title: 'Payment retry logic',
-        spec_ref: 'payment-retry.md',
-        mrs_merged: 3,
-        decision: 'exponential backoff',
-        confidence: 'high',
-      },
-    ],
-    in_progress: [
-      {
-        id: 'mock-p1',
-        title: 'Auth refactor',
-        spec_ref: 'identity-security.md',
-        sub_specs_done: 3,
-        sub_specs_total: 5,
-        active_agents: 2,
-        uncertainties: [
-          { agent_id: 'worker-8', text: 'token refresh for offline...' },
-        ],
-      },
-    ],
-    cross_workspace: [
-      {
-        id: 'mock-x1',
-        source_workspace: 'platform-core',
-        spec_ref: 'idempotent-api.md',
-        description: 'platform-core updated idempotent-api.md',
-      },
-    ],
-    exceptions: [
-      {
-        id: 'mock-e1',
-        type: 'gate_failure',
-        description: 'cargo test failed (3 tests).',
-        mr_id: '47',
-        repo: 'billing-service',
-      },
-    ],
-    metrics: {
-      mrs_count: 12,
-      runs_count: 47,
-      cost_usd: 23.40,
-      budget_pct: 67,
-    },
-  };
-
   function sinceEpochForRange(range) {
     const now = Math.floor(Date.now() / 1000);
     switch (range) {

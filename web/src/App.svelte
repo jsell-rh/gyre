@@ -473,9 +473,9 @@
           {:else if currentNav === 'specs'}
             <SpecDashboard workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'meta-specs'}
-            <MetaSpecs {scope} />
+            <MetaSpecs workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'admin'}
-            <AdminPanel {scope} />
+            <AdminPanel workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {/if}
         </div>
       </ContentArea>
