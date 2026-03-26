@@ -371,6 +371,8 @@ gyre policy effective --subject user:jsell --resource-type spec  # "What can jse
 - **Effective permissions view:** select a user/agent, see what they can do across all resource types
 - **Policy conflict detector:** highlight policies that could produce unexpected interactions
 
+**URL pattern:** The UI uses the **global** policy endpoints (`/api/v1/policies`) with `?scope=Workspace&scope_id=<workspace_id>` query parameters for workspace-scoped views. There are no separate `/workspaces/:id/abac-policies` endpoints — workspace scoping is a filter on the global CRUD, not a separate resource hierarchy. The dry-run simulator uses `POST /api/v1/policies/evaluate` (not a workspace-scoped simulate endpoint). The frontend must use these global URLs — workspace-prefixed policy URLs will return 405.
+
 ## MCP Integration
 
 Agents don't interact with the policy engine directly. The MCP server enforces policies transparently on every tool call. However, agents can query their own permissions:
