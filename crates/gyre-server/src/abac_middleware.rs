@@ -365,6 +365,22 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/graph", "graph", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "graph", None),
+                // ── Explorer views (S3.1) ───────────────────────────────────
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views",
+                    "explorer_view",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views/generate",
+                    "explorer_view",
+                    Some("generate"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views/:view_id",
+                    "explorer_view",
+                    None,
+                ),
                 // ── Meta-specs ─────────────────────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:path/blast-radius",
