@@ -56,3 +56,4 @@ Access at `http://localhost:3000`. Default token `gyre-dev-token` works against 
 | `GYRE_WG_PEER_TTL` | `300` | Seconds of inactivity before a peer is marked stale and filtered from the peer list. Stale peer detector runs every 60 s. (M26) |
 | `GYRE_DERP_SERVERS` | _(unset)_ | JSON array of DERP relay server configs served by `GET /api/v1/network/derp-map`. (M26) |
 | `GYRE_DERP_URL` | _(unset)_ | URL to fetch the DERP relay map JSON (used when `GYRE_DERP_SERVERS` is unset). (M26) |
+| `GYRE_DIVERGENCE_THRESHOLD` | `3` | Minimum number of conflicting node changes across agent deltas for the same spec before a `ConflictingInterpretations` (priority-5) inbox notification is emitted. One notification per spec_ref per push, sent to all Admin and Developer workspace members. Set to a higher value to reduce noise in large workspaces. (HSI §8) |
