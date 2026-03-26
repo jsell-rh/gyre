@@ -2,7 +2,8 @@ use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
     procfs_monitor, register_default_compute_target, siem, spawn_budget_daily_reset,
-    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
+    spawn_llm_rate_limiter_cleanup, spawn_stale_agent_detector, spawn_stale_peer_detector,
+    telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -58,6 +59,7 @@ async fn main() -> Result<()> {
     procfs_monitor::spawn_procfs_monitor(state.clone());
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
+    spawn_llm_rate_limiter_cleanup(state.clone());
 
     let app = build_router(state);
 
