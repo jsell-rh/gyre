@@ -74,10 +74,7 @@ pub struct CompleteAgentRequest {
 
 /// Create the three ABAC policies required for an interrogation agent (HSI §4).
 /// Returns the list of created policy IDs (stored in kv_store for cleanup).
-pub async fn create_interrogation_policies(
-    state: &AppState,
-    agent_id: &str,
-) -> Vec<String> {
+pub async fn create_interrogation_policies(state: &AppState, agent_id: &str) -> Vec<String> {
     let now = now_secs();
     let subject_value = format!("agent:{agent_id}");
 
@@ -90,7 +87,9 @@ pub async fn create_interrogation_policies(
         Policy {
             id: Id::new(&restrict_id),
             name: restrict_id.clone(),
-            description: format!("Interrogation agent {agent_id} is read-only + message to requesting human"),
+            description: format!(
+                "Interrogation agent {agent_id} is read-only + message to requesting human"
+            ),
             scope: PolicyScope::Tenant,
             scope_id: None,
             priority: 200,
@@ -1061,10 +1060,7 @@ pub async fn complete_agent(
     // HSI §4: Clean up interrogation ABAC policies on completion.
     cleanup_interrogation_policies(&state, &id).await;
     // Also remove any stored conversation context for this agent.
-    let _ = state
-        .kv_store
-        .kv_remove("interrogation_context", &id)
-        .await;
+    let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
     // Create a jj bookmark for the agent's branch in their worktree (best-effort).
     // This persists the branch tip in jj's bookmark namespace for traceability.
