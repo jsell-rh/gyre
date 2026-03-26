@@ -16,6 +16,7 @@ pub mod container;
 pub mod dependencies;
 pub mod discover;
 pub mod error;
+pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
@@ -638,6 +639,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/briefing",
             get(graph::get_workspace_briefing),
+        )
+        // Explorer views CRUD + LLM generation (S3.1)
+        // NOTE: /generate must be registered BEFORE /:view_id to avoid "generate"
+        //       being matched as a view_id parameter.
+        .route(
+            "/api/v1/workspaces/:id/explorer-views",
+            get(explorer_views::list_explorer_views).post(explorer_views::create_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/generate",
+            post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/:view_id",
+            get(explorer_views::get_explorer_view)
+                .put(explorer_views::update_explorer_view)
+                .delete(explorer_views::delete_explorer_view),
         )
 }
 
