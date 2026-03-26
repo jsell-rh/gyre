@@ -10,6 +10,7 @@
   import SpecDashboard from './components/SpecDashboard.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import AdminPanel from './components/AdminPanel.svelte';
+  import UserProfile from './components/UserProfile.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
@@ -48,12 +49,19 @@
   // ── UI state ─────────────────────────────────────────────────────────
   let searchOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let shortcutsModalEl = $state(null);
   let userMenuOpen = $state(false);
 
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
-  let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
+  let hasToken = $state(true);
   let tokenInfo = $state(null);
+
+  $effect(() => {
+    if (shortcutsOpen && shortcutsModalEl) {
+      shortcutsModalEl.querySelector('button')?.focus();
+    }
+  });
 
   // Content cross-fade key (increment to trigger fade transition)
   let contentVisible = $state(true);
@@ -370,7 +378,7 @@
 {#if !$isLoading}
 <div class="app">
   <!-- Sidebar: 6 fixed nav items, always present -->
-  <Sidebar bind:currentNav onnavigate={(v) => navigate(v)} {inboxBadge} />
+  <Sidebar bind:currentNav onnavigate={(v) => navigate(v)} {inboxBadge} {wsStatus} />
 
   <!-- Main area: topbar + content + status bar -->
   <div class="main">
@@ -426,7 +434,7 @@
             onclick={() => (userMenuOpen = !userMenuOpen)}
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            aria-label="User menu"
+            aria-label="User menu ({hasToken ? 'authenticated' : 'not authenticated'})"
           >
             <div class="user-avatar" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16">
@@ -444,7 +452,7 @@
               aria-label="User menu"
               onkeydown={(e) => { if (e.key === 'Escape') userMenuOpen = false; }}
             >
-              <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('admin'); userMenuOpen = false; }}>
+              <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
                 Profile
               </button>
               <button class="user-dropdown-item" role="menuitem" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
@@ -467,13 +475,15 @@
           {#if currentNav === 'inbox'}
             <Inbox workspaceId={scope.workspaceId} />
           {:else if currentNav === 'briefing'}
-            <Briefing workspaceId={scope.workspaceId} />
+            <Briefing workspaceId={scope.workspaceId} workspaceName={currentWorkspace?.name} {trustLevel} />
           {:else if currentNav === 'explorer'}
             <ExplorerView {scope} />
           {:else if currentNav === 'specs'}
             <SpecDashboard workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'meta-specs'}
             <MetaSpecs workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
+          {:else if currentNav === 'profile'}
+            <UserProfile workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'admin'}
             <AdminPanel workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {/if}
@@ -546,8 +556,8 @@
 
 <!-- Keyboard shortcut overlay -->
 {#if shortcutsOpen}
-  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts">
-    <div class="shortcuts-modal">
+  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true">
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl}>
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>

@@ -10,6 +10,7 @@
 
   // Use shell context API for detail panel — S4.1 app shell manages the split layout
   const openDetailPanel = getContext('openDetailPanel');
+  const navigate = getContext('navigate');
 
   let notifications = $state([]);
   let loading = $state(true);
@@ -392,6 +393,15 @@
     }
   }
 
+  async function handleIncreaseTrust(n) {
+    navigate?.('admin');
+    await handleDismiss(n);
+  }
+
+  function handleAdjustMetaSpec(n) {
+    navigate?.('meta-specs');
+  }
+
   onMount(() => {
     loadNotifications();
     refreshInterval = setInterval(loadNotifications, 60000);
@@ -457,7 +467,7 @@
                   data-priority={n.priority}
                   title="Priority {n.priority}"
                 >
-                  !{n.priority}
+                  P{n.priority}
                 </span>
                 <div class="card-header-text">
                   <span class="card-title">{n.title}</span>
@@ -556,6 +566,9 @@
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         View Spec
                       </Button>
+                      <Button variant="ghost" size="sm" onclick={() => { navigate?.('explorer'); handleDismiss(n); }}>
+                        Open in Explorer
+                      </Button>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -643,12 +656,7 @@
                       <Button
                         variant="ghost"
                         size="sm"
-                        onclick={() =>
-                          openDetail({
-                            type: 'spec',
-                            id: body.meta_spec_path || n.entity_ref,
-                            data: n,
-                          })}
+                        onclick={() => handleAdjustMetaSpec(n)}
                       >
                         Adjust Meta-spec
                       </Button>
@@ -660,7 +668,7 @@
                         variant="primary"
                         size="sm"
                         disabled={state?.loading}
-                        onclick={() => handleDismiss(n)}
+                        onclick={() => handleIncreaseTrust(n)}
                       >
                         Increase Trust
                       </Button>

@@ -15,7 +15,7 @@
    *   repoId      — repo UUID (repo scope)
    *   scope       — 'workspace' | 'tenant' | 'repo'
    */
-  let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
+  let { workspaceId = null, repoId = null, scope = 'workspace', workspaceName = null, trustLevel = null } = $props();
 
   // Shell context API (S4.1 App Shell) — falls back gracefully when not mounted in shell
   const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
@@ -191,6 +191,12 @@
         <h1 class="briefing-title">Briefing</h1>
         {#if !loading}
           <span class="briefing-since" data-testid="since-label">Since {sinceLabel}</span>
+        {/if}
+        {#if scope === 'workspace' && workspaceName}
+          <span class="briefing-workspace">Workspace: {workspaceName}</span>
+        {/if}
+        {#if trustLevel}
+          <span class="briefing-trust">Trust: {trustLevel}</span>
         {/if}
       </div>
       <div class="header-right">
@@ -548,6 +554,16 @@
     color: var(--color-text-muted);
   }
 
+  .briefing-workspace {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .briefing-trust {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
   .header-right {
     display: flex;
     align-items: center;
@@ -644,7 +660,7 @@
   }
 
   .completed-icon { color: var(--color-success, #22c55e); }
-  .inprogress-icon { color: var(--color-primary); }
+  .inprogress-icon { color: var(--color-warning, #f59e0b); }
   .cross-icon { color: var(--color-text-secondary); }
   .exception-icon { color: var(--color-danger); }
 
