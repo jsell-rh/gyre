@@ -12,7 +12,7 @@ use gyre_common::Id;
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 
@@ -63,12 +63,23 @@ pub async fn get_spec_policy(
     Ok(Json(SpecPolicyResponse::from_policy(repo_id, &policy)))
 }
 
-/// PUT /api/v1/repos/:id/spec-policy — set spec enforcement policy (AdminOnly).
+/// PUT /api/v1/repos/:id/spec-policy — set spec enforcement policy.
+///
+/// Admin only: spec enforcement governs whether pushes must reference an
+/// approved spec. Allowing Agent/Developer roles to disable this requirement
+/// would let agents bypass the human-approval workflow (NEW-38).
 pub async fn set_spec_policy(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(repo_id): Path<String>,
     Json(req): Json<SpecPolicy>,
 ) -> Result<(StatusCode, Json<SpecPolicyResponse>), ApiError> {
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update spec enforcement policy".to_string(),
+        ));
+    }
+
     state
         .repos
         .find_by_id(&Id::new(&repo_id))
@@ -304,5 +315,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_role_cannot_set_spec_policy() {
+        // NEW-38 regression: Agent role must be rejected with 403.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-jwt"),
+            gyre_common::Id::new("proj-1"),
+            "jwt-repo",
+            "/tmp/jwt-repo",
+            0,
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.repos.create(&repo))
+                .unwrap();
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "rogue-agent",
+                "preferred_username": "rogue-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let body = serde_json::json!({
+            "require_spec_ref": false,
+            "require_approved_spec": false,
+            "warn_stale_spec": false,
+            "require_current_spec": false
+        });
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-jwt/spec-policy")
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent role must not modify spec enforcement policy (NEW-38)"
+        );
     }
 }
