@@ -334,7 +334,7 @@
         <thead>
           <tr>
             {#each TABLE_COLS as [col, label]}
-              <th scope="col">
+              <th scope="col" aria-sort={sortCol === col ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                 <button class="sort-btn" onclick={() => toggleSort(col)}>
                   {label}
                   <span class="sort-arrow" aria-hidden="true">{sortArrow(col)}</span>

@@ -205,7 +205,7 @@
             {/if}
           </div>
           {#if !budget.config?.max_tokens_per_day && !budget.config?.max_cost_per_day && !budget.config?.max_concurrent_agents}
-            <EmptyState message="No budget limits configured for this workspace." />
+            <EmptyState title="No budget limits configured for this workspace." />
           {/if}
           {#if !budgetFormOpen}
             <button class="configure-budget-btn" onclick={() => { budgetFormOpen = true; budgetForm = { max_tokens_per_day: budget.config?.max_tokens_per_day ?? '', max_cost_per_day: budget.config?.max_cost_per_day ?? '', max_concurrent_agents: budget.config?.max_concurrent_agents ?? '', max_agent_lifetime_secs: budget.config?.max_agent_lifetime_secs ?? '' }; }}>Configure Budget</button>
@@ -238,14 +238,14 @@
           {/if}
         </div>
       {:else}
-        <EmptyState message="No budget data available." />
+        <EmptyState title="No budget data available." />
       {/if}
     </div>
 
   {:else if activeTab === 'repos'}
     <div class="tab-body">
       {#if repos.length === 0}
-        <EmptyState message="No repos in this workspace." />
+        <EmptyState title="No repos in this workspace." />
       {:else}
         <table class="data-table">
           <thead>
@@ -273,7 +273,7 @@
   {:else if activeTab === 'members'}
     <div class="tab-body">
       {#if members.length === 0}
-        <EmptyState message="No members in this workspace." />
+        <EmptyState title="No members in this workspace." />
       {:else}
         <table class="data-table">
           <thead>
@@ -295,7 +295,7 @@
   {:else if activeTab === 'teams'}
     <div class="tab-body">
       {#if teams.length === 0}
-        <EmptyState message="No teams in this workspace." />
+        <EmptyState title="No teams in this workspace." />
       {:else}
         <div class="teams-grid">
           {#each teams as team}
@@ -534,8 +534,8 @@
   }
   .trust-select:disabled { opacity: 0.5; cursor: not-allowed; }
   .trust-select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
-  .trust-select.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-info, #8b5cf6) 30%, transparent); }
-  .trust-select.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); border-color: color-mix(in srgb, var(--color-info, #60a5fa) 30%, transparent); }
+  .trust-select.trust-supervised { background: color-mix(in srgb, var(--color-info, #4db0ff) 15%, transparent); color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-info, #4db0ff) 30%, transparent); }
+  .trust-select.trust-guided     { background: color-mix(in srgb, var(--color-info, #4db0ff) 15%, transparent); color: var(--color-link); border-color: color-mix(in srgb, var(--color-info, #4db0ff) 30%, transparent); }
   .trust-select.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }
   .trust-select.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, transparent); }
   .trust-saving { font-size: var(--text-xs); color: var(--color-text-muted); }

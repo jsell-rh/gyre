@@ -469,6 +469,7 @@
             <span class="inbox-count" aria-hidden="true">{inboxBadge > 99 ? '99+' : inboxBadge}</span>
           {/if}
         </button>
+        <span class="sr-only" aria-live="polite" aria-atomic="true">{inboxBadge > 0 ? `${inboxBadge} unresolved inbox items` : ''}</span>
 
         <!-- User avatar dropdown -->
         <div class="user-menu-wrap">
@@ -532,8 +533,6 @@
             <UserProfile workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'admin'}
             <AdminPanel workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
-          {:else if currentNav === 'profile'}
-            <UserProfile />
           {/if}
         </div>
       </ContentArea>
@@ -1187,6 +1186,8 @@
   .btn-secondary:active {
     opacity: 0.85;
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   .user-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);

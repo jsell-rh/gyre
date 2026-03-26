@@ -273,8 +273,9 @@
           />
         </div>
 
+        <span aria-live="polite" class="sr-only">{conceptLoading ? 'Searching…' : ''}</span>
         {#if conceptLoading}
-          <span class="search-loading" aria-live="polite">
+          <span class="search-loading">
             <span class="spinner" aria-hidden="true"></span>
             Searching…
           </span>
@@ -499,6 +500,11 @@
     outline: none;
     min-width: 180px;
     max-width: 280px;
+  }
+
+  .repo-select:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 
   .repo-select option {
@@ -773,4 +779,6 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
