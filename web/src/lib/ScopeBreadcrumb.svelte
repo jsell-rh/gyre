@@ -94,7 +94,7 @@
       {#if dropdownOpen && workspaces.length > 1}
         <ul class="ws-dropdown" role="listbox" aria-label="Select workspace">
           {#each workspaces as ws}
-            <li>
+            <li role="presentation">
               <button
                 class="ws-option"
                 class:active={ws.id === workspace?.id}

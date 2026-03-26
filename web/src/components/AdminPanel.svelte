@@ -259,13 +259,12 @@
   }
 
   // ---- MEMBERS ----
-  async function removeMember(userId) {
-    if (!confirm('Remove this member from the workspace?')) return;
-    try {
-      await api.removeWorkspaceMember(workspaceId, userId);
-      wsMembers = wsMembers.filter(m => (m.id ?? m.user_id) !== userId);
-      toastSuccess('Member removed.');
-    } catch (e) { toastError(e.message); }
+  function removeMember(userId, userName) {
+    deleteConfirmModal = {
+      kind: 'member',
+      userId,
+      label: `Remove ${userName || 'this member'} from the workspace? This cannot be undone.`,
+    };
   }
 
   async function addMember() {
@@ -368,8 +367,11 @@
     finally { gateSaving = false; }
   }
 
-  async function deleteGate(gateId) {
-    if (!confirm('Remove this gate?')) return;
+  function deleteGate(gateId) {
+    deleteConfirmModal = { kind: 'gate', gateId, label: 'Remove this gate? This cannot be undone.' };
+  }
+
+  async function confirmDeleteGate(gateId) {
     gateDeleting = { ...gateDeleting, [gateId]: true };
     try {
       await api.deleteRepoGate(repoId, gateId);
@@ -393,13 +395,36 @@
     finally { computeLoading = false; }
   }
 
-  async function deleteCompute(id) {
-    if (!confirm('Delete this compute target?')) return;
-    try {
-      await api.computeDelete(id);
-      tenantCompute = tenantCompute.filter(t => t.id !== id);
-      toastSuccess('Compute target deleted.');
-    } catch (e) { toastError(e.message); }
+  function deleteCompute(id) {
+    deleteConfirmModal = { kind: 'compute', computeId: id, label: 'Delete this compute target? This cannot be undone.' };
+  }
+
+  async function confirmDelete() {
+    const modal = deleteConfirmModal;
+    if (!modal) return;
+
+    if (modal.kind === 'policy') {
+      await deletePolicy(modal.policyId);
+      return;
+    }
+
+    deleteConfirmModal = null;
+
+    if (modal.kind === 'member') {
+      try {
+        await api.removeWorkspaceMember(workspaceId, modal.userId);
+        wsMembers = wsMembers.filter(m => (m.id ?? m.user_id) !== modal.userId);
+        toastSuccess('Member removed.');
+      } catch (e) { toastError(e.message); }
+    } else if (modal.kind === 'gate') {
+      await confirmDeleteGate(modal.gateId);
+    } else if (modal.kind === 'compute') {
+      try {
+        await api.computeDelete(modal.computeId);
+        tenantCompute = tenantCompute.filter(t => t.id !== modal.computeId);
+        toastSuccess('Compute target deleted.');
+      } catch (e) { toastError(e.message); }
+    }
   }
 
   // ---- HELPERS ----
@@ -699,7 +724,7 @@
                   <td><Badge value={member.role ?? 'member'} /></td>
                   <td class="dim">{relativeTime(member.last_active ?? member.last_seen_at)}</td>
                   <td>
-                    <button class="kill-btn" onclick={() => removeMember(member.id ?? member.user_id)}>
+                    <button class="kill-btn" onclick={() => removeMember(member.id ?? member.user_id, member.name ?? member.email)}>
                       Remove
                     </button>
                   </td>
@@ -754,7 +779,7 @@
                   <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
                   {#if wsTrustLevel === 'Custom'}
                     <button class="secondary-btn small" onclick={() => openEditPolicy(policy)}>Edit</button>
-                    <button class="kill-btn small" onclick={() => deleteConfirmModal = { policyId: policy.id }}>Delete</button>
+                    <button class="kill-btn small" onclick={() => deleteConfirmModal = { kind: 'policy', policyId: policy.id, label: 'This policy will be permanently removed. This cannot be undone.' }}>Delete</button>
                   {/if}
                 </div>
               {/each}
@@ -778,7 +803,7 @@
                   <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
                   {#if wsTrustLevel === 'Custom'}
                     <button class="secondary-btn small" onclick={() => openEditPolicy(policy)}>Edit</button>
-                    <button class="kill-btn small" onclick={() => deleteConfirmModal = { policyId: policy.id }}>Delete</button>
+                    <button class="kill-btn small" onclick={() => deleteConfirmModal = { kind: 'policy', policyId: policy.id, label: 'This policy will be permanently removed. This cannot be undone.' }}>Delete</button>
                   {/if}
                 </div>
               {/each}
@@ -997,16 +1022,27 @@
   </div>
 {/if}
 
-<!-- DELETE POLICY CONFIRM -->
+<!-- DESTRUCTIVE ACTION CONFIRM -->
 {#if deleteConfirmModal}
   <div class="modal-backdrop" aria-hidden="true" onclick={() => deleteConfirmModal = null}></div>
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Delete Policy"
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
+    aria-label={deleteConfirmModal.kind === 'member' ? 'Remove Member' : deleteConfirmModal.kind === 'gate' ? 'Remove Gate' : deleteConfirmModal.kind === 'compute' ? 'Delete Compute Target' : 'Delete Policy'}
     onkeydown={(e) => { if (e.key === 'Escape') deleteConfirmModal = null; }}>
-    <h3 class="modal-title">Delete Policy</h3>
-    <p class="modal-desc">This policy will be permanently removed. This cannot be undone.</p>
+    <h3 class="modal-title">
+      {#if deleteConfirmModal.kind === 'member'}Remove Member
+      {:else if deleteConfirmModal.kind === 'gate'}Remove Gate
+      {:else if deleteConfirmModal.kind === 'compute'}Delete Compute Target
+      {:else}Delete Policy{/if}
+    </h3>
+    <p class="modal-desc">{deleteConfirmModal.label ?? 'This cannot be undone.'}</p>
     <div class="modal-actions">
       <button class="secondary-btn" onclick={() => deleteConfirmModal = null}>Cancel</button>
-      <button class="kill-btn" onclick={() => deletePolicy(deleteConfirmModal.policyId)}>Delete Policy</button>
+      <button class="kill-btn" onclick={confirmDelete}>
+        {#if deleteConfirmModal.kind === 'member'}Remove Member
+        {:else if deleteConfirmModal.kind === 'gate'}Remove Gate
+        {:else if deleteConfirmModal.kind === 'compute'}Delete
+        {:else}Delete Policy{/if}
+      </button>
     </div>
   </div>
 {/if}
