@@ -22,7 +22,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::stream;
+use futures_util::{stream, StreamExt as _};
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
     Id,
@@ -910,27 +910,48 @@ pub async fn briefing_ask(
         }
     }
 
-    let question = req.question.clone();
+    // Require LLM to be configured.
+    let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
 
-    // Stub LLM: synthesize an answer based on question text.
-    let answer = format!(
-        "Based on the briefing for workspace '{id}': no specific information found for \"{question}\". \
-         Check the completed MRs and in-progress tasks for recent activity.",
-    );
+    let workspace_id_obj = Id::new(&id);
 
-    let partial_answer = format!("Looking at the briefing data for workspace '{id}'...");
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&workspace_id_obj, "briefing-ask")
+        .await
+        .map_err(ApiError::Internal)?
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
 
-    let s = stream::iter(vec![
-        Ok(Event::default().event("partial").data(
-            serde_json::to_string(&serde_json::json!({"answer": partial_answer}))
-                .unwrap_or_default(),
-        )),
-        Ok(Event::default().event("complete").data(
-            serde_json::to_string(&serde_json::json!({"answer": answer})).unwrap_or_default(),
-        )),
-    ]);
+    let system_prompt = template_content
+        .replace("{{workspace_id}}", &id)
+        .replace("{{context}}", "")
+        .replace("{{question}}", &req.question);
+    let user_prompt = req.question.clone();
 
-    Ok(Sse::new(s).keep_alive(
+    // Resolve model and call streaming LLM.
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(&state, &Id::new(&id), "briefing-ask").await;
+    let stream = factory
+        .for_model(&model)
+        .stream_complete(&system_prompt, &user_prompt, None)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let full_text = chunks.join("");
+
+    let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
+    for chunk in &chunks {
+        let data = serde_json::to_string(&serde_json::json!({"text": chunk})).unwrap_or_default();
+        events.push(Ok(Event::default().event("partial").data(data)));
+    }
+    let complete_data =
+        serde_json::to_string(&serde_json::json!({"text": full_text})).unwrap_or_default();
+    events.push(Ok(Event::default().event("complete").data(complete_data)));
+
+    Ok(Sse::new(stream::iter(events)).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
@@ -1057,17 +1078,75 @@ pub async fn get_workspace_graph_concept(
 
 /// GET /api/v1/repos/{id}/graph/predict (legacy compat)
 /// POST /api/v1/repos/{id}/graph/predict
-/// Structural prediction stub — returns an empty predictions array.
+/// Structural prediction via LLM — analyzes graph nodes and returns structured predictions.
 /// Request body (POST): `{spec_path, draft_content}` — reserved for future implementation.
 pub async fn predict_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<PredictResponse>, ApiError> {
-    require_repo(&state, &id).await?;
+    // Load repo to get workspace_id.
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Require LLM to be configured.
+    let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
+
+    let workspace_id = repo.workspace_id.clone();
+
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&workspace_id, "graph-predict")
+        .await
+        .map_err(ApiError::Internal)?
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_PREDICT.to_string());
+
+    // Load graph nodes for context.
+    let repo_id = Id::new(&id);
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let nodes_summary: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "type": format!("{:?}", n.node_type),
+            })
+        })
+        .collect();
+    let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
+
+    let system_prompt = template_content.replace("{{nodes}}", &nodes_json);
+    let user_prompt = format!("Predict structural improvements for repo {id}.");
+
+    // Resolve model and call LLM for structured JSON output.
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
+    let result = factory
+        .for_model(&model)
+        .predict_json(&system_prompt, &user_prompt)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let predictions = if let Some(arr) = result.as_array() {
+        arr.clone()
+    } else {
+        vec![result]
+    };
 
     Ok(Json(PredictResponse {
         repo_id: id,
-        predictions: vec![],
+        predictions,
     }))
 }
 
@@ -1318,5 +1397,177 @@ mod tests {
             .unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id.as_str(), nid.as_str());
+    }
+
+    // ── LLM endpoint tests ───────────────────────────────────────────────────
+
+    fn app_no_llm() -> Router {
+        let mut s = (*test_state()).clone();
+        s.llm = None;
+        crate::api::api_router().with_state(std::sync::Arc::new(s))
+    }
+
+    #[tokio::test]
+    async fn predict_graph_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+
+        // Create a repo first.
+        let create_body = serde_json::json!({
+            "name": "predict-test-repo",
+            "workspace_id": "ws-predict",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/predict"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn predict_graph_with_mock_llm_returns_non_empty_predictions() {
+        let app = app();
+
+        // Create a repo.
+        let create_body = serde_json::json!({
+            "name": "predict-llm-repo",
+            "workspace_id": "ws-predict-llm",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/predict"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let predictions = json["predictions"].as_array().unwrap();
+        assert!(
+            !predictions.is_empty(),
+            "mock LLM should return at least one prediction"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+
+        let ws_body = serde_json::json!({"name": "llm-unavail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "What changed?"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_with_mock_llm_streams_sse_events() {
+        let app = app();
+
+        let ws_body = serde_json::json!({"name": "llm-ask-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "What changed recently?"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
     }
 }
