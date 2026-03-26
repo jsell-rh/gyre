@@ -389,7 +389,7 @@ test.describe('Admin view', () => {
     await expect(healthContent).toBeVisible({ timeout: 5000 });
   });
 
-  test('user_menu_profile_navigates_to_admin', async ({ page }) => {
+  test('user_menu_profile_navigates_to_profile', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
@@ -397,8 +397,9 @@ test.describe('Admin view', () => {
     await page.locator('[role="menuitem"]', { hasText: 'Profile' }).click();
 
     await page.waitForLoadState('networkidle');
-    const adminBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Admin' });
-    await expect(adminBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+    // Profile view renders a .user-profile container (UserProfile component)
+    const profileContainer = page.locator('.user-profile');
+    await expect(profileContainer).toBeVisible({ timeout: 5000 });
   });
 });
 
