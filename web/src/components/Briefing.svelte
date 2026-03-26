@@ -1,6 +1,7 @@
 <script>
   import { onMount, getContext } from 'svelte';
   import { api } from '../lib/api.js';
+  import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
@@ -37,6 +38,7 @@
   let error = $state(null);
   let briefing = $state(null);
   let sinceLabel = $state('');
+  let workspaceMap = $state({});
 
   function sinceEpochForRange(range) {
     const now = Math.floor(Date.now() / 1000);
@@ -86,8 +88,10 @@
         briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
+        const wsList = workspaces || [];
+        workspaceMap = Object.fromEntries(wsList.map(w => [w.id, w.name ?? w.id]));
         const results = await Promise.allSettled(
-          (workspaces || []).map(w => api.getWorkspaceBriefing(w.id, since))
+          wsList.map(w => api.getWorkspaceBriefing(w.id, since).then(b => ({ ...b, _wsId: w.id })))
         );
         const merged = {
           completed: [],
@@ -100,10 +104,11 @@
         for (const r of results) {
           if (r.status !== 'fulfilled' || !r.value) continue;
           const b = r.value;
-          merged.completed.push(...(b.completed ?? []));
-          merged.in_progress.push(...(b.in_progress ?? []));
-          merged.cross_workspace.push(...(b.cross_workspace ?? []));
-          merged.exceptions.push(...(b.exceptions ?? []));
+          const wsId = b._wsId;
+          merged.completed.push(...(b.completed ?? []).map(item => ({ ...item, workspace_id: item.workspace_id ?? wsId })));
+          merged.in_progress.push(...(b.in_progress ?? []).map(item => ({ ...item, workspace_id: item.workspace_id ?? wsId })));
+          merged.cross_workspace.push(...(b.cross_workspace ?? []).map(item => ({ ...item, workspace_id: item.workspace_id ?? wsId })));
+          merged.exceptions.push(...(b.exceptions ?? []).map(item => ({ ...item, workspace_id: item.workspace_id ?? wsId })));
           if (b.metrics) {
             mrsCount  += b.metrics.mrs_count ?? 0;
             runsCount += b.metrics.runs_count ?? 0;
@@ -245,6 +250,9 @@
               <div class="item-title">
                 <span class="item-icon completed-icon" aria-hidden="true">✓</span>
                 <span class="item-name">{item.title}</span>
+                {#if scope === 'tenant' && item.workspace_id}
+                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                {/if}
                 {#if item.spec_ref}
                   <button
                     class="entity-ref"
@@ -286,6 +294,9 @@
               <div class="item-title">
                 <span class="item-icon inprogress-icon" aria-hidden="true">◐</span>
                 <span class="item-name">{item.title}</span>
+                {#if scope === 'tenant' && item.workspace_id}
+                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                {/if}
                 {#if item.spec_ref}
                   <button
                     class="entity-ref"
@@ -362,6 +373,9 @@
               <div class="item-title">
                 <span class="item-icon cross-icon" aria-hidden="true">↔</span>
                 <span class="item-name">{item.description ?? item.spec_ref}</span>
+                {#if scope === 'tenant' && item.workspace_id}
+                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                {/if}
                 {#if item.spec_ref}
                   <button
                     class="entity-ref"
@@ -405,6 +419,9 @@
             <div class="section-item exception-item" data-testid="exception-item">
               <div class="item-title">
                 <span class="item-icon exception-icon" aria-hidden="true">✗</span>
+                {#if scope === 'tenant' && item.workspace_id}
+                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                {/if}
                 <span class="item-name">
                   Gate failure:
                   {#if item.repo && item.mr_id}
@@ -761,7 +778,7 @@
     font-family: var(--font-body);
     font-size: var(--text-xs);
     font-weight: 500;
-    padding: var(--space-1) var(--space-3);
+    padding: var(--space-2) var(--space-3);
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 

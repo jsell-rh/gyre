@@ -18,6 +18,7 @@
   let showDismissed = $state(false);
   let actionStates = $state({});
   let refreshInterval;
+  let workspaceMap = $state({});
 
   // Mock notifications covering all 10 types for demonstration when API is empty
   const MOCK_NOTIFICATIONS = [
@@ -224,6 +225,18 @@
     suggested_link: 'Suggested Link',
   };
 
+  async function loadWorkspaceNames() {
+    if (scope !== 'tenant') return;
+    try {
+      const wsList = await api.workspaces();
+      workspaceMap = Object.fromEntries(
+        (Array.isArray(wsList) ? wsList : []).map(w => [w.id, w.name ?? w.id])
+      );
+    } catch {
+      // best-effort — fall back to raw IDs
+    }
+  }
+
   async function loadNotifications() {
     try {
       loading = true;
@@ -393,6 +406,7 @@
   }
 
   onMount(() => {
+    loadWorkspaceNames();
     loadNotifications();
     refreshInterval = setInterval(loadNotifications, 60000);
   });
@@ -478,7 +492,7 @@
               </div>
               <div class="card-header-right">
                 {#if scope === 'tenant' && n.workspace_id}
-                  <Badge value={n.workspace_id} variant="default" />
+                  <Badge value={workspaceMap[n.workspace_id] ?? n.workspace_id} variant="default" />
                 {/if}
                 <Badge
                   value={TYPE_LABELS[n.notification_type] || n.notification_type}
