@@ -117,7 +117,7 @@ Meta-specs — personas, principles, standards, process norms — are the instru
 
 There is no separate "prompt configuration." The meta-spec registry IS the prompt configuration.
 
-**Relationship to existing Persona model:** `platform-model.md` §2 defines a `Persona` entity with fields like `slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`. This spec **extends** that model — the `Persona` struct gains the `MetaSpec` fields below (content versioning, required flag, content SHA). The existing `PersonaScope` enum (`Global`, `Workspace`, `Repo` per `platform-model.md` §2) is preserved but simplified for prompt assembly: only Global (tenant-level) and Workspace meta-specs participate in the required/optional injection model. Repo-scoped personas continue to work as nearest-scope-wins overrides per `platform-model.md` §2, but cannot be marked `required` (only tenant/workspace admins can enforce meta-specs across all agents). The persona approval lifecycle from `platform-model.md` §2 (`approval_status`, `approved_by`, `approved_at`) is preserved — editing a meta-spec's content resets `approval_status` to `Pending`, and the new version cannot be used by agents until re-approved by a human. This ensures prompt changes go through the same human oversight as spec changes.
+**Relationship to existing Persona model:** `platform-model.md` §2 defines a `Persona` entity with fields like `slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`. This spec **extends** that model — the `Persona` struct gains the `MetaSpec` fields below (versioning, required flag). Note: `platform-model.md` §2 already defines `prompt: String` and `content_hash: String` on Persona — these serve the same purpose as the `content` and `content_sha` fields described below. Use the existing field names: `prompt` (not `content`) and `content_hash` (not `content_sha`). The existing `PersonaScope` enum (`Global`, `Workspace`, `Repo` per `platform-model.md` §2) is preserved but simplified for prompt assembly: only Global (tenant-level) and Workspace meta-specs participate in the required/optional injection model. Repo-scoped personas continue to work as nearest-scope-wins overrides per `platform-model.md` §2, but cannot be marked `required` (only tenant/workspace admins can enforce meta-specs across all agents). The persona approval lifecycle from `platform-model.md` §2 (`approval_status`, `approved_by`, `approved_at`) is preserved — editing a meta-spec's content resets `approval_status` to `Pending`, and the new version cannot be used by agents until re-approved by a human. This ensures prompt changes go through the same human oversight as spec changes.
 
 The `Persona` struct's operational fields (`model`, `temperature`, `max_tokens`, `budget`) remain separate from the prompt content. A persona is both a prompt (the `content` field injected into the agent) and a configuration (the operational fields that control agent execution parameters).
 
@@ -135,10 +135,12 @@ Tenant registry (org-wide conventions)
 
 Each registry entry adds these fields to the existing entity model:
 ```rust
-// Extension fields for all meta-spec kinds (Persona, Principle, Standard, Process)
-pub content: String,              // the actual prompt text
+// Extension fields for all meta-spec kinds (Persona, Principle, Standard, Process).
+// For Persona kind, `prompt` and `content_hash` already exist on the Persona struct.
+// For other kinds, a new MetaSpec struct carries these fields.
+pub prompt: String,               // the actual prompt text (called `prompt` on Persona, `content` on other kinds)
 pub version: u32,                 // auto-incremented on each edit
-pub content_sha: String,          // SHA-256 of content (content-addressable)
+pub content_hash: String,         // SHA-256 of prompt text (content-addressable)
 pub required: bool,               // if true, always injected — cannot be opted out
 ```
 
@@ -190,8 +192,8 @@ When a meta-spec is edited:
 {
   "spec_ref": "specs/system/auth.md@abc123",
   "meta_specs_used": [
-    {"id": "uuid-1", "kind": "persona", "content_sha": "sha256:...", "version": 3, "required": true, "scope": "tenant"},
-    {"id": "uuid-2", "kind": "standard", "content_sha": "sha256:...", "version": 1, "required": false, "scope": "workspace"}
+    {"id": "uuid-1", "kind": "meta:persona", "content_hash": "sha256:...", "version": 3, "required": true, "scope": "global"},
+    {"id": "uuid-2", "kind": "meta:standard", "content_hash": "sha256:...", "version": 1, "required": false, "scope": "workspace"}
   ],
   "agent_id": "...",
   "task_id": "..."
@@ -218,14 +220,14 @@ Gyre ships with default meta-specs seeded at first startup:
 
 | Kind | Name | Scope | Required | Purpose |
 |---|---|---|---|---|
-| Persona | `default-worker` | Tenant | No | General-purpose implementation agent |
-| Persona | `workspace-orchestrator` | Tenant | No | Cross-repo coordination and delegation |
-| Persona | `repo-orchestrator` | Tenant | No | Spec decomposition into tasks, worker dispatch |
-| Persona | `spec-reviewer` | Tenant | No | Spec-vs-code gate review |
-| Persona | `accountability` | Tenant | No | Gate agent: accountability review |
-| Persona | `security` | Tenant | No | Gate agent: security review |
-| Principle | `conventional-commits` | Tenant | Yes | Commit message conventions |
-| Standard | `test-coverage` | Tenant | No | Test writing standards |
+| `meta:persona` | `default-worker` | Global | No | General-purpose implementation agent |
+| `meta:persona` | `workspace-orchestrator` | Global | No | Cross-repo coordination and delegation |
+| `meta:persona` | `repo-orchestrator` | Global | No | Spec decomposition into tasks, worker dispatch |
+| `meta:persona` | `spec-reviewer` | Global | No | Spec-vs-code gate review |
+| `meta:persona` | `accountability` | Global | No | Gate agent: accountability review |
+| `meta:persona` | `security` | Global | No | Gate agent: security review |
+| `meta:principle` | `conventional-commits` | Global | Yes | Commit message conventions |
+| `meta:standard` | `test-coverage` | Global | No | Test writing standards |
 
 These can be edited, cloned, or replaced by the user. The `required` flag can be changed by tenant/workspace admins.
 
@@ -430,7 +432,8 @@ The **task context** is assembled at spawn time from the task, spec, and any gat
 | `platform-model.md` §2 Persona | The `Persona` struct gains `content`, `version`, `content_sha`, `required` fields from this spec. Existing fields (`slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`, `approval_status`, `approved_by`, `approved_at`) are preserved. The bootstrap persona list in `platform-model.md` §2 is superseded by the bootstrap table in this spec §2. |
 | `platform-model.md` §1 or §3 Agent entity | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`. Add `status: AgentStatus` field to the Agent entity (not currently defined as a struct in platform-model — define it alongside Task/MR/Repository). |
 | `agent-gates.md` | Gate failure → Ralph loop re-spawn defined here. `agent-gates.md` retains gate type definitions and execution mechanics. `MergeAttestation` amended to include `meta_specs_used` array. |
-| `hierarchy-enforcement.md` §4 | Add compute target CRUD endpoints to route table. Add `meta_spec_versions`, `meta_spec_bindings`, `compute_targets` tables to tenant-filter configuration. |
+| `abac-policy-engine.md` §Resource attributes | Add `meta_spec` (attributes: `scope`, `scope_id`, `kind`) and `compute_target` (attributes: `tenant_id`) to the resource type list. Add `archive` to the action attribute table (used by repo archive/unarchive endpoints). |
+| `hierarchy-enforcement.md` §4 | Add compute target CRUD endpoints and meta-spec CRUD endpoints to route table. Compute target routes use tenant context from auth (no path param). Meta-spec routes use `scope_id` from query param/body. Add `meta_spec_versions`, `meta_spec_bindings`, `compute_targets` tables to tenant-filter configuration. |
 | `human-system-interface.md` §5 | Attestation bundle schema amended to include `meta_specs_used` array with full content SHAs. |
 | `human-system-interface.md` §1 | Meta-specs view at workspace scope uses the meta-spec registry API defined here, not the git-backed spec list. |
 

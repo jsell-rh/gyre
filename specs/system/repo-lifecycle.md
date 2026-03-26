@@ -145,7 +145,8 @@ Request:
 {
   "name": "payment-api-v2",
   "description": "Updated payment service",
-  "max_agents": 5
+  "max_agents": 5,
+  "budget": {"max_tokens_per_day": 1000000, "max_cost_per_day": 50.0}
 }
 
 Response 200: updated repo object
