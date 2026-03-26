@@ -60,8 +60,8 @@ pub use message_type::MessageType;
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
 pub use policy::{
-    builtin_policies, Condition, ConditionOp, ConditionValue, Policy, PolicyDecision, PolicyEffect,
-    PolicyScope,
+    builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
+    PolicyDecision, PolicyEffect, PolicyScope,
 };
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
 pub use repository::Repository;

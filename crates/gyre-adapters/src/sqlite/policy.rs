@@ -57,6 +57,7 @@ struct PolicyRow {
     resource_types: String,
     enabled: i32,
     built_in: i32,
+    immutable: i32,
     created_by: String,
     created_at: i64,
     updated_at: i64,
@@ -81,6 +82,7 @@ impl PolicyRow {
             resource_types,
             enabled: self.enabled != 0,
             built_in: self.built_in != 0,
+            immutable: self.immutable != 0,
             created_by: self.created_by,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
@@ -103,6 +105,7 @@ struct NewPolicyRow {
     resource_types: String,
     enabled: i32,
     built_in: i32,
+    immutable: i32,
     created_by: String,
     created_at: i64,
     updated_at: i64,
@@ -179,6 +182,7 @@ impl PolicyRepository for SqliteStorage {
                 resource_types: serde_json::to_string(&p.resource_types)?,
                 enabled: p.enabled as i32,
                 built_in: p.built_in as i32,
+                immutable: p.immutable as i32,
                 created_by: p.created_by.clone(),
                 created_at: p.created_at as i64,
                 updated_at: p.updated_at as i64,
@@ -297,6 +301,43 @@ impl PolicyRepository for SqliteStorage {
                 .execute(&mut *conn)
                 .context("delete policy")?;
             Ok(())
+        })
+        .await?
+    }
+
+    async fn delete_by_name_prefix(&self, prefix: &str) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let pattern = format!("{prefix}%");
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let count = diesel::delete(policies::table.filter(policies::name.like(&pattern)))
+                .execute(&mut *conn)
+                .context("delete policies by name prefix")?;
+            Ok(count as u64)
+        })
+        .await?
+    }
+
+    async fn delete_by_name_prefix_and_scope_id(
+        &self,
+        prefix: &str,
+        scope_id: &str,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let pattern = format!("{prefix}%");
+        let scope_id = scope_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let count = diesel::delete(
+                policies::table.filter(
+                    policies::name
+                        .like(&pattern)
+                        .and(policies::scope_id.eq(Some(&scope_id))),
+                ),
+            )
+            .execute(&mut *conn)
+            .context("delete policies by name prefix and scope_id")?;
+            Ok(count as u64)
         })
         .await?
     }

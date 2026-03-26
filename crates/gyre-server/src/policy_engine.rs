@@ -183,9 +183,13 @@ fn policy_sort_key(p: &Policy) -> (u32, u8) {
 
 /// Evaluate the given list of `policies` against `ctx` for `action` on `resource_type`.
 ///
-/// Returns `Allow` if any policy with `Allow` effect matches first, or `Deny`
-/// if a `Deny` policy matches first. If no policy matches, returns `Deny`
-/// (default-deny posture).
+/// Evaluation order (HSI §2, abac-policy-engine.md):
+/// 1. **Immutable Deny policies first** — evaluated before any priority-based policy.
+///    If any immutable Deny's conditions match, the request is denied immediately.
+///    These cannot be overridden by any Allow regardless of priority.
+/// 2. **Priority-based evaluation** — remaining policies sorted highest-priority-first,
+///    then most-specific scope. First match wins (Allow or Deny).
+/// 3. **Default deny** — if no policy matches, the request is denied.
 pub fn evaluate(
     mut policies: Vec<Policy>,
     ctx: &AttributeContext,
@@ -197,16 +201,38 @@ pub fn evaluate(
     // Filter to enabled policies that apply to this action/resource_type.
     policies.retain(|p| p.enabled && p.applies_to(action, resource_type));
 
-    // Sort: highest priority first, then most-specific scope.
-    policies.sort_by(|a, b| {
+    let total = policies.len() as u32;
+
+    // Step 1: Check immutable Deny policies first (before any priority sorting).
+    // These cannot be overridden — if any match, deny immediately.
+    for policy in &policies {
+        if policy.immutable
+            && policy.effect == PolicyEffect::Deny
+            && eval_policy_conditions(policy, ctx)
+        {
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            return EvalResult {
+                effect: PolicyEffect::Deny,
+                matched_policy: Some(policy.id.to_string()),
+                evaluated_count: total,
+                evaluation_ms: ms,
+            };
+        }
+    }
+
+    // Step 2: Priority-based evaluation of remaining (non-immutable) policies.
+    let mut remaining: Vec<_> = policies
+        .iter()
+        .filter(|p| !(p.immutable && p.effect == PolicyEffect::Deny))
+        .collect();
+
+    remaining.sort_by(|a, b| {
         let ka = policy_sort_key(a);
         let kb = policy_sort_key(b);
         kb.cmp(&ka)
     });
 
-    let total = policies.len() as u32;
-
-    for policy in &policies {
+    for policy in &remaining {
         if eval_policy_conditions(policy, ctx) {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
@@ -218,7 +244,7 @@ pub fn evaluate(
         }
     }
 
-    // No match → default deny.
+    // Step 3: No match → default deny.
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     EvalResult {
         effect: PolicyEffect::Deny,
@@ -278,6 +304,7 @@ mod tests {
             resource_types: vec!["*".to_string()],
             enabled: true,
             built_in: false,
+            immutable: false,
             created_by: "system".to_string(),
             created_at: 0,
             updated_at: 0,
@@ -288,6 +315,13 @@ mod tests {
         Policy {
             effect: PolicyEffect::Deny,
             ..allow_policy(priority, conditions)
+        }
+    }
+
+    fn immutable_deny_policy(conditions: Vec<Condition>) -> Policy {
+        Policy {
+            immutable: true,
+            ..deny_policy(999, conditions)
         }
     }
 
@@ -437,5 +471,99 @@ mod tests {
         assert!(ctx.has("subject.workspace_role"));
         assert!(ctx.has("subject.groups"));
         assert!(ctx.has("subject.attestation_level"));
+    }
+
+    // --- Immutable Deny policy tests (HSI §2) ---------------------------------
+
+    #[test]
+    fn immutable_deny_blocks_even_when_high_priority_allow_matches() {
+        // A high-priority Allow at p=1000 cannot override an immutable Deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+
+        // Immutable deny: agents cannot approve specs.
+        let mut immutable = immutable_deny_policy(vec![Condition {
+            attribute: "subject.type".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("agent".to_string()),
+        }]);
+        immutable.actions = vec!["approve".to_string()];
+        immutable.resource_types = vec!["spec".to_string()];
+
+        // High-priority allow (simulating system-full-access at p=1000).
+        let mut system_allow = allow_policy(1000, vec![]);
+        system_allow.actions = vec!["approve".to_string()];
+        system_allow.resource_types = vec!["spec".to_string()];
+
+        let result = evaluate(vec![system_allow, immutable], &ctx, "approve", "spec");
+        // Immutable deny must win regardless of the p=1000 Allow.
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert!(result.matched_policy.is_some());
+    }
+
+    #[test]
+    fn immutable_deny_only_triggers_when_conditions_match() {
+        // Immutable deny does NOT trigger when conditions don't match.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "user"); // user, not agent
+
+        let mut immutable = immutable_deny_policy(vec![Condition {
+            attribute: "subject.type".to_string(),
+            operator: ConditionOp::NotEquals,
+            value: ConditionValue::String("user".to_string()),
+        }]);
+        immutable.actions = vec!["approve".to_string()];
+        immutable.resource_types = vec!["spec".to_string()];
+
+        let mut allow = allow_policy(50, vec![]);
+        allow.actions = vec!["approve".to_string()];
+        allow.resource_types = vec!["spec".to_string()];
+
+        let result = evaluate(vec![allow, immutable], &ctx, "approve", "spec");
+        // User approving: immutable condition (not_equals "user") doesn't match → Allow wins.
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    #[test]
+    fn builtin_require_human_spec_approval_blocks_agent_approve() {
+        // Integration-level: simulate the builtin:require-human-spec-approval policy.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set("subject.id", "worker-42");
+
+        let builtin_policies = gyre_domain::builtin_policies("system");
+        let spec_approval = builtin_policies
+            .into_iter()
+            .find(|p| p.name == "builtin:require-human-spec-approval")
+            .expect("builtin:require-human-spec-approval must exist");
+
+        assert!(spec_approval.immutable, "must be immutable");
+
+        // Add a high-priority allow to simulate system-full-access at p=1000.
+        let mut system_allow = allow_policy(1000, vec![]);
+        system_allow.actions = vec!["approve".to_string()];
+        system_allow.resource_types = vec!["spec".to_string()];
+
+        let result = evaluate(vec![system_allow, spec_approval], &ctx, "approve", "spec");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn system_full_access_matches_by_id_not_type() {
+        // system-full-access now matches subject.id == "gyre-system-token", not subject.type.
+        // The merge processor (type: "system", id: "merge-processor") must NOT be allowed.
+        let builtin_policies = gyre_domain::builtin_policies("system");
+        let system_access = builtin_policies
+            .into_iter()
+            .find(|p| p.name == "system-full-access")
+            .expect("system-full-access must exist");
+
+        // The condition must be on subject.id, not subject.type.
+        assert_eq!(system_access.conditions.len(), 1);
+        assert_eq!(system_access.conditions[0].attribute, "subject.id");
+        assert_eq!(
+            system_access.conditions[0].value,
+            gyre_domain::ConditionValue::String("gyre-system-token".to_string())
+        );
     }
 }

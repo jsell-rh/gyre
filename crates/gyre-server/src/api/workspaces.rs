@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{BudgetConfig, TrustLevel, UserRole, Workspace};
+use gyre_domain::{trust_policies_for_level, BudgetConfig, TrustLevel, UserRole, Workspace};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -197,13 +197,41 @@ pub async fn update_workspace(
     if let Some(max_agents) = req.max_agents_per_repo {
         ws.max_agents_per_repo = Some(max_agents);
     }
-    if let Some(tl) = req.trust_level {
-        ws.trust_level = TrustLevel::from_db_str(&tl);
-    }
+    let trust_changed = if let Some(tl) = req.trust_level {
+        let new_trust = TrustLevel::from_db_str(&tl);
+        let changed = new_trust != ws.trust_level;
+        ws.trust_level = new_trust;
+        changed
+    } else {
+        false
+    };
     if let Some(model) = req.llm_model {
         ws.llm_model = Some(model);
     }
     state.workspaces.update(&ws).await?;
+
+    // Apply trust preset ABAC policies as a side effect of trust level change.
+    // When transitioning TO Custom, preserve existing trust: policies as the
+    // starting point for user-managed ABAC (HSI §2). On all other transitions,
+    // delete workspace-scoped trust: policies and seed the new preset.
+    if trust_changed {
+        let is_now_custom = matches!(ws.trust_level, TrustLevel::Custom);
+        if !is_now_custom {
+            state
+                .policies
+                .delete_by_name_prefix_and_scope_id("trust:", ws.id.as_str())
+                .await
+                .map_err(ApiError::Internal)?;
+        }
+        for policy in trust_policies_for_level(&ws.trust_level, ws.id.as_str(), &auth.agent_id) {
+            state.policies.create(&policy).await.map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Trust level transition failed — policies could not be created: {e}"
+                ))
+            })?;
+        }
+    }
+
     Ok(Json(WorkspaceResponse::from(ws)))
 }
 
@@ -682,5 +710,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- Trust level transition tests (S1.3) ----------------------------------
+
+    /// Transitioning to Supervised creates the trust:require-human-mr-review policy.
+    #[tokio::test]
+    async fn trust_transition_to_supervised_creates_trust_policy() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a workspace.
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Transition to Supervised trust.
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let updated = body_json(update_resp).await;
+        assert_eq!(updated["trust_level"], "Supervised");
+
+        // The trust:require-human-mr-review policy must now exist.
+        let policies = state.policies.list().await.unwrap();
+        let trust_policy = policies
+            .iter()
+            .find(|p| p.name == "trust:require-human-mr-review");
+        assert!(
+            trust_policy.is_some(),
+            "trust:require-human-mr-review must be created on Supervised transition"
+        );
+
+        // Transition to Guided — trust: policies must be deleted.
+        let update2 = serde_json::json!({ "trust_level": "Guided" });
+        let update_resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp2.status(), StatusCode::OK);
+        let updated2 = body_json(update_resp2).await;
+        assert_eq!(updated2["trust_level"], "Guided");
+
+        let policies2 = state.policies.list().await.unwrap();
+        let trust_policy2 = policies2.iter().find(|p| p.name.starts_with("trust:"));
+        assert!(
+            trust_policy2.is_none(),
+            "trust: policies must be deleted on transition away from Supervised"
+        );
     }
 }
