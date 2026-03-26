@@ -111,6 +111,7 @@
       placeholder="Filter by spec path (e.g. specs/system/agent-gates.md)"
       bind:value={filterPath}
       onkeydown={(e) => e.key === 'Enter' && load()}
+      aria-label="Filter spec approvals"
     />
     <Button variant="secondary" onclick={load}>Search</Button>
   </div>
@@ -159,7 +160,7 @@
               </td>
               <td>
                 {#if !a.revoked_at}
-                  <button class="revoke-btn" onclick={() => openRevoke(a)}>Revoke</button>
+                  <button class="revoke-btn" onclick={() => openRevoke(a)} aria-label="Revoke approval">Revoke</button>
                 {/if}
               </td>
             </tr>
@@ -355,7 +356,7 @@
   }
 
   .revoke-btn:hover {
-    background: rgba(238, 0, 0, 0.08);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
   }
 
   /* Modal form */

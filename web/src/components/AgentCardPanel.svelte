@@ -202,9 +202,9 @@
   .protocol-tag {
     font-size: var(--text-xs);
     font-weight: 600;
-    background: rgba(94, 64, 190, 0.15);
-    color: #8b6fe0;
-    border: 1px solid rgba(94, 64, 190, 0.3);
+    background: color-mix(in srgb, var(--color-blocked, #5e40be) 15%, transparent);
+    color: var(--color-blocked, #8b6fe0);
+    border: 1px solid color-mix(in srgb, var(--color-blocked, #5e40be) 30%, transparent);
     border-radius: var(--radius-sm);
     padding: 1px var(--space-2);
   }
@@ -277,8 +277,8 @@
   .form-error {
     color: var(--color-danger);
     font-size: var(--text-sm);
-    background: rgba(240, 86, 29, 0.1);
-    border: 1px solid rgba(240, 86, 29, 0.2);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 20%, transparent);
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-3);
   }
@@ -306,7 +306,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
     cursor: pointer;
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-4);
@@ -356,10 +356,10 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-link);
-    background: rgba(0, 102, 204, 0.08);
+    background: color-mix(in srgb, var(--color-info) 8%, transparent);
     padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm);
-    border: 1px solid rgba(0, 102, 204, 0.2);
+    border: 1px solid color-mix(in srgb, var(--color-info) 20%, transparent);
   }
 
   .edit-btn-secondary {
@@ -396,8 +396,8 @@
   }
 
   .publish-btn {
-    background: rgba(0, 102, 204, 0.1);
-    border: 1px solid rgba(0, 102, 204, 0.3);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
     border-radius: var(--radius);
     color: var(--color-link);
     cursor: pointer;
@@ -407,5 +407,5 @@
     font-weight: 500;
     transition: background var(--transition-fast);
   }
-  .publish-btn:hover { background: rgba(0, 102, 204, 0.2); }
+  .publish-btn:hover { background: color-mix(in srgb, var(--color-info) 20%, transparent); }
 </style>

@@ -34,7 +34,7 @@
 
   // Node positions derived from the simple column layout (mirroring ExplorerCanvas)
   // This will be replaced by bind:positionedNodes from ExplorerCanvas once it exposes them.
-  let positionedNodes = $derived(() => {
+  let positionedNodes = $derived.by(() => {
     if (!nodes.length) return [];
     const byType = {};
     for (const n of nodes) {
@@ -67,7 +67,7 @@
   });
 
   // Compute per-node metrics from spans
-  let nodeMetrics = $derived(() => {
+  let nodeMetrics = $derived.by(() => {
     const m = {};
     const byNode = {};
     for (const s of spans) {
@@ -86,12 +86,12 @@
     return m;
   });
 
-  let nodesWithMetrics = $derived(() => {
-    return positionedNodes().filter(n => nodeMetrics()[n.id]);
+  let nodesWithMetrics = $derived.by(() => {
+    return positionedNodes.filter(n => nodeMetrics[n.id]);
   });
 
   // Max time for scrubber
-  let maxTime = $derived(() => {
+  let maxTime = $derived.by(() => {
     if (!spans.length) return 10000;
     return Math.max(...spans.map(s => s.start_time + (s.duration_us ?? 0)));
   });
@@ -154,7 +154,7 @@
         class="scrubber-input"
         type="range"
         min="0"
-        max={maxTime()}
+        max={maxTime}
         step="1000"
         value={currentTime}
         oninput={onScrub}
@@ -194,7 +194,7 @@
 
     <!-- Canvas 2D particle overlay -->
     <FlowCanvas
-      nodes={positionedNodes()}
+      nodes={positionedNodes}
       {edges}
       {spans}
       bind:currentTime
@@ -214,8 +214,8 @@
       height={canvasHeight}
       aria-hidden="true"
     >
-      {#each nodesWithMetrics() as node (node.id)}
-        <NodeBadge {node} metrics={nodeMetrics()[node.id]} />
+      {#each nodesWithMetrics as node (node.id)}
+        <NodeBadge {node} metrics={nodeMetrics[node.id]} />
       {/each}
     </svg>
   </div>

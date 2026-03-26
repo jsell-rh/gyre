@@ -701,7 +701,8 @@
     resize: vertical;
     box-sizing: border-box;
   }
-  .persona-textarea:focus { outline: none; border-color: var(--color-primary, #ee0000); }
+  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-primary, #ee0000); }
+  .persona-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary, #ee0000); }
 
   .persona-diff {
     min-height: 280px;
@@ -803,4 +804,14 @@
   .mono { font-family: monospace; }
   .empty { color: var(--color-text-muted, #888); font-size: 0.88rem; margin: 0; }
   .error { color: var(--color-error, #f55); font-size: 0.88rem; }
+
+  /* Focus-visible for interactive elements */
+  .pill:focus-visible,
+  .impact-tab:focus-visible,
+  .detail-tab:focus-visible,
+  .link-btn:focus-visible,
+  .persona-select:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
 </style>
