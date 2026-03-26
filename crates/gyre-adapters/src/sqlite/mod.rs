@@ -232,4 +232,49 @@ mod tests {
         SqliteStorage::new(path).unwrap();
         SqliteStorage::new(path).unwrap();
     }
+
+    /// Guard: detect duplicate migration version strings before they shadow each other.
+    ///
+    /// Diesel's `migrations_internals::version_from_string` extracts the version from a
+    /// migration directory name by taking everything before the first `_` and stripping
+    /// dashes: e.g. `2026-03-23-000009_kv_store_and_budget_usage` → `"20260323000009"`.
+    /// Two directories that produce the same version string will collide — Diesel runs
+    /// only the last one alphabetically, silently dropping the other's schema changes.
+    ///
+    /// This test replicates that extraction logic and fails if any two migration
+    /// directories produce the same version, so the defect is caught before it reaches
+    /// a deployed database.
+    #[test]
+    fn no_duplicate_migration_version_prefixes() {
+        let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+        let mut versions = std::collections::HashMap::<String, Vec<String>>::new();
+
+        let entries = std::fs::read_dir(migrations_dir).expect("migrations directory should exist");
+
+        for entry in entries {
+            let entry = entry.expect("valid dir entry");
+            let name = entry.file_name().into_string().expect("valid UTF-8");
+            // Replicate Diesel's version_from_string:
+            //   take everything before the first '_', then remove all '-'
+            let version = name.split('_').next().unwrap_or("").replace('-', "");
+            if !version.is_empty() {
+                versions.entry(version).or_default().push(name);
+            }
+        }
+
+        let duplicates: Vec<_> = versions
+            .into_iter()
+            .filter(|(_, names)| names.len() > 1)
+            .collect();
+
+        assert!(
+            duplicates.is_empty(),
+            "Duplicate Diesel migration versions detected — only one will run per version:\n{}",
+            duplicates
+                .iter()
+                .map(|(version, names)| format!("  version {}: {:?}", version, names))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
 }
