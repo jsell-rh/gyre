@@ -8,7 +8,11 @@
 //!  - MR status (Merged)     → Merged event
 //!
 //! No new storage is needed — all data is assembled from existing repos.
-//! ConversationTurn events will be available once PR #413 (conversation provenance) merges.
+//!
+//! **Deferred event types:**
+//! - `ConversationTurn` — requires `TurnCommitLink` records (conversation provenance feature,
+//!   PR #413). Add once that feature is available on this branch.
+//! - `Notification` — no structured Notification query port exists yet; add when available.
 
 use axum::{
     extract::{Path, State},
