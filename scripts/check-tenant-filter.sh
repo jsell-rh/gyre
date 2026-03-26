@@ -67,6 +67,9 @@ for dir in "${ADAPTER_DIRS[@]}"; do
         # message.rs: workspace_id isolation (globally unique, tenant-bound).
         # Expiry methods are intentionally cross-tenant housekeeping.
         [ "$bname" = "message.rs" ] && continue
+        # user_workspace_state.rs: no tenant_id by design — workspace_id global uniqueness
+        # provides structural tenant isolation. No REST endpoint, no UUID-guessing risk.
+        [ "$bname" = "user_workspace_state.rs" ] && continue
 
         output=$(scan_file "$file" "$label")
         # Print violation lines (everything except SUMMARY)

@@ -618,4 +618,13 @@ diesel::allow_tables_to_appear_in_same_query!(
     messages,
     meta_spec_sets,
     budget_call_records,
+    user_workspace_state,
 );
+
+diesel::table! {
+    user_workspace_state (user_id, workspace_id) {
+        user_id -> Text,
+        workspace_id -> Text,
+        last_seen_at -> BigInt,
+    }
+}
