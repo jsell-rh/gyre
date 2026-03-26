@@ -62,7 +62,7 @@
   let blastLoading = $state(false);
   let blastResult  = $state(null);
 
-  const filtered = $derived(() => {
+  const filtered = $derived.by(() => {
     if (kindFilter === 'all') return specs;
     return specs.filter(s => s.kind === kindFilter);
   });
@@ -157,7 +157,7 @@
   function selectAll() { selectedSpecPaths = targetSpecs.map(s => s.path); }
   function clearAll()  { selectedSpecPaths = []; }
 
-  const canPreview = $derived(() => selectedSpecPaths.length > 0 && previewState === 'editing');
+  const canPreview = $derived.by(() => selectedSpecPaths.length > 0 && previewState === 'editing');
 
   async function startPreview() {
     previewState = 'running';
@@ -369,7 +369,7 @@
               {#if previewState === 'complete'}
                 <Button variant="secondary" onclick={iterate}>Iterate</Button>
               {:else}
-                <Button variant="secondary" onclick={startPreview} disabled={!canPreview()}>Preview</Button>
+                <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>Preview</Button>
               {/if}
               <Button variant="primary" onclick={publish}>Publish</Button>
             </div>
@@ -404,7 +404,7 @@
             </div>
 
           {:else if previewState === 'running'}
-            <div class="preview-progress" data-testid="preview-running">
+            <div class="preview-progress" data-testid="preview-running" aria-live="polite">
               <div class="progress-header">Preview: Running</div>
               <div class="progress-list">
                 {#each previewProgress as item (item.path)}
@@ -494,10 +494,10 @@
       <p class="subtitle">Versioned specs that govern agent behavior — personas, principles, standards, and process norms.</p>
     </div>
 
-    <div class="filter-pills">
-      <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'}>All</button>
+    <div class="filter-pills" role="tablist">
+      <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} role="tab" aria-selected={kindFilter === 'all'}>All</button>
       {#each META_KINDS as k}
-        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k}>{KIND_LABELS[k]}</button>
+        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} role="tab" aria-selected={kindFilter === k}>{KIND_LABELS[k]}</button>
       {/each}
     </div>
 
@@ -505,7 +505,7 @@
       <Skeleton />
     {:else if error}
       <EmptyState title="Failed to load meta-specs" description={error} />
-    {:else if filtered().length === 0}
+    {:else if filtered.length === 0}
       <EmptyState
         title="No meta-specs found"
         description="Add meta-spec entries with kind: meta:persona (or principle/standard/process)."
@@ -514,16 +514,16 @@
       <table class="catalog-table" data-testid="catalog-table">
         <thead>
           <tr>
-            <th>Path</th>
-            <th>Kind</th>
-            <th>Name</th>
-            <th>Status</th>
-            <th>SHA</th>
-            <th></th>
+            <th scope="col">Path</th>
+            <th scope="col">Kind</th>
+            <th scope="col">Name</th>
+            <th scope="col">Status</th>
+            <th scope="col">SHA</th>
+            <th scope="col"></th>
           </tr>
         </thead>
         <tbody>
-          {#each filtered() as spec (spec.path)}
+          {#each filtered as spec (spec.path)}
             <tr
               class="catalog-row"
               onclick={() => { detailSpec = spec; detailTab = 'info'; }}
@@ -714,8 +714,8 @@
     overflow-x: auto;
   }
   .diff-line { padding: 0 0.25rem; line-height: 1.5; }
-  .diff-line.add { background: rgba(63, 185, 80, 0.12); color: #3fb950; }
-  .diff-line.remove { background: rgba(255, 80, 80, 0.12); color: #f55; }
+  .diff-line.add { background: color-mix(in srgb, var(--color-success, #3fb950) 12%, transparent); color: var(--color-success, #3fb950); }
+  .diff-line.remove { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
   .diff-line.ctx { color: var(--color-text-muted, #888); }
 
   .editor-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
@@ -774,8 +774,8 @@
   .impact-content { padding: 1rem; font-size: 0.875rem; }
   .arch-diff { display: flex; flex-direction: column; gap: 0.3rem; }
   .arch-line { padding: 0.2rem 0.4rem; border-radius: 3px; font-family: var(--font-mono, monospace); }
-  .arch-line.add { color: #3fb950; background: rgba(63, 185, 80, 0.1); }
-  .arch-line.mod { color: #d29922; background: rgba(210, 153, 34, 0.1); }
+  .arch-line.add { color: var(--color-success, #3fb950); background: color-mix(in srgb, var(--color-success, #3fb950) 10%, transparent); }
+  .arch-line.mod { color: var(--color-warning, #d29922); background: color-mix(in srgb, var(--color-warning, #d29922) 10%, transparent); }
   .arch-line.ctx { color: var(--color-text-muted, #888); }
   .code-diff { display: flex; flex-direction: column; gap: 0.75rem; }
   .code-diff-file { border: 1px solid var(--color-border, #333); border-radius: 4px; overflow: hidden; }

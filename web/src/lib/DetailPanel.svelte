@@ -3,6 +3,7 @@
   import Button from './Button.svelte';
   import Badge from './Badge.svelte';
   import Skeleton from './Skeleton.svelte';
+  import EmptyState from './EmptyState.svelte';
   import { api } from './api.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
 
@@ -160,7 +161,7 @@
       } else {
         url.searchParams.delete('expanded');
       }
-      window.history.pushState({}, '', url.toString());
+      window.history.replaceState({}, '', url.toString());
     }
   }
 
@@ -698,12 +699,12 @@
 
       {:else if activeTab === 'spec'}
         <div class="tab-pane">
-          <p class="placeholder-text">Spec viewer for {entity.data?.spec_path ?? 'this entity'}.</p>
+          <EmptyState title="Spec not loaded" description="Spec content for {entity.data?.spec_path ?? 'this entity'} is not available in this context." />
         </div>
 
       {:else if activeTab === 'chat'}
         <div class="tab-pane">
-          <p class="placeholder-text">Inline chat — implemented by InlineChat component.</p>
+          <EmptyState title="No conversation yet" description="Start a conversation by typing below." />
         </div>
 
       {:else if activeTab === 'history'}
@@ -735,28 +736,28 @@
               <p class="no-data">No approval events recorded.</p>
             {/if}
           {:else}
-            <p class="placeholder-text">Modification history timeline.</p>
+            <EmptyState title="No history available" description="Modification history will appear when changes are recorded." />
           {/if}
         </div>
 
       {:else if activeTab === 'diff'}
         <div class="tab-pane">
-          <p class="placeholder-text">Side-by-side code diff — implemented by MR slice.</p>
+          <EmptyState title="Code diff not available" description="Diff view requires a merge request context." />
         </div>
 
       {:else if activeTab === 'gates'}
         <div class="tab-pane">
-          <p class="placeholder-text">Gate execution results — implemented by MR slice.</p>
+          <EmptyState title="No gate results" description="Gate checks will appear here when a merge request is active." />
         </div>
 
       {:else if activeTab === 'attestation'}
         <div class="tab-pane">
-          <p class="placeholder-text">Merge attestation bundle + conversation provenance.</p>
+          <EmptyState title="No attestation data" description="Merge attestation and conversation provenance will appear after the MR is merged." />
         </div>
 
       {:else if activeTab === 'trace'}
         <div class="tab-pane">
-          <p class="placeholder-text">System trace timeline — implemented by MR/Agent slice.</p>
+          <EmptyState title="No trace data" description="System trace timeline will appear when agent activity is recorded." />
         </div>
 
       {:else if activeTab === 'ask-why'}
@@ -795,6 +796,7 @@
   .detail-panel.open {
     width: 40%;
     min-width: 320px;
+    max-width: 480px;
   }
 
   .detail-panel.expanded {

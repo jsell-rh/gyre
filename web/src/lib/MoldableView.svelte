@@ -20,18 +20,18 @@
   let sortBy = $state('type'); // 'type' | 'name' | 'file'
   let filterType = $state('');
 
-  let nodeTypes = $derived(() => {
+  let nodeTypes = $derived.by(() => {
     const types = new Set(nodes.map(n => n.node_type).filter(Boolean));
     return ['', ...Array.from(types).sort()];
   });
 
   // Nodes/edges visible in the current concept filter
-  let displayNodes = $derived(() => {
+  let displayNodes = $derived.by(() => {
     if (!conceptFilterIds) return nodes;
     return nodes.filter(n => conceptFilterIds.has(n.id));
   });
 
-  let displayEdges = $derived(() => {
+  let displayEdges = $derived.by(() => {
     if (!conceptFilterIds) return edges;
     return edges.filter(e => {
       const sid = e.source_id ?? e.from_node_id ?? e.from;
@@ -40,7 +40,7 @@
     });
   });
 
-  let filteredNodes = $derived(() => {
+  let filteredNodes = $derived.by(() => {
     let result = conceptFilterIds
       ? nodes.filter(n => conceptFilterIds.has(n.id))
       : nodes;
@@ -75,15 +75,15 @@
   let selectedDelta = $state(null);
 
   // Timestamps (seconds epoch) for min/max from delta records
-  let minTs = $derived(() => {
+  let minTs = $derived.by(() => {
     if (timelineDeltas.length === 0) return Math.floor(Date.now() / 1000) - 86400;
     return Math.min(...timelineDeltas.map(d => d.timestamp));
   });
 
-  let maxTs = $derived(() => Math.floor(Date.now() / 1000));
+  let maxTs = $derived.by(() => Math.floor(Date.now() / 1000));
 
   // Deltas up to scrubber position
-  let activeShas = $derived(() => {
+  let activeShas = $derived.by(() => {
     const cutoff = Math.floor(scrubberValue / 1000);
     const set = new Set();
     for (const d of timelineDeltas) {
@@ -93,14 +93,14 @@
   });
 
   // Nodes whose last_modified_sha appears in a delta at or before scrubber
-  let timelineNodes = $derived(() => {
+  let timelineNodes = $derived.by(() => {
     if (timelineDeltas.length === 0) return nodes;
-    if (activeShas().size === 0) return [];
-    return nodes.filter(n => n.last_modified_sha && activeShas().has(n.last_modified_sha));
+    if (activeShas.size === 0) return [];
+    return nodes.filter(n => n.last_modified_sha && activeShas.has(n.last_modified_sha));
   });
 
   // Deltas sorted by timestamp ascending (for markers)
-  let sortedDeltas = $derived(() =>
+  let sortedDeltas = $derived.by(() =>
     [...timelineDeltas].sort((a, b) => a.timestamp - b.timestamp)
   );
 
@@ -160,8 +160,8 @@
   }
 
   function markerLeft(ts) {
-    const min = minTs();
-    const max = maxTs();
+    const min = minTs;
+    const max = maxTs;
     if (max === min) return '50%';
     return `${((ts - min) / (max - min)) * 100}%`;
   }
@@ -226,7 +226,7 @@
   <!-- View content -->
   <div class="view-content">
     {#if activeView === 'graph'}
-      <ExplorerCanvas nodes={displayNodes()} edges={displayEdges()} {repoId} {onSelectNode} />
+      <ExplorerCanvas nodes={displayNodes} edges={displayEdges} {repoId} {onSelectNode} />
 
     {:else if activeView === 'list'}
       <div class="list-view">
@@ -237,7 +237,7 @@
             onchange={(e) => (filterType = e.target.value)}
             aria-label="Filter by node type"
           >
-            {#each nodeTypes() as t}
+            {#each nodeTypes as t}
               <option value={t}>{t || 'All types'}</option>
             {/each}
           </select>
@@ -251,15 +251,22 @@
               >{label}</button>
             {/each}
           </div>
-          <span class="list-count">{filteredNodes().length} nodes</span>
+          <span class="list-count">{filteredNodes.length} nodes</span>
         </div>
 
         <div class="list-table-wrap">
-          {#if filteredNodes().length === 0 && conceptFilterIds}
+          {#if filteredNodes.length === 0 && conceptFilterIds}
             <div class="list-empty-concept">
               <EmptyState
                 title="No nodes matching '{conceptQuery}'"
                 message="Try a shorter term or check spelling."
+              />
+            </div>
+          {:else if filteredNodes.length === 0 && !conceptFilterIds}
+            <div class="list-empty-concept">
+              <EmptyState
+                title="No graph data yet"
+                message="Push code to trigger graph extraction."
               />
             </div>
           {:else}
@@ -274,7 +281,7 @@
                 </tr>
               </thead>
               <tbody>
-                {#each filteredNodes() as node}
+                {#each filteredNodes as node}
                   <tr
                     class="list-row"
                     role="button"
@@ -304,8 +311,8 @@
 
     {:else if activeView === 'flow'}
       <FlowRenderer
-        nodes={displayNodes()}
-        edges={displayEdges()}
+        nodes={displayNodes}
+        edges={displayEdges}
         {repoId}
         spans={[]}
       />
@@ -321,7 +328,7 @@
           {:else if timelineDeltas.length > 0}
             <span class="timeline-meta">
               {timelineDeltas.length} delta{timelineDeltas.length !== 1 ? 's' : ''}
-              · {timelineNodes().length} / {nodes.length} nodes visible
+              · {timelineNodes.length} / {nodes.length} nodes visible
             </span>
           {/if}
           {#if repoId && !timelineLoading && timelineDeltas.length > 0}
@@ -343,14 +350,20 @@
         {:else}
           <!-- Node list filtered by scrubber position -->
           <div class="timeline-nodes-area">
-            {#if timelineNodes().length === 0}
+            {#if timelineNodes.length === 0}
               <div class="timeline-empty-inner">
                 <p class="no-nodes-msg">No nodes modified up to this point in history.</p>
               </div>
             {:else}
               <div class="timeline-node-list">
-                {#each timelineNodes() as node}
-                  <div class="tl-node-row">
+                {#each timelineNodes as node}
+                  <div
+                    class="tl-node-row"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => onSelectNode?.(node)}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
+                  >
                     <Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} />
                     <span class="tl-node-name">{node.name}</span>
                     <span class="tl-node-file">{node.file_path ?? ''}</span>
@@ -396,7 +409,7 @@
           <div class="scrubber-area" aria-label="Timeline scrubber">
             <!-- Delta markers -->
             <div class="marker-track" aria-hidden="true">
-              {#each sortedDeltas() as delta}
+              {#each sortedDeltas as delta}
                 <button
                   class="delta-marker"
                   class:active={selectedDelta?.id === delta.id}
@@ -413,8 +426,8 @@
             <input
               type="range"
               class="scrubber-input"
-              min={minTs() * 1000}
-              max={maxTs() * 1000}
+              min={minTs * 1000}
+              max={maxTs * 1000}
               step={1000}
               value={scrubberValue}
               oninput={onScrubberChange}
@@ -422,7 +435,7 @@
             />
 
             <div class="scrubber-labels">
-              <span class="scrubber-label-left">{relativeTime(minTs())}</span>
+              <span class="scrubber-label-left">{relativeTime(minTs)}</span>
               <span class="scrubber-label-right">Now</span>
             </div>
           </div>
@@ -474,6 +487,11 @@
   .view-tab.active {
     color: var(--color-text);
     border-bottom-color: var(--color-primary);
+  }
+
+  .view-tab:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .view-content {
@@ -534,6 +552,11 @@
     cursor: pointer;
     font-family: var(--font-body);
     transition: all var(--transition-fast);
+  }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .sort-btn.active {
@@ -720,6 +743,7 @@
     border-bottom: 1px solid var(--color-border);
     font-size: var(--text-sm);
     transition: background var(--transition-fast);
+    cursor: pointer;
   }
 
   .tl-node-row:hover {

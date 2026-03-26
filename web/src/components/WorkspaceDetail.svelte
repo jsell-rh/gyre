@@ -108,14 +108,19 @@
       Workspaces
     </button>
     <div class="ws-title">
-      <h2>{workspace?.name ?? 'Workspace'}</h2>
+      <div class="ws-name-row">
+        <h2>{workspace?.name ?? 'Workspace'}</h2>
+        {#if workspace?.trust_level}
+          <span class="trust-badge trust-{(workspace.trust_level).toLowerCase()}">{workspace.trust_level}</span>
+        {/if}
+      </div>
       {#if workspace?.description}
         <p class="ws-desc">{workspace.description}</p>
       {/if}
     </div>
   </div>
 
-  <Tabs {tabs} bind:activeTab />
+  <Tabs {tabs} bind:active={activeTab} />
 
   {#if loading}
     <div class="tab-body">
@@ -135,7 +140,7 @@
                   <span class="bar-nums">{fmtNum(budget.usage?.tokens_used_today)} / {fmtNum(budget.config.max_tokens_per_day)}</span>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%"></div>
+                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Budget usage: {p}%"></div>
                 </div>
                 <span class="bar-pct">{p}%</span>
               </div>
@@ -148,7 +153,7 @@
                   <span class="bar-nums">{fmtCost(budget.usage?.cost_today)} / {fmtCost(budget.config.max_cost_per_day)}</span>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%"></div>
+                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Budget usage: {p}%"></div>
                 </div>
                 <span class="bar-pct">{p}%</span>
               </div>
@@ -161,7 +166,7 @@
                   <span class="bar-nums">{budget.usage?.active_agents ?? 0} / {budget.config.max_concurrent_agents}</span>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%"></div>
+                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Budget usage: {p}%"></div>
                 </div>
                 <span class="bar-pct">{p}%</span>
               </div>
@@ -453,4 +458,18 @@
   .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
   .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-secondary:hover { color: var(--color-text); }
+
+  .ws-name-row { display: flex; align-items: center; gap: var(--space-3); }
+
+  .trust-badge {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    text-transform: capitalize;
+  }
+  .trust-badge.trust-supervised { background: rgba(94, 64, 190, 0.15); color: var(--color-blocked); }
+  .trust-badge.trust-guided     { background: rgba(77, 176, 255, 0.15); color: var(--color-link); }
+  .trust-badge.trust-autonomous { background: rgba(99, 153, 61, 0.15);  color: var(--color-success); }
+  .trust-badge.trust-custom     { background: rgba(245, 146, 27, 0.15); color: var(--color-warning); }
 </style>
