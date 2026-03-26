@@ -36,6 +36,7 @@ pub mod spec_policy;
 pub mod task;
 pub mod team;
 pub mod tenant;
+pub mod trace;
 pub mod user;
 pub mod user_workspace_state;
 pub mod workspace;

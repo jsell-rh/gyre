@@ -36,6 +36,7 @@ pub mod spec_policy;
 pub mod task;
 pub mod team;
 pub mod tenant;
+pub mod trace;
 pub mod user;
 pub mod user_workspace_state;
 pub mod workspace;
@@ -173,6 +174,8 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "gate_traces",
+            "trace_spans",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;

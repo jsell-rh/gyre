@@ -233,6 +233,15 @@ impl ResourceResolver {
                     "merge_request",
                     Some("write"),
                 ),
+                // ── Gate-time trace capture (HSI §3a) ──────────────────────
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/trace",
+                    "merge_request",
+                    None,
+                ),
+                // /api/v1/trace-spans/:span_id/payload is ABAC-exempt (per-handler auth).
+                // The handler resolves span → gate_trace → MR → workspace for authorization.
+                RouteResourceMapping::exempt("/api/v1/trace-spans/:span_id/payload"),
                 // ── Release ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/release/prepare", "release", Some("write")),
                 // ── Specs ──────────────────────────────────────────────────
