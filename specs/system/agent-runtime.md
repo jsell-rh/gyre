@@ -38,10 +38,10 @@ Both are agents with built-in personas (`workspace-orchestrator`, `repo-orchestr
 
 ### Phase 2: Agent Spawn
 
-For each task, the repo orchestrator spawns a worker agent via `POST /api/v1/agents/spawn` (REST). The server:
+For each task, the repo orchestrator spawns a worker agent via the `agent.spawn` MCP tool (per `platform-model.md` §4's rule that all agent-to-server interaction is via MCP). This tool wraps `POST /api/v1/agents/spawn` internally. **Amendment to `platform-model.md` §4 MCP tools:** add `agent.spawn` (scope: workspace) — spawns a new agent for a task. The server:
 
-1. Creates the agent record (`Active` status)
-2. Mints an EdDSA JWT scoped to the agent's repo
+1. Creates the agent record (`Active` status). **Agent status enum:** `Active` (executing), `Idle` (completed successfully), `Failed` (max iterations or spawn failure), `Stopped` (manually stopped or cascaded shutdown). Amendment to `platform-model.md` §6: define `AgentStatus` enum alongside existing `TaskStatus`.
+2. Mints an OIDC JWT (EdDSA-signed, per `platform-model.md` §1 Token Scoping) scoped to the agent's repo
 3. Assembles the prompt set (§2)
 4. Creates a git worktree on the task's branch
 5. Provisions the agent on the workspace's compute target (§3)
@@ -117,7 +117,7 @@ Meta-specs — personas, principles, standards, process norms — are the instru
 
 There is no separate "prompt configuration." The meta-spec registry IS the prompt configuration.
 
-**Relationship to existing Persona model:** `platform-model.md` §2 defines a `Persona` entity with fields like `slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`. This spec **extends** that model — the `Persona` struct gains the `MetaSpec` fields below (content versioning, required flag, content SHA). The existing `PersonaScope` enum (Tenant, Workspace, Repo) is preserved but simplified for prompt assembly: only Tenant and Workspace meta-specs participate in the required/optional injection model. Repo-scoped personas continue to work as nearest-scope-wins overrides per `platform-model.md` §2, but cannot be marked `required` (only tenant/workspace admins can enforce meta-specs across all agents).
+**Relationship to existing Persona model:** `platform-model.md` §2 defines a `Persona` entity with fields like `slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`. This spec **extends** that model — the `Persona` struct gains the `MetaSpec` fields below (content versioning, required flag, content SHA). The existing `PersonaScope` enum (`Global`, `Workspace`, `Repo` per `platform-model.md` §2) is preserved but simplified for prompt assembly: only Global (tenant-level) and Workspace meta-specs participate in the required/optional injection model. Repo-scoped personas continue to work as nearest-scope-wins overrides per `platform-model.md` §2, but cannot be marked `required` (only tenant/workspace admins can enforce meta-specs across all agents). The persona approval lifecycle from `platform-model.md` §2 (`approval_status`, `approved_by`, `approved_at`) is preserved — editing a meta-spec's content resets `approval_status` to `Pending`, and the new version cannot be used by agents until re-approved by a human. This ensures prompt changes go through the same human oversight as spec changes.
 
 The `Persona` struct's operational fields (`model`, `temperature`, `max_tokens`, `budget`) remain separate from the prompt content. A persona is both a prompt (the `content` field injected into the agent) and a configuration (the operational fields that control agent execution parameters).
 
@@ -148,7 +148,7 @@ For `Persona` kind, these extend the existing `Persona` struct from `platform-mo
 
 ### Required vs Optional
 
-- **Required** meta-specs (tenant or workspace level): always injected into every agent spawned in that scope. Spec authors cannot opt out. **Who can set `required`:** Only admins at the meta-spec's own scope level — tenant admins for tenant meta-specs, workspace admins (Owner/Admin role) for workspace meta-specs. A workspace admin cannot mark a tenant meta-spec as required (that would be privilege escalation). The `required` flag coexists with `platform-model.md`'s nearest-scope-wins resolution: `required` meta-specs bypass scope resolution entirely — they are always included regardless of whether a lower-scope meta-spec exists with the same name.
+- **Required** meta-specs (tenant or workspace level): always injected into every agent spawned in that scope. Spec authors cannot opt out. **Who can set `required`:** Only admins at the meta-spec's own scope level — tenant admins for tenant meta-specs, workspace admins (Owner/Admin role) for workspace meta-specs. A workspace admin cannot mark a tenant meta-spec as required (that would be privilege escalation). The `required` flag coexists with `platform-model.md`'s nearest-scope-wins resolution: `required` meta-specs bypass scope resolution entirely — they are always included regardless of whether a lower-scope meta-spec exists with the same name. **Same-name collision:** If a required tenant persona named `security` exists and a repo-scoped persona also named `security` exists, the agent receives BOTH — the required one first (in the required section), and the repo-scoped one via spec-level binding if the spec author explicitly binds it. This is not a conflict — they are concatenated as separate prompt sections, and the agent processes both.
 - **Optional** meta-specs: available in the registry for spec authors to explicitly select via spec-level bindings. Not auto-applied.
 
 ### Spec-Level Binding
@@ -352,7 +352,7 @@ Budget is tracked per repo and aggregated to workspace. The repo-level budget (d
 |---|---|---|
 | **80%** | Warn | `BudgetWarning` notification created (Inbox priority 7). Agents continue running. |
 | **100%** | Graceful stop | All active agents in the workspace receive a `BudgetExhausted` message in their inbox. Agents have 60 seconds to commit current work and call `agent_complete`. After 60 seconds, agents are killed via `ComputeTarget::kill_process()`. |
-| **Beyond limit** | Hard kill | `ComputeTarget::kill_process()` called immediately. Worktree preserved for recovery. No MR created. Task remains `InProgress` for human review. |
+| **Beyond limit** | Hard kill | `ComputeTarget::kill_process()` called immediately. Worktree preserved for recovery. No MR created. Task remains `InProgress` for human review. "Beyond limit" means the workspace budget was reduced below current usage (e.g., tenant admin lowered the tenant ceiling, or workspace admin reduced the workspace budget while agents are running). The 100% threshold handles normal exhaustion; beyond-limit handles external budget changes. |
 
 ### What's Tracked
 
@@ -361,7 +361,7 @@ Budget is tracked per repo and aggregated to workspace. The repo-level budget (d
 | `llm_tokens` | Agent LLM calls (via cred-proxy usage reports) | Input + output tokens |
 | `llm_cost_usd` | Agent LLM calls (via cred-proxy) | Dollar amount (model-specific pricing) |
 | `compute_minutes` | Agent wall-clock time (spawn to complete/kill) | Minutes |
-| `llm_query` | User-initiated LLM calls (briefing/ask, explorer/generate, specs/assist) | Per-call |
+| `llm_query` | User-initiated LLM calls (briefing/ask, explorer/generate, specs/assist) | Per-call. Charged to workspace budget directly (no repo-level tracking — user queries have no repo context). |
 
 The credential proxy (`cred-proxy.mjs`) reports token usage back to the server after each LLM call via `POST /api/v1/agents/:id/usage`. The server aggregates usage per workspace and checks against workspace limits on every report.
 
@@ -424,8 +424,11 @@ The **task context** is assembled at spawn time from the task, spec, and any gat
 
 | Spec | Amendment |
 |---|---|
-| `platform-model.md` §4 | Agent spawn semantics move to this spec. `platform-model.md` retains domain types (Agent, Task, MR structs) but defers lifecycle to `agent-runtime.md`. |
-| `meta-spec-reconciliation.md` | Meta-spec registry model (tenant/workspace levels, `required` flag, DB-backed versioning) defined here. Reconciliation spec defers to this for registry semantics. |
+| `platform-model.md` §4 | Agent spawn semantics move to this spec. `platform-model.md` retains domain types (Agent, Task, MR structs) but defers lifecycle to `agent-runtime.md`. Add `agent.spawn` MCP tool (scope: workspace). |
+| `platform-model.md` §1 Workspace | Add `compute_target_id: Option<Id>` field to Workspace struct. References a `ComputeTargetConfig` entity defined in this spec §3. |
+| `meta-spec-reconciliation.md` | Meta-spec registry model (tenant/workspace levels, `required` flag, DB-backed versioning) defined here. Reconciliation spec defers to this for registry semantics. The `PUT /api/v1/workspaces/{id}/meta-spec-set` endpoint is replaced by updating `required` flags and spec-level bindings via the meta-spec API. Reconciliation is triggered when a required meta-spec's approved version changes — the server detects specs with stale pins and creates reconciliation tasks. The `MetaSpecSnapshot` from reconciliation spec uses `content_sha` (from this spec) instead of git SHA. |
+| `platform-model.md` §2 Persona | The `Persona` struct gains `content`, `version`, `content_sha`, `required` fields from this spec. Existing fields (`slug`, `capabilities`, `protocols`, `model`, `temperature`, `max_tokens`, `budget`, `approval_status`, `approved_by`, `approved_at`) are preserved. The bootstrap persona list in `platform-model.md` §2 is superseded by the bootstrap table in this spec §2. |
+| `platform-model.md` §6 | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`. |
 | `agent-gates.md` | Gate failure → Ralph loop re-spawn defined here. `agent-gates.md` retains gate type definitions and execution mechanics. `MergeAttestation` amended to include `meta_specs_used` array. |
 | `hierarchy-enforcement.md` §4 | Add compute target CRUD endpoints to route table. Add `meta_spec_versions`, `meta_spec_bindings`, `compute_targets` tables to tenant-filter configuration. |
 | `human-system-interface.md` §5 | Attestation bundle schema amended to include `meta_specs_used` array with full content SHAs. |

@@ -189,7 +189,7 @@ Archiving a repo makes it read-only. No new agents can be spawned, no new MRs cr
 1. Repo status set to `Archived`
 2. All active agents in the repo are gracefully stopped (60-second grace period)
 3. All open MRs are closed with reason "Repo archived"
-4. All in-progress tasks are cancelled
+4. All non-terminal tasks (`InProgress` and `Backlog`) are cancelled
 5. Git push hook rejects new pushes
 6. Agent spawn rejects new agents scoped to this repo
 7. Repo appears grayed out in Explorer and repo lists
@@ -266,8 +266,8 @@ pub struct Repository {
 | `GET /api/v1/repos/:id` | GET | Get repo details | ABAC: read on repo |
 | `PUT /api/v1/repos/:id` | PUT | Update repo settings | ABAC: write on repo (Admin) |
 | `DELETE /api/v1/repos/:id` | DELETE | Delete repo (must be archived) | ABAC: delete on repo (Admin) |
-| `POST /api/v1/repos/:id/archive` | POST | Archive repo | ABAC: write on repo (Admin) |
-| `POST /api/v1/repos/:id/unarchive` | POST | Unarchive repo | ABAC: write on repo (Admin) |
+| `POST /api/v1/repos/:id/archive` | POST | Archive repo | ABAC: `action_override: "archive"` on repo (Admin) |
+| `POST /api/v1/repos/:id/unarchive` | POST | Unarchive repo | ABAC: `action_override: "archive"` on repo (Admin) |
 | `POST /api/v1/repos/mirror` | POST | Import external repo as mirror | ABAC: write on workspace |
 | `POST /api/v1/repos/:id/mirror/sync` | POST | Trigger mirror sync | ABAC: write on repo |
 
