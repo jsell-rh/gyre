@@ -1098,8 +1098,8 @@
     outline-offset: -2px;
   }
 
-  .spec-editor-textarea:focus {
-    border-color: var(--color-primary);
+  .spec-editor-textarea:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   /* LLM suggestion block */
@@ -1276,8 +1276,8 @@
     outline-offset: -2px;
   }
 
-  .llm-textarea:focus {
-    border-color: var(--color-primary);
+  .llm-textarea:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .llm-textarea:disabled { opacity: 0.6; cursor: not-allowed; }

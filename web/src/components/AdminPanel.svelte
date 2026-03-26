@@ -125,6 +125,7 @@
   let newWorkspaceModalEl = $state(null);
   let gateModalEl = $state(null);
   let computeModalEl = $state(null);
+  let policyModalEl = $state(null);
 
   $effect(() => {
     if (budgetModal) {
@@ -165,6 +166,12 @@
   $effect(() => {
     if (computeModal) {
       tick().then(() => computeModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (policyModal) {
+      tick().then(() => policyModalEl?.focus());
     }
   });
 
@@ -527,7 +534,7 @@
   <div class="admin-content" role="tabpanel" id="tabpanel-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}" aria-labelledby="tab-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}">
     {#if error}
       <div class="error-banner" role="alert">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
           <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
         </svg>
         {error}
@@ -1027,7 +1034,17 @@
   <div class="modal-backdrop" role="presentation" onclick={() => budgetModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Adjust Budget Limit"
     bind:this={budgetModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') budgetModal = false; }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { budgetModal = false; return; }
+      if (e.key === 'Tab') {
+        const focusable = budgetModalEl?.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable ?? []);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus(); } }
+        else { if (document.activeElement === last) { e.preventDefault(); first.focus(); } }
+      }
+    }}>
     <h3 class="modal-title">Adjust Budget Limit</h3>
     <div class="form-field">
       <label class="form-label" for="budget-limit">Limit ({wsBudget?.currency ?? 'USD'})</label>
@@ -1076,7 +1093,18 @@
 {#if policyModal}
   <div class="modal-backdrop" role="presentation" onclick={() => policyModal = null}></div>
   <div class="modal modal-lg" role="dialog" aria-modal="true" tabindex="-1" aria-label="Policy Editor"
-    onkeydown={(e) => { if (e.key === 'Escape') policyModal = null; }}>
+    bind:this={policyModalEl}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { policyModal = null; return; }
+      if (e.key === 'Tab') {
+        const focusable = policyModalEl?.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable ?? []);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus(); } }
+        else { if (document.activeElement === last) { e.preventDefault(); first.focus(); } }
+      }
+    }}>
     <h3 class="modal-title">{policyModal.mode === 'create' ? 'New Policy' : 'Edit Policy'}</h3>
     <div class="form-field">
       <label class="form-label" for="policy-name">Name</label>
@@ -1095,6 +1123,7 @@
         {#each ACTIONS as a}
           <button
             class="chip {policyForm.actions.includes(a) ? 'selected' : ''}"
+            aria-pressed={policyForm.actions.includes(a)}
             onclick={() => policyForm.actions = toggleChip(policyForm.actions, a)}
           >{a}</button>
         {/each}
@@ -1106,6 +1135,7 @@
         {#each RESOURCE_TYPES as r}
           <button
             class="chip {policyForm.resource_types.includes(r) ? 'selected' : ''}"
+            aria-pressed={policyForm.resource_types.includes(r)}
             onclick={() => policyForm.resource_types = toggleChip(policyForm.resource_types, r)}
           >{r}</button>
         {/each}

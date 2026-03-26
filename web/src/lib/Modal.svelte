@@ -1,4 +1,6 @@
 <script>
+  import { tick } from 'svelte';
+
   let {
     open = $bindable(false),
     title = '',
@@ -54,12 +56,12 @@
     if (open) {
       previousFocus = document.activeElement;
       // Focus the modal close button (first focusable element) after render
-      setTimeout(() => {
+      tick().then(() => {
         const focusable = modalEl?.querySelector(
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
         );
         focusable?.focus();
-      }, 20);
+      });
     } else {
       previousFocus?.focus();
       previousFocus = null;

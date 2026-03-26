@@ -44,7 +44,12 @@
 
   $effect(() => {
     if (showSpawnModal) {
-      tick().then(() => spawnModalEl?.focus());
+      tick().then(() => {
+        if (spawnModalEl) {
+          const first = spawnModalEl.querySelector('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+          (first ?? spawnModalEl).focus();
+        }
+      });
     }
   });
 
@@ -223,11 +228,12 @@
   </div>
 
   <div class="filter-bar">
-    <button class="pill" class:active={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
+    <button class="pill" class:active={statusFilter === ''} aria-pressed={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
     {#each statuses as s}
       <button
         class="pill"
         class:active={statusFilter === s}
+        aria-pressed={statusFilter === s}
         onclick={() => (statusFilter = statusFilter === s ? '' : s)}
       >
         {s}

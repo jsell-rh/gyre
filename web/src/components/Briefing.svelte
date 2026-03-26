@@ -230,7 +230,7 @@
               aria-label="Custom start date"
               data-testid="custom-date-input"
             />
-            <button class="apply-btn" onclick={onCustomApply}>Apply</button>
+            <button class="apply-btn" onclick={onCustomApply} disabled={!customSince}>Apply</button>
           {/if}
         </div>
       </div>
@@ -626,8 +626,8 @@
     outline: none;
   }
 
-  .range-select:focus {
-    border-color: var(--color-primary);
+  .range-select:focus-visible {
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .range-select:focus-visible {
@@ -739,7 +739,7 @@
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-primary);
+    color: var(--color-link, var(--color-primary));
     text-decoration: underline;
     text-underline-offset: 2px;
     transition: color var(--transition-fast);

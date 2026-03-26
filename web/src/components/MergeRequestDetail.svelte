@@ -174,14 +174,14 @@
 
   <!-- Tab bar -->
   <div class="tab-bar" role="tablist" aria-label="Merge request tabs">
-    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'}>Overview</button>
-    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'}>
+    <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => switchTab('overview')} role="tab" aria-selected={activeTab === 'overview'} id="tab-overview">Overview</button>
+    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => switchTab('files')} role="tab" aria-selected={activeTab === 'files'} id="tab-files">
       Files
       {#if mr.diff_stats}<span class="tab-badge">{mr.diff_stats.files_changed}</span>{/if}
     </button>
   </div>
 
-  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel">
+  <div class="content" class:content-files={activeTab === 'files'} role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
     {#if activeTab === 'overview'}
     <!-- Two-column layout -->
     <div class="two-col">
@@ -199,7 +199,7 @@
             <div class="meta-row">
               <span class="meta-label">Author</span>
               {#if navigate}
-                <button class="meta-link-btn" onclick={() => navigate('agents')}>{mr.author_agent_id}</button>
+                <button class="meta-link-btn" onclick={() => navigate('agents')} aria-label="View agent {mr.author_agent_id}">{mr.author_agent_id}</button>
               {:else}
                 <span class="meta-value">{mr.author_agent_id}</span>
               {/if}
@@ -286,7 +286,7 @@
                       onclick={() => removeDep(depId)}
                       disabled={removingDepId === depId}
                       title="Remove dependency"
-                      aria-label="Remove dependency"
+                      aria-label="Remove dependency {depId}"
                     >
                       {removingDepId === depId ? '…' : '×'}
                     </button>
