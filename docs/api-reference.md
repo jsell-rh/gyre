@@ -8,6 +8,11 @@ Authorization: Bearer <token>
 
 See [server-config.md](server-config.md) for authentication mechanisms and environment variables.
 
+> **Breaking changes since M32:**
+> - **M33**: Project entity removed. Workspace is now the primary grouping entity.
+> - **M34 Slice 6**: Git URL format changed from `/git/{project}/{repo}/...` to `/git/{workspace_slug}/{repo_name}/...`
+> - **M34 Slice 5**: `POST /api/v1/specs/approve` and `POST /api/v1/specs/revoke` removed — use path-scoped `POST /api/v1/specs/{path}/approve` and `POST /api/v1/specs/{path}/revoke` instead.
+
 ---
 
 ## Server Endpoints
@@ -22,11 +27,20 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/activity` | Query activity log (`?since=&limit=&agent_id=&event_type=`) |
 | `POST/GET` | `/api/v1/projects` | Create / list projects (`?workspace_id=` optional filter) |
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
+| `POST/GET` | `/api/v1/tenants` | Create / list tenants (**Admin only**); tenant is the top-level isolation boundary (M34) |
+| `GET/PUT/DELETE` | `/api/v1/tenants/{id}` | Read / update / delete tenant (**Admin only**) (M34) |
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
+| `GET` | `/api/v1/workspaces/{workspace_id}/tasks` | List tasks scoped to a workspace (M34 Slice 6 — preferred access pattern) |
+| `GET` | `/api/v1/workspaces/{workspace_id}/agents` | List agents scoped to a workspace (M34 Slice 6) |
+| `GET` | `/api/v1/workspaces/{workspace_id}/merge-requests` | List MRs scoped to a workspace (M34 Slice 6) |
+| `POST/GET` | `/api/v1/workspaces/{workspace_id}/messages` | Send a message to all workspace members / list messages; body: `{content, tier: "Directed"|"Telemetry"|"Broadcast", recipient_agent_id?}`; messages are Ed25519-signed at rest (Message Bus Phase 3) |
+| `GET` | `/api/v1/workspaces/{workspace_id}/presence` | Workspace presence — `[{user_id, session_id, view, workspace_id, last_seen}]`; stale entries evicted every 30 s (HSI §7, S1.5) |
 | `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope` JSON wire format: `{"kind": "Tenant"|"Workspace"|"Repo", "id": "<uuid>"}` (serde tagged enum — both `kind` and `id` fields required; `id` is the tenant/workspace/repo UUID); Rust type: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona -- fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
+| `POST` | `/api/v1/personas/{id}/approve` | Approve a persona version — transitions it to active; **Admin only**; records approver + timestamp (VISION-3) |
+| `GET` | `/api/v1/personas/resolve` | Resolve the effective persona for a scope: `?scope=tenant|workspace|repo&scope_id=<uuid>` — returns the most specific persona applicable (VISION-3) |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=&workspace_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
 | `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5); response includes `workspace_id: Option<Id>` when repo belongs to a workspace (M22.1) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); URL must use `https://` (M12.2) |
@@ -46,11 +60,16 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/specs/{path}` | Get single spec ledger entry by URL-encoded path (M21.1) |
 | `POST` | `/api/v1/specs/{path}/approve` | Approve a specific spec version: `{sha}` — path-scoped; transitions ledger Pending → Approved; `sha` must be 40-char hex; **approver type (`agent`/`human`) derived server-side from token kind** (JWT bearer = agent, global token/API key = human; client must not supply); approval blocked (400) when an `implements` link exists and parent spec is not yet approved, or when a `conflicts_with` link exists and conflicting spec is already approved (M22.3); **Developer+ required** — ReadOnly callers receive 403 (M21.1, M21.1-B, M21.1-C) |
 | `POST` | `/api/v1/specs/{path}/revoke` | Revoke approval for a specific spec: `{reason}` — path-scoped; caller must be original approver or Admin (M21.1) |
+| `POST` | `/api/v1/specs/{path}/reject` | Reject a spec: `{reason}` — transitions Pending → Rejected; caller must be Admin (M21.1) |
+| `GET` | `/api/v1/specs/{path}/progress` | Spec implementation progress — linked tasks and MRs with status: `{spec_path, tasks: [...], merge_requests: [...]}` (VISION-1) |
 | `GET` | `/api/v1/specs/{path}/history` | Approval event history for a specific spec — list of approval/revocation events with approver, SHA, timestamps, reason (M21.1) |
 | `GET` | `/api/v1/specs/{path}/links` | Outbound and inbound spec links for a specific spec — `{links: [{link_type, target_path, direction},...]}` (M22.3) |
 | `GET` | `/api/v1/specs/graph` | Full spec link graph — `{nodes: [{path, title, approval_status},...], edges: [{from, to, link_type},...]}` (M22.3) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
 | `GET/PUT` | `/api/v1/repos/{id}/spec-policy` | Get / set per-repo spec enforcement policy: `{require_spec_ref: bool, require_approved_spec: bool, warn_stale_spec: bool, require_current_spec: bool}`. `warn_stale_spec` emits `StaleSpecWarning` domain event when MR spec_ref SHA differs from HEAD; `require_current_spec` blocks merge queue when stale. **PUT requires Admin role**. All fields default to `false` (backwards compatible). (M18) |
+| `POST` | `/api/v1/repos/{id}/specs/assist` | LLM-assisted spec editing — SSE stream of `DiffOp` events; body: `{spec_path, instruction, draft_content?}`; streams incremental diff operations (`insert`/`delete`/`replace`) to the caller (S3.3, HSI §11) |
+| `POST` | `/api/v1/repos/{id}/specs/save` | Commit spec changes to a feature branch and open an MR; body: `{spec_path, content, message}`; returns `{branch, mr_id}` (S3.3) |
+| `POST` | `/api/v1/repos/{id}/prompts/save` | Commit a prompt/spec directly to the default branch; body: `{prompt_path, content, message}` (S3.3) |
 | `GET` | `/api/v1/repos/{id}/blame?path={file}` | Per-line agent attribution — which agent last touched each line (M13.4) |
 | `GET` | `/api/v1/repos/{id}/hot-files?limit=20` | Files with the most concurrent active agents in the last 24h (M13.4) |
 | `GET` | `/api/v1/repos/{id}/review-routing?path={file}` | Ordered list of agents to request review from, ranked by recency and commit count (M13.4) |
@@ -103,6 +122,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
 | `GET` | `/api/v1/merge-requests/{id}/attestation` | Get signed merge attestation bundle for a merged MR — fields: `attestation_version`, `mr_id`, `merge_commit_sha`, `merged_at`, `gate_results`, `spec_ref`, `spec_fully_approved`, `author_agent_id`; returns 404 if not yet merged or attestation pending (G5) |
+| `GET` | `/api/v1/merge-requests/{id}/timeline` | MR SDLC event timeline — chronological list of events (created, commits pushed, gates run, merged, graph extracted) with timestamps and actor metadata (S2.5, HSI §3) |
+| `GET` | `/api/v1/merge-requests/{id}/trace` | Gate-time execution trace for an MR — structured spans capturing gate execution, LLM calls, tool use; `{mr_id, spans: [{span_id, parent_span_id, name, start_ms, end_ms, attributes}]}` (S2.4, HSI §3a) |
+| `GET` | `/api/v1/trace-spans/{span_id}/payload` | Full payload for a single trace span — raw input/output data for a gate or LLM call (S2.4) |
 | `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100). **Branch lineage auto-detection:** on MR creation, the server uses `git merge-base` to check if the source branch descends from another open MR's source branch and auto-populates `depends_on` (branch refs validated to prevent arg injection). |
 | `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
 | `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
@@ -117,9 +139,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
 | `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task; writes `refs/agents/{id}/head` and `refs/tasks/{task-id}` (M13.6); JWT bearers are evaluated against the target repo's ABAC policy before spawning — returns 403 if no policy matches (G6); returns **429** if workspace or tenant budget limits are exceeded (`max_concurrent_agents`, `max_tokens_per_day`, `max_cost_per_day`) (M22.2) |
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
-| `GET` | `/git/{project}/{repo}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) |
-| `POST` | `/git/{project}/{repo}/git-upload-pack` | Smart HTTP git clone / fetch data |
-| `POST` | `/git/{project}/{repo}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); **pushes to the default branch also trigger automatic Rust knowledge graph extraction** — `git archive` → `RustExtractor` → persists nodes/edges + records `ArchitecturalDelta` in the background (M30b); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for Gyre-hosted repos (M22.4) |
+| `GET` | `/git/{workspace_slug}/{repo_name}/info/refs` | Smart HTTP git discovery (`?service=git-upload-pack` or `git-receive-pack`) — **M34 Slice 6**: URL format uses workspace slug + repo name (was `{project}/{repo}`) |
+| `POST` | `/git/{workspace_slug}/{repo_name}/git-upload-pack` | Smart HTTP git clone / fetch data |
+| `POST` | `/git/{workspace_slug}/{repo_name}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); **pushes to the default branch also trigger automatic Rust knowledge graph extraction** — `git archive` → `RustExtractor` → persists nodes/edges + records `ArchitecturalDelta` in the background (M30b); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for Gyre-hosted repos (M22.4) |
 | `GET` | `/api/v1/auth/token-info` | Token introspection — returns token kind (`agent_jwt`, `uuid_token`, `api_key`, `global`) and decoded JWT claims including `task_id`, `spawned_by`, `exp` (M18) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
 | `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
@@ -127,6 +149,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
 | `GET` | `/api/v1/users/me/notifications` | Notifications (16 `NotificationType` variants: `MrNeedsReview`, `GateFailure`, `MrMerged`, etc.; 4 priority levels); auto-created on agent complete, gate failure, and MR merge (M22.8) |
 | `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark notification read (M22.8) |
+| `POST` | `/api/v1/notifications/{id}/dismiss` | Dismiss a notification (removes from inbox view) (HSI §2) |
+| `POST` | `/api/v1/notifications/{id}/resolve` | Resolve a notification (marks underlying issue addressed) (HSI §2) |
+| `GET` | `/api/v1/conversations/{sha}` | Conversation provenance — returns agent conversation history anchored to a commit SHA; `{sha, turns: [{role, content, timestamp, model}]}`; records the agent reasoning that produced the commit (HSI §5, S2.3) |
 | `POST/GET` | `/api/v1/workspaces/{id}/members` | Invite (**Admin only**, H-19) / list members; `WorkspaceRole`: Owner, Admin, Developer, Viewer; accept/pending lifecycle (M22.8) |
 | `PUT` | `/api/v1/workspaces/{id}/members/{user_id}` | Update a member's `WorkspaceRole`; **Admin only** (H-17, M22.8) |
 | `DELETE` | `/api/v1/workspaces/{id}/members/{user_id}` | Remove a member; **Admin only** (H-20, M22.8) |
@@ -134,6 +159,11 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `PUT/DELETE` | `/api/v1/workspaces/{id}/teams/{team_id}` | Update / delete team; **Admin only** (H-18); `add_member`/`remove_member` idempotent (M22.8) |
 | `GET` | `/api/v1/workspaces/{id}/graph` | Cross-repo aggregated knowledge graph for a workspace — all nodes and edges across every repo in the workspace (M30) |
 | `GET` | `/api/v1/workspaces/{id}/briefing` | Narrative summary of recent architectural changes — `{workspace_id, since, summary, deltas}`; filter with `?since=<epoch>` (M30) |
+| `POST` | `/api/v1/workspaces/{id}/briefing/ask` | SSE Q&A on the workspace briefing — streams LLM-generated answers to a question about recent changes; body: `{question}`; returns `text/event-stream` (S3.2, HSI) |
+| `GET` | `/api/v1/workspaces/{id}/graph/concept/{concept_name}` | Workspace-wide concept search — nodes matching `concept_name` across all repos in the workspace (M30) |
+| `GET/POST` | `/api/v1/workspaces/{id}/explorer-views` | List / create named explorer views (saved graph perspectives); body: `{name, description?, query?, layout?}` (S3.1) |
+| `POST` | `/api/v1/workspaces/{id}/explorer-views/generate` | LLM-generate an explorer view from a natural-language description; body: `{prompt}`; returns a draft `ExplorerView` (S3.1) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/explorer-views/{view_id}` | Read / update / delete a named explorer view (S3.1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |

@@ -16,6 +16,9 @@ crates/
 - `gyre-domain` MUST NOT import `gyre-adapters` or any infrastructure crate.
 - Violation is caught by `scripts/check-arch.sh` and CI (will fail the build).
 
+> **M33**: Project entity removed. Workspace is now the primary entity. All APIs use `workspace_id`.
+> **M34**: `workspace_id`/`repo_id` non-optional on Task/Agent/MR. ABAC replaces RBAC middleware. Git URLs use workspace slug: `/git/{workspace_slug}/{repo_name}/...`
+
 Dependency flow:
 ```
 gyre-server --> gyre-domain --> gyre-ports --> gyre-common
@@ -69,14 +72,15 @@ cargo test -p gyre-server --test git_integration      # 12 git smart HTTP + merg
 
 ### Integration Test Suites
 
-Five integration test files in `crates/gyre-server/tests/` each start a live server on a random port:
+Six integration test files in `crates/gyre-server/tests/` each start a live server on a random port:
 
 | File | Tests | Coverage |
 |---|---|---|
 | `e2e_ralph_loop.rs` | 1 | Full Ralph loop end-to-end: spawn -> clone -> push -> MR -> merge |
-| `api_integration.rs` | 68 | REST API contract tests for all endpoints (M17.2) |
-| `auth_integration.rs` | 21 | Auth matrix: valid tokens, invalid tokens, RBAC role enforcement (M17.4) |
-| `git_integration.rs` | 12 | Smart HTTP clone/push, push gates, merge queue, commit provenance (M17.3) |
+| `api_integration.rs` | 66 | REST API contract tests for all endpoints (M17.2) |
+| `auth_integration.rs` | 21 | Auth matrix: valid tokens, invalid tokens, ABAC role enforcement (M17.4) |
+| `git_integration.rs` | 19 | Smart HTTP clone/push, push gates, merge queue, commit provenance (M17.3) |
+| `graph_integration.rs` | 30 | Knowledge graph extraction, node/edge CRUD, spec linkage, push-triggered extraction (M30) |
 | `m18_oidc_integration.rs` | 8 | OIDC discovery document, JWKS Ed25519 JWK, JWT spawn token, JWT auth, token-info claims, JWT revocation after complete (M18) |
 
 All tests bind to `127.0.0.1:0` (random port) and run safely in parallel. Require `git` on `PATH`.
