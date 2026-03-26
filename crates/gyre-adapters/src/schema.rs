@@ -337,6 +337,7 @@ diesel::table! {
         resource_types -> Text,
         enabled -> Integer,
         built_in -> Integer,
+        immutable -> Integer,
         created_by -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,

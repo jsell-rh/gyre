@@ -1392,6 +1392,20 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
         Ok(())
     }
 
+    async fn delete_by_name_prefix(&self, prefix: &str) -> Result<u64> {
+        let mut store = self.policies.lock().await;
+        let to_delete: Vec<String> = store
+            .values()
+            .filter(|p| p.name.starts_with(prefix))
+            .map(|p| p.id.to_string())
+            .collect();
+        let count = to_delete.len() as u64;
+        for id in to_delete {
+            store.remove(&id);
+        }
+        Ok(count)
+    }
+
     async fn record_decision(&self, decision: &gyre_domain::PolicyDecision) -> Result<()> {
         self.decisions.lock().await.push(decision.clone());
         Ok(())

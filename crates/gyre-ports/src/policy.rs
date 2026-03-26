@@ -29,6 +29,11 @@ pub trait PolicyRepository: Send + Sync {
     /// Delete a policy. Returns an error if the policy is built-in.
     async fn delete(&self, id: &str) -> Result<()>;
 
+    /// Delete all policies whose name starts with the given prefix.
+    /// Used by trust level transitions to clean up `trust:` prefixed policies.
+    /// Returns the number of policies deleted.
+    async fn delete_by_name_prefix(&self, prefix: &str) -> Result<u64>;
+
     /// Append a policy decision to the audit log.
     async fn record_decision(&self, decision: &PolicyDecision) -> Result<()>;
 
