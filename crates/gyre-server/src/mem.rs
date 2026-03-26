@@ -2716,6 +2716,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         // NoopGitOps does not create files; commits_since() on a missing path returns 0.
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
         prompt_templates: Arc::new(MemPromptRepository::default()),
+        llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
     })
 }
 

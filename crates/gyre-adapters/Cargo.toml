@@ -22,9 +22,16 @@ zstd = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
 ring = { workspace = true }
+futures-util = { workspace = true }
 gyre-common = { workspace = true }
 gyre-domain = { workspace = true }
 gyre-ports = { workspace = true }
+
+# LLM inference via Google Vertex AI — direct REST API + ADC auth.
+# rig-core ≥ 0.33.0 requires Rust 1.88 (let chains); our MSRV is 1.87.
+# We implement the adapter using reqwest + ring (for JWT signing).
+reqwest = { workspace = true }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
