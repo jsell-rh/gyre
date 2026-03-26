@@ -7,6 +7,8 @@ use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
     Id,
 };
+use gyre_adapters::MockLlmPortFactory;
+use gyre_ports::LlmPortFactory;
 use gyre_server::{abac_middleware, build_router, build_state};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -27,6 +29,27 @@ impl Ctx {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = build_state(TOKEN, &base_url, None);
+        abac_middleware::seed_builtin_policies(&state).await;
+        let app = build_router(Arc::clone(&state));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        Self {
+            client: reqwest::Client::new(),
+            base: base_url,
+            state,
+        }
+    }
+
+    /// Like `new()` but wires a MockLlmPortFactory so LLM endpoints return real (mocked) data.
+    async fn new_with_llm() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{port}");
+
+        let base_state = build_state(TOKEN, &base_url, None);
+        let mut s = (*base_state).clone();
+        s.llm = Some(Arc::new(MockLlmPortFactory::echo()) as Arc<dyn LlmPortFactory>);
+        let state = Arc::new(s);
         abac_middleware::seed_builtin_policies(&state).await;
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -453,10 +476,10 @@ async fn test_link_node_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-/// GET /api/v1/repos/{id}/graph/predict — returns empty predictions.
+/// GET /api/v1/repos/{id}/graph/predict — returns non-empty predictions from mock LLM.
 #[tokio::test]
 async fn test_graph_predict() {
-    let ctx = Ctx::new().await;
+    let ctx = Ctx::new_with_llm().await;
     let repo_id = create_repo(&ctx, "proj-12").await;
 
     let resp = ctx
@@ -464,7 +487,8 @@ async fn test_graph_predict() {
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["predictions"].as_array().unwrap().is_empty());
+    // Mock LLM returns at least one prediction.
+    assert!(!body["predictions"].as_array().unwrap().is_empty());
 }
 
 /// GET /api/v1/workspaces/{id}/graph — 404 for missing workspace.
@@ -505,7 +529,7 @@ async fn test_workspace_briefing_empty() {
 #[tokio::test]
 async fn test_briefing_ask_sse() {
     use gyre_domain::Workspace;
-    let ctx = Ctx::new().await;
+    let ctx = Ctx::new_with_llm().await;
 
     let ws_id = Id::new(uuid::Uuid::new_v4().to_string());
     let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), "ask-ws", "ask-ws", 0);
@@ -892,10 +916,10 @@ async fn test_workspace_graph_concept_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-/// POST /api/v1/repos/{id}/graph/predict — POST method returns empty predictions.
+/// POST /api/v1/repos/{id}/graph/predict — POST method returns predictions from mock LLM.
 #[tokio::test]
 async fn test_graph_predict_post() {
-    let ctx = Ctx::new().await;
+    let ctx = Ctx::new_with_llm().await;
     let repo_id = create_repo(&ctx, "proj-predict-post").await;
 
     let resp = ctx
@@ -906,7 +930,8 @@ async fn test_graph_predict_post() {
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["predictions"].as_array().unwrap().is_empty());
+    // Mock LLM returns at least one prediction.
+    assert!(!body["predictions"].as_array().unwrap().is_empty());
     assert_eq!(body["repo_id"], repo_id);
 }
 

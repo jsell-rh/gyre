@@ -15,6 +15,7 @@ pub mod procfs_monitor;
 
 pub(crate) mod health;
 pub mod jobs;
+pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
 pub(crate) mod mcp;

@@ -10,7 +10,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::stream;
+use futures_util::{stream, StreamExt as _};
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
@@ -126,36 +126,51 @@ pub async fn assist_spec(
         }
     }
 
-    let explanation = format!(
-        "Applying instruction to {}: {}",
-        req.spec_path, req.instruction
-    );
-    let diff = vec![DiffOp {
-        op: "add".to_string(),
-        path: "## Changes".to_string(),
-        content: format!(
-            "<!-- Instruction: {} -->\n\n{}",
-            req.instruction,
-            req.draft_content.as_deref().unwrap_or("")
-        ),
-    }];
+    // Require LLM to be configured.
+    let factory = state
+        .llm
+        .as_ref()
+        .ok_or(super::error::ApiError::LlmUnavailable)?;
 
-    let partial_data = serde_json::to_string(&serde_json::json!({
-        "explanation": format!("Analyzing spec at {}...", req.spec_path)
-    }))
-    .unwrap_or_default();
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&repo.workspace_id, "specs-assist")
+        .await
+        .map_err(ApiError::Internal)?
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
 
-    let complete_data = serde_json::to_string(&serde_json::json!({
-        "diff": diff,
-        "explanation": explanation,
-    }))
-    .unwrap_or_default();
+    let system_prompt = template_content
+        .replace("{{spec_path}}", &req.spec_path)
+        .replace(
+            "{{draft_content}}",
+            req.draft_content.as_deref().unwrap_or(""),
+        )
+        .replace("{{instruction}}", &req.instruction);
+    let user_prompt = format!("Instruction: {}", req.instruction);
 
-    // Stream: one partial explanation chunk, then the complete event.
-    let events: Vec<Result<Event, std::convert::Infallible>> = vec![
-        Ok(Event::default().event("partial").data(partial_data)),
-        Ok(Event::default().event("complete").data(complete_data)),
-    ];
+    // Resolve model and call streaming LLM.
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
+    let stream = factory
+        .for_model(&model)
+        .stream_complete(&system_prompt, &user_prompt, None)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let full_text = chunks.join("");
+
+    let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
+    for chunk in &chunks {
+        let data = serde_json::to_string(&serde_json::json!({"text": chunk})).unwrap_or_default();
+        events.push(Ok(Event::default().event("partial").data(data)));
+    }
+    let complete_data =
+        serde_json::to_string(&serde_json::json!({"text": full_text})).unwrap_or_default();
+    events.push(Ok(Event::default().event("complete").data(complete_data)));
+
     let s = stream::iter(events);
     Ok(Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -526,5 +541,105 @@ mod tests {
         let parts: Vec<&str> = slug.rsplitn(2, '-').collect();
         assert_eq!(parts[0].len(), 4);
         assert!(parts[0].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── LLM endpoint tests ───────────────────────────────────────────────────
+
+    fn app_no_llm() -> Router {
+        let mut s = (*crate::mem::test_state()).clone();
+        s.llm = None;
+        crate::api::api_router().with_state(std::sync::Arc::new(s))
+    }
+
+    #[tokio::test]
+    async fn assist_spec_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+
+        // Create a repo.
+        let create_body = serde_json::json!({
+            "name": "assist-503-repo",
+            "workspace_id": "ws-assist-503",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add a summary",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn assist_spec_with_mock_llm_streams_sse_events() {
+        let app = app();
+
+        // Create a repo.
+        let create_body = serde_json::json!({
+            "name": "assist-sse-repo",
+            "workspace_id": "ws-assist-sse",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add a summary",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
     }
 }
