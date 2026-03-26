@@ -76,7 +76,7 @@
           class="nav-item"
           class:active={currentNav === item.id}
           onclick={() => nav(item.id)}
-          aria-label={collapsed ? item.label : undefined}
+          aria-label={item.label}
           aria-current={currentNav === item.id ? 'page' : undefined}
           title={collapsed ? `${item.label} (⌘${item.shortcut})` : undefined}
         >
@@ -84,7 +84,7 @@
           {#if !collapsed}
             <span class="nav-label">{item.label}</span>
             {#if item.id === 'inbox' && inboxBadge > 0}
-              <span class="nav-badge" aria-label="{inboxBadge} unresolved">{inboxBadge > 99 ? '99+' : inboxBadge}</span>
+              <span class="nav-badge" aria-hidden="true">{inboxBadge > 99 ? '99+' : inboxBadge}</span>
             {/if}
             <span class="nav-shortcut" aria-hidden="true">⌘{item.shortcut}</span>
           {:else if item.id === 'inbox' && inboxBadge > 0}

@@ -56,7 +56,7 @@
       <span class="protocol-tag">A2A</span>
     </div>
     {#if !editing && card}
-      <button class="edit-btn" onclick={startEdit}>Edit</button>
+      <button class="edit-btn" aria-label="Edit agent card" onclick={startEdit}>Edit</button>
     {/if}
   </div>
 
@@ -106,7 +106,7 @@
       </div>
 
       {#if saveError}
-        <div class="form-error">{saveError}</div>
+        <div class="form-error" role="alert">{saveError}</div>
       {/if}
 
       <div class="form-actions">
@@ -157,7 +157,7 @@
 
   {:else}
     <div class="empty-card">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24" aria-hidden="true">
         <rect x="2" y="5" width="20" height="14" rx="2"/>
         <path d="M2 10h20"/>
       </svg>
