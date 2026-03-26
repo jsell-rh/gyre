@@ -788,7 +788,12 @@ pub async fn get_spec_progress(
 
     let open_tasks = linked_tasks
         .iter()
-        .filter(|t| !matches!(t.status, gyre_domain::TaskStatus::Done))
+        .filter(|t| {
+            !matches!(
+                t.status,
+                gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+            )
+        })
         .count();
     let completed_tasks = linked_tasks
         .iter()
