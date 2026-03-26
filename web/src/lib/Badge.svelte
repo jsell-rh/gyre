@@ -1,5 +1,5 @@
 <script>
-  let { value, variant = 'default' } = $props();
+  let { value = '', variant = 'default' } = $props();
 
   /* Map common status strings to badge variants */
   const STATUS_MAP = {
@@ -35,7 +35,7 @@
   );
 
   let label = $derived(
-    value?.replace?.(/([A-Z])/g, ' $1').trim() ?? value
+    value?.replace?.(/([A-Z])/g, ' $1').trim() ?? value ?? ''
   );
 </script>
 
@@ -55,13 +55,13 @@
     border: 1px solid transparent;
   }
 
-  .badge-success  { background: rgba(99,153,61,0.15);  color: #7dc25a; border-color: rgba(99,153,61,0.3); }
-  .badge-warning  { background: rgba(245,146,27,0.15); color: #f5921b; border-color: rgba(245,146,27,0.3); }
-  .badge-danger   { background: rgba(240,86,29,0.15);  color: #f0561d; border-color: rgba(240,86,29,0.3); }
-  .badge-info     { background: rgba(0,102,204,0.15);  color: #4394e5; border-color: rgba(0,102,204,0.3); }
-  .badge-purple   { background: rgba(94,64,190,0.15);  color: #8b6fe0; border-color: rgba(94,64,190,0.3); }
-  .badge-blocked  { background: rgba(94,64,190,0.15);  color: #8b6fe0; border-color: rgba(94,64,190,0.3); }
-  .badge-muted    { background: rgba(112,112,112,0.15); color: #a3a3a3; border-color: rgba(112,112,112,0.3); }
-  .badge-critical { background: rgba(238,0,0,0.15);    color: #ee0000; border-color: rgba(238,0,0,0.3); }
-  .badge-default  { background: rgba(112,112,112,0.15); color: #a3a3a3; border-color: rgba(112,112,112,0.3); }
+  .badge-success  { background: color-mix(in srgb, var(--color-success, #22c55e) 15%, transparent);  color: var(--color-success, #22c55e); border-color: color-mix(in srgb, var(--color-success, #22c55e) 30%, transparent); }
+  .badge-warning  { background: color-mix(in srgb, var(--color-warning, #f59e0b) 15%, transparent); color: var(--color-warning, #f59e0b); border-color: color-mix(in srgb, var(--color-warning, #f59e0b) 30%, transparent); }
+  .badge-danger   { background: color-mix(in srgb, var(--color-danger, #f0561d) 15%, transparent);  color: var(--color-danger, #f0561d); border-color: color-mix(in srgb, var(--color-danger, #f0561d) 30%, transparent); }
+  .badge-info     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent);  color: var(--color-info, #60a5fa); border-color: color-mix(in srgb, var(--color-info, #60a5fa) 30%, transparent); }
+  .badge-purple   { background: color-mix(in srgb, var(--color-purple, #8b6fe0) 15%, transparent);  color: var(--color-purple, #8b6fe0); border-color: color-mix(in srgb, var(--color-purple, #8b6fe0) 30%, transparent); }
+  .badge-blocked  { background: color-mix(in srgb, var(--color-purple, #8b6fe0) 15%, transparent);  color: var(--color-purple, #8b6fe0); border-color: color-mix(in srgb, var(--color-purple, #8b6fe0) 30%, transparent); }
+  .badge-muted    { background: color-mix(in srgb, var(--color-text-muted, #a3a3a3) 15%, transparent); color: var(--color-text-muted, #a3a3a3); border-color: color-mix(in srgb, var(--color-text-muted, #a3a3a3) 30%, transparent); }
+  .badge-critical { background: color-mix(in srgb, var(--color-danger, #ee0000) 15%, transparent);    color: var(--color-danger, #ee0000); border-color: color-mix(in srgb, var(--color-danger, #ee0000) 30%, transparent); }
+  .badge-default  { background: color-mix(in srgb, var(--color-text-muted, #a3a3a3) 15%, transparent); color: var(--color-text-muted, #a3a3a3); border-color: color-mix(in srgb, var(--color-text-muted, #a3a3a3) 30%, transparent); }
 </style>

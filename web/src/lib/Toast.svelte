@@ -1,4 +1,5 @@
 <script>
+  import { fly } from 'svelte/transition';
   import { getToasts, dismiss } from './toast.svelte.js';
 
   let toasts = $derived(getToasts());
@@ -6,7 +7,7 @@
 
 <div class="toast-container" aria-live="polite" aria-atomic="false">
   {#each toasts as t (t.id)}
-    <div class="toast toast-{t.type}" role="alert">
+    <div class="toast toast-{t.type}" role="alert" transition:fly={{ y: 8, duration: 200 }}>
       <span class="toast-icon" aria-hidden="true">
         {#if t.type === 'success'}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
@@ -49,12 +50,6 @@
     border-radius: var(--radius);
     box-shadow: var(--shadow-md);
     pointer-events: all;
-    animation: toast-in 150ms ease;
-  }
-
-  @keyframes toast-in {
-    from { opacity: 0; transform: translateY(8px); }
-    to   { opacity: 1; transform: translateY(0); }
   }
 
   .toast-icon {
@@ -94,5 +89,10 @@
 
   .toast-dismiss:hover {
     color: var(--color-text);
+  }
+
+  .toast-dismiss:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 </style>
