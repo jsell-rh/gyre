@@ -542,6 +542,29 @@ test.describe('Keyboard shortcuts', () => {
     await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
   });
 
+  test('cmd_5_navigates_to_meta_specs', async ({ page }) => {
+    // meta-specs is the only hyphenated nav ID — test it explicitly
+    await page.goto('/inbox');
+    await page.waitForLoadState('networkidle');
+
+    await page.keyboard.press('Control+5');
+
+    const metaBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Meta-specs' });
+    await expect(metaBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+  });
+
+  test('esc_closes_shortcuts_overlay', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    await page.keyboard.press('?');
+    const dialog = page.getByRole('dialog', { name: /keyboard shortcuts/i });
+    await expect(dialog).toBeVisible({ timeout: 3000 });
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).not.toBeVisible({ timeout: 3000 });
+  });
+
   test('esc_closes_user_menu', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
