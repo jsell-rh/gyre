@@ -313,6 +313,13 @@
 
   let trustLevel = $derived(currentWorkspace?.trust_level ?? null);
 
+  // ── Page title ─────────────────────────────────────────────────────
+  $effect(() => {
+    const navLabel = currentNav ? currentNav.charAt(0).toUpperCase() + currentNav.slice(1).replace('-', ' ') : 'Gyre';
+    const wsName = scope?.type === 'workspace' ? (currentWorkspace?.name ?? '') : '';
+    document.title = wsName ? `${navLabel} — ${wsName} | Gyre` : `${navLabel} | Gyre`;
+  });
+
   let currentLayout = $derived.by(() => {
     if (detailPanel.open) return 'split';
     if (currentNav === 'explorer' && scope.type !== 'tenant') return 'canvas-controls';

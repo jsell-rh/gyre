@@ -96,7 +96,7 @@
   let deleteConfirmModal = $state(null);
   let deleteInProgress = $state(false);
 
-  let simulateForm = $state({ action: 'merge', resource_type: 'mr' });
+  let simulateForm = $state({ action: 'merge', resource_type: 'mr', subject_role: '' });
   let simulateResult = $state(null);
   let simulateLoading = $state(false);
 
@@ -382,7 +382,9 @@
     simulateLoading = true;
     simulateResult = null;
     try {
-      simulateResult = await api.simulateAbacPolicy(workspaceId, simulateForm);
+      const payload = { action: simulateForm.action, resource_type: simulateForm.resource_type };
+      if (simulateForm.subject_role) payload.subject_role = simulateForm.subject_role;
+      simulateResult = await api.simulateAbacPolicy(workspaceId, payload);
     } catch (e) {
       simulateResult = { error: e.message };
     } finally { simulateLoading = false; }
@@ -894,6 +896,16 @@
                     {#each RESOURCE_TYPES as r}<option value={r}>{r}</option>{/each}
                   </select>
                 </div>
+                <div class="form-field">
+                  <label class="form-label" for="sim-role">Simulate as role</label>
+                  <select id="sim-role" class="target-select narrow" bind:value={simulateForm.subject_role}>
+                    <option value="">Any (default)</option>
+                    <option value="admin">Admin</option>
+                    <option value="member">Member</option>
+                    <option value="agent">Agent</option>
+                    <option value="viewer">Viewer</option>
+                  </select>
+                </div>
                 <button class="primary-btn" onclick={simulatePolicy} disabled={simulateLoading}>
                   {simulateLoading ? 'Simulating…' : 'Simulate'}
                 </button>
@@ -903,6 +915,10 @@
                   {#if simulateResult.error}
                     Error: {simulateResult.error}
                   {:else}
+                    {#if simulateForm.subject_role}
+                      <span class="sim-role-label">Simulating as: {simulateForm.subject_role}</span>
+                      <br/>
+                    {/if}
                     Outcome: <strong>{simulateResult.outcome ?? 'Unknown'}</strong>
                     {#if simulateResult.matched_policies?.length}
                       — matched: {simulateResult.matched_policies.join(', ')}
@@ -1637,6 +1653,7 @@
   .simulate-result.allow { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
   .simulate-result.deny  { background: color-mix(in srgb, var(--color-danger) 10%, transparent);  color: var(--color-danger); }
   .simulate-result.error { background: color-mix(in srgb, var(--color-danger) 10%, transparent);  color: var(--color-danger); }
+  .sim-role-label { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); }
 
   /* Chip multi-select */
   .chip-group { display: flex; flex-wrap: wrap; gap: var(--space-2); }

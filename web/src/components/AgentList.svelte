@@ -40,6 +40,7 @@
   let ttyConnecting = $state(false);
   let containerRecord = $state(null);
   let spawnModalEl = $state(null);
+  let spawnTriggerEl = $state(null);
 
   $effect(() => {
     if (showSpawnModal) {
@@ -155,12 +156,16 @@
   }
 
   function openSpawnModal() {
+    spawnTriggerEl = document.activeElement;
     spawnName = ''; spawnRepoId = ''; spawnTaskId = ''; spawnBranch = ''; spawnComputeTarget = '';
     spawnResult = null; spawnError = null;
     showSpawnModal = true;
   }
 
-  function closeSpawnModal() { showSpawnModal = false; }
+  function closeSpawnModal() {
+    showSpawnModal = false;
+    spawnTriggerEl?.focus();
+  }
 
   async function doSpawn() {
     if (!spawnName || !spawnRepoId || !spawnTaskId || !spawnBranch) {
@@ -259,21 +264,21 @@
           </div>
         {:else}
           <div class="form">
-            <label>Name<input bind:value={spawnName} placeholder="worker-1" /></label>
+            <label>Name<input bind:value={spawnName} placeholder="worker-1" aria-required="true" /></label>
             <label>Repository
-              <select bind:value={spawnRepoId}>
+              <select bind:value={spawnRepoId} aria-required="true">
                 <option value="">Select repo...</option>
                 {#each repos as r}<option value={r.id}>{r.name}</option>{/each}
               </select>
             </label>
             <label>Task
-              <select bind:value={spawnTaskId}>
+              <select bind:value={spawnTaskId} aria-required="true">
                 <option value="">Select task...</option>
                 {#each tasks as t}<option value={t.id}>{t.title}</option>{/each}
               </select>
             </label>
             <label>Branch
-              <input bind:value={spawnBranch} list="branch-suggestions" placeholder="feat/my-feature (new branch name)" />
+              <input bind:value={spawnBranch} list="branch-suggestions" placeholder="feat/my-feature (new branch name)" aria-required="true" />
               <datalist id="branch-suggestions">
                 {#each repoBranches as b}<option value={b}></option>{/each}
               </datalist>
