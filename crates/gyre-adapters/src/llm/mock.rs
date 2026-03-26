@@ -84,7 +84,7 @@ impl LlmPort for MockLlmAdapter {
         let text = self.resolve_text(user_prompt);
         // Emit in (up to) 3 chunks to simulate streaming behaviour.
         let chars: Vec<char> = text.chars().collect();
-        let chunk_size = (chars.len().max(1) + 2) / 3;
+        let chunk_size = chars.len().max(1).div_ceil(3);
         let chunks: Vec<Result<String>> = chars
             .chunks(chunk_size)
             .map(|c| Ok(c.iter().collect::<String>()))
@@ -158,14 +158,8 @@ mod tests {
     #[tokio::test]
     async fn mock_stream_complete_emits_chunks_and_terminates() {
         let adapter = MockLlmAdapter::new("hello world");
-        let stream = adapter
-            .stream_complete("sys", "user", None)
-            .await
-            .unwrap();
-        let chunks: Vec<String> = stream
-            .map(|r| r.unwrap())
-            .collect::<Vec<_>>()
-            .await;
+        let stream = adapter.stream_complete("sys", "user", None).await.unwrap();
+        let chunks: Vec<String> = stream.map(|r| r.unwrap()).collect::<Vec<_>>().await;
         // Chunks must reassemble to the original response.
         assert_eq!(chunks.join(""), "hello world");
         // Stream must terminate (we collected it).
