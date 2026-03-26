@@ -15,6 +15,7 @@ pub mod attestation;
 pub mod audit;
 pub mod budget;
 pub mod container_audit;
+pub mod conversation;
 pub mod dependency;
 pub mod kv_store;
 pub mod merge_queue;

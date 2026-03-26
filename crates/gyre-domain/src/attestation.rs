@@ -28,8 +28,8 @@ pub struct MergeAttestation {
     pub spec_fully_approved: bool,
     /// Agent ID of the MR author.
     pub author_agent_id: Option<String>,
-    /// SHA-256 of the agent's conversation at the time of merge (HSI §4).
-    /// Populated from the `AgentCompleted` message payload when the MR is merged.
+    /// SHA-256 of the agent's conversation blob (HSI §5 provenance).
+    /// Populated from the KV store at merge time; None if the agent did not upload a conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_sha: Option<String>,
 }

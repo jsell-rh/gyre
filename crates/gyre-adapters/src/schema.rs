@@ -656,6 +656,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_workspace_state,
     gate_traces,
     trace_spans,
+    conversations,
+    turn_commit_links,
 );
 
 diesel::table! {
@@ -663,5 +665,30 @@ diesel::table! {
         user_id -> Text,
         workspace_id -> Text,
         last_seen_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    conversations (sha) {
+        sha -> Text,
+        agent_id -> Text,
+        workspace_id -> Text,
+        blob -> Nullable<Binary>,
+        file_path -> Nullable<Text>,
+        created_at -> BigInt,
+        tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    turn_commit_links (id) {
+        id -> Text,
+        agent_id -> Text,
+        turn_number -> Integer,
+        commit_sha -> Text,
+        files_changed -> Text,
+        conversation_sha -> Nullable<Text>,
+        timestamp -> BigInt,
+        tenant_id -> Text,
     }
 }

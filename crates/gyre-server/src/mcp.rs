@@ -254,6 +254,24 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "conversation_upload",
+                "description": "Upload the agent's full conversation blob for provenance linking (HSI §5). Call this just before agent.complete. The blob is base64-encoded zstd-compressed JSON. Max 10MB before base64 (configurable via GYRE_MAX_CONVERSATION_SIZE).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "blob": {
+                            "type": "string",
+                            "description": "Base64-encoded zstd-compressed conversation JSON"
+                        },
+                        "conversation_sha": {
+                            "type": "string",
+                            "description": "Expected SHA-256 of the raw compressed bytes (optional — server computes and verifies)"
+                        }
+                    },
+                    "required": ["blob"]
+                }
+            },
+            {
                 "name": "gyre_search",
                 "description": "Full-text search across tasks, agents, MRs, and specs. Returns matching entities ranked by relevance.",
                 "inputSchema": {
@@ -589,6 +607,102 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
         Ok(None) => tool_error(format!("Agent not found: {agent_id}")),
         Err(e) => tool_error(format!("Error: {e}")),
     }
+}
+
+/// Handle `conversation.upload` — store agent conversation blob and back-fill turn links.
+///
+/// Expects base64-encoded zstd-compressed bytes in `blob`.
+/// Derives workspace_id and tenant_id from the authenticated agent's JWT/identity.
+async fn handle_conversation_upload(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    // Max allowed compressed size (default 10MB).
+    let max_bytes: usize = std::env::var("GYRE_MAX_CONVERSATION_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10 * 1024 * 1024);
+
+    // Decode base64 blob.
+    let blob_b64 = match get_str(args, "blob") {
+        Some(s) => s,
+        None => return tool_error("missing required field: blob"),
+    };
+    let compressed = match B64.decode(blob_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return tool_error(format!("blob: invalid base64: {e}")),
+    };
+    if compressed.len() > max_bytes {
+        return tool_error(format!(
+            "blob exceeds max size of {} bytes (compressed)",
+            max_bytes
+        ));
+    }
+
+    // Compute SHA-256 of raw compressed bytes.
+    let mut hasher = Sha256::new();
+    hasher.update(&compressed);
+    let computed_sha = hex::encode(hasher.finalize());
+
+    // If caller provided a SHA, verify it matches.
+    if let Some(claimed_sha) = get_str(args, "conversation_sha") {
+        if claimed_sha != computed_sha {
+            return tool_error(format!(
+                "SHA-256 mismatch: provided {claimed_sha}, computed {computed_sha}"
+            ));
+        }
+    }
+
+    // Resolve agent to get workspace_id. Tenant comes from auth.
+    let agent_id = Id::new(&auth.agent_id);
+    let tenant_id = Id::new(&auth.tenant_id);
+
+    let agent = match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return tool_error(format!("Agent not found: {}", auth.agent_id)),
+        Err(e) => return tool_error(format!("Failed to lookup agent: {e}")),
+    };
+    let workspace_id = agent.workspace_id.clone();
+
+    // Store conversation blob.
+    let sha = match state
+        .conversations
+        .store(&agent_id, &workspace_id, &tenant_id, &compressed)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            // Non-fatal per spec: completion still succeeds.
+            tracing::warn!(
+                agent_id = %auth.agent_id,
+                error = %e,
+                "conversation.upload failed — conversation marked unavailable"
+            );
+            return tool_error(format!("conversation upload failed (non-fatal): {e}"));
+        }
+    };
+
+    // Back-fill turn links for this agent.
+    let backfilled = state
+        .conversations
+        .backfill_turn_links(&agent_id, &sha, &tenant_id)
+        .await
+        .unwrap_or(0);
+
+    // Persist SHA in KV store so merge_processor can populate MergeAttestation.conversation_sha.
+    let kv_key = format!("conv_sha:{}", auth.agent_id);
+    let _ = state
+        .kv_store
+        .kv_set("agent_provenance", &kv_key, sha.clone())
+        .await;
+
+    tool_result(format!(
+        "Conversation uploaded: sha={sha}, backfilled {backfilled} turn links"
+    ))
 }
 
 async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
@@ -981,6 +1095,7 @@ pub async fn mcp_handler(
                     | "gyre_record_activity"
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
+                    | "conversation_upload"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
                 return Json(JsonRpcResponse::err(
@@ -1051,6 +1166,7 @@ pub async fn mcp_handler(
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_search" => handle_search(&state, &args).await,
+                "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
