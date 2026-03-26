@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Workspace};
+use gyre_domain::{
+    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace,
+};
 use gyre_ports::{PersonaRepository, WorkspaceRepository};
 use std::sync::Arc;
 
@@ -25,6 +27,8 @@ struct WorkspaceRow {
     budget: Option<String>,
     max_repos: Option<i32>,
     max_agents_per_repo: Option<i32>,
+    trust_level: String,
+    llm_model: Option<String>,
     created_at: i64,
 }
 
@@ -44,6 +48,8 @@ impl WorkspaceRow {
             budget,
             max_repos: self.max_repos.map(|v| v as u32),
             max_agents_per_repo: self.max_agents_per_repo.map(|v| v as u32),
+            trust_level: TrustLevel::from_db_str(&self.trust_level),
+            llm_model: self.llm_model,
             created_at: self.created_at as u64,
         })
     }
@@ -60,6 +66,8 @@ struct NewWorkspaceRow<'a> {
     budget: Option<String>,
     max_repos: Option<i32>,
     max_agents_per_repo: Option<i32>,
+    trust_level: String,
+    llm_model: Option<String>,
     created_at: i64,
 }
 
@@ -71,6 +79,7 @@ impl WorkspaceRepository for PgStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let budget_json = w.budget.as_ref().map(serde_json::to_string).transpose()?;
+            let trust_level = w.trust_level.to_string();
             let row = NewWorkspaceRow {
                 id: w.id.as_str(),
                 tenant_id: w.tenant_id.as_str(),
@@ -80,6 +89,8 @@ impl WorkspaceRepository for PgStorage {
                 budget: budget_json,
                 max_repos: w.max_repos.map(|v| v as i32),
                 max_agents_per_repo: w.max_agents_per_repo.map(|v| v as i32),
+                trust_level: trust_level.clone(),
+                llm_model: w.llm_model.clone(),
                 created_at: w.created_at as i64,
             };
             diesel::insert_into(workspaces::table)
@@ -93,10 +104,29 @@ impl WorkspaceRepository for PgStorage {
                     workspaces::budget.eq(row.budget.as_deref()),
                     workspaces::max_repos.eq(row.max_repos),
                     workspaces::max_agents_per_repo.eq(row.max_agents_per_repo),
+                    workspaces::trust_level.eq(&trust_level),
+                    workspaces::llm_model.eq(w.llm_model.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("insert workspace")?;
             Ok(())
+        })
+        .await?
+    }
+
+    async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>> {
+        let pool = Arc::clone(&self.pool);
+        let tid = tenant_id.clone();
+        let slug = slug.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Workspace>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let result = workspaces::table
+                .filter(workspaces::tenant_id.eq(tid.as_str()))
+                .filter(workspaces::slug.eq(&slug))
+                .first::<WorkspaceRow>(&mut *conn)
+                .optional()
+                .context("find workspace by slug")?;
+            result.map(WorkspaceRow::into_workspace).transpose()
         })
         .await?
     }
@@ -150,6 +180,7 @@ impl WorkspaceRepository for PgStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let budget_json = w.budget.as_ref().map(serde_json::to_string).transpose()?;
+            let trust_level = w.trust_level.to_string();
             diesel::update(workspaces::table.find(w.id.as_str()))
                 .set((
                     workspaces::name.eq(&w.name),
@@ -158,6 +189,8 @@ impl WorkspaceRepository for PgStorage {
                     workspaces::budget.eq(budget_json.as_deref()),
                     workspaces::max_repos.eq(w.max_repos.map(|v| v as i32)),
                     workspaces::max_agents_per_repo.eq(w.max_agents_per_repo.map(|v| v as i32)),
+                    workspaces::trust_level.eq(&trust_level),
+                    workspaces::llm_model.eq(w.llm_model.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("update workspace")?;

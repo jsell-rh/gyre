@@ -1,3 +1,4 @@
+use crate::agent_tracking::LoopConfig;
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -47,7 +48,13 @@ pub struct Agent {
     /// How the agent should behave when the server is unreachable (BCP graceful degradation).
     #[serde(default)]
     pub disconnected_behavior: DisconnectedBehavior,
-    pub workspace_id: Option<gyre_common::Id>,
+    /// Workspace that governs this agent (ABAC boundary). Non-optional per M34 hierarchy enforcement.
+    pub workspace_id: Id,
+    /// Current session iteration count for the Ralph loop.
+    #[serde(default)]
+    pub iteration: u32,
+    /// Ralph loop configuration (when present, server manages session cycle).
+    pub loop_config: Option<LoopConfig>,
 }
 
 impl Agent {
@@ -63,7 +70,9 @@ impl Agent {
             last_heartbeat: None,
             spawned_by: None,
             disconnected_behavior: DisconnectedBehavior::default(),
-            workspace_id: None,
+            workspace_id: Id::new("default"),
+            iteration: 0,
+            loop_config: None,
         }
     }
 

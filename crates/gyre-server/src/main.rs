@@ -1,7 +1,8 @@
 use anyhow::Result;
 use gyre_server::{
-    audit_simulator, build_router, build_state, jobs, merge_processor, procfs_monitor,
-    register_default_compute_target, siem, spawn_budget_daily_reset, spawn_stale_agent_detector,
+    abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
+    procfs_monitor, register_default_compute_target, siem, spawn_budget_daily_reset,
+    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
     spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
@@ -38,6 +39,10 @@ async fn main() -> Result<()> {
 
     let state = build_state(&auth_token, &base_url, jwt_config);
 
+    // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
+    abac_middleware::init_resolver();
+    abac_middleware::seed_builtin_policies(&state).await;
+
     // M25: Auto-register default container compute target if Docker/Podman is available.
     register_default_compute_target(&state).await;
 
@@ -47,6 +52,7 @@ async fn main() -> Result<()> {
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
+    spawn_presence_eviction(state.clone());
     merge_processor::spawn_merge_processor(state.clone());
     siem::spawn_siem_forwarder(state.clone());
     // Real procfs-based agent monitoring (replaces the synthetic simulator).
@@ -54,6 +60,7 @@ async fn main() -> Result<()> {
     procfs_monitor::spawn_procfs_monitor(state.clone());
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
+    spawn_llm_rate_limiter_cleanup(state.clone());
 
     let app = build_router(state);
 

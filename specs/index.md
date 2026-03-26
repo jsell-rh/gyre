@@ -22,6 +22,8 @@ What Gyre does - the product.
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
 | ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
+| Hierarchy Enforcement | [`system/hierarchy-enforcement.md`](system/hierarchy-enforcement.md) | Making the ownership hierarchy load-bearing: Tenant entity, non-optional workspace_id, ABAC middleware integration, tenant filtering, legacy cleanup |
+| Unified Message Bus | [`system/message-bus.md`](system/message-bus.md) | One signed envelope for all inter-component communication: three-tier model (directed/event/telemetry), server-attested signing, workspace-scoped routing, ack-based delivery |
 | Design Principles | [`system/design-principles.md`](system/design-principles.md) | Core invariants that govern all decisions |
 | Source Control | [`system/source-control.md`](system/source-control.md) | Built-in git forge, MRs, merge queue, jj evaluation |
 | Forge Advantages | [`system/forge-advantages.md`](system/forge-advantages.md) | 8 capabilities only possible with a forge-native agent platform |
@@ -43,7 +45,9 @@ What Gyre does - the product.
 | Meta-Spec Reconciliation | [`system/meta-spec-reconciliation.md`](system/meta-spec-reconciliation.md) | Safe iteration on personas, principles, and standards: versioned meta-specs, workspace-scoped binding, provenance tracking, Kubernetes-style reconciliation loop, rollout policies, preview mode (fast iteration loop) |
 | Realized System Model | [`system/realized-model.md`](system/realized-model.md) | Language-agnostic code knowledge graph: structural extraction on push, spec linkage, architectural timeline, concept views, risk metrics, narrative generation |
 | System Explorer | [`system/system-explorer.md`](system/system-explorer.md) | GT-inspired live architecture viewer: moldable views per entity, inline spec editing, progressive preview (instant/fast/thorough), ghost overlays, flow traces, conversational exploration |
-| UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | Journey-oriented navigation replacing entity-centric sidebar: Inbox (action queue), Briefing (narrative), Explorer (architecture), Meta-specs (preview loop), scoped to tenant/workspace/repo |
+| UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | (Superseded by Human-System Interface) Journey-oriented navigation |
+| **Human-System Interface** | [`system/human-system-interface.md`](system/human-system-interface.md) | **How humans interact with autonomous development:** trust gradient, progressive Explorer (C4 + LLM views), agent interrogation, conversation-to-code provenance, scoped chat, cross-workspace spec links, completion summaries |
+| UI Layout & Interactions | [`system/ui-layout.md`](system/ui-layout.md) | Spatial structure, view specification grammar (data/layout/encoding), interaction patterns (scope transitions, drill-down, inline chat), rendering technology (SVG + ELK/dagre) |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
@@ -53,6 +57,7 @@ How Gyre gets built - process and standards for the agent team.
 | Spec | Path | Summary |
 |---|---|---|
 | Architecture & Standards | [`development/architecture.md`](development/architecture.md) | Rust, Svelte, DDD, hexagonal, storage, API |
+| API Design Conventions | [`development/api-conventions.md`](development/api-conventions.md) | URL structure, naming rules, parameter conventions, auth contract, deprecation protocol, mechanical enforcement |
 | Database & Migrations | [`development/database-migrations.md`](development/database-migrations.md) | Diesel ORM, paired up/down migrations, multi-tenant row isolation, startup behavior |
 | Ralph Loops (superseded) | [`development/ralph-loops.md`](development/ralph-loops.md) | Superseded by [`system/ralph-loop.md`](system/ralph-loop.md) |
 | Agent Experience (Day One) | [`development/agent-experience.md`](development/agent-experience.md) | Testing, observability, repo as system of record, cache hits, entropy management |
@@ -116,6 +121,9 @@ How Gyre gets built - process and standards for the agent team.
 | M30: Knowledge Graph | [`milestones/m30-knowledge-graph.md`](milestones/m30-knowledge-graph.md) | Live knowledge graph extracted from source code: `GraphNode`/`GraphEdge` domain types, `RustExtractor` (syn-based AST), 13 graph API endpoints, push-triggered automatic extraction (M30b) |
 | M31: UI Journeys | [`milestones/m31-ui-journeys.md`](milestones/m31-ui-journeys.md) | Intent-centric dashboard: Inbox (action queue), Briefing (narrative digest), System Explorer Canvas (MoldableView SVG graph), navigation restructure, keyboard shortcuts `i`/`b` |
 | M32: Meta-Spec Reconciliation | [`milestones/m32-meta-spec-reconciliation.md`](milestones/m32-meta-spec-reconciliation.md) | Spec `kind` field (meta:persona/principle/standard/process), workspace meta-spec-set bindings, blast-radius endpoint, `meta_spec_set_sha` in spawn provenance, MetaSpecs UI |
+| M33: Project Removal | _(inline — see M34 hierarchy)_ | Project entity removed; Workspace becomes the primary grouping entity. All APIs migrated to use `workspace_id` directly. |
+| M34: Hierarchy Enforcement | [`milestones/m34-hierarchy-enforcement.md`](milestones/m34-hierarchy-enforcement.md) | Load-bearing ownership hierarchy: Tenant entity, non-optional workspace_id, ABAC middleware, tenant isolation, auth gap fixes, URL restructure |
+| M35: Unified Message Bus | (see [`system/message-bus.md`](system/message-bus.md)) | Signed message envelope replacing REST inbox + domain events + activity store. Depends on M34 Slice 3. |
 
 ## Open Questions
 

@@ -2,21 +2,8 @@
 // Matches migrations/2024-01-01-000001_initial_schema/up.sql
 
 diesel::table! {
-    projects (id) {
-        id -> Text,
-        name -> Text,
-        description -> Nullable<Text>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-        tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
-    }
-}
-
-diesel::table! {
     repositories (id) {
         id -> Text,
-        project_id -> Text,
         name -> Text,
         path -> Text,
         default_branch -> Text,
@@ -26,7 +13,7 @@ diesel::table! {
         mirror_interval_secs -> Nullable<BigInt>,
         last_mirror_sync -> Nullable<BigInt>,
         tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
     }
 }
 
@@ -42,7 +29,7 @@ diesel::table! {
         last_heartbeat -> Nullable<BigInt>,
         tenant_id -> Text,
         spawned_by -> Nullable<Text>,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
     }
 }
 
@@ -61,8 +48,9 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         tenant_id -> Text,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        repo_id -> Text,
     }
 }
 
@@ -85,7 +73,7 @@ diesel::table! {
         tenant_id -> Text,
         depends_on -> Text,
         atomic_group -> Nullable<Text>,
-        workspace_id -> Nullable<Text>,
+        workspace_id -> Text,
     }
 }
 
@@ -144,7 +132,6 @@ diesel::table! {
         branch -> Text,
         timestamp -> BigInt,
         task_id -> Nullable<Text>,
-        ralph_step -> Nullable<Text>,
         spawned_by_user_id -> Nullable<Text>,
         parent_agent_id -> Nullable<Text>,
         model_context -> Nullable<Text>,
@@ -264,6 +251,8 @@ diesel::table! {
         budget -> Nullable<Text>,
         max_repos -> Nullable<Integer>,
         max_agents_per_repo -> Nullable<Integer>,
+        trust_level -> Text,
+        llm_model -> Nullable<Text>,
         created_at -> BigInt,
     }
 }
@@ -319,17 +308,18 @@ diesel::table! {
 diesel::table! {
     notifications (id) {
         id -> Text,
+        workspace_id -> Text,
         user_id -> Text,
         notification_type -> Text,
+        priority -> Integer,
         title -> Text,
-        body -> Text,
-        entity_type -> Nullable<Text>,
-        entity_id -> Nullable<Text>,
-        priority -> Text,
-        action_url -> Nullable<Text>,
-        read -> Integer,
-        read_at -> Nullable<BigInt>,
+        body -> Nullable<Text>,
+        entity_ref -> Nullable<Text>,
+        repo_id -> Nullable<Text>,
+        resolved_at -> Nullable<BigInt>,
+        dismissed_at -> Nullable<BigInt>,
         created_at -> BigInt,
+        tenant_id -> Text,
     }
 }
 
@@ -347,6 +337,7 @@ diesel::table! {
         resource_types -> Text,
         enabled -> Integer,
         built_in -> Integer,
+        immutable -> Integer,
         created_by -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,
@@ -530,8 +521,96 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    tenants (id) {
+        id -> Text,
+        name -> Text,
+        slug -> Text,
+        oidc_issuer -> Nullable<Text>,
+        budget -> Nullable<Text>,
+        max_workspaces -> Nullable<Integer>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    messages (id) {
+        id -> Text,
+        tenant_id -> Text,
+        from_type -> Text,
+        from_id -> Nullable<Text>,
+        workspace_id -> Text,
+        to_type -> Text,
+        to_id -> Nullable<Text>,
+        kind -> Text,
+        payload -> Nullable<Text>,
+        created_at -> BigInt,
+        signature -> Nullable<Text>,
+        key_id -> Nullable<Text>,
+        acknowledged -> Integer,
+        ack_reason -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    meta_spec_sets (workspace_id) {
+        workspace_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    budget_call_records (id) {
+        id -> Text,
+        tenant_id -> Text,
+        workspace_id -> Text,
+        repo_id -> Nullable<Text>,
+        agent_id -> Nullable<Text>,
+        task_id -> Nullable<Text>,
+        usage_type -> Text,
+        input_tokens -> BigInt,
+        output_tokens -> BigInt,
+        cost_usd -> Double,
+        model -> Text,
+        timestamp -> BigInt,
+    }
+}
+
+diesel::table! {
+    gate_traces (id) {
+        id -> Text,
+        mr_id -> Text,
+        gate_run_id -> Text,
+        commit_sha -> Text,
+        captured_at -> BigInt,
+        tenant_id -> Text,
+        permanent -> Integer,
+    }
+}
+
+diesel::table! {
+    trace_spans (span_id, gate_trace_id) {
+        span_id -> Text,
+        gate_trace_id -> Text,
+        parent_span_id -> Nullable<Text>,
+        operation_name -> Text,
+        service_name -> Text,
+        kind -> Text,
+        start_time -> BigInt,
+        duration_us -> BigInt,
+        attributes -> Text,
+        input_summary -> Nullable<Text>,
+        output_summary -> Nullable<Text>,
+        payload_blob -> Nullable<Binary>,
+        status -> Text,
+        graph_node_id -> Nullable<Text>,
+    }
+}
+
+diesel::joinable!(trace_spans -> gate_traces (gate_trace_id));
+
 diesel::allow_tables_to_appear_in_same_query!(
-    projects,
     repositories,
     agents,
     tasks,
@@ -570,4 +649,46 @@ diesel::allow_tables_to_appear_in_same_query!(
     container_audit_records,
     spec_ledger_entries,
     spec_approval_events,
+    tenants,
+    messages,
+    meta_spec_sets,
+    budget_call_records,
+    user_workspace_state,
+    gate_traces,
+    trace_spans,
+    conversations,
+    turn_commit_links,
 );
+
+diesel::table! {
+    user_workspace_state (user_id, workspace_id) {
+        user_id -> Text,
+        workspace_id -> Text,
+        last_seen_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    conversations (sha) {
+        sha -> Text,
+        agent_id -> Text,
+        workspace_id -> Text,
+        blob -> Nullable<Binary>,
+        file_path -> Nullable<Text>,
+        created_at -> BigInt,
+        tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    turn_commit_links (id) {
+        id -> Text,
+        agent_id -> Text,
+        turn_number -> Integer,
+        commit_sha -> Text,
+        files_changed -> Text,
+        conversation_sha -> Nullable<Text>,
+        timestamp -> BigInt,
+        tenant_id -> Text,
+    }
+}

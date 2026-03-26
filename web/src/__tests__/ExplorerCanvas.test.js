@@ -3,12 +3,24 @@ import { render } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 import MoldableView from '../lib/MoldableView.svelte';
 
-// Top-level mock so vitest hoisting works correctly
+// Top-level mocks so vitest hoisting works correctly
 vi.mock('../lib/api.js', () => ({
   api: {
     repoGraphTimeline: vi.fn().mockResolvedValue([]),
+    repoGraphRisks: vi.fn().mockResolvedValue([]),
+    repoGraphNode: vi.fn().mockResolvedValue({ node: null, edges: [] }),
   },
 }));
+
+vi.mock('../lib/layout-engines.js', async () => {
+  // Provide a synchronous mock so tests don't need to await async ELK/d3
+  const { columnLayout } = await vi.importActual('../lib/layout-engines.js');
+  return {
+    columnLayout,
+    computeLayout: vi.fn().mockImplementation(async (_eng, nodes) => columnLayout(nodes)),
+  };
+});
+
 import { api } from '../lib/api.js';
 
 const SAMPLE_NODES = [
@@ -61,21 +73,11 @@ const SAMPLE_NODES = [
 ];
 
 const SAMPLE_EDGES = [
-  {
-    id: 'edge-1',
-    source_id: 'node-1',
-    target_id: 'node-2',
-    edge_type: 'contains',
-  },
-  {
-    id: 'edge-2',
-    source_id: 'node-2',
-    target_id: 'node-3',
-    edge_type: 'implements',
-  },
+  { id: 'edge-1', source_id: 'node-1', target_id: 'node-2', edge_type: 'contains' },
+  { id: 'edge-2', source_id: 'node-2', target_id: 'node-3', edge_type: 'implements' },
 ];
 
-describe('ExplorerCanvas', () => {
+describe('ExplorerCanvas — core rendering', () => {
   it('renders without throwing', () => {
     expect(() => render(ExplorerCanvas)).not.toThrow();
   });
@@ -86,25 +88,19 @@ describe('ExplorerCanvas', () => {
   });
 
   it('renders SVG canvas with nodes', () => {
-    const { container } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const svg = container.querySelector('svg');
     expect(svg).toBeTruthy();
   });
 
   it('renders node count in toolbar', () => {
-    const { container } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     expect(container.innerHTML).toContain('3 nodes');
     expect(container.innerHTML).toContain('2 edges');
   });
 
   it('renders all node groups', () => {
-    const { container } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const nodeGroups = container.querySelectorAll('.graph-node');
     expect(nodeGroups.length).toBe(3);
   });
@@ -116,39 +112,97 @@ describe('ExplorerCanvas', () => {
     });
     const firstNode = container.querySelector('.graph-node');
     expect(firstNode).toBeTruthy();
-    // SVG <g> elements don't have .click() in jsdom — dispatch a click event
     firstNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(onSelectNode).toHaveBeenCalledWith(expect.objectContaining({ id: expect.any(String) }));
   });
 
-  it('shows reset button when nodes are present', () => {
-    const { getByText } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+  it('dispatches ViewEvent via onViewEvent prop on node click', async () => {
+    const onViewEvent = vi.fn();
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, onViewEvent },
     });
+    const firstNode = container.querySelector('.graph-node');
+    firstNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onViewEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'click', entity_type: 'node', entity_id: expect.any(String) })
+    );
+  });
+
+  it('shows reset button when nodes are present', () => {
+    const { getByText } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     expect(getByText('Reset')).toBeTruthy();
   });
 
   it('shows legend items', () => {
-    const { container } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     expect(container.innerHTML).toContain('Package');
     expect(container.innerHTML).toContain('Type');
     expect(container.innerHTML).toContain('Interface');
     expect(container.innerHTML).toContain('Endpoint');
   });
+});
 
-  it('shows Spec Linkage toggle button', () => {
-    const { getByText } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
+describe('ExplorerCanvas — layout engine switcher', () => {
+  it('shows layout switcher buttons', () => {
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
+    expect(container.innerHTML).toContain('Column');
+    expect(container.innerHTML).toContain('Force');
+    expect(container.innerHTML).toContain('Hierarchical');
+    expect(container.innerHTML).toContain('Layered');
+  });
+
+  it('Column layout is active by default', () => {
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
+    const activeBtn = container.querySelector('.layout-btn.active');
+    expect(activeBtn?.textContent?.trim()).toBe('Column');
+  });
+
+  it('switching to Force layout marks Force button active', async () => {
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
+    const forceBtn = Array.from(container.querySelectorAll('.layout-btn'))
+      .find(el => el.textContent.trim() === 'Force');
+    expect(forceBtn).toBeTruthy();
+    forceBtn.click();
+    await new Promise(r => setTimeout(r, 10));
+    expect(forceBtn.classList.contains('active')).toBe(true);
+  });
+
+  it('switching to Hierarchical layout marks Hierarchical button active', async () => {
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
+    const hierBtn = Array.from(container.querySelectorAll('.layout-btn'))
+      .find(el => el.textContent.trim() === 'Hierarchical');
+    hierBtn.click();
+    await new Promise(r => setTimeout(r, 10));
+    expect(hierBtn.classList.contains('active')).toBe(true);
+  });
+
+  it('switching to Layered layout marks Layered button active', async () => {
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
+    const layeredBtn = Array.from(container.querySelectorAll('.layout-btn'))
+      .find(el => el.textContent.trim() === 'Layered');
+    layeredBtn.click();
+    await new Promise(r => setTimeout(r, 10));
+    expect(layeredBtn.classList.contains('active')).toBe(true);
+  });
+
+  it('viewSpec.layout sets initial layout engine', () => {
+    const viewSpec = { layout: 'hierarchical', data: {}, encoding: {} };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, viewSpec },
     });
+    const activeBtn = container.querySelector('.layout-btn.active');
+    expect(activeBtn?.textContent?.trim()).toBe('Hierarchical');
+  });
+});
+
+describe('ExplorerCanvas — spec linkage overlay', () => {
+  it('shows Spec Linkage toggle button', () => {
+    const { getByText } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     expect(getByText('Spec Linkage')).toBeTruthy();
   });
 
   it('does not show spec legend by default', () => {
-    const { container } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(ExplorerCanvas, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     expect(container.querySelector('.spec-legend')).toBeNull();
   });
 
@@ -171,7 +225,6 @@ describe('ExplorerCanvas', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: true },
     });
-    // 2 of 3 nodes have spec_path
     expect(container.innerHTML).toContain('2 specced');
     expect(container.innerHTML).toContain('1 unspecced');
   });
@@ -198,19 +251,100 @@ describe('ExplorerCanvas', () => {
     });
     expect(container.innerHTML).toContain('Unspecced only');
   });
+});
 
-  it('does not show Unspecced only pill when spec linkage is off', () => {
-    const { container } = render(ExplorerCanvas, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, showSpecLinkage: false },
-    });
-    expect(container.innerHTML).not.toContain('Unspecced only');
+describe('ExplorerCanvas — performance thresholds', () => {
+  function makeNodes(count, visibility = 'public') {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `node-${i}`,
+      node_type: 'module',
+      name: `Module${i}`,
+      visibility: i % 2 === 0 ? 'public' : visibility,
+    }));
+  }
+
+  it('does NOT show public-only banner when node count <= 500', () => {
+    const { container } = render(ExplorerCanvas, { props: { nodes: makeNodes(100), edges: [] } });
+    expect(container.innerHTML).not.toContain('private nodes hidden');
   });
 
-  it('shows spec_path as clickable button in detail panel', async () => {
+  it('shows public-only banner when node count > 500 and <= 1000', () => {
+    const nodes = makeNodes(600, 'private');
+    const { container } = render(ExplorerCanvas, { props: { nodes, edges: [] } });
+    expect(container.innerHTML).toContain('private nodes hidden');
+    expect(container.innerHTML).toContain('Show All');
+  });
+
+  it('shows list fallback warning when node count > 1000', () => {
+    const nodes = makeNodes(1001);
+    const { container } = render(ExplorerCanvas, { props: { nodes, edges: [] } });
+    expect(container.innerHTML).toContain('Graph too large');
+    expect(container.querySelector('.list-table')).toBeTruthy();
+  });
+
+  it('list fallback shows node rows', () => {
+    const nodes = makeNodes(1001);
+    const { container } = render(ExplorerCanvas, { props: { nodes, edges: [] } });
+    const rows = container.querySelectorAll('.list-row');
+    expect(rows.length).toBeGreaterThan(0);
+  });
+});
+
+describe('ExplorerCanvas — viewSpec grammar', () => {
+  it('shows explanation banner when viewSpec.explanation is set', () => {
+    const viewSpec = {
+      layout: 'column',
+      explanation: 'Authentication flows through require_auth_middleware',
+      data: {},
+      encoding: {},
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, viewSpec },
+    });
+    expect(container.innerHTML).toContain('Authentication flows through require_auth_middleware');
+  });
+
+  it('applies node_type filter from viewSpec.data.node_types', async () => {
+    const viewSpec = { layout: 'column', data: { node_types: ['module'] }, encoding: {} };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, viewSpec },
+    });
+    // Only module nodes should be visible (1 of 3)
+    expect(container.innerHTML).toContain('1 nodes');
+  });
+
+  it('applies highlight from viewSpec.highlight.spec_path', () => {
+    const viewSpec = {
+      layout: 'column',
+      highlight: { spec_path: 'specs/system/platform-model.md' },
+      data: {},
+      encoding: {},
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, viewSpec },
+    });
+    // Nodes with that spec_path should have spec-highlighted class
+    const highlighted = container.querySelector('.graph-node.spec-highlighted');
+    expect(highlighted).toBeTruthy();
+  });
+
+  it('shows annotations from viewSpec.annotations', () => {
+    const viewSpec = {
+      layout: 'column',
+      annotations: [{ node_name: 'gyre_domain', text: 'Entry point' }],
+      data: {},
+      encoding: {},
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, viewSpec },
+    });
+    expect(container.innerHTML).toContain('Entry point');
+  });
+
+  it('shows spec-link button in detail panel', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
     });
-    // Click the first node (which has spec_path)
     const firstNode = container.querySelector('.graph-node');
     firstNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await new Promise(r => setTimeout(r, 0));
@@ -225,40 +359,30 @@ describe('MoldableView', () => {
   });
 
   it('shows graph view by default', () => {
-    const { container } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
-    // Graph tab should be active
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const activeTab = container.querySelector('.view-tab.active');
     expect(activeTab?.textContent?.trim()).toContain('Graph');
   });
 
   it('renders all three view tabs', () => {
-    const { getByRole } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const tabs = document.querySelectorAll('[role="tab"]');
     expect(tabs.length).toBe(3);
   });
 
   it('switches to list view', async () => {
-    const { container } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const listTab = Array.from(container.querySelectorAll('.view-tab'))
       .find(el => el.textContent.includes('List'));
     expect(listTab).toBeTruthy();
     listTab.click();
-    // After clicking list, a table should appear
     await new Promise(r => setTimeout(r, 0));
     const table = container.querySelector('.list-table');
     expect(table).toBeTruthy();
   });
 
   it('switches to timeline view and shows Architectural Timeline heading', async () => {
-    const { container } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
       .find(el => el.textContent.includes('Timeline'));
     expect(timelineTab).toBeTruthy();
@@ -268,14 +392,11 @@ describe('MoldableView', () => {
   });
 
   it('timeline view shows EmptyState when no repoId', async () => {
-    const { container } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES },
-    });
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES } });
     const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
       .find(el => el.textContent.includes('Timeline'));
     timelineTab.click();
     await new Promise(r => setTimeout(r, 0));
-    // No repoId -> should show empty state
     expect(container.innerHTML).toContain('No architectural changes recorded yet');
   });
 
@@ -286,17 +407,13 @@ describe('MoldableView', () => {
     ];
     api.repoGraphTimeline.mockResolvedValueOnce(mockDeltas);
 
-    const { container } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' },
-    });
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' } });
     const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
       .find(el => el.textContent.includes('Timeline'));
     timelineTab.click();
     await new Promise(r => setTimeout(r, 50));
-    // Scrubber should be present
     const scrubber = container.querySelector('.scrubber-input');
     expect(scrubber).toBeTruthy();
-    // Now button should be present
     const nowBtn = container.querySelector('.now-btn');
     expect(nowBtn).toBeTruthy();
   });
@@ -308,9 +425,7 @@ describe('MoldableView', () => {
     ];
     api.repoGraphTimeline.mockResolvedValueOnce(mockDeltas);
 
-    const { container } = render(MoldableView, {
-      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' },
-    });
+    const { container } = render(MoldableView, { props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' } });
     const timelineTab = Array.from(container.querySelectorAll('.view-tab'))
       .find(el => el.textContent.includes('Timeline'));
     timelineTab.click();

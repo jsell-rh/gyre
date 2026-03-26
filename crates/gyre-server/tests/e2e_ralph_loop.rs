@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the complete agent development cycle:
 //!   1. Start server with real git operations
-//!   2. Create project + repo via API
+//!   2. Create repo via API
 //!   3. Create task via API
 //!   4. Spawn agent via /api/v1/agents/spawn (gets token + worktree)
 //!   5. Agent clones repo via smart HTTP (Bearer token auth)
@@ -11,7 +11,7 @@
 //!   8. MR enqueued -> merge queue processes it
 //!   9. Verify: MR merged, commit on target branch
 
-use gyre_server::{build_router, build_state, merge_processor};
+use gyre_server::{abac_middleware, build_router, build_state, merge_processor};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -51,6 +51,7 @@ async fn full_ralph_loop_via_gyre() {
     let auth_token = "e2e-ralph-token";
 
     let state = build_state(auth_token, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);
@@ -60,17 +61,32 @@ async fn full_ralph_loop_via_gyre() {
     let api = format!("{base_url}/api/v1");
     let auth_hdr = format!("Bearer {auth_token}");
 
-    // -- 2. Create repo (path computed server-side from GYRE_REPOS_PATH) --
-    // Use a UUID-derived project_id so each run uses a fresh bare repo on disk.
-    let project_id = format!(
-        "e2e-project-{}",
+    // -- 2. Create workspace + repo (workspace needed for git URL slug resolution) --
+    let ws_slug = format!(
+        "e2e-ws-{}",
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
+    let workspace: serde_json::Value = client
+        .post(format!("{api}/workspaces"))
+        .header("Authorization", &auth_hdr)
+        .json(&serde_json::json!({
+            "tenant_id": "default",
+            "name": "E2E Workspace",
+            "slug": ws_slug,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let workspace_id = workspace["id"].as_str().unwrap().to_string();
+
     let repo: serde_json::Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "project_id": project_id,
+            "workspace_id": workspace_id,
             "name": "gyre-e2e",
         }))
         .send()

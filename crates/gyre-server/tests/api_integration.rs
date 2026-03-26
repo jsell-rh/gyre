@@ -6,7 +6,6 @@
 //!
 //! Coverage:
 //!   - /health, /healthz, /readyz, /metrics, /api/v1/version (public)
-//!   - Projects CRUD
 //!   - Repos CRUD
 //!   - Agents (create, get, list, status, heartbeat, messages, logs)
 //!   - Tasks CRUD + status transitions
@@ -30,7 +29,7 @@
 //!   - Spec approvals (approve, list, revoke)
 //!   - Auth: missing/invalid token → 401
 
-use gyre_server::{build_router, build_state};
+use gyre_server::{abac_middleware, build_router, build_state};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -50,6 +49,7 @@ impl Ctx {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = build_state(TOKEN, &base_url, None);
+        abac_middleware::seed_builtin_policies(&state).await;
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -185,7 +185,7 @@ async fn version_is_public() {
 #[tokio::test]
 async fn missing_token_returns_401() {
     let ctx = Ctx::new().await;
-    let resp = ctx.get_no_auth("/api/v1/projects").await;
+    let resp = ctx.get_no_auth("/api/v1/repos").await;
     assert_eq!(resp.status(), 401);
 }
 
@@ -194,7 +194,7 @@ async fn invalid_token_returns_401() {
     let ctx = Ctx::new().await;
     let resp = ctx
         .client
-        .get(format!("{}/api/v1/projects", ctx.base))
+        .get(format!("{}/api/v1/repos", ctx.base))
         .header("Authorization", "Bearer wrong-token")
         .send()
         .await
@@ -206,83 +206,21 @@ async fn invalid_token_returns_401() {
 async fn post_without_token_returns_401() {
     let ctx = Ctx::new().await;
     let resp = ctx
-        .post_no_auth("/api/v1/projects", json!({"name": "x"}))
+        .post_no_auth(
+            "/api/v1/repos",
+            json!({"workspace_id": "ws-1", "name": "x"}),
+        )
         .await;
     assert_eq!(resp.status(), 401);
 }
 
-// ── 3. Projects CRUD ──────────────────────────────────────────────────────────
+// ── 3. Repos CRUD ─────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn projects_crud() {
-    let ctx = Ctx::new().await;
-
-    // Create
-    let resp = ctx
-        .post(
-            "/api/v1/projects",
-            json!({"name": "proj-a", "description": "test"}),
-        )
-        .await;
-    assert_eq!(resp.status(), 201);
-    let project: serde_json::Value = resp.json().await.unwrap();
-    let project_id = project["id"].as_str().unwrap().to_string();
-    assert_eq!(project["name"], "proj-a");
-
-    // Get
-    let got = ctx
-        .get_json(&format!("/api/v1/projects/{project_id}"))
-        .await;
-    assert_eq!(got["id"], project_id);
-    assert_eq!(got["name"], "proj-a");
-
-    // List
-    let list = ctx.get_json("/api/v1/projects").await;
-    let arr = list.as_array().unwrap();
-    assert!(arr.iter().any(|p| p["id"] == project_id));
-
-    // Update
-    let updated = ctx
-        .put_json(
-            &format!("/api/v1/projects/{project_id}"),
-            json!({"name": "proj-a-renamed", "description": "updated"}),
-        )
-        .await;
-    assert_eq!(updated["name"], "proj-a-renamed");
-
-    // Delete
-    let del_resp = ctx.delete(&format!("/api/v1/projects/{project_id}")).await;
-    assert!(del_resp.status().is_success());
-
-    // Get after delete → 404
-    let resp404 = ctx.get(&format!("/api/v1/projects/{project_id}")).await;
-    assert_eq!(resp404.status(), 404);
-}
-
-#[tokio::test]
-async fn get_nonexistent_project_returns_404() {
-    let ctx = Ctx::new().await;
-    let resp = ctx.get("/api/v1/projects/no-such-id").await;
-    assert_eq!(resp.status(), 404);
-}
-
-// ── 4. Repos CRUD ─────────────────────────────────────────────────────────────
-
-async fn create_project(ctx: &Ctx) -> String {
-    let j = ctx
-        .post_json(
-            "/api/v1/projects",
-            json!({"name": "test-project", "description": ""}),
-        )
-        .await;
-    j["id"].as_str().unwrap().to_string()
-}
-
-async fn create_repo(ctx: &Ctx, project_id: &str) -> String {
+async fn create_repo(ctx: &Ctx) -> String {
     let j = ctx
         .post_json(
             "/api/v1/repos",
-            json!({"project_id": project_id, "name": "test-repo"}),
+            json!({"workspace_id": "ws-1", "name": "test-repo"}),
         )
         .await;
     j["id"].as_str().unwrap().to_string()
@@ -291,12 +229,11 @@ async fn create_repo(ctx: &Ctx, project_id: &str) -> String {
 #[tokio::test]
 async fn repos_create_and_get() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
 
     let resp = ctx
         .post(
             "/api/v1/repos",
-            json!({"project_id": proj_id, "name": "myrepo"}),
+            json!({"workspace_id": "ws-1", "name": "myrepo"}),
         )
         .await;
     assert_eq!(resp.status(), 201);
@@ -309,14 +246,11 @@ async fn repos_create_and_get() {
 }
 
 #[tokio::test]
-async fn repos_list_by_project() {
+async fn repos_list() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    create_repo(&ctx, &proj_id).await;
+    create_repo(&ctx).await;
 
-    let list = ctx
-        .get_json(&format!("/api/v1/repos?project_id={proj_id}"))
-        .await;
+    let list = ctx.get_json("/api/v1/repos").await;
     let arr = list.as_array().unwrap();
     assert!(!arr.is_empty());
 }
@@ -324,8 +258,7 @@ async fn repos_list_by_project() {
 #[tokio::test]
 async fn repos_branches_empty_on_new_repo() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // Branches list: empty (no real git repo on disk)
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/branches")).await;
@@ -343,8 +276,7 @@ async fn repos_get_nonexistent_returns_404() {
 #[tokio::test]
 async fn repos_push_gates_get_and_set() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // Get (should return empty or defaults)
     let resp = ctx
@@ -435,20 +367,29 @@ async fn agent_messages_send_and_receive() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
 
-    // Send a message to the agent (fields: from, content, message_type)
+    // Send via new unified send endpoint (workspace-scoped).
+    // The agent was created with workspace_id="default", so use that.
     let resp = ctx
         .post(
-            &format!("/api/v1/agents/{agent_id}/messages"),
-            json!({"from": "test-sender", "content": {"text": "hello"}}),
+            "/api/v1/workspaces/default/messages",
+            json!({
+                "to": {"agent": agent_id},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-1"}
+            }),
         )
         .await;
-    assert!(resp.status().is_success());
+    assert!(
+        resp.status().is_success(),
+        "send returned: {}",
+        resp.status()
+    );
 
-    // Poll messages
+    // Poll messages via cursor-based GET (non-destructive).
     let msgs = ctx
-        .get_json(&format!("/api/v1/agents/{agent_id}/messages"))
+        .get_json(&format!("/api/v1/agents/{agent_id}/messages?after_ts=0"))
         .await;
-    assert!(msgs.is_array() || msgs.is_object());
+    assert!(msgs.is_array());
 }
 
 #[tokio::test]
@@ -646,8 +587,7 @@ async fn create_mr(ctx: &Ctx, repo_id: &str) -> String {
 #[tokio::test]
 async fn merge_requests_create_and_get() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     let resp = ctx
         .post(
@@ -676,8 +616,7 @@ async fn merge_requests_create_and_get() {
 #[tokio::test]
 async fn merge_requests_list_and_filter() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     create_mr(&ctx, &repo_id).await;
 
     let list = ctx.get_json("/api/v1/merge-requests").await;
@@ -694,8 +633,7 @@ async fn merge_requests_list_and_filter() {
 #[tokio::test]
 async fn merge_requests_comments_and_reviews() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let mr_id = create_mr(&ctx, &repo_id).await;
 
     // Add comment
@@ -735,8 +673,7 @@ async fn merge_requests_comments_and_reviews() {
 #[tokio::test]
 async fn merge_request_status_transition() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let mr_id = create_mr(&ctx, &repo_id).await;
 
     // Transition to approved
@@ -757,8 +694,7 @@ async fn merge_request_status_transition() {
 #[tokio::test]
 async fn merge_request_diff_endpoint() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let mr_id = create_mr(&ctx, &repo_id).await;
 
     // Diff: no real git repo, returns empty or error but should not 401
@@ -773,8 +709,7 @@ async fn merge_request_diff_endpoint() {
 #[tokio::test]
 async fn merge_queue_enqueue_list_cancel() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let mr_id = create_mr(&ctx, &repo_id).await;
 
     // Enqueue
@@ -809,8 +744,7 @@ async fn merge_queue_enqueue_list_cancel() {
 #[tokio::test]
 async fn quality_gates_create_list_delete() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // Create gate (gate_type uses snake_case; name field is required)
     let gate_resp = ctx
@@ -1181,16 +1115,15 @@ async fn network_peers_register_list_delete() {
 #[tokio::test]
 async fn compose_apply_status_teardown() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
-    // Apply a compose spec (requires version, project_id, repo_id, agents)
+    // Apply a compose spec (requires version, workspace_id, repo_id, agents)
     let resp = ctx
         .post(
             "/api/v1/compose/apply",
             json!({
                 "version": "1",
-                "project_id": proj_id,
+                "workspace_id": "ws-1",
                 "repo_id": repo_id,
                 "agents": [
                     {
@@ -1231,8 +1164,7 @@ async fn compose_apply_status_teardown() {
 #[tokio::test]
 async fn worktrees_create_list_delete() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let agent_id = create_agent(&ctx).await;
 
     // Create worktree
@@ -1269,8 +1201,7 @@ async fn worktrees_create_list_delete() {
 #[tokio::test]
 async fn agent_commits_record_and_list() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let agent_id = create_agent(&ctx).await;
 
     // Record commit
@@ -1301,8 +1232,7 @@ async fn agent_commits_record_and_list() {
 #[tokio::test]
 async fn code_awareness_endpoints() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // Blame (no real git, returns error or empty)
     let blame = ctx
@@ -1339,8 +1269,7 @@ async fn agent_touched_paths() {
 #[tokio::test]
 async fn speculative_merge_endpoints() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // List speculative results
     let list = ctx
@@ -1360,8 +1289,7 @@ async fn speculative_merge_endpoints() {
 #[tokio::test]
 async fn stack_policy_get_and_set() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // Get (no policy set)
     let resp = ctx
@@ -1390,45 +1318,16 @@ async fn activity_log_query() {
     assert!(j.is_array());
 }
 
-// ── 23. Spec approvals ────────────────────────────────────────────────────────
+// ── 23. Spec approvals (M34 Slice 5: legacy endpoints removed) ───────────────
 
 #[tokio::test]
-async fn spec_approvals_lifecycle() {
+async fn spec_approvals_list_is_accessible() {
+    // GET /api/v1/specs/approvals still works (list endpoint retained).
+    // POST /api/v1/specs/approve and POST /api/v1/specs/revoke removed;
+    // callers should use POST /api/v1/specs/:path/approve instead.
     let ctx = Ctx::new().await;
-    let agent_id = create_agent(&ctx).await;
-
-    // Approve a spec (fields: path, sha [40-char hex], approver_id, signature)
-    let resp = ctx
-        .post(
-            "/api/v1/specs/approve",
-            json!({
-                "path": "specs/system/my-feature.md",
-                "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-                "approver_id": format!("agent:{agent_id}")
-            }),
-        )
-        .await;
-    assert!(resp.status().is_success());
-    let approval: serde_json::Value = resp.json().await.unwrap();
-    let approval_id = approval["id"].as_str().unwrap().to_string();
-
-    // List approvals
     let list = ctx.get_json("/api/v1/specs/approvals").await;
-    let arr = list.as_array().unwrap();
-    assert!(arr.iter().any(|a| a["id"] == approval_id));
-
-    // Revoke (fields: approval_id, revoked_by, reason)
-    let revoke_resp = ctx
-        .post(
-            "/api/v1/specs/revoke",
-            json!({
-                "approval_id": approval_id,
-                "revoked_by": format!("agent:{agent_id}"),
-                "reason": "superseded by new spec version"
-            }),
-        )
-        .await;
-    assert!(revoke_resp.status().is_success());
+    assert!(list.is_array());
 }
 
 // ── 24. Release automation ────────────────────────────────────────────────────
@@ -1452,8 +1351,7 @@ async fn release_prepare_repo_not_found() {
 #[tokio::test]
 async fn release_prepare_empty_repo() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     // No real git repo on disk; commits_since returns empty → v0.1.0, no MR
     let resp = ctx
@@ -1504,8 +1402,7 @@ async fn admin_snapshot_create_list_delete() {
 #[tokio::test]
 async fn mr_gate_results() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
     let mr_id = create_mr(&ctx, &repo_id).await;
 
     let resp = ctx
@@ -1588,8 +1485,7 @@ async fn admin_run_job() {
 #[tokio::test]
 async fn provenance_query() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     let resp = ctx
         .get(&format!("/api/v1/repos/{repo_id}/provenance"))
@@ -1602,8 +1498,7 @@ async fn provenance_query() {
 #[tokio::test]
 async fn aibom_query() {
     let ctx = Ctx::new().await;
-    let proj_id = create_project(&ctx).await;
-    let repo_id = create_repo(&ctx, &proj_id).await;
+    let repo_id = create_repo(&ctx).await;
 
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/aibom")).await;
     assert_ne!(resp.status(), 401_u16);
@@ -1648,6 +1543,7 @@ async fn cors_includes_server_port() {
 
     let base_url = format!("http://127.0.0.1:{port}");
     let state = build_state(TOKEN, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     let app = build_router(Arc::clone(&state));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 

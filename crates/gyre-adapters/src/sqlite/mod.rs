@@ -15,14 +15,16 @@ pub mod attestation;
 pub mod audit;
 pub mod budget;
 pub mod container_audit;
+pub mod conversation;
 pub mod dependency;
 pub mod kv_store;
 pub mod merge_queue;
 pub mod merge_request;
+pub mod message;
+pub mod meta_spec_set;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
-pub mod project;
 pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
@@ -34,7 +36,10 @@ pub mod spec_ledger;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
+pub mod tenant;
+pub mod trace;
 pub mod user;
+pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
 pub mod worktree;
@@ -154,7 +159,6 @@ mod tests {
         let (_tmp, storage) = tmp_storage();
         let mut conn = storage.pool.get().unwrap();
         let tables = [
-            "projects",
             "repositories",
             "agents",
             "tasks",
@@ -168,6 +172,13 @@ mod tests {
             "cost_entries",
             "audit_events",
             "network_peers",
+            "tenants",
+            "messages",
+            "meta_spec_sets",
+            "gate_traces",
+            "trace_spans",
+            "conversations",
+            "turn_commit_links",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;

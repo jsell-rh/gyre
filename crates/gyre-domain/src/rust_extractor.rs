@@ -126,6 +126,7 @@ impl ExtractionContext {
             created_at: self.now,
             complexity: None,
             churn_count_30d: 0,
+            test_coverage: None,
         }
     }
 

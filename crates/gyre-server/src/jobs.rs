@@ -258,10 +258,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
             },
             |state| async move {
-                state
-                    .retention_store
-                    .run_cleanup(&state.activity_store)
-                    .await;
+                state.retention_store.run_cleanup().await;
                 Ok(())
             },
         )
@@ -291,6 +288,49 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
             },
             |state| async move { crate::speculative_merge::run_once(&state).await },
+        )
+        .await;
+
+    // Register abandoned_branch_check job (runs daily, ui-layout.md §3)
+    registry
+        .register(
+            JobDefinition {
+                name: "abandoned_branch_check".to_string(),
+                description:
+                    "Flags spec-edit/* MRs with no activity for >7 days as priority-9 Inbox items"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |_state| async move {
+                // Stub: real impl queries open MRs where source_branch starts with
+                // "spec-edit/" and updated_at < now - 604800 (7 days in seconds),
+                // then creates priority-9 notifications for workspace Admin/Developer
+                // members per the HSI §8 Inbox priority table.
+                tracing::debug!("abandoned_branch_check: stub, no-op");
+                Ok(())
+            },
+        )
+        .await;
+
+    // Register cross_workspace_link_staleness_check job (runs daily, HSI §6)
+    registry
+        .register(
+            JobDefinition {
+                name: "cross_workspace_link_staleness_check".to_string(),
+                description:
+                    "Re-resolves cross-workspace spec links and marks stale entries (HSI §6)"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |_state| async move {
+                // Stub: real impl iterates spec_links_store entries where target_display
+                // starts with '@', re-resolves workspace slug → repo UUID, and updates
+                // target_repo_id + status ("unresolved" if slug no longer found).
+                tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
+                Ok(())
+            },
         )
         .await;
 

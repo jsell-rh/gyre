@@ -15,6 +15,7 @@ fn status_to_str(s: &MrStatus) -> &'static str {
         MrStatus::Approved => "Approved",
         MrStatus::Merged => "Merged",
         MrStatus::Closed => "Closed",
+        MrStatus::Reverted => "Reverted",
     }
 }
 
@@ -24,6 +25,7 @@ fn str_to_status(s: &str) -> Result<MrStatus> {
         "Approved" => Ok(MrStatus::Approved),
         "Merged" => Ok(MrStatus::Merged),
         "Closed" => Ok(MrStatus::Closed),
+        "Reverted" => Ok(MrStatus::Reverted),
         other => Err(anyhow!("unknown MR status: {}", other)),
     }
 }
@@ -50,7 +52,7 @@ struct MergeRequestRow {
     tenant_id: String,
     depends_on: String,
     atomic_group: Option<String>,
-    workspace_id: Option<String>,
+    workspace_id: String,
 }
 
 impl MergeRequestRow {
@@ -86,7 +88,7 @@ impl MergeRequestRow {
             atomic_group: self.atomic_group,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
-            workspace_id: self.workspace_id.map(Id::new),
+            workspace_id: Id::new(self.workspace_id),
         })
     }
 }
@@ -111,7 +113,7 @@ struct NewMergeRequestRow<'a> {
     tenant_id: &'a str,
     depends_on: &'a str,
     atomic_group: Option<&'a str>,
-    workspace_id: Option<&'a str>,
+    workspace_id: &'a str,
 }
 
 #[async_trait]
@@ -143,7 +145,7 @@ impl MergeRequestRepository for PgStorage {
                 tenant_id: "default",
                 depends_on: &depends_on_json,
                 atomic_group: m.atomic_group.as_deref(),
-                workspace_id: m.workspace_id.as_ref().map(|id| id.as_str()),
+                workspace_id: m.workspace_id.as_str(),
             };
             diesel::insert_into(merge_requests::table)
                 .values(&row)
@@ -175,10 +177,12 @@ impl MergeRequestRepository for PgStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = merge_requests::table
-                .find(id.as_str())
+                .filter(merge_requests::tenant_id.eq(&tenant))
+                .filter(merge_requests::id.eq(id.as_str()))
                 .first::<MergeRequestRow>(&mut *conn)
                 .optional()
                 .context("find merge_request by id")?;
@@ -189,9 +193,11 @@ impl MergeRequestRepository for PgStorage {
 
     async fn list(&self) -> Result<Vec<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = merge_requests::table
+                .filter(merge_requests::tenant_id.eq(&tenant))
                 .order(merge_requests::created_at.asc())
                 .load::<MergeRequestRow>(&mut *conn)
                 .context("list merge_requests")?;
@@ -203,9 +209,11 @@ impl MergeRequestRepository for PgStorage {
     async fn list_by_status(&self, status: &MrStatus) -> Result<Vec<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
         let status_str = status_to_str(status).to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = merge_requests::table
+                .filter(merge_requests::tenant_id.eq(&tenant))
                 .filter(merge_requests::status.eq(&status_str))
                 .order(merge_requests::created_at.asc())
                 .load::<MergeRequestRow>(&mut *conn)
@@ -218,9 +226,11 @@ impl MergeRequestRepository for PgStorage {
     async fn list_by_repo(&self, repository_id: &Id) -> Result<Vec<MergeRequest>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = repository_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<MergeRequest>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = merge_requests::table
+                .filter(merge_requests::tenant_id.eq(&tenant))
                 .filter(merge_requests::repository_id.eq(repo_id.as_str()))
                 .order(merge_requests::created_at.asc())
                 .load::<MergeRequestRow>(&mut *conn)

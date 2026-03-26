@@ -8,7 +8,6 @@ use crate::task::TaskPriority;
 pub struct AgentCompose {
     /// Schema version, currently "1".
     pub version: String,
-    pub project_id: Id,
     pub repo_id: Id,
     pub agents: Vec<AgentSpec>,
 }
@@ -114,7 +113,6 @@ mod tests {
     fn make_compose(agents: Vec<AgentSpec>) -> AgentCompose {
         AgentCompose {
             version: "1".to_string(),
-            project_id: Id::new("proj-1"),
             repo_id: Id::new("repo-1"),
             agents,
         }

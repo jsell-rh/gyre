@@ -13,9 +13,11 @@ pub mod code_awareness;
 pub mod compose;
 pub mod compute;
 pub mod container;
+pub mod conversations;
 pub mod dependencies;
 pub mod discover;
 pub mod error;
+pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
@@ -23,11 +25,12 @@ pub mod jj;
 pub mod merge_deps;
 pub mod merge_queue;
 pub mod merge_requests;
+pub mod messages;
 pub mod meta_specs;
+pub mod mr_timeline;
 pub mod network;
 pub mod personas;
 pub mod policies;
-pub mod projects;
 pub mod provenance;
 pub mod push_gates;
 pub mod release;
@@ -37,9 +40,12 @@ pub mod search;
 pub mod spawn;
 pub mod spec_policy;
 pub mod specs;
+pub mod specs_assist;
 pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
+pub mod tenants;
+pub mod traces;
 pub mod users;
 pub mod version;
 pub mod workload;
@@ -62,9 +68,9 @@ use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
 use users::{
-    create_team, delete_team, get_me, get_my_agents, get_my_mrs, get_my_notifications,
-    get_my_tasks, invite_member, list_members, list_teams, mark_notification_read, remove_member,
-    update_me, update_member_role, update_team,
+    create_team, delete_team, dismiss_notification, get_me, get_my_agents, get_my_mrs,
+    get_my_notifications, get_my_tasks, invite_member, list_members, list_teams, remove_member,
+    resolve_notification, update_me, update_member_role, update_team,
 };
 
 use crate::AppState;
@@ -73,17 +79,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/version", get(version::version_handler))
         .route("/api/v1/activity", get(activity::activity_handler))
-        // Projects
-        .route(
-            "/api/v1/projects",
-            post(projects::create_project).get(projects::list_projects),
-        )
-        .route(
-            "/api/v1/projects/:id",
-            get(projects::get_project)
-                .put(projects::update_project)
-                .delete(projects::delete_project),
-        )
         // Repos
         .route(
             "/api/v1/repos",
@@ -117,7 +112,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(agent_tracking::create_worktree).get(agent_tracking::list_worktrees),
         )
         .route(
-            "/api/v1/repos/:id/worktrees/:wt_id",
+            "/api/v1/repos/:id/worktrees/:worktree_id",
             delete(agent_tracking::delete_worktree),
         )
         // Quality gates
@@ -194,9 +189,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/agents/:id/heartbeat", put(agents::agent_heartbeat))
         .route("/api/v1/agents/:id/complete", post(spawn::complete_agent))
         .route("/api/v1/agents/:id/card", put(update_agent_card))
+        .route("/api/v1/agents/:id/messages", get(messages::poll_messages))
         .route(
-            "/api/v1/agents/:id/messages",
-            get(agent_messages::get_messages).post(agent_messages::send_message),
+            "/api/v1/agents/:id/messages/:message_id/ack",
+            put(messages::ack_message),
         )
         // Agent touched paths (M13.4)
         .route(
@@ -271,25 +267,39 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/merge-requests/:id/gates",
             get(gates::list_mr_gate_results),
         )
+        // MR SDLC timeline (S2.5 — HSI §3 System Trace View)
+        .route(
+            "/api/v1/merge-requests/:id/timeline",
+            get(mr_timeline::get_mr_timeline),
+        )
         // MR dependency graph (TASK-100)
         .route(
             "/api/v1/merge-requests/:id/dependencies",
             put(merge_deps::set_dependencies).get(merge_deps::get_dependencies),
         )
         .route(
-            "/api/v1/merge-requests/:id/dependencies/:dep_id",
+            "/api/v1/merge-requests/:id/dependencies/:dependency_id",
             delete(merge_deps::remove_dependency),
         )
         .route(
             "/api/v1/merge-requests/:id/atomic-group",
             put(merge_deps::set_atomic_group),
         )
+        // Gate-time trace capture (HSI §3a)
+        .route(
+            "/api/v1/merge-requests/:id/trace",
+            get(traces::get_trace_for_mr),
+        )
+        .route(
+            "/api/v1/trace-spans/:span_id/payload",
+            get(traces::get_span_payload),
+        )
         // Release automation (Admin only)
         .route("/api/v1/release/prepare", post(release::release_prepare))
         // Spec approval ledger (agent-gates spec)
-        .route("/api/v1/specs/approve", post(gates::approve_spec))
+        // NOTE: POST /api/v1/specs/approve and POST /api/v1/specs/revoke removed in M34 Slice 5
+        //       (superseded by POST /api/v1/specs/:path/approve and POST /api/v1/specs/:path/revoke)
         .route("/api/v1/specs/approvals", get(gates::list_spec_approvals))
-        .route("/api/v1/specs/revoke", post(gates::revoke_spec_approval))
         // Spec registry (M21.1) — manifest-driven ledger
         .route("/api/v1/specs", get(specs::list_specs))
         .route("/api/v1/specs/pending", get(specs::list_pending_specs))
@@ -302,6 +312,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/specs/:path/revoke",
             post(specs::revoke_spec_approval),
         )
+        .route("/api/v1/specs/:path/reject", post(specs::reject_spec))
         .route(
             "/api/v1/specs/:path/history",
             get(specs::spec_approval_history),
@@ -310,6 +321,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/specs/:path/progress",
             get(specs::get_spec_progress),
+        )
+        // Spec editing backend (S3.3 — HSI §11 CLI/MCP parity)
+        .route(
+            "/api/v1/repos/:id/specs/assist",
+            post(specs_assist::assist_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/specs/save",
+            post(specs_assist::save_spec),
+        )
+        .route(
+            "/api/v1/repos/:id/prompts/save",
+            post(specs_assist::save_prompt),
         )
         // Merge Queue
         .route("/api/v1/merge-queue/enqueue", post(merge_queue::enqueue))
@@ -372,6 +396,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/bcp/drill", post(admin::admin_bcp_drill))
         // Seed data
         .route("/api/v1/admin/seed", post(admin::admin_seed))
+        // Search reindex (moved from /api/v1/search/reindex in M34 Slice 5)
+        .route(
+            "/api/v1/admin/search/reindex",
+            post(search::reindex_handler),
+        )
         // Data Export
         .route("/api/v1/admin/export", get(admin::admin_export))
         // Retention Policies
@@ -426,7 +455,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(dependencies::list_dependencies).post(dependencies::add_dependency),
         )
         .route(
-            "/api/v1/repos/:id/dependencies/:dep_id",
+            "/api/v1/repos/:id/dependencies/:dependency_id",
             delete(dependencies::delete_dependency),
         )
         .route(
@@ -451,7 +480,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/budget/summary", get(budget::budget_summary))
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
-        .route("/api/v1/search/reindex", post(search::reindex_handler))
+        // Tenants (M34)
+        .route(
+            "/api/v1/tenants",
+            post(tenants::create_tenant).get(tenants::list_tenants),
+        )
+        .route(
+            "/api/v1/tenants/:id",
+            get(tenants::get_tenant)
+                .put(tenants::update_tenant)
+                .delete(tenants::delete_tenant),
+        )
         // Workspaces (M22.1)
         .route(
             "/api/v1/workspaces",
@@ -467,10 +506,33 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/repos",
             post(workspaces::add_repo_to_workspace).get(workspaces::list_workspace_repos),
         )
+        // Workspace-scoped entity lists (M34 Slice 6 — primary access patterns per api-conventions.md §1.1)
+        .route(
+            "/api/v1/workspaces/:workspace_id/tasks",
+            get(tasks::list_workspace_tasks),
+        )
+        .route(
+            "/api/v1/workspaces/:workspace_id/agents",
+            get(agents::list_workspace_agents),
+        )
+        .route(
+            "/api/v1/workspaces/:workspace_id/merge-requests",
+            get(merge_requests::list_workspace_mrs),
+        )
         // Meta-spec sets (M32)
         .route(
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Message bus (Phase 3)
+        .route(
+            "/api/v1/workspaces/:workspace_id/messages",
+            post(messages::send_message).get(messages::list_workspace_messages),
+        )
+        // Presence (HSI §7)
+        .route(
+            "/api/v1/workspaces/:workspace_id/presence",
+            get(workspaces::get_workspace_presence),
         )
         // Meta-spec blast radius (M32)
         .route(
@@ -515,10 +577,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users/me/agents", get(get_my_agents))
         .route("/api/v1/users/me/tasks", get(get_my_tasks))
         .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        // Notifications (HSI §2) — per-handler auth, ABAC-exempt
         .route("/api/v1/users/me/notifications", get(get_my_notifications))
         .route(
-            "/api/v1/users/me/notifications/:id/read",
-            put(mark_notification_read),
+            "/api/v1/notifications/:id/dismiss",
+            post(dismiss_notification),
+        )
+        .route(
+            "/api/v1/notifications/:id/resolve",
+            post(resolve_notification),
         )
         // Workspace members (M22.8)
         .route(
@@ -586,15 +653,40 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/graph/predict",
-            get(graph::get_graph_predictions),
+            get(graph::predict_graph).post(graph::predict_graph),
         )
         .route(
             "/api/v1/workspaces/:id/graph",
             get(graph::get_workspace_graph),
         )
         .route(
+            "/api/v1/workspaces/:id/graph/concept/:concept_name",
+            get(graph::get_workspace_graph_concept),
+        )
+        .route(
             "/api/v1/workspaces/:id/briefing",
             get(graph::get_workspace_briefing),
+        )
+        .route(
+            "/api/v1/workspaces/:id/briefing/ask",
+            post(graph::briefing_ask),
+        )
+        // Explorer views CRUD + LLM generation (S3.1)
+        // NOTE: /generate must be registered BEFORE /:view_id to avoid "generate"
+        //       being matched as a view_id parameter.
+        .route(
+            "/api/v1/workspaces/:id/explorer-views",
+            get(explorer_views::list_explorer_views).post(explorer_views::create_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/generate",
+            post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/:view_id",
+            get(explorer_views::get_explorer_view)
+                .put(explorer_views::update_explorer_view)
+                .delete(explorer_views::delete_explorer_view),
         )
 }
 

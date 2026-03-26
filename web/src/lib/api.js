@@ -48,12 +48,10 @@ export const api = {
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
   task: (id) => request(`/tasks/${id}`),
-  projects: ({ workspaceId } = {}) => {
+  repos: ({ workspaceId } = {}) => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
-    return request(`/projects${qs}`);
+    return request(`/repos${qs}`);
   },
-  project: (id) => request(`/projects/${id}`),
-  repos: (projectId) => request(`/repos?project_id=${projectId}`),
   allRepos: () => request('/repos'),
   repoBranches: (id) => request(`/repos/${id}/branches`),
   repoCommits: (id, branch, limit = 50) =>
@@ -173,8 +171,6 @@ export const api = {
   adminDeleteSnapshot: (id) =>
     request(`/admin/snapshots/${id}`, { method: 'DELETE' }),
   // CRUD create methods
-  createProject: (data) =>
-    request('/projects', { method: 'POST', body: JSON.stringify(data) }),
   createRepo: (data) =>
     request('/repos', { method: 'POST', body: JSON.stringify(data) }),
   createMirrorRepo: (data) =>
@@ -328,6 +324,25 @@ export const api = {
     const qs = params.toString();
     return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
   },
+  // Briefing Q&A SSE (S4.3) — returns a fetch Response; caller handles SSE
+  briefingAsk: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/briefing/ask`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
+  // Tenants (M34)
+  tenants: () => request('/tenants'),
+  tenant: (id) => request(`/tenants/${id}`),
+  createTenant: (data) =>
+    request('/tenants', { method: 'POST', body: JSON.stringify(data) }),
+  updateTenant: (id, data) =>
+    request(`/tenants/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteTenant: (id) =>
+    request(`/tenants/${id}`, { method: 'DELETE' }),
   // Workspaces (M22.5)
   workspaces: () => request('/workspaces'),
   workspace: (id) => request(`/workspaces/${id}`),
@@ -387,4 +402,52 @@ export const api = {
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
   },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
+  // Meta-spec preview loop (S4.6)
+  previewPersona: (workspaceId, data) =>
+    request(`/workspaces/${workspaceId}/meta-specs/preview`, { method: 'POST', body: JSON.stringify(data) }),
+  previewPersonaStatus: (workspaceId, previewId) =>
+    request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
+  publishPersona: (workspaceId, personaId, data) =>
+    request(`/workspaces/${workspaceId}/personas/${personaId}/publish`, { method: 'POST', body: JSON.stringify(data) }),
+  // Workspace admin (S4.7)
+  updateWorkspace: (id, data) =>
+    request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  workspaceAbacPolicies: (id) => request(`/workspaces/${id}/abac-policies`),
+  createWorkspaceAbacPolicy: (id, data) =>
+    request(`/workspaces/${id}/abac-policies`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteWorkspaceAbacPolicy: (id, policyId) =>
+    request(`/workspaces/${id}/abac-policies/${policyId}`, { method: 'DELETE' }),
+  simulateAbacPolicy: (id, data) =>
+    request(`/workspaces/${id}/abac-policies/simulate`, { method: 'POST', body: JSON.stringify(data) }),
+  // Explorer saved views (HSI §3)
+  explorerViews: (workspaceId) => request(`/workspaces/${workspaceId}/explorer-views`),
+  saveExplorerView: (workspaceId, data) =>
+    request(`/workspaces/${workspaceId}/explorer-views`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteExplorerView: (workspaceId, id) =>
+    request(`/workspaces/${workspaceId}/explorer-views/${id}`, { method: 'DELETE' }),
+  // LLM view generation (SSE — returns raw Response, not parsed JSON)
+  generateExplorerView: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
+  // Specs View (S4.5)
+  specsForWorkspace: (workspaceId) =>
+    request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
+  specContent: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specProgress: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}/progress${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specLinks: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}/links${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specHistoryRepo: (path, repoId) =>
+    request(`/specs/${encodeURIComponent(path)}/history${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specsAssist: (repoId, body) =>
+    fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
+  specsSave: (repoId, data) =>
+    request(`/repos/${repoId}/specs/save`, { method: 'POST', body: JSON.stringify(data) }),
 };

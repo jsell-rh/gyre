@@ -74,7 +74,6 @@ pub async fn get_push_gates(
 /// PUT /api/v1/repos/:id/push-gates — set pre-accept gate list for this repo.
 pub async fn set_push_gates(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(repo_id): Path<String>,
     Json(req): Json<SetPushGatesRequest>,
 ) -> Result<(StatusCode, Json<PushGatesResponse>), ApiError> {

@@ -18,6 +18,10 @@ diesel_migrations = { workspace = true }
 git2 = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+zstd = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
+ring = { workspace = true }
 gyre-common = { workspace = true }
 gyre-domain = { workspace = true }
 gyre-ports = { workspace = true }

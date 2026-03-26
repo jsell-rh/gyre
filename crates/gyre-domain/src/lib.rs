@@ -27,7 +27,6 @@ pub mod message_type;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
-pub mod project;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
@@ -37,6 +36,7 @@ pub mod spec_ledger;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
+pub mod tenant;
 pub mod user;
 pub mod workspace;
 pub mod workspace_membership;
@@ -44,11 +44,11 @@ pub mod workspace_membership;
 pub use activity::ActivityEvent;
 pub use agent::{Agent, AgentError, AgentStatus, DisconnectedBehavior};
 pub use agent_card::AgentCard;
-pub use agent_tracking::{AgentCommit, AgentWorktree, RalphStep};
+pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
 pub use attestation::{AttestationBundle, AttestationGateResult, MergeAttestation};
 pub use audit::{AuditEvent, AuditEventType};
-pub use budget::{BudgetConfig, BudgetUsage};
+pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use container_audit::ContainerAuditRecord;
 pub use dependency::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
@@ -58,12 +58,11 @@ pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use message_type::MessageType;
 pub use network_peer::NetworkPeer;
-pub use notification::{Notification, NotificationPriority, NotificationType};
+pub use notification::{Notification, NotificationType};
 pub use policy::{
-    builtin_policies, Condition, ConditionOp, ConditionValue, Policy, PolicyDecision, PolicyEffect,
-    PolicyScope,
+    builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
+    PolicyDecision, PolicyEffect, PolicyScope,
 };
-pub use project::Project;
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
 pub use repository::Repository;
 pub use review::{Review, ReviewComment, ReviewDecision};
@@ -73,6 +72,7 @@ pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus};
 pub use team::Team;
+pub use tenant::Tenant;
 pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
-pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, Workspace};
+pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};

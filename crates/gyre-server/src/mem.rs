@@ -7,20 +7,22 @@ use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
     DependencyEdge, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MrStatus, NetworkPeer,
-    Persona, PersonaScope, Project, Repository, Review, ReviewComment, ReviewDecision, Task,
-    TaskStatus, User, Workspace,
+    Persona, PersonaScope, Repository, Review, ReviewComment, ReviewDecision, Task, TaskStatus,
+    Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
-    MergeQueueRepository, MergeRequestRepository, NetworkPeerRepository, PersonaRepository,
-    ProjectRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, UserRepository, WorkspaceRepository, WorktreeRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -209,24 +211,6 @@ impl AgentCommitRepository for MemAgentCommitRepository {
             .cloned()
             .collect())
     }
-
-    async fn find_by_ralph_step(&self, repo_id: &Id, ralph_step: &str) -> Result<Vec<AgentCommit>> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .iter()
-            .filter(|ac| {
-                ac.repository_id.as_str() == repo_id.as_str()
-                    && ac
-                        .ralph_step
-                        .as_ref()
-                        .map(|s| s.as_str() == ralph_step)
-                        .unwrap_or(false)
-            })
-            .cloned()
-            .collect())
-    }
 }
 
 #[derive(Default)]
@@ -273,54 +257,6 @@ impl WorktreeRepository for MemWorktreeRepository {
 }
 
 #[derive(Default)]
-pub struct MemProjectRepository {
-    store: Arc<Mutex<HashMap<String, Project>>>,
-}
-
-#[async_trait]
-impl ProjectRepository for MemProjectRepository {
-    async fn create(&self, project: &Project) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(project.id.to_string(), project.clone());
-        Ok(())
-    }
-
-    async fn find_by_id(&self, id: &Id) -> Result<Option<Project>> {
-        Ok(self.store.lock().await.get(id.as_str()).cloned())
-    }
-
-    async fn list(&self) -> Result<Vec<Project>> {
-        Ok(self.store.lock().await.values().cloned().collect())
-    }
-
-    async fn update(&self, project: &Project) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(project.id.to_string(), project.clone());
-        Ok(())
-    }
-
-    async fn delete(&self, id: &Id) -> Result<()> {
-        self.store.lock().await.remove(id.as_str());
-        Ok(())
-    }
-
-    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Project>> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .values()
-            .filter(|p| p.workspace_id.as_ref() == Some(workspace_id))
-            .cloned()
-            .collect())
-    }
-}
-
-#[derive(Default)]
 pub struct MemRepoRepository {
     store: Arc<Mutex<HashMap<String, Repository>>>,
 }
@@ -343,17 +279,6 @@ impl RepoRepository for MemRepoRepository {
         Ok(self.store.lock().await.values().cloned().collect())
     }
 
-    async fn list_by_project(&self, project_id: &Id) -> Result<Vec<Repository>> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .values()
-            .filter(|r| r.project_id.as_str() == project_id.as_str())
-            .cloned()
-            .collect())
-    }
-
     async fn update(&self, repo: &Repository) -> Result<()> {
         self.store
             .lock()
@@ -373,9 +298,23 @@ impl RepoRepository for MemRepoRepository {
             .lock()
             .await
             .values()
-            .filter(|r| r.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|r| &r.workspace_id == workspace_id)
             .cloned()
             .collect())
+    }
+
+    async fn find_by_name_and_workspace(
+        &self,
+        workspace_id: &Id,
+        name: &str,
+    ) -> Result<Option<Repository>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|r| &r.workspace_id == workspace_id && r.name == name)
+            .cloned())
     }
 }
 
@@ -442,7 +381,7 @@ impl AgentRepository for MemAgentRepository {
             .lock()
             .await
             .values()
-            .filter(|a| a.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|a| &a.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
@@ -525,7 +464,7 @@ impl TaskRepository for MemTaskRepository {
             .lock()
             .await
             .values()
-            .filter(|t| t.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|t| &t.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
@@ -620,7 +559,7 @@ impl MergeRequestRepository for MemMrRepository {
             .lock()
             .await
             .values()
-            .filter(|mr| mr.workspace_id.as_ref() == Some(workspace_id))
+            .filter(|mr| &mr.workspace_id == workspace_id)
             .cloned()
             .collect())
     }
@@ -1225,6 +1164,53 @@ impl SpawnLogRepository for MemSpawnLogRepository {
 }
 
 #[derive(Default)]
+pub struct MemTenantRepository {
+    store: Arc<Mutex<HashMap<String, Tenant>>>,
+}
+
+#[async_trait]
+impl TenantRepository for MemTenantRepository {
+    async fn create(&self, tenant: &Tenant) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant.id.to_string(), tenant.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Tenant>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_slug(&self, slug: &str) -> Result<Option<Tenant>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|t| t.slug == slug)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<Tenant>> {
+        Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn update(&self, tenant: &Tenant) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant.id.to_string(), tenant.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 pub struct MemWorkspaceRepository {
     store: Arc<Mutex<HashMap<String, Workspace>>>,
 }
@@ -1241,6 +1227,16 @@ impl WorkspaceRepository for MemWorkspaceRepository {
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>> {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|ws| ws.tenant_id.as_str() == tenant_id.as_str() && ws.slug == slug)
+            .cloned())
     }
 
     async fn list(&self) -> Result<Vec<Workspace>> {
@@ -1395,6 +1391,38 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
         }
         store.remove(id);
         Ok(())
+    }
+
+    async fn delete_by_name_prefix(&self, prefix: &str) -> Result<u64> {
+        let mut store = self.policies.lock().await;
+        let to_delete: Vec<String> = store
+            .values()
+            .filter(|p| p.name.starts_with(prefix))
+            .map(|p| p.id.to_string())
+            .collect();
+        let count = to_delete.len() as u64;
+        for id in to_delete {
+            store.remove(&id);
+        }
+        Ok(count)
+    }
+
+    async fn delete_by_name_prefix_and_scope_id(
+        &self,
+        prefix: &str,
+        scope_id: &str,
+    ) -> Result<u64> {
+        let mut store = self.policies.lock().await;
+        let to_delete: Vec<String> = store
+            .values()
+            .filter(|p| p.name.starts_with(prefix) && p.scope_id.as_deref() == Some(scope_id))
+            .map(|p| p.id.to_string())
+            .collect();
+        let count = to_delete.len() as u64;
+        for id in to_delete {
+            store.remove(&id);
+        }
+        Ok(count)
     }
 
     async fn record_decision(&self, decision: &gyre_domain::PolicyDecision) -> Result<()> {
@@ -1560,7 +1588,7 @@ impl TeamRepository for MemTeamRepository {
 // Notification
 // ──────────────────────────────────────────────────────────────────────────────
 
-use gyre_domain::Notification;
+use gyre_common::Notification;
 use gyre_ports::NotificationRepository;
 
 #[derive(Default)]
@@ -1575,54 +1603,142 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(())
     }
 
-    async fn find_by_id(&self, id: &Id) -> Result<Option<Notification>> {
+    async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>> {
         Ok(self
             .store
             .lock()
             .await
             .iter()
-            .find(|n| n.id == *id)
+            .find(|n| n.id == *id && n.user_id == *user_id)
             .cloned())
     }
 
-    async fn list_by_user(&self, user_id: &Id, unread_only: bool) -> Result<Vec<Notification>> {
-        Ok(self
-            .store
-            .lock()
-            .await
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
             .iter()
-            .filter(|n| n.user_id == *user_id && (!unread_only || !n.read))
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && min_priority.is_none_or(|min| n.priority >= min)
+                    && max_priority.is_none_or(|max| n.priority <= max)
+            })
             .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(b.created_at.cmp(&a.created_at))
+        });
+        Ok(items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
             .collect())
     }
 
-    async fn count_unread(&self, user_id: &Id) -> Result<u64> {
-        Ok(self
-            .store
-            .lock()
-            .await
-            .iter()
-            .filter(|n| n.user_id == *user_id && !n.read)
-            .count() as u64)
-    }
-
-    async fn mark_read(&self, id: &Id, now: u64) -> Result<()> {
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for n in self.store.lock().await.iter_mut() {
-            if n.id == *id {
-                n.mark_read(now);
+            if n.id == *id && n.user_id == *user_id {
+                n.dismissed_at = Some(now);
                 break;
             }
         }
         Ok(())
     }
 
-    async fn mark_all_read(&self, user_id: &Id, now: u64) -> Result<()> {
+    async fn resolve(&self, id: &Id, user_id: &Id, _action_taken: Option<&str>) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for n in self.store.lock().await.iter_mut() {
-            if n.user_id == *user_id && !n.read {
-                n.mark_read(now);
+            if n.id == *id && n.user_id == *user_id {
+                n.resolved_at = Some(now);
+                break;
             }
         }
         Ok(())
+    }
+
+    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+            })
+            .count() as u64)
+    }
+
+    async fn has_recent_dismissal(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        days: u32,
+    ) -> Result<bool> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - (days as i64 * 86400);
+        Ok(self.store.lock().await.iter().any(|n| {
+            n.workspace_id == *workspace_id
+                && n.user_id == *user_id
+                && n.notification_type.as_str() == notification_type
+                && n.dismissed_at.is_some_and(|d| d >= cutoff)
+        }))
+    }
+}
+
+// ── MemUserWorkspaceStateRepository ──────────────────────────────────────────
+
+/// In-memory user workspace state repository for tests and development.
+#[derive(Default)]
+pub struct MemUserWorkspaceStateRepository {
+    store: Mutex<HashMap<(String, String), i64>>,
+}
+
+#[async_trait]
+impl UserWorkspaceStateRepository for MemUserWorkspaceStateRepository {
+    async fn upsert_last_seen(
+        &self,
+        user_id: &str,
+        workspace_id: &str,
+        timestamp: i64,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert((user_id.to_owned(), workspace_id.to_owned()), timestamp);
+        Ok(())
+    }
+
+    async fn get_last_seen(&self, user_id: &str, workspace_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(&(user_id.to_owned(), workspace_id.to_owned()))
+            .copied())
     }
 }
 
@@ -2159,6 +2275,339 @@ impl gyre_ports::SpecApprovalEventRepository for MemSpecApprovalEventRepository 
     }
 }
 
+#[derive(Default)]
+pub struct MemMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl MetaSpecSetRepository for MemMetaSpecSetRepository {
+    async fn get(&self, workspace_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(workspace_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, workspace_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, workspace_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(workspace_id.as_str());
+        Ok(())
+    }
+}
+
+/// sha -> (agent_id, workspace_id, tenant_id, blob)
+type ConvMap = Arc<Mutex<HashMap<String, (String, String, String, Vec<u8>)>>>;
+
+/// In-memory ConversationRepository for development and tests.
+pub struct MemConversationRepository {
+    convs: ConvMap,
+    links: Arc<Mutex<Vec<gyre_common::TurnCommitLink>>>,
+}
+
+impl Default for MemConversationRepository {
+    fn default() -> Self {
+        Self {
+            convs: Arc::new(Mutex::new(HashMap::new())),
+            links: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl gyre_ports::ConversationRepository for MemConversationRepository {
+    async fn store(
+        &self,
+        agent_id: &Id,
+        workspace_id: &Id,
+        tenant_id: &Id,
+        conversation: &[u8],
+    ) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(conversation);
+        let sha = hex::encode(hasher.finalize());
+        self.convs
+            .lock()
+            .await
+            .entry(sha.clone())
+            .or_insert_with(|| {
+                (
+                    agent_id.as_str().to_string(),
+                    workspace_id.as_str().to_string(),
+                    tenant_id.as_str().to_string(),
+                    conversation.to_vec(),
+                )
+            });
+        Ok(sha)
+    }
+
+    async fn get(&self, conversation_sha: &str, tenant_id: &Id) -> Result<Option<Vec<u8>>> {
+        let guard = self.convs.lock().await;
+        let Some((_, _, tid, blob)) = guard.get(conversation_sha) else {
+            return Ok(None);
+        };
+        if tid != tenant_id.as_str() {
+            return Ok(None);
+        }
+        // Decompress.
+        let decompressed = zstd::decode_all(blob.as_slice())
+            .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
+        Ok(Some(decompressed))
+    }
+
+    async fn record_turn_link(&self, link: &gyre_common::TurnCommitLink) -> Result<()> {
+        self.links.lock().await.push(link.clone());
+        Ok(())
+    }
+
+    async fn get_turn_links(
+        &self,
+        conversation_sha: &str,
+        tenant_id: &Id,
+    ) -> Result<Vec<gyre_common::TurnCommitLink>> {
+        let guard = self.links.lock().await;
+        Ok(guard
+            .iter()
+            .filter(|l| {
+                l.conversation_sha.as_deref() == Some(conversation_sha)
+                    && l.tenant_id.as_str() == tenant_id.as_str()
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn get_metadata(
+        &self,
+        conversation_sha: &str,
+        tenant_id: &Id,
+    ) -> Result<Option<(Id, Id)>> {
+        let guard = self.convs.lock().await;
+        let Some((aid, wid, tid, _)) = guard.get(conversation_sha) else {
+            return Ok(None);
+        };
+        if tid != tenant_id.as_str() {
+            return Ok(None);
+        }
+        Ok(Some((Id::new(aid), Id::new(wid))))
+    }
+
+    async fn list_by_agent(&self, agent_id: &Id, tenant_id: &Id) -> Result<Vec<String>> {
+        let guard = self.convs.lock().await;
+        Ok(guard
+            .iter()
+            .filter(|(_, (aid, _, tid, _))| aid == agent_id.as_str() && tid == tenant_id.as_str())
+            .map(|(sha, _)| sha.clone())
+            .collect())
+    }
+
+    async fn backfill_turn_links(
+        &self,
+        agent_id: &Id,
+        conversation_sha: &str,
+        tenant_id: &Id,
+    ) -> Result<u64> {
+        let mut guard = self.links.lock().await;
+        let mut count = 0u64;
+        for link in guard.iter_mut() {
+            if link.agent_id.as_str() == agent_id.as_str()
+                && link.tenant_id.as_str() == tenant_id.as_str()
+                && link.conversation_sha.is_none()
+            {
+                link.conversation_sha = Some(conversation_sha.to_string());
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
+/// In-memory MessageRepository for tests.
+pub struct MemMessageRepository {
+    store: Arc<Mutex<HashMap<String, gyre_common::message::Message>>>,
+}
+
+impl Default for MemMessageRepository {
+    fn default() -> Self {
+        Self {
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl gyre_ports::MessageRepository for MemMessageRepository {
+    async fn store(&self, message: &gyre_common::message::Message) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(message.id.as_str().to_string(), message.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_common::message::Message>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn list_after(
+        &self,
+        agent_id: &Id,
+        after_ts: u64,
+        after_id: Option<&Id>,
+        limit: usize,
+    ) -> Result<Vec<gyre_common::message::Message>> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let mut msgs: Vec<_> = guard
+            .values()
+            .filter(|m| matches!(&m.to, Destination::Agent(id) if id == agent_id))
+            .filter(|m| match after_id {
+                Some(aid) => {
+                    m.created_at > after_ts
+                        || (m.created_at == after_ts && m.id.as_str() > aid.as_str())
+                }
+                None => m.created_at > after_ts,
+            })
+            .cloned()
+            .collect();
+        msgs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        });
+        msgs.truncate(limit);
+        Ok(msgs)
+    }
+
+    async fn list_unacked(
+        &self,
+        agent_id: &Id,
+        limit: usize,
+    ) -> Result<Vec<gyre_common::message::Message>> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let mut msgs: Vec<_> = guard
+            .values()
+            .filter(|m| matches!(&m.to, Destination::Agent(id) if id == agent_id))
+            .filter(|m| !m.acknowledged)
+            .cloned()
+            .collect();
+        msgs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.id.as_str().cmp(b.id.as_str()))
+        });
+        msgs.truncate(limit);
+        Ok(msgs)
+    }
+
+    async fn count_unacked(&self, agent_id: &Id) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let count = guard
+            .values()
+            .filter(|m| matches!(&m.to, Destination::Agent(id) if id == agent_id))
+            .filter(|m| !m.acknowledged)
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn acknowledge(&self, message_id: &Id, agent_id: &Id) -> Result<()> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        if let Some(m) = guard.get_mut(message_id.as_str()) {
+            if matches!(&m.to, Destination::Agent(id) if id == agent_id) {
+                m.acknowledged = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn acknowledge_all(&self, agent_id: &Id, _reason: &str) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        let mut count = 0u64;
+        for m in guard.values_mut() {
+            if matches!(&m.to, Destination::Agent(id) if id == agent_id) && !m.acknowledged {
+                m.acknowledged = true;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn list_by_workspace(
+        &self,
+        workspace_id: &Id,
+        kind: Option<&str>,
+        since: Option<u64>,
+        before_ts: Option<u64>,
+        before_id: Option<&Id>,
+        limit: Option<usize>,
+    ) -> Result<Vec<gyre_common::message::Message>> {
+        use gyre_common::message::Destination;
+        let guard = self.store.lock().await;
+        let mut msgs: Vec<_> = guard
+            .values()
+            .filter(|m| {
+                m.workspace_id
+                    .as_ref()
+                    .map(|ws| ws == workspace_id)
+                    .unwrap_or(false)
+            })
+            .filter(|m| !matches!(&m.to, Destination::Agent(_)))
+            .filter(|m| kind.map(|k| m.kind.as_str() == k).unwrap_or(true))
+            .filter(|m| since.map(|s| m.created_at >= s).unwrap_or(true))
+            .filter(|m| match (before_ts, before_id) {
+                (Some(bts), Some(bid)) => {
+                    m.created_at < bts || (m.created_at == bts && m.id.as_str() < bid.as_str())
+                }
+                (Some(bts), None) => m.created_at < bts,
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        msgs.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
+        if let Some(lim) = limit {
+            msgs.truncate(lim);
+        }
+        Ok(msgs)
+    }
+
+    async fn expire_events(&self, older_than: u64) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        let before = guard.len();
+        guard.retain(|_, m| matches!(&m.to, Destination::Agent(_)) || m.created_at >= older_than);
+        Ok((before - guard.len()) as u64)
+    }
+
+    async fn expire_acked_inboxes(&self, older_than: u64) -> Result<u64> {
+        let mut guard = self.store.lock().await;
+        let before = guard.len();
+        guard.retain(|_, m| !m.acknowledged || m.created_at >= older_than);
+        Ok((before - guard.len()) as u64)
+    }
+
+    async fn expire_for_agents(&self, agent_ids: &[Id], older_than: u64) -> Result<u64> {
+        use gyre_common::message::Destination;
+        let mut guard = self.store.lock().await;
+        let before = guard.len();
+        guard.retain(|_, m| {
+            let is_target = matches!(&m.to, Destination::Agent(id) if agent_ids.contains(id));
+            !(is_target && m.created_at < older_than)
+        });
+        Ok((before - guard.len()) as u64)
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
@@ -2167,7 +2616,6 @@ pub fn test_state() -> Arc<crate::AppState> {
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
-        projects: Arc::new(MemProjectRepository::default()),
         repos: Arc::new(MemRepoRepository::default()),
         agents: Arc::new(MemAgentRepository::default()),
         tasks: Arc::new(MemTaskRepository::default()),
@@ -2178,9 +2626,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         jj_ops: Arc::new(NoopJjOps),
         agent_commits: Arc::new(MemAgentCommitRepository::default()),
         worktrees: Arc::new(MemWorktreeRepository::default()),
-        activity_store: crate::activity::ActivityStore::new(),
-        broadcast_tx: broadcast::channel(16).0,
-        event_tx: broadcast::channel(16).0,
+        telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
+        message_broadcast_tx: broadcast::channel(16).0,
         kv_store: Arc::new(MemKvStore::default()),
         agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
         agent_jwt_ttl_secs: 3600,
@@ -2229,6 +2676,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        tenants: Arc::new(MemTenantRepository::default()),
         workspaces: Arc::new(MemWorkspaceRepository::default()),
         personas: Arc::new(MemPersonaRepository::default()),
         policies: Arc::new(MemPolicyRepository::default()),
@@ -2237,6 +2685,80 @@ pub fn test_state() -> Arc<crate::AppState> {
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         wg_config: crate::WireGuardConfig::from_env(),
-        meta_spec_sets: Arc::new(Mutex::new(HashMap::new())),
+        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        messages: Arc::new(MemMessageRepository::default()),
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while rx.recv().await.is_some() {}
+            });
+            tx
+        },
+        agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        presence: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        traces: Arc::new(MemTraceRepository::default()),
+        otlp_config: crate::otlp_receiver::OtlpServerConfig {
+            enabled: false,
+            grpc_port: 4317,
+            max_spans_per_trace: 10_000,
+        },
+        conversations: Arc::new(MemConversationRepository::default()),
+        // Use a non-existent path that unit tests will never actually access via real git.
+        // NoopGitOps does not create files; commits_since() on a missing path returns 0.
+        repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
     })
+}
+
+// ── In-memory TraceRepository ────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemTraceRepository {
+    store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
+    payloads: Arc<Mutex<HashMap<(String, String), gyre_ports::trace::SpanPayload>>>,
+}
+
+#[async_trait]
+impl gyre_ports::TraceRepository for MemTraceRepository {
+    async fn store(&self, trace: &gyre_common::GateTrace) -> Result<()> {
+        let mut guard = self.store.lock().await;
+        // Replace any existing trace for same MR (capped at most recent).
+        guard.retain(|_, v| v.mr_id != trace.mr_id);
+        guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
+        Ok(())
+    }
+
+    async fn get_by_mr(&self, mr_id: &Id) -> Result<Option<gyre_common::GateTrace>> {
+        Ok(self.store.lock().await.get(mr_id.as_str()).cloned())
+    }
+
+    async fn get_span_payload(
+        &self,
+        gate_run_id: &Id,
+        span_id: &str,
+    ) -> Result<Option<gyre_ports::trace::SpanPayload>> {
+        let guard = self.payloads.lock().await;
+        let key = (gate_run_id.as_str().to_string(), span_id.to_string());
+        Ok(guard.get(&key).map(|p| gyre_ports::trace::SpanPayload {
+            input: p.input.clone(),
+            output: p.output.clone(),
+        }))
+    }
+
+    async fn promote_to_attestation(&self, _mr_id: &Id) -> Result<()> {
+        Ok(()) // no-op for in-memory (no eviction logic needed in tests)
+    }
+
+    async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(mr_id.as_str());
+        Ok(())
+    }
 }

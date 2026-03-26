@@ -72,7 +72,6 @@ pub struct ConditionRequest {
 
 pub async fn create_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     auth: AuthenticatedAgent,
     Json(req): Json<CreatePolicyRequest>,
 ) -> Result<(StatusCode, Json<Policy>), ApiError> {
@@ -81,9 +80,19 @@ pub async fn create_policy(
         .unwrap_or_default()
         .as_secs();
 
+    // Reserved name prefixes: trust: and builtin: are managed by the server.
+    // User-created policies cannot use these prefixes (HSI §2).
+    let name = req.name;
+    if name.starts_with("trust:") || name.starts_with("builtin:") {
+        return Err(ApiError::InvalidInput(format!(
+            "policy name '{name}' uses a reserved prefix ('trust:' or 'builtin:'); \
+             these are managed by the server"
+        )));
+    }
+
     let policy = Policy {
         id: Id::new(uuid::Uuid::new_v4().to_string()),
-        name: req.name,
+        name,
         description: req.description.unwrap_or_default(),
         scope: parse_scope(&req.scope)?,
         scope_id: req.scope_id,
@@ -98,6 +107,7 @@ pub async fn create_policy(
         resource_types: req.resource_types,
         enabled: req.enabled.unwrap_or(true),
         built_in: false,
+        immutable: false,
         created_by: auth.agent_id,
         created_at: now,
         updated_at: now,
@@ -134,8 +144,8 @@ pub struct UpdatePolicyRequest {
 
 pub async fn update_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(id): Path<String>,
+    _auth: AuthenticatedAgent,
     Json(req): Json<UpdatePolicyRequest>,
 ) -> Result<Json<Policy>, ApiError> {
     let mut policy = state
@@ -144,7 +154,23 @@ pub async fn update_policy(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("policy {id} not found")))?;
 
+    if policy.built_in {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{id}' is a built-in policy and cannot be modified"
+        )));
+    }
+    if policy.immutable {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{id}' is immutable and cannot be modified"
+        )));
+    }
+
     if let Some(name) = req.name {
+        if name.starts_with("trust:") || name.starts_with("builtin:") {
+            return Err(ApiError::InvalidInput(format!(
+                "policy name '{name}' uses a reserved prefix ('trust:' or 'builtin:') and cannot be set by callers"
+            )));
+        }
         policy.name = name;
     }
     if let Some(desc) = req.description {
@@ -182,14 +208,19 @@ pub async fn update_policy(
 
 pub async fn delete_policy(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminOnly,
     Path(id): Path<String>,
+    _auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let policy = state
         .policies
         .find_by_id(&id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("policy {id} not found")))?;
+    if policy.built_in {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{id}' is a built-in policy and cannot be deleted"
+        )));
+    }
     state
         .policies
         .delete(&id)
@@ -360,7 +391,7 @@ pub async fn effective_permissions(
     // Sample action/resource_type pairs to test.
     let resource_type = q.resource_type.as_deref().unwrap_or("*");
     let actions = [
-        "read", "write", "delete", "approve", "spawn", "push", "merge",
+        "read", "write", "delete", "approve", "spawn", "push", "merge", "generate",
     ];
 
     let mut results = Vec::new();
@@ -697,5 +728,59 @@ mod tests {
         assert!(!arr.is_empty());
         // With no policies, everything should be deny.
         assert!(arr.iter().all(|p| p["decision"] == "deny"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_policy_rejects_trust_prefix() {
+        let app = app();
+        let body = serde_json::json!({
+            "name": "trust:my-policy",
+            "scope": "tenant",
+            "priority": 50,
+            "effect": "deny",
+            "conditions": [],
+            "actions": ["merge"],
+            "resource_types": ["mr"]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_policy_rejects_builtin_prefix() {
+        let app = app();
+        let body = serde_json::json!({
+            "name": "builtin:my-policy",
+            "scope": "tenant",
+            "priority": 999,
+            "effect": "deny",
+            "conditions": [],
+            "actions": ["approve"],
+            "resource_types": ["spec"]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

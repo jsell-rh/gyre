@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{
-    auth::{AdminOnly, AuthenticatedAgent},
-    AppState,
-};
+use crate::{auth::AuthenticatedAgent, AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
@@ -25,11 +22,11 @@ pub struct CreateApiKeyResponse {
 }
 
 pub async fn create_api_key(
-    AdminOnly { user_id, .. }: AdminOnly,
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), (StatusCode, String)> {
-    let user_id = user_id.ok_or_else(|| {
+    let user_id = auth.user_id.ok_or_else(|| {
         (
             StatusCode::FORBIDDEN,
             "API key creation requires user account".to_string(),
@@ -196,11 +193,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // ABAC middleware enforces admin-only; handler itself accepts any authenticated user.
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
-    async fn system_token_can_create_api_key() {
+    async fn system_token_cannot_create_api_key_without_user_id() {
         // "system" resolves to agent_id="system" with no user_id, so this should fail
         // because the endpoint requires a user_id (you must have an account).
         let state = make_test_state_with_jwt();
@@ -221,7 +219,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // system is admin so passes AdminOnly, but has no user_id → 403
+        // system token has no user_id → 403 (handler rejects, not ABAC)
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

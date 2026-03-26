@@ -314,15 +314,22 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 %current_sha,
                                 "stale spec_ref detected (warn only)"
                             );
-                            let _ = state.event_tx.send(
-                                crate::domain_events::DomainEvent::StaleSpecWarning {
-                                    mr_id: mr.id.to_string(),
-                                    repo_id: repo.id.to_string(),
-                                    spec_path: path.to_string(),
-                                    spec_sha: sha.to_string(),
-                                    current_sha,
-                                },
-                            );
+                            state
+                                .emit_event(
+                                    Some(mr.workspace_id.clone()),
+                                    gyre_common::message::Destination::Workspace(
+                                        mr.workspace_id.clone(),
+                                    ),
+                                    gyre_common::message::MessageKind::StaleSpecWarning,
+                                    Some(serde_json::json!({
+                                        "mr_id": mr.id.to_string(),
+                                        "repo_id": repo.id.to_string(),
+                                        "spec_path": path,
+                                        "spec_sha": sha,
+                                        "current_sha": current_sha,
+                                    })),
+                                )
+                                .await;
                         }
                     }
                 }
@@ -434,6 +441,18 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 true // no spec bound — treat as approved
             };
 
+            // Look up conversation SHA uploaded by the authoring agent (HSI §5).
+            let conversation_sha = if let Some(ref agent_id) = updated_mr.author_agent_id {
+                let kv_key = format!("conv_sha:{}", agent_id.as_str());
+                state
+                    .kv_store
+                    .kv_get("agent_provenance", &kv_key)
+                    .await
+                    .unwrap_or(None)
+            } else {
+                None
+            };
+
             let attestation = crate::attestation::MergeAttestation {
                 attestation_version: 1,
                 mr_id: updated_mr.id.to_string(),
@@ -443,6 +462,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 spec_ref: updated_mr.spec_ref.clone(),
                 spec_fully_approved,
                 author_agent_id: updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                conversation_sha,
+                // completion_summary is populated from the AgentCompleted message payload
+                // when the agent calls agent.complete with a summary. At merge time, the
+                // processor does not re-fetch the summary — it is stored at agent.complete time.
+                completion_summary: None,
             };
 
             let bundle =
@@ -492,12 +516,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
-            // Notify the MR author that their MR was merged (M22.8).
+            // Notify the MR author that their MR was merged (HSI §2).
             if let Some(ref author_id) = updated_mr.author_agent_id {
                 crate::notifications::notify_mr_merged(
                     state,
                     author_id,
+                    &updated_mr.workspace_id,
                     &updated_mr.id.to_string(),
+                    "default",
                 )
                 .await;
             }

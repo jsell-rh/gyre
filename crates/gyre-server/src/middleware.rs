@@ -1,4 +1,4 @@
-//! HTTP middleware: request tracing and rate limiting.
+//! HTTP middleware: request tracing, rate limiting, and last-seen tracking.
 //!
 //! For every request:
 //! - Generates a UUID request ID and attaches it to the tracing span.
@@ -6,6 +6,12 @@
 //! - Adds `X-Request-Id` response header.
 //! - Updates Prometheus request counter and duration histogram.
 //! - Enforces per-second rate limit, returning 429 when exceeded.
+//!
+//! `last_seen_middleware` additionally:
+//! - Tracks per-user, per-workspace last-seen timestamps (HSI §1).
+//! - Debounced to at most one upsert per 60 seconds per (user, workspace) pair.
+//! - Fires upserts as fire-and-forget `tokio::spawn` tasks.
+//! - Sets `X-Gyre-Last-Seen` response header with the current epoch seconds.
 
 use axum::{
     body::Body,
@@ -84,6 +90,101 @@ pub async fn rate_limit_middleware(
     }
 }
 
+/// Last-seen tracking middleware (HSI §1).
+///
+/// Runs after `require_auth_middleware` (request is already authenticated).
+/// Extracts user_id via `AuthenticatedAgent` extractor and workspace_id from
+/// the request path (`/api/v1/workspaces/:id/...`). When both are present:
+/// - Debounces to at most one upsert per 60 seconds per (user_id, workspace_id) pair.
+/// - Fires the upsert as a fire-and-forget `tokio::spawn` task (non-blocking).
+/// - Sets `X-Gyre-Last-Seen: <epoch_seconds>` on the response.
+///
+/// Silently skips when user_id or workspace_id cannot be determined (system tokens,
+/// agent JWTs, non-workspace routes).
+pub async fn last_seen_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    use crate::auth::AuthenticatedAgent;
+    use axum::extract::FromRequestParts;
+
+    // Extract workspace_id from path: /api/v1/workspaces/<id>/...
+    let workspace_id = extract_workspace_id_from_path(req.uri().path());
+
+    // Extract user_id from auth context. Split+reassemble to use the extractor.
+    let (mut parts, body) = req.into_parts();
+    let user_id = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
+        Ok(auth) => auth.user_id.map(|id| id.as_str().to_owned()),
+        Err(_) => None,
+    };
+    let req = Request::from_parts(parts, body);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let tracking = match (&user_id, &workspace_id) {
+        (Some(uid), Some(wid)) => {
+            let key = (uid.clone(), wid.clone());
+            let should = {
+                let mut cache = state
+                    .last_seen_debounce
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let should = cache
+                    .get(&key)
+                    .map(|t| t.elapsed().as_secs() >= 60)
+                    .unwrap_or(true);
+                if should {
+                    // Evict stale entries when cache grows large (>10_000 pairs).
+                    // Simple full-clear: all entries are at most 60s old, so the
+                    // cost is at most 10_000 extra upserts in the next minute.
+                    if cache.len() >= 10_000 {
+                        cache.retain(|_, t| t.elapsed().as_secs() < 60);
+                    }
+                    cache.insert(key, std::time::Instant::now());
+                }
+                should
+            };
+            if should {
+                let uid = uid.clone();
+                let wid = wid.clone();
+                let repo = state.user_workspace_state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = repo.upsert_last_seen(&uid, &wid, now).await {
+                        tracing::warn!("last_seen upsert failed: {e}");
+                    }
+                });
+            }
+            should
+        }
+        _ => false,
+    };
+
+    let mut response = next.run(req).await;
+
+    if tracking {
+        if let Ok(val) = now.to_string().parse() {
+            response.headers_mut().insert("x-gyre-last-seen", val);
+        }
+    }
+
+    response
+}
+
+/// Extract workspace_id from paths like `/api/v1/workspaces/<id>/...`.
+fn extract_workspace_id_from_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/v1/workspaces/")?;
+    let id = rest.split('/').next()?;
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_owned())
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -107,7 +208,6 @@ mod tests {
             rate_limiter: crate::rate_limit::RateLimiter::new(rate),
             auth_token: base.auth_token.clone(),
             base_url: base.base_url.clone(),
-            projects: base.projects.clone(),
             repos: base.repos.clone(),
             agents: base.agents.clone(),
             tasks: base.tasks.clone(),
@@ -118,8 +218,8 @@ mod tests {
             jj_ops: base.jj_ops.clone(),
             agent_commits: base.agent_commits.clone(),
             worktrees: base.worktrees.clone(),
-            activity_store: crate::activity::ActivityStore::new(),
-            broadcast_tx: base.broadcast_tx.clone(),
+            telemetry_buffer: base.telemetry_buffer.clone(),
+            message_broadcast_tx: base.message_broadcast_tx.clone(),
             kv_store: base.kv_store.clone(),
             agent_signing_key: base.agent_signing_key.clone(),
             agent_jwt_ttl_secs: base.agent_jwt_ttl_secs,
@@ -139,7 +239,6 @@ mod tests {
             audit_broadcast_tx: base.audit_broadcast_tx.clone(),
             network_peers: base.network_peers.clone(),
             dependencies: base.dependencies.clone(),
-            event_tx: base.event_tx.clone(),
             process_registry: base.process_registry.clone(),
             agent_logs: base.agent_logs.clone(),
             agent_log_tx: base.agent_log_tx.clone(),
@@ -165,6 +264,7 @@ mod tests {
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
             search: base.search.clone(),
+            tenants: base.tenants.clone(),
             workspaces: base.workspaces.clone(),
             personas: base.personas.clone(),
             policies: base.policies.clone(),
@@ -174,6 +274,20 @@ mod tests {
             graph_store: base.graph_store.clone(),
             wg_config: base.wg_config.clone(),
             meta_spec_sets: base.meta_spec_sets.clone(),
+            messages: base.messages.clone(),
+            message_dispatch_tx: base.message_dispatch_tx.clone(),
+            agent_inbox_max: base.agent_inbox_max,
+            user_workspace_state: base.user_workspace_state.clone(),
+            last_seen_debounce: base.last_seen_debounce.clone(),
+            llm_rate_limiter: base.llm_rate_limiter.clone(),
+            presence: base.presence.clone(),
+            ws_connections: base.ws_connections.clone(),
+            ws_connection_counter: base.ws_connection_counter.clone(),
+            ws_connection_workspaces: base.ws_connection_workspaces.clone(),
+            traces: base.traces.clone(),
+            otlp_config: base.otlp_config.clone(),
+            conversations: base.conversations.clone(),
+            repos_root: base.repos_root.clone(),
         });
         crate::build_router(state)
     }

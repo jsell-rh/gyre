@@ -1,5 +1,5 @@
 pub(crate) mod abac;
-pub(crate) mod activity;
+pub mod abac_middleware;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -15,6 +15,7 @@ pub mod procfs_monitor;
 
 pub(crate) mod health;
 pub mod jobs;
+pub mod llm_rate_limit;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -34,6 +35,7 @@ pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub mod notifications;
+pub mod otlp_receiver;
 pub mod policy_engine;
 pub mod stale_agents;
 pub mod stale_peers;
@@ -44,18 +46,20 @@ pub mod workload_attestation;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
-use domain_events::DomainEvent;
-use gyre_common::ActivityEventData;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
+use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
-    ContainerAuditRepository, CostRepository, DependencyRepository, GateResultRepository,
-    GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository, MergeRequestRepository,
-    NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
-    PreAcceptGate, ProcessHandle, ProjectRepository, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, UserRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyRepository,
+    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
+    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
+    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
     WorktreeRepository,
 };
 use jobs::JobRegistry;
@@ -63,7 +67,23 @@ use retention::RetentionStore;
 use siem::SiemStore;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
+
+/// In-memory presence entry for a single browser-tab session.
+#[derive(Clone)]
+pub struct PresenceEntry {
+    /// Workspace this session is viewing.
+    pub workspace_id: String,
+    /// Current view name (e.g. "inbox", "explorer", "specs").
+    pub view: String,
+    /// Client-supplied epoch milliseconds (informational only — NOT used for eviction).
+    pub timestamp: u64,
+    /// Server-recorded epoch milliseconds of the last `UserPresence` heartbeat.
+    /// Used for idle eviction to prevent client clock manipulation.
+    pub server_last_seen: u64,
+    /// Connection ID — used to route `PresenceEvicted` to the right WS sender.
+    pub connection_id: u64,
+}
 
 /// Configuration for the WireGuard coordination plane (M26.1).
 #[derive(Clone)]
@@ -161,7 +181,6 @@ pub struct AppState {
     pub auth_token: String,
     /// Base URL for building clone URLs, e.g. "http://localhost:3000".
     pub base_url: String,
-    pub projects: Arc<dyn ProjectRepository>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -172,10 +191,10 @@ pub struct AppState {
     pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
-    pub activity_store: activity::ActivityStore,
-    pub broadcast_tx: broadcast::Sender<ActivityEventData>,
-    /// Domain event bus: broadcasts structured domain events to all WS clients.
-    pub event_tx: broadcast::Sender<DomainEvent>,
+    /// In-memory ring buffer for Telemetry-tier messages (replaces ActivityStore).
+    pub telemetry_buffer: Arc<TelemetryBuffer>,
+    /// Unified broadcast channel for WebSocket message delivery (replaces broadcast_tx + event_tx).
+    pub message_broadcast_tx: broadcast::Sender<Message>,
     /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
     /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
     /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
@@ -272,6 +291,8 @@ pub struct AppState {
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
+    /// Tenant repository (M34).
+    pub tenants: Arc<dyn gyre_ports::TenantRepository>,
     /// Workspace repository (M22.1).
     pub workspaces: Arc<dyn WorkspaceRepository>,
     /// Persona repository (M22.1).
@@ -288,16 +309,172 @@ pub struct AppState {
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
     pub graph_store: Arc<dyn GraphPort>,
-    /// Workspace meta-spec sets: workspace_id -> MetaSpecSet (M32).
-    pub meta_spec_sets: Arc<Mutex<HashMap<String, api::meta_specs::MetaSpecSet>>>,
+    /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
+    pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Message bus persistence (Directed + Event tier).
+    pub messages: Arc<dyn gyre_ports::MessageRepository>,
+    /// Bounded mpsc sender for background message consumer dispatch.
+    pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
+    /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
+    pub agent_inbox_max: u64,
+    /// Per-user, per-workspace last-seen tracking (HSI §1).
+    pub user_workspace_state: Arc<dyn UserWorkspaceStateRepository>,
+    /// Debounce cache for last-seen middleware: (user_id, workspace_id) -> last upsert Instant.
+    pub last_seen_debounce:
+        Arc<std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>>,
+    /// Per-(user_id, workspace_id) sliding-window rate limiter for LLM endpoints.
+    /// Enforces 10 requests/60 s per user per workspace (ui-layout.md §2).
+    pub llm_rate_limiter: Arc<tokio::sync::Mutex<llm_rate_limit::LlmRateLimiterMap>>,
+    /// In-memory presence map: (user_id, session_id) → PresenceEntry.
+    /// Not persisted — evicted after 60 s of inactivity or on graceful disconnect.
+    pub presence: Arc<RwLock<HashMap<(String, String), PresenceEntry>>>,
+    /// Active WebSocket connections for targeted message delivery (e.g. PresenceEvicted).
+    /// connection_id → mpsc::Sender<serialized WsMessage JSON>.
+    pub ws_connections: Arc<RwLock<HashMap<u64, tokio::sync::mpsc::Sender<String>>>>,
+    /// Monotonically increasing counter for assigning unique connection IDs.
+    pub ws_connection_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// Workspace subscriptions per connection — used to scope UserPresence broadcasts.
+    /// connection_id → list of subscribed workspace IDs.
+    pub ws_connection_workspaces: Arc<RwLock<HashMap<u64, Vec<gyre_common::Id>>>>,
+    /// Gate-time OTel trace capture repository (HSI §3a).
+    pub traces: Arc<dyn TraceRepository>,
+    /// OTLP receiver server configuration (HSI §3a). From GYRE_OTLP_* env vars.
+    pub otlp_config: otlp_receiver::OtlpServerConfig,
+    /// Conversation provenance repository (HSI §5).
+    pub conversations: Arc<dyn gyre_ports::ConversationRepository>,
+    /// Root directory for bare git repositories. Defaults to `./repos`.
+    /// Stored here so unit tests can override it without touching env vars.
+    pub repos_root: String,
+}
+
+/// Helper: sign a bus message and return (base64_signature, key_id).
+fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, String) {
+    use sha2::{Digest, Sha256};
+
+    let (from_type, from_id) = match &msg.from {
+        MessageOrigin::Server => ("server", "".to_string()),
+        MessageOrigin::Agent(id) => ("agent", id.as_str().to_string()),
+        MessageOrigin::User(id) => ("user", id.as_str().to_string()),
+    };
+    let (to_type, to_id) = match &msg.to {
+        Destination::Agent(id) => ("agent", id.as_str().to_string()),
+        Destination::Workspace(id) => ("workspace", id.as_str().to_string()),
+        Destination::Broadcast => ("broadcast", "".to_string()),
+    };
+    let ws_id = msg
+        .workspace_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_default();
+    let payload_json = msg
+        .payload
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    let payload_hash = format!("{:x}", hasher.finalize());
+    let sign_input = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        msg.id.as_str(),
+        from_type,
+        from_id,
+        ws_id,
+        to_type,
+        to_id,
+        msg.kind.as_str(),
+        payload_hash,
+        msg.created_at,
+    );
+    let sig_bytes = key.sign_bytes(sign_input.as_bytes());
+    let sig_b64 = B64.encode(&sig_bytes);
+    (sig_b64, key.kid.clone())
+}
+
+impl AppState {
+    /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
+    /// and dispatch to consumers. Best-effort: logs errors, never panics.
+    pub async fn emit_event(
+        &self,
+        workspace_id: Option<Id>,
+        to: Destination,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let id = Id::new(uuid::Uuid::new_v4().to_string());
+
+        let mut msg = Message {
+            id,
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id,
+            to,
+            kind,
+            payload,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+
+        let (sig, kid) = sign_bus_message(&self.agent_signing_key, &msg);
+        msg.signature = Some(sig);
+        msg.key_id = Some(kid);
+
+        // Persist (not Broadcast — those are never stored).
+        if !matches!(msg.to, Destination::Broadcast) {
+            if let Err(e) = self.messages.store(&msg).await {
+                tracing::warn!("emit_event: failed to persist message: {e}");
+            }
+        }
+        // Broadcast to WebSocket clients.
+        let _ = self.message_broadcast_tx.send(msg.clone());
+        // Dispatch to consumers (notification system, etc.).
+        let _ = self.message_dispatch_tx.try_send(msg);
+    }
+
+    /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
+    /// Unsigned and not persisted.
+    pub fn emit_telemetry(
+        &self,
+        workspace_id: Id,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let id = Id::new(uuid::Uuid::new_v4().to_string());
+        let msg = Message {
+            id,
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(workspace_id.clone()),
+            to: Destination::Workspace(workspace_id),
+            kind,
+            payload,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        self.telemetry_buffer.push(msg.clone());
+        let _ = self.message_broadcast_tx.send(msg);
+    }
 }
 
 /// Global authentication middleware for all `/api/v1/` routes.
 ///
 /// Rejects any request without a valid `Authorization: Bearer <token>` header
 /// with `401 Unauthorized`. The `/api/v1/version` endpoint is public.
-/// Per-handler extractors (`AuthenticatedAgent`, `AdminOnly`, etc.) still
-/// enforce finer-grained role checks on top of this.
+/// ABAC middleware runs after this and enforces finer-grained policy checks.
 async fn require_auth_middleware(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: axum::extract::Request,
@@ -362,6 +539,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use axum::routing::post;
     use tower_http::catch_panic::CatchPanicLayer;
 
+    // Ensure the ABAC resource resolver is initialized (idempotent).
+    abac_middleware::init_resolver();
+
     // Body size limit: configurable via GYRE_MAX_BODY_SIZE (bytes), default 10MB.
     let max_body_bytes: usize = std::env::var("GYRE_MAX_BODY_SIZE")
         .ok()
@@ -371,11 +551,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // CORS: configurable via GYRE_CORS_ORIGINS (comma-separated), default localhost only.
     let cors = build_cors_layer();
 
-    // Apply global API auth middleware to all /api/v1/ routes.
-    let api = api::api_router().layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        require_auth_middleware,
-    ));
+    // Apply global API auth middleware and ABAC middleware to all /api/v1/ routes.
+    // Layer ordering (axum): later .layer() calls run FIRST.
+    // So require_auth runs before last_seen_middleware runs before abac runs before the handler.
+    let api = api::api_router()
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            abac_middleware::abac_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::last_seen_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_middleware,
+        ));
 
     Router::new()
         .route("/health", get(health::health_handler))
@@ -391,21 +582,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
+        // M34 Slice 6: workspace-slug/repo-name URL format.
         .route(
-            "/git/:project/:repo/info/refs",
+            "/git/:workspace_slug/:repo_name/info/refs",
             get(git_http::git_info_refs),
         )
         .route(
-            "/git/:project/:repo/git-upload-pack",
+            "/git/:workspace_slug/:repo_name/git-upload-pack",
             post(git_http::git_upload_pack),
         )
         .route(
-            "/git/:project/:repo/git-receive-pack",
+            "/git/:workspace_slug/:repo_name/git-receive-pack",
             post(git_http::git_receive_pack),
         )
         // MCP (Model Context Protocol) endpoints
         .route("/mcp", post(mcp::mcp_handler))
         .route("/mcp/sse", get(mcp::mcp_sse_handler))
+        // Conversation provenance (HSI §5) — per-handler auth, ABAC-exempt from middleware.
+        .route(
+            "/api/v1/conversations/:sha",
+            get(api::conversations::get_conversation),
+        )
         .route("/", get(spa::spa_handler))
         .route("/*path", get(spa::spa_handler))
         .merge(api)
@@ -475,9 +672,18 @@ pub fn build_state(
     base_url: &str,
     jwt_config: Option<Arc<JwtConfig>>,
 ) -> Arc<AppState> {
-    let (broadcast_tx, _) = broadcast::channel(256);
-    let (event_tx, _) = broadcast::channel(256);
+    let (message_broadcast_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
+    let telemetry_buffer = Arc::new(TelemetryBuffer::new(
+        std::env::var("GYRE_TELEMETRY_BUFFER_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000),
+        std::env::var("GYRE_TELEMETRY_MAX_WORKSPACES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100),
+    ));
     let metrics = Arc::new(metrics::Metrics::new().expect("failed to create Prometheus metrics"));
     let started_at_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -525,7 +731,6 @@ pub fn build_state(
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
-        projects: store!(dyn ProjectRepository, mem::MemProjectRepository::default()),
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
         agents: store!(dyn AgentRepository, mem::MemAgentRepository::default()),
         tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
@@ -545,9 +750,8 @@ pub fn build_state(
             dyn WorktreeRepository,
             mem::MemWorktreeRepository::default()
         ),
-        activity_store: activity::ActivityStore::new(),
-        broadcast_tx,
-        event_tx,
+        telemetry_buffer,
+        message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
         agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
         // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
@@ -647,6 +851,10 @@ pub fn build_state(
             mem::MemBudgetUsageRepository::default()
         ),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        tenants: store!(
+            dyn gyre_ports::TenantRepository,
+            mem::MemTenantRepository::default()
+        ),
         workspaces: store!(
             dyn WorkspaceRepository,
             mem::MemWorkspaceRepository::default()
@@ -655,11 +863,179 @@ pub fn build_state(
         policies: store!(dyn PolicyRepository, mem::MemPolicyRepository::default()),
         workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(mem::MemTeamRepository::default()),
-        notifications: Arc::new(mem::MemNotificationRepository::default()),
+        notifications: store!(
+            dyn NotificationRepository,
+            mem::MemNotificationRepository::default()
+        ),
         wg_config: WireGuardConfig::from_env(),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
-        meta_spec_sets: Arc::new(Mutex::new(HashMap::new())),
+        meta_spec_sets: store!(
+            dyn MetaSpecSetRepository,
+            mem::MemMetaSpecSetRepository::default()
+        ),
+        messages: Arc::new(mem::MemMessageRepository::default()),
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            // Drain the channel so the receiver is not dropped.
+            // ReconciliationCompleted → MetaSpecDrift notification creation happens
+            // synchronously in emit_reconciliation_completed() helper, not here.
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while let Some(_msg) = rx.recv().await {
+                    // No-op drain. Consumers can be wired via spawn_message_consumer().
+                }
+            });
+            tx
+        },
+        agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000),
+        user_workspace_state: store!(
+            dyn UserWorkspaceStateRepository,
+            mem::MemUserWorkspaceStateRepository::default()
+        ),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        presence: Arc::new(RwLock::new(HashMap::new())),
+        ws_connections: Arc::new(RwLock::new(HashMap::new())),
+        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
+        traces: store!(dyn TraceRepository, mem::MemTraceRepository::default()),
+        otlp_config: otlp_receiver::OtlpServerConfig::from_env(),
+        conversations: store!(
+            dyn ConversationRepository,
+            mem::MemConversationRepository::default()
+        ),
+        repos_root: std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string()),
     })
+}
+
+/// Spawn a background task that evicts stale presence entries every 30 seconds.
+///
+/// An entry is stale if server_last_seen is more than 60 seconds old.
+/// The evicted connection (if still open) receives a `PresenceEvicted` message.
+pub fn spawn_presence_eviction(state: Arc<AppState>) {
+    use gyre_common::WsMessage;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let stale: Vec<((String, String), u64)> = {
+                let map = state.presence.read().await;
+                map.iter()
+                    .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
+                    .map(|(key, entry)| (key.clone(), entry.connection_id))
+                    .collect()
+            };
+
+            for ((user_id, session_id), conn_id) in stale {
+                state
+                    .presence
+                    .write()
+                    .await
+                    .remove(&(user_id, session_id.clone()));
+
+                let evict_msg = WsMessage::PresenceEvicted {
+                    session_id: session_id.clone(),
+                };
+                if let Ok(payload) = serde_json::to_string(&evict_msg) {
+                    let conns = state.ws_connections.read().await;
+                    if let Some(tx) = conns.get(&conn_id) {
+                        let _ = tx.try_send(payload);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Emit a `ReconciliationCompleted` Event-tier message and create priority-6
+/// `MetaSpecDrift` notifications for all Admin/Developer/Owner workspace members (HSI §4).
+///
+/// This is the "MessageConsumer path" for ReconciliationCompleted: the spec says p6 is
+/// "async acceptable", so we create notifications inline alongside the event emission.
+/// This avoids the complexity of a separate consumer while meeting the spec requirement.
+pub async fn emit_reconciliation_completed(
+    state: &Arc<AppState>,
+    workspace_id: Id,
+    payload: Option<serde_json::Value>,
+) {
+    use gyre_common::{Notification, NotificationType};
+    use gyre_domain::WorkspaceRole;
+
+    // Emit Event-tier message.
+    state
+        .emit_event(
+            Some(workspace_id.clone()),
+            Destination::Workspace(workspace_id.clone()),
+            MessageKind::ReconciliationCompleted,
+            payload,
+        )
+        .await;
+
+    // Resolve tenant_id from workspace record (avoid hardcoding "default").
+    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            tracing::warn!("emit_reconciliation_completed: workspace {workspace_id} not found; skipping notifications");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "emit_reconciliation_completed: failed to resolve workspace tenant: {e}"
+            );
+            return;
+        }
+    };
+
+    // Create priority-6 MetaSpecDrift notifications for all Admin/Developer/Owner members.
+    let members = match state
+        .workspace_memberships
+        .list_by_workspace(&workspace_id)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("emit_reconciliation_completed: failed to list members: {e}");
+            return;
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    for member in &members {
+        if !matches!(
+            member.role,
+            WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+        ) {
+            continue;
+        }
+        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
+        let notif = Notification::new(
+            notif_id,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::MetaSpecDrift,
+            "Meta-spec reconciliation completed — workspace specs may have drifted",
+            &tenant_id,
+            now,
+        );
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(
+                "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
+                member.user_id
+            );
+        }
+    }
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
@@ -729,6 +1105,21 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
             "registered default container compute target (M25)"
         );
     }
+}
+
+/// Spawn a background task that evicts stale LLM rate-limiter entries every 60 seconds.
+///
+/// Prevents unbounded map growth: entries for users who have been idle for a full window
+/// are removed. Safe to call once on server startup.
+pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
+    use llm_rate_limit::{evict_stale_entries, LLM_WINDOW_SECS};
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(LLM_WINDOW_SECS)).await;
+            let mut limiter = state.llm_rate_limiter.lock().await;
+            evict_stale_entries(&mut limiter, LLM_WINDOW_SECS);
+        }
+    });
 }
 
 /// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).

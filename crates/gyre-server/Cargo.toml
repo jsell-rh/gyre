@@ -42,9 +42,11 @@ reqwest = { workspace = true }
 url = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"
+hex = { workspace = true }
 subtle = { workspace = true }
 ring = { workspace = true }
 base64 = "0.22"
+zstd = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]

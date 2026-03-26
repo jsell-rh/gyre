@@ -45,7 +45,6 @@ pub enum DomainEvent {
         agent_id: String,
         commit_count: usize,
         task_id: Option<String>,
-        ralph_step: Option<String>,
     },
     /// Emitted when a speculative merge detects a conflict between branches (M13.5).
     SpeculativeConflict {

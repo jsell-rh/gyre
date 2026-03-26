@@ -1,0 +1,2 @@
+-- SQLite does not support DROP COLUMN in older versions; recreate without immutable.
+-- This is a no-op for rollback purposes in dev — the column defaults to 0 (false).

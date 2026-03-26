@@ -15,6 +15,8 @@ pub enum TaskStatus {
     Review,
     Done,
     Blocked,
+    /// Task cancelled because a spec was rejected or it's no longer needed. Terminal.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +41,10 @@ pub struct Task {
     pub pr_link: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    pub workspace_id: Option<Id>,
+    /// Workspace that governs this task (ABAC boundary). Non-optional per M34 hierarchy enforcement.
+    pub workspace_id: Id,
+    /// Repo that owns the spec this task implements. Non-optional per M34 hierarchy enforcement.
+    pub repo_id: Id,
     /// Spec path this task was created to implement/review (e.g. "specs/system/agent-gates.md").
     pub spec_path: Option<String>,
 }
@@ -59,26 +64,31 @@ impl Task {
             pr_link: None,
             created_at,
             updated_at: created_at,
-            workspace_id: None,
+            workspace_id: Id::new("default"),
+            repo_id: Id::new(""),
             spec_path: None,
         }
     }
 
     /// Enforce valid status transitions:
-    /// Backlog → InProgress
-    /// InProgress → Review | Blocked
-    /// Review → Done | InProgress
-    /// Blocked → InProgress
-    /// Done is terminal
+    /// Backlog → InProgress | Cancelled
+    /// InProgress → Review | Blocked | Cancelled
+    /// Review → Done | InProgress | Cancelled
+    /// Blocked → InProgress | Cancelled
+    /// Done and Cancelled are terminal
     pub fn transition_status(&mut self, new_status: TaskStatus) -> Result<(), TaskError> {
         let valid = matches!(
             (&self.status, &new_status),
             (TaskStatus::Backlog, TaskStatus::InProgress)
+                | (TaskStatus::Backlog, TaskStatus::Cancelled)
                 | (TaskStatus::InProgress, TaskStatus::Review)
                 | (TaskStatus::InProgress, TaskStatus::Blocked)
+                | (TaskStatus::InProgress, TaskStatus::Cancelled)
                 | (TaskStatus::Review, TaskStatus::Done)
                 | (TaskStatus::Review, TaskStatus::InProgress)
+                | (TaskStatus::Review, TaskStatus::Cancelled)
                 | (TaskStatus::Blocked, TaskStatus::InProgress)
+                | (TaskStatus::Blocked, TaskStatus::Cancelled)
         );
         if valid {
             self.status = new_status;

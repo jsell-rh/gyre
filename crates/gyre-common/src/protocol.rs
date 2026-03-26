@@ -1,3 +1,4 @@
+use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// AG-UI typed event taxonomy (replaces free-form event_type strings).
@@ -87,6 +88,12 @@ pub struct ActivityEventData {
     pub timestamp: u64,
 }
 
+/// Workspace scope for a WebSocket subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeScope {
+    pub workspace_id: Id,
+}
+
 /// WebSocket message types shared between server and CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -118,6 +125,40 @@ pub enum WsMessage {
     ActivityResponse {
         events: Vec<ActivityEventData>,
     },
+    /// Subscribe to workspace-scoped message delivery.
+    /// `last_seen` is epoch milliseconds — when present the server replays
+    /// persisted Event-tier messages with created_at > last_seen.
+    /// `session_id` is a random UUID per browser tab — required for user
+    /// connections that send `UserPresence`, optional for agent connections.
+    Subscribe {
+        scopes: Vec<SubscribeScope>,
+        last_seen: Option<u64>,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+    /// Sent by a browser tab to report the user's current view.
+    /// The server derives `user_id` from the authenticated connection — the
+    /// client-provided `user_id` is ignored for security.
+    UserPresence {
+        user_id: Id,
+        session_id: String,
+        workspace_id: Id,
+        view: String,
+        timestamp: u64,
+    },
+    /// Sent by the server to a specific tab when it has been evicted from the
+    /// presence map (5-session cap or 60-second idle timeout).
+    PresenceEvicted {
+        session_id: String,
+    },
+    /// Sent by the server when replay was truncated at 1000 messages.
+    /// The client can fetch the full history via GET /api/v1/workspaces/:id/messages.
+    ReplayCatchUp {
+        truncated: bool,
+    },
+    /// Catch-all for unrecognized message types — silently ignored for forward compatibility.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -212,5 +253,130 @@ mod tests {
         let decoded: ActivityEventData = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.event_type, AgEventType::RunStarted);
         assert_eq!(decoded.event_type.as_str(), "RUN_STARTED");
+    }
+
+    #[test]
+    fn ws_subscribe_roundtrip() {
+        use crate::Id;
+        let msg = WsMessage::Subscribe {
+            scopes: vec![SubscribeScope {
+                workspace_id: Id::new("ws-42"),
+            }],
+            last_seen: Some(1_711_324_800_000),
+            session_id: Some("tab-uuid-1".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"Subscribe\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        if let WsMessage::Subscribe {
+            scopes,
+            last_seen,
+            session_id,
+        } = decoded
+        {
+            assert_eq!(scopes.len(), 1);
+            assert_eq!(scopes[0].workspace_id, Id::new("ws-42"));
+            assert_eq!(last_seen, Some(1_711_324_800_000));
+            assert_eq!(session_id, Some("tab-uuid-1".to_string()));
+        } else {
+            panic!("expected Subscribe variant");
+        }
+    }
+
+    #[test]
+    fn ws_subscribe_without_session_id_roundtrip() {
+        // session_id is optional — old clients omitting it should still decode.
+        let json = r#"{"type":"Subscribe","scopes":[{"workspace_id":"ws-1"}],"last_seen":null}"#;
+        let decoded: WsMessage = serde_json::from_str(json).unwrap();
+        if let WsMessage::Subscribe { session_id, .. } = decoded {
+            assert_eq!(session_id, None);
+        } else {
+            panic!("expected Subscribe variant");
+        }
+    }
+
+    #[test]
+    fn user_presence_roundtrip() {
+        use crate::Id;
+        let msg = WsMessage::UserPresence {
+            user_id: Id::new("user-1"),
+            session_id: "tab-abc".to_string(),
+            workspace_id: Id::new("ws-99"),
+            view: "inbox".to_string(),
+            timestamp: 1_711_324_800_000,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"UserPresence\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        if let WsMessage::UserPresence {
+            user_id,
+            session_id,
+            workspace_id,
+            view,
+            timestamp,
+        } = decoded
+        {
+            assert_eq!(user_id, Id::new("user-1"));
+            assert_eq!(session_id, "tab-abc");
+            assert_eq!(workspace_id, Id::new("ws-99"));
+            assert_eq!(view, "inbox");
+            assert_eq!(timestamp, 1_711_324_800_000);
+        } else {
+            panic!("expected UserPresence variant");
+        }
+    }
+
+    #[test]
+    fn presence_evicted_roundtrip() {
+        let msg = WsMessage::PresenceEvicted {
+            session_id: "tab-evicted".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"PresenceEvicted\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        if let WsMessage::PresenceEvicted { session_id } = decoded {
+            assert_eq!(session_id, "tab-evicted");
+        } else {
+            panic!("expected PresenceEvicted variant");
+        }
+    }
+
+    #[test]
+    fn ws_replay_catch_up_roundtrip() {
+        let msg = WsMessage::ReplayCatchUp { truncated: true };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"ReplayCatchUp\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            WsMessage::ReplayCatchUp { truncated: true }
+        ));
+    }
+
+    #[test]
+    fn ws_unknown_variant_ignored() {
+        // An unrecognized type tag should deserialize to Unknown without error.
+        let json = r#"{"type":"FutureUnknownVariant","extra_field":42}"#;
+        let decoded: WsMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(decoded, WsMessage::Unknown));
+    }
+
+    #[test]
+    fn ws_subscribe_null_last_seen() {
+        use crate::Id;
+        let msg = WsMessage::Subscribe {
+            scopes: vec![SubscribeScope {
+                workspace_id: Id::new("ws-1"),
+            }],
+            last_seen: None,
+            session_id: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        if let WsMessage::Subscribe { last_seen, .. } = decoded {
+            assert_eq!(last_seen, None);
+        } else {
+            panic!("expected Subscribe");
+        }
     }
 }

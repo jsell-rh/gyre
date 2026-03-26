@@ -1,6 +1,6 @@
 # UI Journeys & Navigation
 
-> **Status: Draft.** This spec defines the user journeys, navigation model, and scoping hierarchy for Gyre's UI. It replaces the current entity-centric sidebar with a journey-oriented navigation scoped to tenant, workspace, and repo.
+> **Status: DEPRECATED.** This spec is superseded by [`human-system-interface.md`](human-system-interface.md). The navigation model, journeys, keyboard shortcuts, and scoping hierarchy defined here are replaced by the Human-System Interface spec. Do not implement from this spec.
 
 ## Problem
 

@@ -5,17 +5,15 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{
-    Agent, AgentStatus, AgentWorktree, AnalyticsEvent, DisconnectedBehavior, MergeRequest,
-    TaskStatus,
+    policy::{Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope},
+    Agent, AgentStatus, AgentWorktree, AnalyticsEvent, DisconnectedBehavior, LoopConfig,
+    MergeRequest, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{
-    auth::AuthenticatedAgent, container_audit, domain_events::DomainEvent, git_refs,
-    workload_attestation, AppState,
-};
+use crate::{auth::AuthenticatedAgent, container_audit, git_refs, workload_attestation, AppState};
 
 use super::agents::AgentResponse;
 use super::error::ApiError;
@@ -35,7 +33,17 @@ pub struct SpawnAgentRequest {
     pub compute_target_id: Option<String>,
     /// How the agent behaves when the server becomes unreachable (BCP graceful degradation).
     pub disconnected_behavior: Option<DisconnectedBehavior>,
+    /// When present, the server manages the Ralph loop session cycle automatically.
+    /// When absent, the agent runs a single session (backward-compatible).
+    pub loop_config: Option<LoopConfig>,
+    /// Agent type: null for normal agents, "interrogation" for interrogation agents (HSI §4).
+    pub agent_type: Option<String>,
+    /// For interrogation agents: SHA-256 of the original agent's conversation to load as context.
+    pub conversation_sha: Option<String>,
 }
+
+/// JWT TTL for interrogation agents: 30 minutes (HSI §4).
+const INTERROGATION_JWT_TTL_SECS: u64 = 1800;
 
 #[derive(Serialize)]
 pub struct SpawnAgentResponse {
@@ -60,6 +68,178 @@ pub struct CompleteAgentRequest {
     pub branch: String,
     pub title: String,
     pub target_branch: String,
+}
+
+// ── Interrogation agent helpers ───────────────────────────────────────────────
+
+/// Create the three ABAC policies required for an interrogation agent (HSI §4).
+/// Returns the list of created policy IDs (stored in kv_store for cleanup).
+pub async fn create_interrogation_policies(state: &AppState, agent_id: &str) -> Vec<String> {
+    let now = now_secs();
+    let subject_value = format!("agent:{agent_id}");
+
+    let restrict_id = format!("interrogation-restrict-{agent_id}");
+    let allow_message_id = format!("interrogation-allow-message-{agent_id}");
+    let allow_read_id = format!("interrogation-allow-read-{agent_id}");
+
+    let policies: Vec<Policy> = vec![
+        // Deny write/delete/spawn/approve/merge on all non-message resources (priority 200).
+        Policy {
+            id: Id::new(&restrict_id),
+            name: restrict_id.clone(),
+            description: format!(
+                "Interrogation agent {agent_id} is read-only + message to requesting human"
+            ),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 200,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.id".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String(subject_value.clone()),
+            }],
+            actions: vec![
+                "write".to_string(),
+                "delete".to_string(),
+                "spawn".to_string(),
+                "approve".to_string(),
+                "merge".to_string(),
+            ],
+            resource_types: vec![
+                "task".to_string(),
+                "mr".to_string(),
+                "repo".to_string(),
+                "agent".to_string(),
+                "spec".to_string(),
+                "persona".to_string(),
+                "worktree".to_string(),
+            ],
+            enabled: true,
+            immutable: false,
+            built_in: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        },
+        // Allow write to message resource (priority 201).
+        Policy {
+            id: Id::new(&allow_message_id),
+            name: allow_message_id.clone(),
+            description: format!("Interrogation agent {agent_id} can send messages"),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 201,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.id".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String(subject_value.clone()),
+            }],
+            actions: vec!["write".to_string()],
+            resource_types: vec!["message".to_string()],
+            enabled: true,
+            immutable: false,
+            built_in: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        },
+        // Allow read to conversation/explorer_view/spec/mr/repo/task (priority 202).
+        Policy {
+            id: Id::new(&allow_read_id),
+            name: allow_read_id.clone(),
+            description: format!("Interrogation agent {agent_id} can read context resources"),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 202,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.id".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String(subject_value),
+            }],
+            actions: vec!["read".to_string()],
+            resource_types: vec![
+                "conversation".to_string(),
+                "explorer_view".to_string(),
+                "spec".to_string(),
+                "mr".to_string(),
+                "repo".to_string(),
+                "task".to_string(),
+            ],
+            enabled: true,
+            immutable: false,
+            built_in: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        },
+    ];
+
+    let mut created_ids = Vec::new();
+    for policy in &policies {
+        match state.policies.create(policy).await {
+            Ok(()) => created_ids.push(policy.id.to_string()),
+            Err(e) => tracing::warn!(
+                agent_id = %agent_id,
+                policy_id = %policy.id,
+                "failed to create interrogation policy: {e}"
+            ),
+        }
+    }
+
+    // Store policy IDs in kv_store for cleanup on complete/kill/stale.
+    if let Ok(ids_json) = serde_json::to_string(&created_ids) {
+        let _ = state
+            .kv_store
+            .kv_set("interrogation_policies", agent_id, ids_json)
+            .await;
+    }
+
+    created_ids
+}
+
+/// Delete all ABAC policies created for an interrogation agent.
+/// Called on agent.complete, admin kill, and stale agent detection.
+pub async fn cleanup_interrogation_policies(state: &AppState, agent_id: &str) {
+    let ids_json = match state
+        .kv_store
+        .kv_get("interrogation_policies", agent_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(j) => j,
+        None => return,
+    };
+
+    let ids: Vec<String> = match serde_json::from_str(&ids_json) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    for id in &ids {
+        if let Err(e) = state.policies.delete(id).await {
+            tracing::warn!(
+                agent_id = %agent_id,
+                policy_id = %id,
+                "failed to delete interrogation policy: {e}"
+            );
+        }
+    }
+
+    // Remove the kv entry.
+    let _ = state
+        .kv_store
+        .kv_remove("interrogation_policies", agent_id)
+        .await;
+
+    tracing::info!(
+        agent_id = %agent_id,
+        count = ids.len(),
+        "interrogation policies cleaned up"
+    );
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -91,7 +271,7 @@ pub async fn spawn_agent(
         .map_err(ApiError::Forbidden)?;
 
     // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
-    super::budget::check_spawn_budget(&state, &repo.project_id.to_string())
+    super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
         .await
         .map_err(ApiError::TooManyRequests)?;
 
@@ -142,6 +322,15 @@ pub async fn spawn_agent(
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
 
+    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
+
+    // HSI §4: Interrogation agents get a short-lived 30-minute JWT.
+    let jwt_ttl = if is_interrogation {
+        INTERROGATION_JWT_TTL_SECS
+    } else {
+        state.agent_jwt_ttl_secs
+    };
+
     // Pre-mint a JWT without workload claims so it can be injected into the
     // container environment at spawn time.  After spawn we create the workload
     // attestation record (stored in state.workload_attestations) which is
@@ -153,7 +342,7 @@ pub async fn spawn_agent(
             &req.task_id,
             &auth.agent_id,
             &state.base_url,
-            state.agent_jwt_ttl_secs,
+            jwt_ttl,
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
@@ -165,77 +354,102 @@ pub async fn spawn_agent(
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
         .await;
 
+    // HSI §4: For interrogation agents — create scoped ABAC policies and store
+    // the conversation context for the conversation://context MCP resource.
+    if is_interrogation {
+        create_interrogation_policies(&state, &agent.id.to_string()).await;
+
+        // Retrieve conversation from kv_store (written by S2.1 ConversationRepository).
+        // Best-effort: if not found, the MCP resource will return an empty context.
+        if let Some(sha) = &req.conversation_sha {
+            if let Ok(Some(blob)) = state.kv_store.kv_get("conversations", sha.as_str()).await {
+                let _ = state
+                    .kv_store
+                    .kv_set("interrogation_context", &agent.id.to_string(), blob)
+                    .await;
+            }
+        }
+    }
+
     // Compute worktree path: {repo_path}/worktrees/{branch_slug}
     let branch_slug = req.branch.replace('/', "-");
     let worktree_path = format!("{}/worktrees/{}", repo.path, branch_slug);
 
-    // Create git worktree. The adapter tries existing branch first, then
-    // creates a new branch from HEAD if the branch doesn't exist yet.
-    if let Err(e) = state
-        .git_ops
-        .create_worktree(&repo.path, &worktree_path, &req.branch)
-        .await
-    {
-        let msg = e.to_string();
-        let msg_lc = msg.to_lowercase();
-        if msg_lc.contains("not a valid object") || msg_lc.contains("bad default revision") {
-            return Err(ApiError::InvalidInput(format!(
-                "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
-                req.branch
-            )));
+    // HSI §4: Interrogation agents are read-only — they have no worktree.
+    // Skip worktree creation, jj init, and git ref writes.
+    let jj_change_id = if !is_interrogation {
+        // Create git worktree. The adapter tries existing branch first, then
+        // creates a new branch from HEAD if the branch doesn't exist yet.
+        if let Err(e) = state
+            .git_ops
+            .create_worktree(&repo.path, &worktree_path, &req.branch)
+            .await
+        {
+            let msg = e.to_string();
+            let msg_lc = msg.to_lowercase();
+            if msg_lc.contains("not a valid object") || msg_lc.contains("bad default revision") {
+                return Err(ApiError::InvalidInput(format!(
+                    "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
+                    req.branch
+                )));
+            }
+            tracing::warn!("create_worktree failed (non-fatal): {e}");
         }
-        tracing::warn!("create_worktree failed (non-fatal): {e}");
-    }
 
-    // Initialize jj in the worktree and create an initial change (best-effort).
-    // Only attempted if the worktree directory exists on disk.
-    let jj_change_id = if std::path::Path::new(&worktree_path).exists() {
-        match state.jj_ops.jj_init(&worktree_path).await {
-            Ok(()) => {
-                let description = format!("Agent {}: task {}", agent.name, req.task_id);
-                match state.jj_ops.jj_new(&worktree_path, &description).await {
-                    Ok(change_id) => {
-                        tracing::debug!(
-                            agent_id = %agent.id,
-                            change_id = %change_id,
-                            "jj initialized in worktree"
-                        );
-                        Some(change_id)
-                    }
-                    Err(e) => {
-                        tracing::debug!(agent_id = %agent.id, "jj new skipped: {e}");
-                        None
+        // Initialize jj in the worktree and create an initial change (best-effort).
+        // Only attempted if the worktree directory exists on disk.
+        let change_id = if std::path::Path::new(&worktree_path).exists() {
+            match state.jj_ops.jj_init(&worktree_path).await {
+                Ok(()) => {
+                    let description = format!("Agent {}: task {}", agent.name, req.task_id);
+                    match state.jj_ops.jj_new(&worktree_path, &description).await {
+                        Ok(change_id) => {
+                            tracing::debug!(
+                                agent_id = %agent.id,
+                                change_id = %change_id,
+                                "jj initialized in worktree"
+                            );
+                            Some(change_id)
+                        }
+                        Err(e) => {
+                            tracing::debug!(agent_id = %agent.id, "jj new skipped: {e}");
+                            None
+                        }
                     }
                 }
+                Err(e) => {
+                    tracing::debug!(agent_id = %agent.id, "jj init skipped: {e}");
+                    None
+                }
             }
-            Err(e) => {
-                tracing::debug!(agent_id = %agent.id, "jj init skipped: {e}");
-                None
-            }
+        } else {
+            None
+        };
+
+        // Write custom ref namespaces (best-effort)
+        if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
+            let agent_ref = format!("refs/agents/{}/head", agent.id);
+            let task_ref = format!("refs/tasks/{}", task.id);
+            git_refs::write_ref(&repo.path, &agent_ref, &sha).await;
+            git_refs::write_ref(&repo.path, &task_ref, &sha).await;
         }
+
+        // Record worktree in DB linked to agent and task
+        let wt = AgentWorktree::new(
+            new_id(),
+            agent.id.clone(),
+            Id::new(&req.repo_id),
+            Some(Id::new(&req.task_id)),
+            req.branch.clone(),
+            worktree_path.clone(),
+            now,
+        );
+        state.worktrees.create(&wt).await?;
+
+        change_id
     } else {
         None
     };
-
-    // Write custom ref namespaces (best-effort)
-    if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
-        let agent_ref = format!("refs/agents/{}/head", agent.id);
-        let ralph_ref = format!("refs/ralph/{}/implement", task.id);
-        git_refs::write_ref(&repo.path, &agent_ref, &sha).await;
-        git_refs::write_ref(&repo.path, &ralph_ref, &sha).await;
-    }
-
-    // Record worktree in DB linked to agent and task
-    let wt = AgentWorktree::new(
-        new_id(),
-        agent.id.clone(),
-        Id::new(&req.repo_id),
-        Some(Id::new(&req.task_id)),
-        req.branch.clone(),
-        worktree_path.clone(),
-        now,
-    );
-    state.worktrees.create(&wt).await?;
 
     // Assign task to agent and advance to InProgress
     task.assigned_to = Some(agent.id.clone());
@@ -245,8 +459,17 @@ pub async fn spawn_agent(
     task.updated_at = now;
     state.tasks.update(&task).await?;
 
-    // Build clone URL: {base_url}/git/{project_id}/{repo_name}
-    let clone_url = format!("{}/git/{}/{}", state.base_url, repo.project_id, repo.name);
+    // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
+    // Resolve workspace slug for the new URL format; fall back to workspace_id if not found.
+    let ws_slug = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.slug)
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
 
     // M19.1: Resolve the effective compute target.
     // Priority: compute_target_id from request → GYRE_DEFAULT_COMPUTE_TARGET env → local.
@@ -422,13 +645,22 @@ pub async fn spawn_agent(
                         .await;
                         let _ = state.container_audits.save(&rec).await;
 
-                        // M19.3: Emit AgentContainerSpawned domain event.
-                        let _ = state.event_tx.send(DomainEvent::AgentContainerSpawned {
-                            agent_id: agent.id.to_string(),
-                            container_id: handle.id.clone(),
-                            image: image.clone(),
-                            runtime: runtime_str.clone(),
-                        });
+                        // M19.3: Emit AgentContainerSpawned event.
+                        state
+                            .emit_event(
+                                Some(agent.workspace_id.clone()),
+                                gyre_common::message::Destination::Workspace(
+                                    agent.workspace_id.clone(),
+                                ),
+                                gyre_common::message::MessageKind::AgentContainerSpawned,
+                                Some(serde_json::json!({
+                                    "agent_id": agent.id.to_string(),
+                                    "container_id": handle.id,
+                                    "image": image,
+                                    "runtime": runtime_str,
+                                })),
+                            )
+                            .await;
 
                         // M23: Emit container_started audit event.
                         {
@@ -731,7 +963,7 @@ pub async fn spawn_agent(
     let _ = state.analytics.record(&ev).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
-    super::budget::increment_active_agents(&state, &repo.project_id.to_string()).await;
+    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
 
     // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
     // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
@@ -828,6 +1060,11 @@ pub async fn complete_agent(
     // Revoke the agent's token — completed agents must not continue to authenticate (N-1).
     let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
 
+    // HSI §4: Clean up interrogation ABAC policies on completion.
+    cleanup_interrogation_policies(&state, &id).await;
+    // Also remove any stored conversation context for this agent.
+    let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
+
     // Create a jj bookmark for the agent's branch in their worktree (best-effort).
     // This persists the branch tip in jj's bookmark namespace for traceability.
     if let Some(wt) = worktrees.first() {
@@ -881,15 +1118,18 @@ pub async fn complete_agent(
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        super::budget::decrement_active_agents(&state, &repo.project_id.to_string()).await;
+        super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
 
-    // Notify the spawning user that an MR needs review (M22.8).
+    // Notify the spawning user that an MR needs review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify_mr_needs_review(
+        crate::notifications::notify(
             state.as_ref(),
-            spawned_by,
-            &mr.id.to_string(),
+            mr.workspace_id.clone(),
+            Id::new(spawned_by.clone()),
+            gyre_common::NotificationType::GateFailure,
+            format!("MR {} is ready for review", mr.id),
+            "default",
         )
         .await;
     }
@@ -918,7 +1158,7 @@ mod tests {
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -1073,8 +1313,8 @@ mod tests {
             "clone_url should contain /git/: {clone_url}"
         );
         assert!(
-            clone_url.contains("proj-1"),
-            "clone_url should contain project id: {clone_url}"
+            clone_url.contains("ws-1"),
+            "clone_url should contain workspace slug/id: {clone_url}"
         );
         assert!(
             clone_url.contains("test-repo"),
@@ -1521,5 +1761,107 @@ mod tests {
         assert_eq!(resp2.status(), StatusCode::ACCEPTED);
         let mr_json2 = body_json(resp2).await;
         assert_eq!(mr_json2["id"].as_str().unwrap(), &mr_id);
+    }
+
+    // ── Interrogation agent tests (HSI §4) ────────────────────────────────────
+
+    async fn do_spawn_interrogation(
+        app: Router,
+        repo_id: &str,
+        task_id: &str,
+        conversation_sha: Option<&str>,
+    ) -> (Router, serde_json::Value) {
+        let mut body = serde_json::json!({
+            "name": "interrogation-1",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/test",
+            "agent_type": "interrogation",
+        });
+        if let Some(sha) = conversation_sha {
+            body["conversation_sha"] = serde_json::Value::String(sha.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation spawn should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json)
+    }
+
+    #[tokio::test]
+    async fn interrogation_spawn_creates_active_agent() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Interrogate agent").await;
+        let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
+
+        assert_eq!(json["agent"]["status"], "active");
+        assert!(!json["token"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrogation_spawn_creates_abac_policies() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Policy agent").await;
+        let (app, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+
+        // Verify that ABAC policies were created by listing them.
+        let policies_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(policies_resp.status(), StatusCode::OK);
+        let policies_json = body_json(policies_resp).await;
+        let policies = policies_json.as_array().unwrap();
+
+        // Should have 3 interrogation policies for this agent.
+        let interrogation_policies: Vec<_> = policies
+            .iter()
+            .filter(|p| {
+                p["name"]
+                    .as_str()
+                    .map(|n| n.contains(&agent_id))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            interrogation_policies.len(),
+            3,
+            "should create 3 interrogation ABAC policies, found: {policies_json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrogation_spawn_without_conversation_sha() {
+        // Spawning without conversation_sha should succeed (best-effort context retrieval).
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "No context agent").await;
+        let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
+
+        assert_eq!(json["agent"]["status"], "active");
     }
 }

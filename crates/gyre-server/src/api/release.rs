@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::{
+    auth::AuthenticatedAgent,
     version_compute::{
         commits_since, compute_next_version, epoch_secs_to_date, latest_semver_tag,
         parse_conventional, render_changelog_markdown, type_bump, BumpLevel, ChangelogEntry,
@@ -20,7 +21,6 @@ use crate::{
 };
 
 use super::{error::ApiError, new_id, now_secs};
-use crate::auth::AdminOnly;
 
 // ── Request type ──────────────────────────────────────────────────────────────
 
@@ -46,11 +46,19 @@ pub struct ReleasePrepareRequest {
 /// Computes the next semver version from conventional commits since the last
 /// semver tag, generates a changelog with agent/task attribution from the
 /// provenance store, and optionally opens a release MR.
+///
+/// Admin-only: an agent that can trigger release preparation can also create
+/// release MRs, which affects the merge queue and release history (NEW-41).
 pub async fn release_prepare(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
+    auth: AuthenticatedAgent,
     Json(req): Json<ReleasePrepareRequest>,
 ) -> Result<Json<ReleasePrepareResponse>, ApiError> {
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may trigger release preparation".to_string(),
+        ));
+    }
     // Validate optional ref inputs to prevent git argument injection.
     if let Some(ref b) = req.branch {
         if !crate::git_refs::refname_safe(b) {
@@ -247,7 +255,7 @@ mod tests {
 
     // Helper: create a test repo and return its ID.
     async fn create_repo(app: &Router) -> String {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -263,6 +271,46 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         json["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_role_cannot_trigger_release_prepare() {
+        // NEW-41 regression: Agent role must be rejected with 403.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "rogue-agent",
+                "preferred_username": "rogue-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let body = serde_json::json!({ "repo_id": "any-repo" });
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/release/prepare")
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent role must not trigger release preparation (NEW-41)"
+        );
     }
 
     #[tokio::test]

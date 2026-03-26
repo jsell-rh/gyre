@@ -33,7 +33,6 @@ pub struct BlameEntry {
     pub commit_sha: String,
     pub agent_id: Option<String>,
     pub task_id: Option<String>,
-    pub ralph_step: Option<String>,
 }
 
 /// GET /api/v1/repos/:id/blame?path={file}
@@ -72,7 +71,6 @@ pub async fn get_blame(
                 commit_sha: ac.commit_sha.clone(),
                 agent_id: Some(ac.agent_id.to_string()),
                 task_id: ac.task_id.clone(),
-                ralph_step: ac.ralph_step.as_ref().map(|s| s.to_string()),
             }
         })
         .collect();
@@ -86,7 +84,6 @@ pub async fn get_blame(
             commit_sha: "HEAD".to_string(),
             agent_id: None,
             task_id: None,
-            ralph_step: None,
         };
         // Only include fallback when a specific path was requested.
         if !path.is_empty() {
@@ -379,7 +376,7 @@ mod tests {
     }
 
     async fn create_repo(app: &Router) -> String {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(

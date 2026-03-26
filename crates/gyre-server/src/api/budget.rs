@@ -15,9 +15,8 @@ use axum::{
 use gyre_domain::{BudgetConfig, BudgetUsage};
 use serde::{Deserialize, Serialize};
 
-use super::super::auth::AdminOnly;
 use super::now_secs;
-use crate::{api::error::ApiError, AppState};
+use crate::{api::error::ApiError, auth::AuthenticatedAgent, AppState};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -107,10 +106,18 @@ pub async fn get_workspace_budget(
 
 pub async fn set_workspace_budget(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SetBudgetRequest>,
 ) -> Result<Json<BudgetResponse>, ApiError> {
+    // Admin-only: workspace budget limits are financial governance controls.
+    // Allowing Developer/Agent roles to raise their own limits could exhaust
+    // tenant resources (NEW-32).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace budget limits".to_string(),
+        ));
+    }
     let new_config = BudgetConfig {
         max_tokens_per_day: req.max_tokens_per_day,
         max_cost_per_day: req.max_cost_per_day,
@@ -173,10 +180,20 @@ pub async fn set_workspace_budget(
 
 // ── GET /api/v1/budget/summary  (Admin only) ─────────────────────────────────
 
+/// GET /api/v1/budget/summary — Admin only.
+///
+/// Returns the full tenant budget picture: all workspace configs and usage.
+/// Agents must not read this — it reveals limits and consumption for workspaces
+/// other than their own and could inform resource-exhaustion strategies (NEW-40).
 pub async fn budget_summary(
     State(state): State<Arc<AppState>>,
-    _admin: AdminOnly,
+    auth: AuthenticatedAgent,
 ) -> Result<Json<TenantBudgetSummary>, ApiError> {
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may read tenant budget summary".to_string(),
+        ));
+    }
     let tenant_config = state
         .budget_configs
         .get_config(tenant_key())
@@ -371,6 +388,41 @@ mod tests {
         assert_eq!(v["usage"]["tokens_used_today"], 0);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn developer_cannot_set_workspace_budget() {
+        // NEW-32: Developer-role JWT must be rejected with 403 on PUT budget.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-test/budget")
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(json_body(r#"{"max_concurrent_agents":999}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
     #[tokio::test]
     async fn set_workspace_budget_stores_limits() {
         let app = make_test_app();
@@ -445,6 +497,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_role_cannot_read_budget_summary() {
+        // NEW-40 regression: Agent role must be rejected with 403.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "rogue-agent",
+                "preferred_username": "rogue-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/budget/summary")
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent role must not read tenant budget summary (NEW-40)"
+        );
     }
 
     #[tokio::test]

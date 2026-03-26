@@ -43,6 +43,10 @@ pub enum GateType {
     AgentReview,
     /// Spawn a validation agent for domain-specific checks; passes when agent reports pass.
     AgentValidation,
+    /// Observational gate: captures OTel spans from the integration test run.
+    /// Always passes — trace capture is not a quality gate, it is observability.
+    /// Configuration fields: otlp_port, test_command, max_spans, capture_external.
+    TraceCapture,
 }
 
 /// Execution status of one gate check for a specific MR.

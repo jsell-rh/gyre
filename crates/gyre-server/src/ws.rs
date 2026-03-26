@@ -6,22 +6,14 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use gyre_common::{ActivityEventData, WsMessage};
-use serde::Serialize;
+use gyre_common::message::{Destination, MessageKind};
+use gyre_common::WsMessage;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
-use crate::domain_events::DomainEvent;
-use crate::AppState;
-
-/// Wrapper that adds `type: "DomainEvent"` to the serialized domain event.
-#[derive(Serialize)]
-struct WsDomainEvent<'a> {
-    #[serde(rename = "type")]
-    msg_type: &'static str,
-    #[serde(flatten)]
-    event: &'a DomainEvent,
-}
+use crate::auth::AuthenticatedAgent;
+use crate::{AppState, PresenceEntry};
 
 /// GET /ws - WebSocket upgrade endpoint.
 pub async fn ws_handler(
@@ -37,8 +29,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Expect first message to be Auth.
-    let authed = match receiver.next().await {
-        Some(Ok(Message::Text(text))) => authenticate(&text, &state.auth_token, &mut sender).await,
+    let caller = match receiver.next().await {
+        Some(Ok(Message::Text(text))) => {
+            match authenticate(&text, &state, &mut sender).await {
+                Some(auth) => auth,
+                None => return, // auth failed — authenticate() already sent AuthResult
+            }
+        }
         Some(Ok(Message::Close(_))) | None => {
             info!("connection closed before auth");
             return;
@@ -49,14 +46,26 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    if !authed {
-        return;
-    }
+    // Assign a unique connection ID for targeted delivery (e.g. PresenceEvicted).
+    let connection_id = state.ws_connection_counter.fetch_add(1, Ordering::SeqCst);
 
-    let mut broadcast_rx = state.broadcast_tx.subscribe();
-    let mut domain_event_rx = state.event_tx.subscribe();
+    // Per-connection mpsc channel: server → this WS sender (for targeted messages).
+    let (targeted_tx, mut targeted_rx) = tokio::sync::mpsc::channel::<String>(32);
+    state
+        .ws_connections
+        .write()
+        .await
+        .insert(connection_id, targeted_tx);
 
-    // Main message loop: handle activity messages and broadcast events.
+    // Subscribed workspace IDs authorized for this connection.
+    let mut subscribed_workspaces: Vec<gyre_common::Id> = vec![];
+
+    // session_id for this connection (set via Subscribe message).
+    let mut connection_session_id: Option<String> = None;
+
+    let mut bus_rx = state.message_broadcast_tx.subscribe();
+
+    // Main message loop.
     loop {
         tokio::select! {
             msg = receiver.next() => {
@@ -71,6 +80,219 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         break;
                                     }
                                 }
+                                WsMessage::Subscribe { scopes, last_seen, session_id } => {
+                                    // Record session_id for this connection (presence tracking).
+                                    connection_session_id = session_id;
+
+                                    // Validate each requested workspace belongs to caller's tenant.
+                                    let mut authorized_workspaces: Vec<gyre_common::Id> = vec![];
+                                    let mut rejected_workspaces: Vec<String> = vec![];
+
+                                    for scope in &scopes {
+                                        let ws_id = &scope.workspace_id;
+                                        match state.workspaces.find_by_id(ws_id).await {
+                                            Ok(Some(workspace)) => {
+                                                // Admin bypass (global token): allow all workspaces.
+                                                let tenant_match = caller.roles.contains(&gyre_domain::UserRole::Admin)
+                                                    || workspace.tenant_id.as_str() == caller.tenant_id;
+                                                if tenant_match {
+                                                    authorized_workspaces.push(ws_id.clone());
+                                                } else {
+                                                    warn!(
+                                                        workspace_id = %ws_id,
+                                                        caller_tenant = %caller.tenant_id,
+                                                        "Subscribe: workspace belongs to different tenant, rejecting"
+                                                    );
+                                                    rejected_workspaces.push(ws_id.to_string());
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                warn!(workspace_id = %ws_id, "Subscribe: workspace not found");
+                                                rejected_workspaces.push(ws_id.to_string());
+                                            }
+                                            Err(e) => {
+                                                warn!(workspace_id = %ws_id, error = %e, "Subscribe: lookup error");
+                                                rejected_workspaces.push(ws_id.to_string());
+                                            }
+                                        }
+                                    }
+
+                                    if !rejected_workspaces.is_empty() {
+                                        let err_msg = WsMessage::Unknown; // closest available; client will see the raw JSON
+                                        // Send structured error as raw JSON since WsMessage has no Error variant.
+                                        let err_json = serde_json::json!({
+                                            "type": "SubscribeError",
+                                            "rejected_workspaces": rejected_workspaces,
+                                            "message": "Unauthorized or unknown workspace IDs",
+                                        });
+                                        let _ = err_msg; // suppress unused warning
+                                        let payload = serde_json::to_string(&err_json).unwrap();
+                                        if sender.send(Message::Text(payload)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+
+                                    subscribed_workspaces = authorized_workspaces;
+                                    // Update per-connection workspace index for targeted broadcasts.
+                                    state.ws_connection_workspaces.write().await
+                                        .insert(connection_id, subscribed_workspaces.clone());
+
+                                    // Replay Event-tier messages since last_seen, oldest-first.
+                                    let mut replayed = 0usize;
+                                    let replay_limit = 1000usize;
+                                    let mut truncated = false;
+
+                                    for ws_id in &subscribed_workspaces {
+                                        let since_ms = last_seen.unwrap_or(0);
+                                        if let Ok(mut messages) = state.messages.list_by_workspace(
+                                            ws_id,
+                                            None,
+                                            Some(since_ms),
+                                            None,
+                                            None,
+                                            Some(replay_limit + 1),
+                                        ).await {
+                                            // list_by_workspace returns newest-first; reverse to oldest-first.
+                                            messages.reverse();
+                                            for m in messages {
+                                                if replayed >= replay_limit {
+                                                    truncated = true;
+                                                    break;
+                                                }
+                                                let payload = serde_json::to_string(&m).unwrap();
+                                                if sender.send(Message::Text(payload)).await.is_err() {
+                                                    return;
+                                                }
+                                                replayed += 1;
+                                            }
+                                        }
+                                        if truncated {
+                                            break;
+                                        }
+                                    }
+
+                                    if truncated {
+                                        let catchup = WsMessage::ReplayCatchUp { truncated: true };
+                                        let payload = serde_json::to_string(&catchup).unwrap();
+                                        if sender.send(Message::Text(payload)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                WsMessage::UserPresence {
+                                    user_id: _client_user_id, // ignored — server uses verified identity
+                                    session_id: presence_session_id,
+                                    workspace_id,
+                                    view,
+                                    timestamp,
+                                } => {
+                                    // Only track presence for connections with verified user identity.
+                                    // Shared-token (GYRE_AUTH_TOKEN) and agent-token connections have
+                                    // user_id: None and are excluded from presence tracking.
+                                    if let Some(verified_user_id) = &caller.user_id {
+                                        let verified_user_str = verified_user_id.to_string();
+
+                                        // Validate that UserPresence.session_id matches the session_id
+                                        // established during Subscribe. Mismatches indicate a protocol
+                                        // error or a misbehaving client — reject silently.
+                                        let canonical_session_id = match &connection_session_id {
+                                            Some(s) if s == &presence_session_id => s.clone(),
+                                            Some(_) => {
+                                                warn!(
+                                                    "UserPresence session_id mismatch with Subscribe session_id — ignoring"
+                                                );
+                                                continue; // use `continue` to skip to next select! iteration — but we're in a match, so we need to break out
+                                            }
+                                            None => presence_session_id.clone(),
+                                        };
+
+                                        // Server-side timestamp for eviction (immune to client manipulation).
+                                        let server_now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as u64;
+
+                                        // Graceful disconnect: client sends view="disconnected" on beforeunload.
+                                        if view == "disconnected" {
+                                            state
+                                                .presence
+                                                .write()
+                                                .await
+                                                .remove(&(verified_user_str, canonical_session_id));
+                                        } else {
+                                            // Update presence map.
+                                            {
+                                                let mut map = state.presence.write().await;
+                                                map.insert(
+                                                    (verified_user_str.clone(), canonical_session_id.clone()),
+                                                    PresenceEntry {
+                                                        workspace_id: workspace_id.to_string(),
+                                                        view: view.clone(),
+                                                        timestamp,
+                                                        server_last_seen: server_now_ms,
+                                                        connection_id,
+                                                    },
+                                                );
+
+                                                // Enforce 5-session cap per user: evict oldest if exceeded.
+                                                let user_sessions: Vec<_> = map
+                                                    .iter()
+                                                    .filter(|((uid, _), _)| uid == &verified_user_str)
+                                                    .map(|((_, sid), entry)| {
+                                                        (sid.clone(), entry.server_last_seen, entry.connection_id)
+                                                    })
+                                                    .collect();
+
+                                                if user_sessions.len() > 5 {
+                                                    // Find oldest by server_last_seen.
+                                                    if let Some((evict_sid, _, evict_conn_id)) =
+                                                        user_sessions.iter().min_by_key(|(_, ts, _)| ts)
+                                                    {
+                                                        let evict_conn_id = *evict_conn_id;
+                                                        let evict_sid = evict_sid.clone();
+                                                        map.remove(&(verified_user_str.clone(), evict_sid.clone()));
+                                                        drop(map); // release lock before async work
+
+                                                        // Send PresenceEvicted to the evicted connection.
+                                                        let evict_msg = WsMessage::PresenceEvicted {
+                                                            session_id: evict_sid,
+                                                        };
+                                                        if let Ok(payload) = serde_json::to_string(&evict_msg) {
+                                                            let conns = state.ws_connections.read().await;
+                                                            if let Some(tx) = conns.get(&evict_conn_id) {
+                                                                let _ = tx.try_send(payload);
+                                                            }
+                                                        }
+                                                    } else {
+                                                        drop(map);
+                                                    }
+                                                }
+                                            }
+
+                                            // Rebroadcast UserPresence (with verified user_id) to
+                                            // connections subscribed to this workspace only.
+                                            let broadcast_msg = WsMessage::UserPresence {
+                                                user_id: verified_user_id.clone(),
+                                                session_id: canonical_session_id,
+                                                workspace_id: workspace_id.clone(),
+                                                view,
+                                                timestamp,
+                                            };
+                                            if let Ok(payload) = serde_json::to_string(&broadcast_msg) {
+                                                let ws_id = &workspace_id;
+                                                let conn_workspaces = state.ws_connection_workspaces.read().await;
+                                                let conns = state.ws_connections.read().await;
+                                                for (conn_id, workspaces) in conn_workspaces.iter() {
+                                                    if workspaces.contains(ws_id) {
+                                                        if let Some(tx) = conns.get(conn_id) {
+                                                            let _ = tx.try_send(payload.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 WsMessage::ActivityEvent {
                                     event_id,
                                     agent_id,
@@ -78,19 +300,53 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     description,
                                     timestamp,
                                 } => {
-                                    let event = ActivityEventData {
-                                        event_id,
-                                        agent_id,
-                                        event_type,
-                                        description,
-                                        timestamp,
-                                    };
-                                    state.activity_store.record(event.clone());
-                                    // Broadcast; ignore send errors (no subscribers is fine).
-                                    let _ = state.broadcast_tx.send(event);
+                                    // Scope telemetry to the caller's first subscribed workspace
+                                    // (or a per-tenant default workspace).
+                                    let ws_id = subscribed_workspaces
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            gyre_common::Id::new(format!("default-{}", caller.tenant_id))
+                                        });
+                                    state.emit_telemetry(
+                                        ws_id,
+                                        MessageKind::StateChanged,
+                                        Some(serde_json::json!({
+                                            "event_id": event_id,
+                                            "agent_id": agent_id,
+                                            "event_type": event_type,
+                                            "description": description,
+                                            "timestamp": timestamp,
+                                        })),
+                                    );
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
-                                    let events = state.activity_store.query(since, limit);
+                                    // Query TelemetryBuffer scoped to subscribed workspaces.
+                                    let since_ms = since.unwrap_or(0);
+                                    let lim = limit.unwrap_or(100);
+                                    let mut events: Vec<gyre_common::ActivityEventData> = vec![];
+
+                                    let scoped_workspaces: Vec<_> = if subscribed_workspaces.is_empty() {
+                                        // No subscription yet: fall back to tenant-default workspace.
+                                        vec![gyre_common::Id::new(format!("default-{}", caller.tenant_id))]
+                                    } else {
+                                        subscribed_workspaces.clone()
+                                    };
+
+                                    for ws_id in &scoped_workspaces {
+                                        let msgs = state.telemetry_buffer.list_since(ws_id, since_ms, lim.saturating_sub(events.len()));
+                                        for m in msgs {
+                                            if let Some(p) = &m.payload {
+                                                if let Ok(ev) = serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()) {
+                                                    events.push(ev);
+                                                }
+                                            }
+                                        }
+                                        if events.len() >= lim {
+                                            break;
+                                        }
+                                    }
+
                                     let response = WsMessage::ActivityResponse { events };
                                     let payload = serde_json::to_string(&response).unwrap();
                                     if sender.send(Message::Text(payload)).await.is_err() {
@@ -113,77 +369,100 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     _ => {}
                 }
             }
-            broadcast = broadcast_rx.recv() => {
-                match broadcast {
-                    Ok(event) => {
-                        let msg = WsMessage::ActivityEvent {
-                            event_id: event.event_id,
-                            agent_id: event.agent_id,
-                            event_type: event.event_type,
-                            description: event.description,
-                            timestamp: event.timestamp,
+            bus_msg = bus_rx.recv() => {
+                match bus_msg {
+                    Ok(msg) => {
+                        // Filter by destination and subscription, plus tenant isolation.
+                        let deliver = match &msg.to {
+                            Destination::Broadcast => {
+                                // Broadcast: only deliver if tenant matches or caller is admin.
+                                caller.roles.contains(&gyre_domain::UserRole::Admin)
+                                    || msg.workspace_id.as_ref().map(|ws_tid| {
+                                        // Use workspace_id to infer tenant — check via subscribed list.
+                                        subscribed_workspaces.contains(ws_tid)
+                                    }).unwrap_or(true) // no workspace_id = global broadcast
+                            }
+                            Destination::Workspace(ws_id) => {
+                                // Must be subscribed AND workspace must be in caller's tenant.
+                                subscribed_workspaces.contains(ws_id)
+                            }
+                            Destination::Agent(_) => false, // Agent-directed: not delivered via WS
                         };
-                        let payload = serde_json::to_string(&msg).unwrap();
-                        if sender.send(Message::Text(payload)).await.is_err() {
-                            break;
+                        if deliver {
+                            let payload = serde_json::to_string(&msg).unwrap();
+                            if sender.send(Message::Text(payload)).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(n, "broadcast receiver lagged");
+                        warn!(n, "message bus receiver lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            domain_ev = domain_event_rx.recv() => {
-                match domain_ev {
-                    Ok(event) => {
-                        let wrapper = WsDomainEvent { msg_type: "DomainEvent", event: &event };
-                        let payload = serde_json::to_string(&wrapper).unwrap();
-                        if sender.send(Message::Text(payload)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(n, "domain event receiver lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Some(targeted_payload) = targeted_rx.recv() => {
+                // Targeted message for this specific connection (e.g. PresenceEvicted).
+                if sender.send(Message::Text(targeted_payload)).await.is_err() {
+                    break;
                 }
             }
         }
     }
 
+    // Cleanup: deregister connection and remove presence entries for this session.
+    state.ws_connections.write().await.remove(&connection_id);
+    state
+        .ws_connection_workspaces
+        .write()
+        .await
+        .remove(&connection_id);
+    if let (Some(user_id), Some(session_id)) = (&caller.user_id, &connection_session_id) {
+        state
+            .presence
+            .write()
+            .await
+            .remove(&(user_id.to_string(), session_id.clone()));
+    }
+
     info!("WebSocket connection closed");
 }
 
-/// Send AuthResult and return true if token is valid.
-#[instrument(skip(token_json, sender, auth_token))]
+/// Validate the Auth message. Returns `Some(AuthenticatedAgent)` on success.
+/// Sends `AuthResult` over the socket in both cases.
+#[instrument(skip(token_json, sender, state))]
 async fn authenticate(
     token_json: &str,
-    auth_token: &str,
+    state: &Arc<AppState>,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-) -> bool {
-    match serde_json::from_str::<WsMessage>(token_json) {
-        Ok(WsMessage::Auth { token }) => {
-            let success = token == auth_token;
-            let result = if success {
-                WsMessage::AuthResult {
-                    success: true,
-                    message: "authenticated".to_string(),
-                }
-            } else {
-                warn!("authentication failed: invalid token");
-                WsMessage::AuthResult {
-                    success: false,
-                    message: "invalid token".to_string(),
-                }
+) -> Option<AuthenticatedAgent> {
+    let token = match serde_json::from_str::<WsMessage>(token_json) {
+        Ok(WsMessage::Auth { token }) => token,
+        _ => {
+            warn!("expected Auth message, got something else");
+            return None;
+        }
+    };
+
+    match crate::auth::authenticate_token(&token, state).await {
+        Ok(auth) => {
+            let result = WsMessage::AuthResult {
+                success: true,
+                message: "authenticated".to_string(),
             };
             let payload = serde_json::to_string(&result).unwrap();
             let _ = sender.send(Message::Text(payload)).await;
-            success
+            Some(auth)
         }
-        _ => {
-            warn!("expected Auth message, got something else");
-            false
+        Err(reason) => {
+            warn!(reason, "WebSocket authentication failed");
+            let result = WsMessage::AuthResult {
+                success: false,
+                message: reason.to_string(),
+            };
+            let payload = serde_json::to_string(&result).unwrap();
+            let _ = sender.send(Message::Text(payload)).await;
+            None
         }
     }
 }
@@ -300,12 +579,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_activity_event_recorded_and_queryable() {
+    async fn ws_activity_event_emits_to_telemetry() {
         let (url, state) = start_test_server("tok").await;
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         auth_ws(&mut ws, "tok").await;
 
-        // Send ActivityEvent
+        // Send ActivityEvent (legacy path).
         let event = WsMessage::ActivityEvent {
             event_id: "ev1".to_string(),
             agent_id: "agent1".to_string(),
@@ -319,107 +598,14 @@ mod tests {
         .await
         .unwrap();
 
-        // Consume the broadcast echo of the ActivityEvent sent back to this connection
-        let broadcast_echo = ws.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = broadcast_echo {
-            let result: WsMessage = serde_json::from_str(&text).unwrap();
-            assert!(matches!(result, WsMessage::ActivityEvent { .. }));
-        } else {
-            panic!("expected ActivityEvent broadcast");
-        }
+        // Give async emit a moment to process.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Verify via store
-        let events = state.activity_store.query(None, None);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_id, "ev1");
-
-        // Query via WS
-        let query = WsMessage::ActivityQuery {
-            since: None,
-            limit: Some(10),
-        };
-        ws.send(tungstenite::Message::Text(
-            serde_json::to_string(&query).unwrap(),
-        ))
-        .await
-        .unwrap();
-
-        let msg = ws.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = msg {
-            let result: WsMessage = serde_json::from_str(&text).unwrap();
-            if let WsMessage::ActivityResponse { events } = result {
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].event_id, "ev1");
-            } else {
-                panic!("expected ActivityResponse, got: {:?}", result);
-            }
-        } else {
-            panic!("expected text message");
-        }
-    }
-
-    #[tokio::test]
-    async fn ws_activity_event_broadcast_to_other_client() {
-        let (url, _state) = start_test_server("tok").await;
-
-        // Client A: sender
-        let (mut ws_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        auth_ws(&mut ws_a, "tok").await;
-
-        // Client B: receiver
-        let (mut ws_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        auth_ws(&mut ws_b, "tok").await;
-
-        // A sends an ActivityEvent
-        let event = WsMessage::ActivityEvent {
-            event_id: "broadcast-ev".to_string(),
-            agent_id: "agentA".to_string(),
-            event_type: gyre_common::AgEventType::TextMessageContent,
-            description: "broadcast test".to_string(),
-            timestamp: 2000,
-        };
-        ws_a.send(tungstenite::Message::Text(
-            serde_json::to_string(&event).unwrap(),
-        ))
-        .await
-        .unwrap();
-
-        // B should receive the broadcast (both A and B get it; A sent it)
-        let msg = ws_b.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = msg {
-            let result: WsMessage = serde_json::from_str(&text).unwrap();
-            if let WsMessage::ActivityEvent { event_id, .. } = result {
-                assert_eq!(event_id, "broadcast-ev");
-            } else {
-                panic!("expected ActivityEvent, got: {:?}", result);
-            }
-        } else {
-            panic!("expected text message");
-        }
-    }
-
-    #[tokio::test]
-    async fn ws_domain_event_broadcast_to_client() {
-        let (url, state) = start_test_server("tok").await;
-        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        auth_ws(&mut ws, "tok").await;
-
-        // Publish a domain event via the event bus.
-        let _ = state
-            .event_tx
-            .send(crate::domain_events::DomainEvent::AgentCreated {
-                id: "agent-123".to_string(),
-            });
-
-        // Client should receive a DomainEvent message.
-        let msg = ws.next().await.unwrap().unwrap();
-        if let tungstenite::Message::Text(text) = msg {
-            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(value["type"], "DomainEvent");
-            assert_eq!(value["event"], "AgentCreated");
-            assert_eq!(value["id"], "agent-123");
-        } else {
-            panic!("expected text message");
-        }
+        // Verify it landed in the telemetry buffer.
+        let all = state.telemetry_buffer.list_all_since(0, 100);
+        assert!(
+            !all.is_empty(),
+            "telemetry buffer should have at least one entry"
+        );
     }
 }

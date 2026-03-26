@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::auth::AdminOnly;
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 
@@ -98,14 +97,14 @@ pub async fn get_meta_spec_set(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
 
-    let sets = state.meta_spec_sets.lock().await;
-    let set = sets
-        .get(&workspace_id)
-        .cloned()
-        .unwrap_or_else(|| MetaSpecSet {
+    let set = match state.meta_spec_sets.get(&Id::new(&workspace_id)).await? {
+        Some(json) => serde_json::from_str::<MetaSpecSet>(&json)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("corrupt meta_spec_set: {e}")))?,
+        None => MetaSpecSet {
             workspace_id: workspace_id.clone(),
             ..Default::default()
-        });
+        },
+    };
     Ok(Json(set))
 }
 
@@ -116,9 +115,19 @@ pub async fn get_meta_spec_set(
 pub async fn put_meta_spec_set(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
-    _admin: AdminOnly,
+    auth: AuthenticatedAgent,
     Json(req): Json<UpdateMetaSpecSetRequest>,
 ) -> Result<(StatusCode, Json<MetaSpecSet>), ApiError> {
+    // Admin-only: meta-spec-set bindings are governance controls that determine
+    // which personas, principles, standards, and processes govern all agents in a
+    // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
+    // bindings would let agents rewrite the rules they operate under (NEW-26).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace meta-spec-set bindings".to_string(),
+        ));
+    }
+
     // Verify workspace exists.
     state
         .workspaces
@@ -134,10 +143,12 @@ pub async fn put_meta_spec_set(
         process: req.process,
     };
 
-    {
-        let mut sets = state.meta_spec_sets.lock().await;
-        sets.insert(workspace_id, set.clone());
-    }
+    let json = serde_json::to_string(&set)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize meta_spec_set: {e}")))?;
+    state
+        .meta_spec_sets
+        .upsert(&Id::new(&workspace_id), &json)
+        .await?;
 
     Ok((StatusCode::OK, Json(set)))
 }
@@ -150,43 +161,49 @@ pub async fn get_meta_spec_blast_radius(
     State(state): State<Arc<AppState>>,
     Path(spec_path): Path<String>,
 ) -> Json<BlastRadiusResponse> {
-    // Collect matching workspace IDs while holding the lock, then drop it before async calls.
-    let matching_workspace_ids: Vec<String> = {
-        let sets = state.meta_spec_sets.lock().await;
-        sets.iter()
-            .filter(|(_, set)| {
-                set.personas.values().any(|e| e.path == spec_path)
-                    || set.principles.iter().any(|e| e.path == spec_path)
-                    || set.standards.iter().any(|e| e.path == spec_path)
-                    || set.process.iter().any(|e| e.path == spec_path)
-            })
-            .map(|(ws_id, _)| ws_id.clone())
-            .collect()
-    };
-
     let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
     let mut affected_repos: Vec<AffectedRepo> = Vec::new();
 
-    for workspace_id in &matching_workspace_ids {
-        affected_workspaces.push(AffectedWorkspace {
-            id: workspace_id.clone(),
-        });
-
-        // Collect repos bound to this workspace via kv_store.
-        let repo_ids: Vec<String> = state
-            .kv_store
-            .kv_get("workspace_repos", workspace_id)
+    // List all workspaces and check each one for a meta-spec-set referencing spec_path.
+    let workspaces = state.workspaces.list().await.unwrap_or_default();
+    for workspace in &workspaces {
+        let ws_id = workspace.id.as_str();
+        let set_opt = state
+            .meta_spec_sets
+            .get(&workspace.id)
             .await
             .ok()
             .flatten()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_default();
-        for repo_id in &repo_ids {
-            affected_repos.push(AffectedRepo {
-                id: repo_id.clone(),
-                workspace_id: workspace_id.clone(),
-                reason: "workspace_binding".to_string(),
-            });
+            .and_then(|json| serde_json::from_str::<MetaSpecSet>(&json).ok());
+
+        if let Some(set) = set_opt {
+            let references_spec = set.personas.values().any(|e| e.path == spec_path)
+                || set.principles.iter().any(|e| e.path == spec_path)
+                || set.standards.iter().any(|e| e.path == spec_path)
+                || set.process.iter().any(|e| e.path == spec_path);
+
+            if references_spec {
+                affected_workspaces.push(AffectedWorkspace {
+                    id: ws_id.to_string(),
+                });
+
+                // Collect repos bound to this workspace via kv_store.
+                let repo_ids: Vec<String> = state
+                    .kv_store
+                    .kv_get("workspace_repos", ws_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                    .unwrap_or_default();
+                for repo_id in &repo_ids {
+                    affected_repos.push(AffectedRepo {
+                        id: repo_id.clone(),
+                        workspace_id: ws_id.to_string(),
+                        reason: "workspace_binding".to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -236,6 +253,62 @@ mod tests {
         let json = body_json(resp).await;
         assert!(json["affected_repos"].as_array().unwrap().is_empty());
         assert!(json["affected_workspaces"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_meta_spec_set_requires_admin() {
+        // A Developer-role JWT should be rejected with 403 (NEW-26 fix).
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        // Create a workspace using the admin static token.
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws26","slug":"ws26"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // Developer-role OIDC JWT.
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"personas":{},"principles":[],"standards":[],"process":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test(flavor = "multi_thread")]

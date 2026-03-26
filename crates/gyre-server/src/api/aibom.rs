@@ -56,7 +56,6 @@ pub struct AibomCommit {
     pub sha: String,
     pub agent_id: String,
     pub task_id: Option<String>,
-    pub ralph_step: Option<String>,
     pub timestamp: u64,
     pub attestation_level: String,
 }
@@ -73,11 +72,10 @@ pub struct AibomResponse {
 }
 
 /// Resolve attestation level: prefer the stored value (M14.2), fall back to heuristic.
-fn resolve_attestation_level(
-    stored: Option<&str>,
-    model_context: Option<&str>,
-    ralph_step: bool,
-) -> &'static str {
+///
+/// The heuristic now uses `model_context` (which carries `wl_*` JWT claims and
+/// `stack_hash`) rather than the removed `ralph_step` field.
+fn resolve_attestation_level(stored: Option<&str>, model_context: Option<&str>) -> &'static str {
     if let Some(lvl) = stored {
         match lvl {
             "server-verified" => return "server-verified",
@@ -85,11 +83,10 @@ fn resolve_attestation_level(
             _ => {}
         }
     }
-    // Heuristic: model_context present → server-verified, ralph_step → self-reported.
+    // Heuristic: model_context present → agent used structured model context,
+    // which carries stack_hash / wl_* JWT claims → self-reported at minimum.
     if model_context.is_some() {
         "server-verified"
-    } else if ralph_step {
-        "self-reported"
     } else {
         "unattested"
     }
@@ -183,11 +180,8 @@ pub async fn get_aibom(
             (agent_id_str.clone(), None, 0, false, false)
         });
         entry.2 += 1;
-        let lvl = resolve_attestation_level(
-            ac.attestation_level.as_deref(),
-            ac.model_context.as_deref(),
-            ac.ralph_step.is_some(),
-        );
+        let lvl =
+            resolve_attestation_level(ac.attestation_level.as_deref(), ac.model_context.as_deref());
         if lvl == "server-verified" {
             entry.3 = true;
         } else if lvl == "self-reported" {
@@ -237,13 +231,11 @@ pub async fn get_aibom(
             let level = resolve_attestation_level(
                 ac.attestation_level.as_deref(),
                 ac.model_context.as_deref(),
-                ac.ralph_step.is_some(),
             );
             AibomCommit {
                 sha: ac.commit_sha.clone(),
                 agent_id: ac.agent_id.to_string(),
                 task_id: ac.task_id.clone(),
-                ralph_step: ac.ralph_step.as_ref().map(|s| s.to_string()),
                 timestamp: ac.timestamp,
                 attestation_level: level.to_string(),
             }
@@ -282,7 +274,7 @@ mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use gyre_common::Id;
-    use gyre_domain::{AgentCommit, RalphStep};
+    use gyre_domain::AgentCommit;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -298,7 +290,7 @@ mod tests {
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -357,7 +349,7 @@ mod tests {
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
 
-        // Record two commits: one with ralph_step (self-reported), one without (unattested).
+        // Record two commits: one with model_context (server-verified), one without (unattested).
         let c1 = AgentCommit::new(
             Id::new("c1"),
             Id::new("agent-1"),
@@ -366,13 +358,7 @@ mod tests {
             "refs/heads/feat/x",
             1000,
         )
-        .with_provenance(
-            Some("TASK-001".to_string()),
-            Some(RalphStep::Implement),
-            None,
-            None,
-            None,
-        );
+        .with_provenance(Some("TASK-001".to_string()), None, None, None);
         let c2 = AgentCommit::new(
             Id::new("c2"),
             Id::new("agent-1"),
@@ -381,7 +367,7 @@ mod tests {
             "refs/heads/feat/x",
             2000,
         )
-        .with_provenance(None, None, None, None, None);
+        .with_provenance(None, None, None, None);
         state.agent_commits.record(&c1).await.unwrap();
         state.agent_commits.record(&c2).await.unwrap();
 
@@ -397,12 +383,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["total_commits"], 2);
-        // One self-reported, one unattested → 50% attested
-        assert_eq!(json["attested_percentage"], 50.0);
+        // Both unattested (no model_context) → 0% attested
+        assert_eq!(json["attested_percentage"], 0.0);
         assert_eq!(json["agents"].as_array().unwrap().len(), 1);
         let agent = &json["agents"][0];
         assert_eq!(agent["commit_count"], 2);
-        assert_eq!(agent["attestation_level"], "self-reported");
+        assert_eq!(agent["attestation_level"], "unattested");
     }
 
     #[tokio::test]
@@ -422,7 +408,6 @@ mod tests {
         )
         .with_provenance(
             None,
-            Some(RalphStep::Spec),
             None,
             None,
             Some(r#"{"model":"claude-opus-4"}"#.to_string()),

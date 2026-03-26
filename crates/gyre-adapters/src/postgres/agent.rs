@@ -47,7 +47,7 @@ struct AgentRow {
     #[allow(dead_code)]
     tenant_id: String,
     spawned_by: Option<String>,
-    workspace_id: Option<String>,
+    workspace_id: String,
 }
 
 impl AgentRow {
@@ -63,7 +63,9 @@ impl AgentRow {
             last_heartbeat: self.last_heartbeat.map(|v| v as u64),
             spawned_by: self.spawned_by,
             disconnected_behavior: Default::default(),
-            workspace_id: self.workspace_id.map(Id::new),
+            workspace_id: Id::new(self.workspace_id),
+            iteration: 0,
+            loop_config: None,
         })
     }
 }
@@ -81,7 +83,7 @@ struct NewAgentRow<'a> {
     last_heartbeat: Option<i64>,
     tenant_id: &'a str,
     spawned_by: Option<&'a str>,
-    workspace_id: Option<&'a str>,
+    workspace_id: &'a str,
 }
 
 #[async_trait]
@@ -103,7 +105,7 @@ impl AgentRepository for PgStorage {
                 last_heartbeat: a.last_heartbeat.map(|v| v as i64),
                 tenant_id: &tenant,
                 spawned_by: a.spawned_by.as_deref(),
-                workspace_id: a.workspace_id.as_ref().map(|id| id.as_str()),
+                workspace_id: a.workspace_id.as_str(),
             };
             diesel::insert_into(agents::table)
                 .values(&row)

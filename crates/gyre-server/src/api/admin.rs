@@ -1,6 +1,6 @@
 //! Admin-only endpoints for gyre-server.
 //!
-//! All endpoints require Admin role (enforced via [`crate::auth::AdminOnly`]).
+//! All endpoints require Admin role (enforced via ABAC middleware).
 
 use axum::{
     extract::{Path, Query, State},
@@ -12,7 +12,7 @@ use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{auth::AdminOnly, retention::RetentionPolicy, AppState};
+use crate::{retention::RetentionPolicy, AppState};
 
 use super::error::ApiError;
 use super::now_secs;
@@ -26,13 +26,12 @@ pub struct SystemHealthResponse {
     pub agent_count: usize,
     pub active_agents: usize,
     pub task_count: usize,
-    pub project_count: usize,
+    pub repo_count: usize,
     pub version: &'static str,
 }
 
 /// GET /api/v1/admin/health — system health summary (Admin only).
 pub async fn admin_health(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     let uptime_secs = now_secs().saturating_sub(state.started_at_secs);
@@ -42,7 +41,7 @@ pub async fn admin_health(
         .filter(|a| a.status == AgentStatus::Active)
         .count();
     let tasks = state.tasks.list().await?;
-    let projects = state.projects.list().await?;
+    let repos = state.repos.list().await?;
 
     Ok(Json(SystemHealthResponse {
         status: "ok",
@@ -50,7 +49,7 @@ pub async fn admin_health(
         agent_count: agents.len(),
         active_agents,
         task_count: tasks.len(),
-        project_count: projects.len(),
+        repo_count: repos.len(),
         version: env!("CARGO_PKG_VERSION"),
     }))
 }
@@ -67,10 +66,7 @@ pub struct JobInfo {
 }
 
 /// GET /api/v1/admin/jobs — list background jobs with run history (Admin only).
-pub async fn admin_jobs(
-    _admin: AdminOnly,
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<JobInfo>> {
+pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     let defs = state.job_registry.list_jobs().await;
     let mut jobs = Vec::with_capacity(defs.len());
     for def in defs {
@@ -112,7 +108,6 @@ pub async fn admin_jobs(
 
 /// POST /api/v1/admin/jobs/{name}/run — manually trigger a job (Admin only).
 pub async fn admin_run_job(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -130,7 +125,6 @@ pub async fn admin_run_job(
 
 /// POST /api/v1/admin/snapshot — create a snapshot (Admin only).
 pub async fn admin_create_snapshot(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<crate::snapshot::SnapshotMeta>, ApiError> {
     let meta = crate::snapshot::create_snapshot(&state)
@@ -140,9 +134,7 @@ pub async fn admin_create_snapshot(
 }
 
 /// GET /api/v1/admin/snapshots — list snapshots (Admin only).
-pub async fn admin_list_snapshots(
-    _admin: AdminOnly,
-) -> Result<Json<Vec<crate::snapshot::SnapshotMeta>>, ApiError> {
+pub async fn admin_list_snapshots() -> Result<Json<Vec<crate::snapshot::SnapshotMeta>>, ApiError> {
     let snapshots = crate::snapshot::list_snapshots()
         .await
         .map_err(ApiError::Internal)?;
@@ -156,7 +148,6 @@ pub struct RestoreRequest {
 
 /// POST /api/v1/admin/restore — restore from snapshot (Admin only).
 pub async fn admin_restore_snapshot(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(req): Json<RestoreRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -169,10 +160,7 @@ pub async fn admin_restore_snapshot(
 }
 
 /// DELETE /api/v1/admin/snapshots/{id} — delete a snapshot (Admin only).
-pub async fn admin_delete_snapshot(
-    _admin: AdminOnly,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+pub async fn admin_delete_snapshot(Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     crate::snapshot::delete_snapshot(&id)
         .await
         .map_err(|e| ApiError::NotFound(e.to_string()))?;
@@ -183,15 +171,13 @@ pub async fn admin_delete_snapshot(
 
 /// GET /api/v1/admin/export — export all data as JSON (Admin only).
 pub async fn admin_export(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (projects, agents, tasks, merge_requests, activity_events) = tokio::try_join!(
-        state.projects.list(),
+    let (agents, tasks, merge_requests, activity_events) = tokio::try_join!(
         state.agents.list(),
         state.tasks.list(),
         state.merge_requests.list(),
-        async { Ok::<_, anyhow::Error>(state.activity_store.query(None, Some(10_000))) },
+        async { Ok::<_, anyhow::Error>(state.telemetry_buffer.list_all_since(0, 10_000)) },
     )
     .map_err(ApiError::Internal)?;
 
@@ -199,7 +185,6 @@ pub async fn admin_export(
 
     Ok(Json(serde_json::json!({
         "exported_at": now_secs(),
-        "projects": projects,
         "repos": repos,
         "agents": agents,
         "tasks": tasks,
@@ -212,7 +197,6 @@ pub async fn admin_export(
 
 /// GET /api/v1/admin/retention — list retention policies (Admin only).
 pub async fn admin_list_retention(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<RetentionPolicy>> {
     Json(state.retention_store.list())
@@ -220,7 +204,6 @@ pub async fn admin_list_retention(
 
 /// PUT /api/v1/admin/retention — update retention policies (Admin only).
 pub async fn admin_update_retention(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Json(policies): Json<Vec<RetentionPolicy>>,
 ) -> StatusCode {
@@ -240,13 +223,20 @@ pub struct AuditQuery {
 
 /// GET /api/v1/admin/audit — searchable activity log (Admin only).
 pub async fn admin_audit(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Query(q): Query<AuditQuery>,
 ) -> Json<serde_json::Value> {
-    let events = state.activity_store.query(q.since, q.limit);
-    let filtered: Vec<_> = events
+    let since_ms = q.since.unwrap_or(0);
+    let lim = q.limit.unwrap_or(100);
+    let msgs = state.telemetry_buffer.list_all_since(since_ms, lim);
+    // Deserialize payload as ActivityEventData for backward-compatible response format.
+    let filtered: Vec<gyre_common::ActivityEventData> = msgs
         .into_iter()
+        .filter_map(|m| {
+            m.payload.as_ref().and_then(|p| {
+                serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()).ok()
+            })
+        })
         .filter(|e| {
             q.agent_id.as_deref().is_none_or(|id| e.agent_id == id)
                 && q.event_type
@@ -266,7 +256,6 @@ pub async fn admin_audit(
 
 /// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
 pub async fn admin_kill_agent(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -316,13 +305,18 @@ pub async fn admin_kill_agent(
         }
     }
 
-    state.activity_store.record(gyre_common::ActivityEventData {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent.id.to_string(),
-        event_type: AgEventType::StateChanged,
-        description: format!("Agent {} force-killed by admin", agent.name),
-        timestamp: now,
-    });
+    let ws_id = agent.workspace_id.clone();
+    state.emit_telemetry(
+        ws_id,
+        gyre_common::message::MessageKind::AgentStatusChanged,
+        Some(serde_json::json!({
+            "event_id": uuid::Uuid::new_v4().to_string(),
+            "agent_id": agent.id.to_string(),
+            "status": "dead",
+            "description": format!("Agent {} force-killed by admin", agent.name),
+            "timestamp": now,
+        })),
+    );
 
     // M23: Emit container_crashed audit event if this agent had a container.
     if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
@@ -333,6 +327,10 @@ pub async fn admin_kill_agent(
         crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
             .await;
     }
+
+    // HSI §4: Clean up interrogation ABAC policies on admin kill.
+    crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
+    let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -346,7 +344,6 @@ pub struct ReassignRequest {
 
 /// POST /api/v1/admin/agents/{id}/reassign — reassign agent tasks (Admin only).
 pub async fn admin_reassign_agent(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<ReassignRequest>,
@@ -373,13 +370,15 @@ pub async fn admin_reassign_agent(
         state.tasks.update(&task).await?;
     }
 
-    state.activity_store.record(gyre_common::ActivityEventData {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent.id.to_string(),
-        event_type: AgEventType::StateChanged,
-        description: format!("Agent {} tasks reassigned to {}", agent.name, target.name),
-        timestamp: now,
-    });
+    let ws_id = agent.workspace_id.clone();
+    state.emit_telemetry(
+        ws_id,
+        gyre_common::message::MessageKind::AgentStatusChanged,
+        Some(serde_json::json!({
+            "agent_id": agent.id.to_string(),
+            "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
+        })),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -400,19 +399,18 @@ pub struct SeedResponse {
 
 /// POST /api/v1/admin/seed — populate demo data (Admin only, idempotent).
 pub async fn admin_seed(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SeedResponse>, ApiError> {
     use gyre_domain::{
-        Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Project, Repository, Task,
+        Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
         TaskPriority, TaskStatus,
     };
 
-    // Idempotency: if seed project already exists, return early.
-    let existing = state.projects.find_by_id(&Id::new("seed-proj-1")).await?;
+    // Idempotency: if seed repo already exists, return early.
+    let existing = state.repos.find_by_id(&Id::new("seed-repo-1")).await?;
     if existing.is_some() {
         return Ok(Json(SeedResponse {
-            projects: 2,
+            projects: 0,
             repos: 3,
             agents: 4,
             tasks: 6,
@@ -425,34 +423,26 @@ pub async fn admin_seed(
 
     let now = now_secs();
 
-    // ── Projects ──────────────────────────────────────────────────────────────
-    let mut proj1 = Project::new(Id::new("seed-proj-1"), "Gyre Platform", now - 3600);
-    proj1.description = Some("Core platform services and agent infrastructure".to_string());
-    let mut proj2 = Project::new(Id::new("seed-proj-2"), "Infrastructure", now - 3600);
-    proj2.description = Some("NixOS configs, CI/CD pipelines, and tooling".to_string());
-    state.projects.create(&proj1).await?;
-    state.projects.create(&proj2).await?;
-
     // ── Repos ─────────────────────────────────────────────────────────────────
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),
-        Id::new("seed-proj-1"),
+        Id::new("default"),
         "gyre-core",
-        "./repos/seed-proj-1/gyre-core.git",
+        "./repos/default/gyre-core.git",
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
-        Id::new("seed-proj-1"),
+        Id::new("default"),
         "gyre-web",
-        "./repos/seed-proj-1/gyre-web.git",
+        "./repos/default/gyre-web.git",
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
-        Id::new("seed-proj-2"),
+        Id::new("default"),
         "infra-config",
-        "./repos/seed-proj-2/infra-config.git",
+        "./repos/default/infra-config.git",
         now - 3300,
     );
     state.repos.create(&repo1).await?;
@@ -610,13 +600,17 @@ pub async fn admin_seed(
         ),
     ];
     for (event_id, agent_id, event_type, description, timestamp) in events {
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: event_id.to_string(),
-            agent_id: agent_id.to_string(),
-            event_type,
-            description: description.to_string(),
-            timestamp,
-        });
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": event_id,
+                "agent_id": agent_id,
+                "event_type": event_type,
+                "description": description,
+                "timestamp": timestamp,
+            })),
+        );
     }
 
     Ok(Json(SeedResponse {
@@ -640,7 +634,7 @@ pub struct BcpTargetsResponse {
 }
 
 /// GET /api/v1/admin/bcp/targets — BCP recovery objectives from environment (Admin only).
-pub async fn admin_bcp_targets(_admin: AdminOnly) -> Json<BcpTargetsResponse> {
+pub async fn admin_bcp_targets() -> Json<BcpTargetsResponse> {
     let rto = std::env::var("GYRE_RTO_SECONDS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -664,7 +658,6 @@ pub struct BcpDrillResponse {
 
 /// POST /api/v1/admin/bcp/drill — create+verify a snapshot, return drill result (Admin only).
 pub async fn admin_bcp_drill(
-    _admin: AdminOnly,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BcpDrillResponse>, ApiError> {
     let start = std::time::Instant::now();
@@ -738,8 +731,13 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    // NOTE: auth enforcement (401/403) is now handled by ABAC middleware, not handler-level
+    // extractors. These handler-unit tests verify handler logic only; integration tests cover
+    // ABAC enforcement.
     #[tokio::test]
-    async fn admin_health_requires_auth() {
+    async fn admin_health_no_auth_handler_allows() {
+        // Without middleware, handler has no auth extractor and returns 200.
+        // ABAC middleware (require_auth + abac) enforces 401/403 in the full stack.
         let resp = app_no_jwt()
             .oneshot(
                 Request::builder()
@@ -749,7 +747,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -787,7 +785,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_health_developer_gets_403() {
+    async fn admin_health_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware (not tested here) enforces 403.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -798,7 +797,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -823,7 +822,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_jobs_developer_gets_403() {
+    async fn admin_jobs_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -834,19 +834,23 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: "test-event-1".to_string(),
-            agent_id: "agent-1".to_string(),
-            event_type: gyre_common::AgEventType::StateChanged,
-            description: "Test event".to_string(),
-            timestamp: 1000,
-        });
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": "test-event-1",
+                "agent_id": "agent-1",
+                "event_type": "state_changed",
+                "description": "Test event",
+                "timestamp": 1000u64,
+            })),
+        );
 
         let app = api_router().with_state(state);
         let resp = app
@@ -868,20 +872,28 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: "e1".to_string(),
-            agent_id: "agent-x".to_string(),
-            event_type: gyre_common::AgEventType::RunStarted,
-            description: "From agent-x".to_string(),
-            timestamp: 1000,
-        });
-        state.activity_store.record(gyre_common::ActivityEventData {
-            event_id: "e2".to_string(),
-            agent_id: "agent-y".to_string(),
-            event_type: gyre_common::AgEventType::RunStarted,
-            description: "From agent-y".to_string(),
-            timestamp: 2000,
-        });
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": "e1",
+                "agent_id": "agent-x",
+                "event_type": "run_started",
+                "description": "From agent-x",
+                "timestamp": 1000u64,
+            })),
+        );
+        state.emit_telemetry(
+            gyre_common::Id::new("default"),
+            gyre_common::message::MessageKind::StateChanged,
+            Some(serde_json::json!({
+                "event_id": "e2",
+                "agent_id": "agent-y",
+                "event_type": "run_started",
+                "description": "From agent-y",
+                "timestamp": 2000u64,
+            })),
+        );
 
         let app = api_router().with_state(state);
         let resp = app
@@ -1065,7 +1077,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_kill_requires_admin() {
+    async fn admin_kill_agent_not_found() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
+        // Agent "some-id" doesn't exist → 404 from handler.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1077,7 +1091,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     // ── Export tests ──────────────────────────────────────────────────────────
@@ -1096,7 +1110,6 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json["projects"].is_array());
         assert!(json["repos"].is_array());
         assert!(json["agents"].is_array());
         assert!(json["tasks"].is_array());
@@ -1106,7 +1119,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_export_requires_admin() {
+    async fn admin_export_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1117,7 +1131,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ── Retention tests ───────────────────────────────────────────────────────
@@ -1174,7 +1188,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_retention_requires_admin() {
+    async fn admin_retention_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1185,7 +1200,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ── Snapshot tests ────────────────────────────────────────────────────────
@@ -1335,8 +1350,8 @@ mod tests {
         assert_eq!(json["activity_events"], 5);
         assert_eq!(json["already_seeded"], false);
 
-        let projects = state.projects.list().await.unwrap();
-        assert_eq!(projects.len(), 2);
+        let repos = state.repos.list().await.unwrap();
+        assert_eq!(repos.len(), 3);
         let agents = state.agents.list().await.unwrap();
         assert_eq!(agents.len(), 4);
         let tasks = state.tasks.list().await.unwrap();
@@ -1379,13 +1394,14 @@ mod tests {
         let json2 = body_json(resp2).await;
         assert_eq!(json2["already_seeded"], true);
 
-        // No duplicate projects created
-        let projects = state.projects.list().await.unwrap();
-        assert_eq!(projects.len(), 2);
+        // No duplicate repos created
+        let repos = state.repos.list().await.unwrap();
+        assert_eq!(repos.len(), 3);
     }
 
     #[tokio::test]
-    async fn admin_seed_requires_admin() {
+    async fn admin_seed_developer_handler_allows() {
+        // Handler has no role extractor; ABAC middleware enforces 403 in the full stack.
         let resp = app_with_jwt()
             .oneshot(
                 Request::builder()
@@ -1397,6 +1413,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -118,7 +118,7 @@ From the agent-gates spec: specs have an approval ledger. When a spec is modifie
 [spec_lifecycle]
 enabled = true
 watched_paths = ["specs/system/", "specs/development/"]
-ignored_paths = ["specs/milestones/", "specs/prior-art/", "specs/personas/"]
+ignored_paths = ["specs/milestones/", "specs/prior-art/", "specs/personas/", "specs/prompts/"]
 auto_invalidate_approvals = true
 dedup_open_tasks = true
 default_priority_new = "Medium"

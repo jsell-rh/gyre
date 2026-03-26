@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::instrument;
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -94,6 +93,7 @@ fn task_status_str(s: &TaskStatus) -> String {
         TaskStatus::Review => "review",
         TaskStatus::Done => "done",
         TaskStatus::Blocked => "blocked",
+        TaskStatus::Cancelled => "cancelled",
     }
     .to_string()
 }
@@ -105,6 +105,7 @@ fn parse_task_status(s: &str) -> Result<TaskStatus, ApiError> {
         "review" => Ok(TaskStatus::Review),
         "done" => Ok(TaskStatus::Done),
         "blocked" => Ok(TaskStatus::Blocked),
+        "cancelled" | "canceled" => Ok(TaskStatus::Cancelled),
         _ => Err(ApiError::InvalidInput(format!("unknown task status: {s}"))),
     }
 }
@@ -158,9 +159,14 @@ pub async fn create_task(
             facets,
         })
         .await;
-    let _ = state.event_tx.send(DomainEvent::TaskCreated {
-        id: task.id.to_string(),
-    });
+    state
+        .emit_event(
+            Some(task.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
+            gyre_common::message::MessageKind::TaskCreated,
+            Some(serde_json::json!({"task_id": task.id.to_string()})),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(TaskResponse::from(task))))
 }
 
@@ -181,6 +187,19 @@ pub async fn list_tasks(
             _ => state.tasks.list().await?,
         }
     };
+    Ok(Json(tasks.into_iter().map(TaskResponse::from).collect()))
+}
+
+/// GET /api/v1/workspaces/:workspace_id/tasks — list tasks scoped to a workspace.
+/// Primary access pattern per api-conventions.md §1.1.
+pub async fn list_workspace_tasks(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Vec<TaskResponse>>, ApiError> {
+    let tasks = state
+        .tasks
+        .list_by_workspace(&Id::new(workspace_id))
+        .await?;
     Ok(Json(tasks.into_iter().map(TaskResponse::from).collect()))
 }
 
@@ -249,10 +268,14 @@ pub async fn transition_task_status(
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
-    let _ = state.event_tx.send(DomainEvent::TaskTransitioned {
-        id: task.id.to_string(),
-        status: req.status.clone(),
-    });
+    state
+        .emit_event(
+            Some(task.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
+            gyre_common::message::MessageKind::TaskTransitioned,
+            Some(serde_json::json!({"task_id": task.id.to_string(), "status": req.status})),
+        )
+        .await;
 
     // Auto-track status transition as analytics event
     let event = AnalyticsEvent::new(

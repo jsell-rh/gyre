@@ -18,7 +18,6 @@ pub struct ProvenanceQuery {
     pub commit: Option<String>,
     pub task_id: Option<String>,
     pub agent_id: Option<String>,
-    pub ralph_step: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -30,7 +29,6 @@ pub struct ProvenanceRecord {
     pub repository_id: String,
     pub timestamp: u64,
     pub task_id: Option<String>,
-    pub ralph_step: Option<String>,
     pub spawned_by_user_id: Option<String>,
     pub parent_agent_id: Option<String>,
     pub model_context: Option<serde_json::Value>,
@@ -51,7 +49,6 @@ impl From<AgentCommit> for ProvenanceRecord {
             repository_id: ac.repository_id.to_string(),
             timestamp: ac.timestamp,
             task_id: ac.task_id,
-            ralph_step: ac.ralph_step.map(|s| s.to_string()),
             spawned_by_user_id: ac.spawned_by_user_id,
             parent_agent_id: ac.parent_agent_id,
             model_context,
@@ -64,9 +61,8 @@ impl From<AgentCommit> for ProvenanceRecord {
 
 /// GET /api/v1/repos/:id/provenance
 ///   ?commit={sha}       — full provenance for one commit
-///   ?task_id={id}       — all commits for a task, grouped by loop step
+///   ?task_id={id}       — all commits for a task
 ///   ?agent_id={id}      — all commits by an agent in this repo
-///   ?ralph_step={step}  — all commits at a specific loop step
 pub async fn get_provenance(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -91,7 +87,7 @@ pub async fn get_provenance(
     }
 
     if let Some(task_id) = params.task_id {
-        // All commits for a task — group by ralph_step.
+        // All commits for a task.
         let commits: Vec<ProvenanceRecord> = state
             .agent_commits
             .find_by_task(&task_id)
@@ -101,17 +97,9 @@ pub async fn get_provenance(
             .map(ProvenanceRecord::from)
             .collect();
 
-        // Group by ralph_step.
-        let mut grouped: std::collections::HashMap<String, Vec<&ProvenanceRecord>> =
-            std::collections::HashMap::new();
-        for rec in &commits {
-            let step = rec.ralph_step.as_deref().unwrap_or("unknown").to_string();
-            grouped.entry(step).or_default().push(rec);
-        }
         return Ok(Json(serde_json::json!({
             "task_id": task_id,
             "commits": commits,
-            "by_step": grouped,
         })));
     }
 
@@ -122,17 +110,6 @@ pub async fn get_provenance(
             .await?
             .into_iter()
             .filter(|ac| ac.repository_id.as_str() == repo_id)
-            .map(ProvenanceRecord::from)
-            .collect();
-        return Ok(Json(serde_json::json!(commits)));
-    }
-
-    if let Some(ralph_step) = params.ralph_step {
-        let commits: Vec<ProvenanceRecord> = state
-            .agent_commits
-            .find_by_ralph_step(&Id::new(&repo_id), &ralph_step)
-            .await?
-            .into_iter()
             .map(ProvenanceRecord::from)
             .collect();
         return Ok(Json(serde_json::json!(commits)));
@@ -156,7 +133,7 @@ mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use gyre_common::Id;
-    use gyre_domain::{AgentCommit, RalphStep};
+    use gyre_domain::AgentCommit;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -172,7 +149,7 @@ mod tests {
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"project_id": "proj-1", "name": "test-repo"});
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -235,13 +212,7 @@ mod tests {
             "refs/heads/main",
             1000,
         )
-        .with_provenance(
-            Some("TASK-001".to_string()),
-            Some(RalphStep::Implement),
-            None,
-            None,
-            None,
-        );
+        .with_provenance(Some("TASK-001".to_string()), None, None, None);
         state.agent_commits.record(&commit).await.unwrap();
 
         let resp = app
@@ -257,7 +228,6 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["commit_sha"], "abc123");
         assert_eq!(json["task_id"], "TASK-001");
-        assert_eq!(json["ralph_step"], "implement");
     }
 
     #[tokio::test]
@@ -266,10 +236,7 @@ mod tests {
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
 
-        for (id, sha, step) in [
-            ("c1", "sha1", RalphStep::Spec),
-            ("c2", "sha2", RalphStep::Implement),
-        ] {
+        for (id, sha) in [("c1", "sha1"), ("c2", "sha2")] {
             let commit = AgentCommit::new(
                 Id::new(id),
                 Id::new("agent-1"),
@@ -278,13 +245,7 @@ mod tests {
                 "refs/heads/feat/x",
                 1000,
             )
-            .with_provenance(
-                Some("TASK-007".to_string()),
-                Some(step),
-                None,
-                None,
-                None,
-            );
+            .with_provenance(Some("TASK-007".to_string()), None, None, None);
             state.agent_commits.record(&commit).await.unwrap();
         }
 
@@ -303,44 +264,5 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["task_id"], "TASK-007");
         assert_eq!(json["commits"].as_array().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn provenance_filter_by_ralph_step() {
-        let state = test_state();
-        let app = crate::api::api_router().with_state(state.clone());
-        let (app, repo_id) = create_repo(app).await;
-
-        for (id, sha, step) in [
-            ("c1", "sha1", RalphStep::Implement),
-            ("c2", "sha2", RalphStep::Review),
-            ("c3", "sha3", RalphStep::Implement),
-        ] {
-            let commit = AgentCommit::new(
-                Id::new(id),
-                Id::new("agent-1"),
-                Id::new(&repo_id),
-                sha,
-                "refs/heads/feat/x",
-                1000,
-            )
-            .with_provenance(None, Some(step), None, None, None);
-            state.agent_commits.record(&commit).await.unwrap();
-        }
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/repos/{repo_id}/provenance?ralph_step=implement"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert_eq!(json.as_array().unwrap().len(), 2);
     }
 }

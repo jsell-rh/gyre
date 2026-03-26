@@ -14,7 +14,7 @@
 
 use gyre_common::Id;
 use gyre_domain::User;
-use gyre_server::{build_router, build_state};
+use gyre_server::{abac_middleware, build_router, build_state};
 use sha2::{Digest, Sha256};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -36,6 +36,7 @@ async fn start_server() -> (String, reqwest::Client) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     let app = build_router(state);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -51,6 +52,7 @@ async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
 
     // Pre-seed a user and API key before starting the server.
     let user = User::new(
@@ -83,7 +85,7 @@ async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
 async fn unauthenticated_request_returns_401() {
     let (base, client) = start_server().await;
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .send()
         .await
         .unwrap();
@@ -94,7 +96,7 @@ async fn unauthenticated_request_returns_401() {
 async fn invalid_bearer_token_returns_401() {
     let (base, client) = start_server().await;
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", "Bearer definitely-not-valid-token")
         .send()
         .await
@@ -107,7 +109,7 @@ async fn empty_bearer_token_returns_401() {
     let (base, client) = start_server().await;
     // "Bearer " with nothing after it — token is an empty string.
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", "Bearer ")
         .send()
         .await
@@ -120,7 +122,7 @@ async fn malformed_auth_header_returns_401() {
     let (base, client) = start_server().await;
     // Missing "Bearer " prefix.
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", GLOBAL_TOKEN) // no "Bearer " prefix
         .send()
         .await
@@ -138,7 +140,7 @@ async fn malformed_auth_header_returns_401() {
 async fn valid_global_token_returns_200() {
     let (base, client) = start_server().await;
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
         .send()
         .await
@@ -163,11 +165,11 @@ async fn global_token_can_list_tasks() {
 }
 
 #[tokio::test]
-async fn global_token_can_create_project() {
+async fn global_token_can_create_repo() {
     let (base, client) = start_server().await;
-    let body = serde_json::json!({"name": "auth-test-project", "description": "auth test"});
+    let body = serde_json::json!({"workspace_id": "ws-auth-test", "name": "auth-test-repo"});
     let resp = client
-        .post(format!("{base}/api/v1/projects"))
+        .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
         .json(&body)
         .send()
@@ -175,7 +177,7 @@ async fn global_token_can_create_project() {
         .unwrap();
     assert!(
         resp.status().is_success(),
-        "global token must be able to create projects, got {}",
+        "global token must be able to create repos, got {}",
         resp.status()
     );
 }
@@ -308,7 +310,7 @@ async fn token_revoked_after_agent_complete() {
     let repo_resp: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", &auth)
-        .json(&serde_json::json!({"project_id": "revoke-proj", "name": "revoke-repo"}))
+        .json(&serde_json::json!({"workspace_id": "revoke-proj", "name": "revoke-repo"}))
         .send()
         .await
         .unwrap()
@@ -403,7 +405,7 @@ async fn api_key_auth_grants_access() {
 
     // Use the raw API key (gyre_... prefix) as the Bearer token.
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {raw_key}"))
         .send()
         .await
@@ -422,7 +424,7 @@ async fn invalid_api_key_returns_401() {
 
     // A key with the right prefix but wrong content must fail.
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header(
             "Authorization",
             "Bearer gyre_this_key_does_not_exist_at_all",
@@ -440,10 +442,9 @@ async fn multiple_endpoints_require_auth() {
     let (base, client) = start_server().await;
 
     let endpoints = vec![
-        ("GET", format!("{base}/api/v1/projects")),
+        ("GET", format!("{base}/api/v1/repos")),
         ("GET", format!("{base}/api/v1/tasks")),
         ("GET", format!("{base}/api/v1/agents")),
-        ("GET", format!("{base}/api/v1/repos")),
         ("GET", format!("{base}/api/v1/merge-requests")),
         ("GET", format!("{base}/api/v1/merge-queue")),
     ];
@@ -474,7 +475,7 @@ async fn constant_time_comparison_rejects_prefix_of_valid_token() {
     // Take the first 10 chars of the global token — should be rejected.
     let prefix_token = &GLOBAL_TOKEN[..10];
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {prefix_token}"))
         .send()
         .await
@@ -493,7 +494,7 @@ async fn constant_time_comparison_rejects_superstring_of_valid_token() {
 
     let super_token = format!("{GLOBAL_TOKEN}-extra-suffix");
     let resp = client
-        .get(format!("{base}/api/v1/projects"))
+        .get(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {super_token}"))
         .send()
         .await

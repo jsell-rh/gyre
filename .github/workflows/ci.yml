@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "feat/**", "fix/**", "chore/**"]
+    branches: ["main"]
   pull_request:
     branches: ["main"]
 
@@ -12,42 +12,75 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
-    name: Build, Lint & Test
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Install mold linker
         run: sudo apt-get install -y mold
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          prefix-key: v0-clippy
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+  arch-lint:                                                                                                                                  
+    name: Architecture lint                                                                                                                     
+    runs-on: ubuntu-latest                                                                                                                      
+    steps:                                                                                                                                      
+      - uses: actions/checkout@v4                                                                                                               
+      - run: bash scripts/check-arch.sh                                                                                                         
+      - name: API auth coverage lint (advisory)
+        run: bash scripts/check-api-auth.sh || true
+      - name: Tenant filter lint (advisory)
+        run: bash scripts/check-tenant-filter.sh || true
+      - name: Hierarchy lint (M34)
+        run: GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh
+      - name: Em-dash check                                                                                                                     
+        run: |                                                                                                                                  
+          find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  
 
-      - name: cargo clippy (deny warnings)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          prefix-key: v0-test
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --all
 
-      - name: Architecture lint
-        run: bash scripts/check-arch.sh
-
-      - name: Em-dash check
-        run: |
-          find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true
-
-      - name: cargo test
-        run: cargo test --all
-
-      - name: cargo build (release)
-        run: cargo build --release --all
+  build-release:
+    name: Build (release)
+    if: github.ref == 'refs/heads/main'
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          prefix-key: v0-release
+      - run: cargo build --release --all

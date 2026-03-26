@@ -15,7 +15,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_common::{ActivityEventData, AgEventType, Id};
+use gyre_common::Id;
 use gyre_domain::{MergeRequest, Task, TaskPriority, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -225,11 +225,37 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_agent_complete",
-                "description": "Signal that an agent has completed its current task.",
+                "description": "Signal that an agent has completed its current task. Optionally include a completion summary with decisions, uncertainties, and conversation_sha.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent_id": { "type": "string", "description": "Agent ID" }
+                        "agent_id": { "type": "string", "description": "Agent ID" },
+                        "summary": {
+                            "type": "object",
+                            "description": "Optional completion summary (HSI §4). Include decisions made, uncertainties, and conversation SHA.",
+                            "properties": {
+                                "spec_ref": { "type": "string", "description": "Spec path this task implements" },
+                                "decisions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "what": { "type": "string" },
+                                            "why": { "type": "string" },
+                                            "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+                                            "alternatives_considered": { "type": "array", "items": { "type": "string" } }
+                                        },
+                                        "required": ["what", "why", "confidence"]
+                                    }
+                                },
+                                "uncertainties": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Open questions or areas where the spec was ambiguous"
+                                },
+                                "conversation_sha": { "type": "string", "description": "SHA-256 of the full conversation history" }
+                            }
+                        }
                     },
                     "required": ["agent_id"]
                 }
@@ -251,6 +277,24 @@ fn tool_definitions() -> Value {
                         }
                     },
                     "required": ["query_type", "params"]
+                }
+            },
+            {
+                "name": "conversation_upload",
+                "description": "Upload the agent's full conversation blob for provenance linking (HSI §5). Call this just before agent.complete. The blob is base64-encoded zstd-compressed JSON. Max 10MB before base64 (configurable via GYRE_MAX_CONVERSATION_SIZE).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "blob": {
+                            "type": "string",
+                            "description": "Base64-encoded zstd-compressed conversation JSON"
+                        },
+                        "conversation_sha": {
+                            "type": "string",
+                            "description": "Expected SHA-256 of the raw compressed bytes (optional — server computes and verifies)"
+                        }
+                    },
+                    "required": ["blob"]
                 }
             },
             {
@@ -343,6 +387,7 @@ fn parse_status(s: &str) -> Option<TaskStatus> {
         "review" => Some(TaskStatus::Review),
         "done" => Some(TaskStatus::Done),
         "blocked" => Some(TaskStatus::Blocked),
+        "cancelled" | "canceled" => Some(TaskStatus::Cancelled),
         _ => None,
     }
 }
@@ -522,16 +567,21 @@ async fn handle_record_activity(state: &AppState, args: &Value) -> Value {
         Some(d) => d.to_string(),
         None => return tool_error("missing required field: description"),
     };
-    let event = ActivityEventData {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id,
-        event_type: AgEventType::from(event_type_str),
-        description,
-        timestamp: now_secs(),
-    };
-    let event_id = event.event_id.clone();
-    state.activity_store.record(event.clone());
-    let _ = state.broadcast_tx.send(event);
+    let event_id = uuid::Uuid::new_v4().to_string();
+    // Emit as Telemetry-tier message via unified bus.
+    // Use a "default" workspace since MCP callers don't have workspace context here.
+    let ws_id = gyre_common::Id::new("default");
+    state.emit_telemetry(
+        ws_id,
+        gyre_common::message::MessageKind::StateChanged,
+        Some(serde_json::json!({
+            "event_id": event_id,
+            "agent_id": agent_id,
+            "event_type": event_type_str,
+            "description": description,
+            "timestamp": now_secs(),
+        })),
+    );
     tool_result(format!("Recorded activity event {event_id}"))
 }
 
@@ -558,22 +608,72 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
     };
+
+    // Parse optional completion summary (HSI §4).
+    let summary: Option<gyre_common::AgentCompletionSummary> = args
+        .get("summary")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
     match state.agents.find_by_id(&Id::new(&agent_id)).await {
         Ok(Some(mut agent)) => {
             use gyre_domain::AgentStatus;
             if let Err(e) = agent.transition_status(AgentStatus::Idle) {
                 return tool_error(format!("Status transition failed: {e}"));
             }
-            // Record completion event
-            let event = ActivityEventData {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                agent_id: agent_id.clone(),
-                event_type: AgEventType::RunFinished,
-                description: format!("Agent {} completed task", agent.name),
-                timestamp: now_secs(),
-            };
-            state.activity_store.record(event.clone());
-            let _ = state.broadcast_tx.send(event);
+            let ws_id = agent.workspace_id.clone();
+
+            // ── Synchronous priority-1 notifications for uncertainties (HSI §4) ──────
+            // MUST happen before returning — reliability-critical, not via MessageConsumer.
+            if let Some(ref s) = summary {
+                if !s.uncertainties.is_empty() {
+                    create_uncertainty_notifications(state, &agent_id, &ws_id, s).await;
+                }
+            }
+
+            // ── Emit AgentCompleted Event-tier message (HSI §4) ──────────────────────
+            let payload =
+                build_agent_completed_payload(&agent_id, agent.current_task_id.as_ref(), &summary);
+            let ws_dest = gyre_common::Destination::Workspace(ws_id.clone());
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    ws_dest,
+                    gyre_common::MessageKind::AgentCompleted,
+                    Some(payload),
+                )
+                .await;
+
+            // ── Persist completion_summary to MR attestation bundle (HSI §4 step 1) ──
+            if let Some(ref s) = summary {
+                if let Ok(all_mrs) = state.merge_requests.list().await {
+                    for mr in all_mrs.into_iter().filter(|mr| {
+                        mr.author_agent_id.as_ref().map(|id| id.to_string())
+                            == Some(agent_id.clone())
+                    }) {
+                        let mr_id = mr.id.to_string();
+                        if let Ok(Some(mut bundle)) =
+                            state.attestation_store.find_by_mr_id(&mr_id).await
+                        {
+                            bundle.attestation.completion_summary = Some(s.clone());
+                            if let Err(e) = state.attestation_store.save(&mr_id, &bundle).await {
+                                tracing::warn!("agent_complete: failed to persist completion_summary to attestation for MR {mr_id}: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Telemetry for real-time dashboard ────────────────────────────────────
+            state.emit_telemetry(
+                ws_id,
+                gyre_common::message::MessageKind::AgentStatusChanged,
+                Some(serde_json::json!({
+                    "agent_id": agent_id,
+                    "status": "idle",
+                    "reason": format!("Agent {} completed task", agent.name),
+                })),
+            );
+
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),
@@ -582,6 +682,233 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
         Ok(None) => tool_error(format!("Agent not found: {agent_id}")),
         Err(e) => tool_error(format!("Error: {e}")),
     }
+}
+
+/// Handle `conversation.upload` — store agent conversation blob and back-fill turn links.
+///
+/// Expects base64-encoded zstd-compressed bytes in `blob`.
+/// Derives workspace_id and tenant_id from the authenticated agent's JWT/identity.
+async fn handle_conversation_upload(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    // Max allowed compressed size (default 10MB).
+    let max_bytes: usize = std::env::var("GYRE_MAX_CONVERSATION_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10 * 1024 * 1024);
+
+    // Decode base64 blob.
+    let blob_b64 = match get_str(args, "blob") {
+        Some(s) => s,
+        None => return tool_error("missing required field: blob"),
+    };
+    let compressed = match B64.decode(blob_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return tool_error(format!("blob: invalid base64: {e}")),
+    };
+    if compressed.len() > max_bytes {
+        return tool_error(format!(
+            "blob exceeds max size of {} bytes (compressed)",
+            max_bytes
+        ));
+    }
+
+    // Compute SHA-256 of raw compressed bytes.
+    let mut hasher = Sha256::new();
+    hasher.update(&compressed);
+    let computed_sha = hex::encode(hasher.finalize());
+
+    // If caller provided a SHA, verify it matches.
+    if let Some(claimed_sha) = get_str(args, "conversation_sha") {
+        if claimed_sha != computed_sha {
+            return tool_error(format!(
+                "SHA-256 mismatch: provided {claimed_sha}, computed {computed_sha}"
+            ));
+        }
+    }
+
+    // Resolve agent to get workspace_id. Tenant comes from auth.
+    let agent_id = Id::new(&auth.agent_id);
+    let tenant_id = Id::new(&auth.tenant_id);
+
+    let agent = match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return tool_error(format!("Agent not found: {}", auth.agent_id)),
+        Err(e) => return tool_error(format!("Failed to lookup agent: {e}")),
+    };
+    let workspace_id = agent.workspace_id.clone();
+
+    // Store conversation blob.
+    let sha = match state
+        .conversations
+        .store(&agent_id, &workspace_id, &tenant_id, &compressed)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            // Non-fatal per spec: completion still succeeds.
+            tracing::warn!(
+                agent_id = %auth.agent_id,
+                error = %e,
+                "conversation.upload failed — conversation marked unavailable"
+            );
+            return tool_error(format!("conversation upload failed (non-fatal): {e}"));
+        }
+    };
+
+    // Back-fill turn links for this agent.
+    let backfilled = state
+        .conversations
+        .backfill_turn_links(&agent_id, &sha, &tenant_id)
+        .await
+        .unwrap_or(0);
+
+    // Persist SHA in KV store so merge_processor can populate MergeAttestation.conversation_sha.
+    let kv_key = format!("conv_sha:{}", auth.agent_id);
+    let _ = state
+        .kv_store
+        .kv_set("agent_provenance", &kv_key, sha.clone())
+        .await;
+
+    tool_result(format!(
+        "Conversation uploaded: sha={sha}, backfilled {backfilled} turn links"
+    ))
+}
+
+/// Build the `AgentCompleted` message payload (HSI §4).
+fn build_agent_completed_payload(
+    agent_id: &str,
+    task_id: Option<&Id>,
+    summary: &Option<gyre_common::AgentCompletionSummary>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "agent_id": agent_id,
+    });
+    if let Some(tid) = task_id {
+        payload["task_id"] = serde_json::Value::String(tid.to_string());
+    }
+    if let Some(s) = summary {
+        if let Some(ref spec_ref) = s.spec_ref {
+            payload["spec_ref"] = serde_json::Value::String(spec_ref.clone());
+        }
+        payload["decisions"] = serde_json::to_value(&s.decisions).unwrap_or_default();
+        payload["uncertainties"] = serde_json::to_value(&s.uncertainties).unwrap_or_default();
+        if let Some(ref sha) = s.conversation_sha {
+            payload["conversation_sha"] = serde_json::Value::String(sha.clone());
+        }
+    } else {
+        payload["decisions"] = serde_json::json!([]);
+        payload["uncertainties"] = serde_json::json!([]);
+    }
+    payload
+}
+
+/// Synchronously create priority-1 `AgentNeedsClarification` notifications for all
+/// workspace Admin and Developer members (HSI §4 — reliability-critical path).
+async fn create_uncertainty_notifications(
+    state: &AppState,
+    agent_id: &str,
+    workspace_id: &Id,
+    summary: &gyre_common::AgentCompletionSummary,
+) {
+    use gyre_common::{Id, Notification, NotificationType};
+    use gyre_domain::WorkspaceRole;
+
+    // Resolve tenant_id from the workspace record (avoid hardcoding "default").
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            tracing::warn!("agent_complete: workspace {workspace_id} not found; skipping uncertainty notifications");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "agent_complete: failed to resolve workspace tenant for notifications: {e}"
+            );
+            return;
+        }
+    };
+
+    let members = match state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "agent_complete: failed to list workspace members for uncertainty notifications: {e}"
+            );
+            return;
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let uncertainty_titles: Vec<String> = summary
+        .uncertainties
+        .iter()
+        .enumerate()
+        .map(|(i, u)| format!("Agent uncertainty {}: {}", i + 1, u))
+        .collect();
+    let title = if summary.uncertainties.len() == 1 {
+        format!(
+            "Agent needs clarification: {}",
+            summary.uncertainties[0]
+                .chars()
+                .take(80)
+                .collect::<String>()
+        )
+    } else {
+        format!(
+            "Agent needs clarification ({} open questions)",
+            summary.uncertainties.len()
+        )
+    };
+    let body = serde_json::to_string(&serde_json::json!({
+        "uncertainties": &summary.uncertainties,
+        "spec_ref": &summary.spec_ref,
+    }))
+    .ok();
+
+    for member in &members {
+        // Only notify Admin and Developer role members (Owner counts as Admin-level).
+        if !matches!(
+            member.role,
+            WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+        ) {
+            continue;
+        }
+        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
+        let mut notif = Notification::new(
+            notif_id,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::AgentNeedsClarification,
+            title.clone(),
+            &tenant_id,
+            now,
+        );
+        notif.entity_ref = Some(agent_id.to_string());
+        notif.body = body.clone();
+
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(
+                "agent_complete: failed to create AgentNeedsClarification notification for user {}: {e}",
+                member.user_id
+            );
+        }
+    }
+
+    let _ = uncertainty_titles; // used to document intent
 }
 
 async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
@@ -796,13 +1123,45 @@ fn resource_definitions() -> Value {
                 "description": "List merge queue entries for a repository. URI: queue://{repo_id}",
                 "mimeType": "application/json",
                 "uriTemplate": "queue://{repo_id}"
+            },
+            {
+                "uri": "conversation://context",
+                "name": "Conversation Context",
+                "description": "Original agent conversation history for interrogation agents (HSI §4). Only accessible to the spawned interrogation agent.",
+                "mimeType": "application/json"
             }
         ]
     })
 }
 
-async fn handle_resource_read(state: &AppState, uri: &str) -> Value {
-    if let Some(raw_path) = uri.strip_prefix("spec://") {
+async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: &str) -> Value {
+    if uri == "conversation://context" {
+        // HSI §4: Serve the original agent's conversation to the interrogation agent.
+        // The context is scoped to the calling agent — each interrogation agent can
+        // only see its own conversation context, not another agent's.
+        let agent_id = &auth.agent_id;
+        match state
+            .kv_store
+            .kv_get("interrogation_context", agent_id.as_str())
+            .await
+        {
+            Ok(Some(blob)) => json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": blob
+                }]
+            }),
+            Ok(None) => json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": "{\"turns\": [], \"note\": \"No conversation context available for this agent.\"}"
+                }]
+            }),
+            Err(e) => json!({"error": format!("failed to read conversation context: {e}")}),
+        }
+    } else if let Some(raw_path) = uri.strip_prefix("spec://") {
         let safe_path = raw_path.trim_start_matches('/');
         if safe_path.contains("..") || safe_path.starts_with('/') {
             return json!({"error": "invalid spec path — path traversal not allowed"});
@@ -839,7 +1198,7 @@ async fn handle_resource_read(state: &AppState, uri: &str) -> Value {
                             "id": a.id.to_string(),
                             "name": a.name,
                             "status": format!("{:?}", a.status).to_lowercase(),
-                            "workspace_id": a.workspace_id.as_ref().map(|id| id.to_string()),
+                            "workspace_id": a.workspace_id.to_string(),
                         })
                     })
                     .collect();
@@ -923,7 +1282,7 @@ pub async fn mcp_handler(
             if uri.is_empty() {
                 JsonRpcResponse::err(id, INVALID_PARAMS, "missing required field: uri")
             } else {
-                let result = handle_resource_read(&state, uri).await;
+                let result = handle_resource_read(&state, &auth, uri).await;
                 JsonRpcResponse::ok(id, result)
             }
         }
@@ -942,6 +1301,7 @@ pub async fn mcp_handler(
                     | "gyre_record_activity"
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
+                    | "conversation_upload"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
                 return Json(JsonRpcResponse::err(
@@ -1012,6 +1372,7 @@ pub async fn mcp_handler(
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_search" => handle_search(&state, &args).await,
+                "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
@@ -1027,20 +1388,14 @@ pub async fn mcp_sse_handler(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedAgent,
 ) -> impl IntoResponse {
-    let rx = state.broadcast_tx.subscribe();
+    let rx = state.message_broadcast_tx.subscribe();
     let event_stream = stream::unfold(rx, |mut rx| async move {
         loop {
             match rx.recv().await {
-                Ok(event) => {
-                    let data = serde_json::to_string(&json!({
-                        "event_id": event.event_id,
-                        "agent_id": event.agent_id,
-                        "event_type": event.event_type,
-                        "description": event.description,
-                        "timestamp": event.timestamp,
-                    }))
-                    .unwrap_or_default();
-                    let sse_event = Event::default().event("activity").data(data);
+                Ok(msg) => {
+                    let data = serde_json::to_string(&msg).unwrap_or_default();
+                    // Map all bus messages to SSE "message" events.
+                    let sse_event = Event::default().event("message").data(data);
                     return Some((Ok::<Event, std::convert::Infallible>(sse_event), rx));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1556,5 +1911,125 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── agent_complete tool advertises summary field in schema ────────────────
+
+    #[tokio::test]
+    async fn agent_complete_tool_schema_includes_summary() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 50,
+                "method": "tools/list",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let complete = tools
+            .iter()
+            .find(|t| t["name"] == "gyre_agent_complete")
+            .expect("gyre_agent_complete must be in tools list");
+        let props = &complete["inputSchema"]["properties"];
+        assert!(
+            props.get("summary").is_some(),
+            "gyre_agent_complete must advertise a 'summary' field in its inputSchema"
+        );
+    }
+
+    // ── agent_complete with unknown agent returns error ────────────────────────
+
+    #[tokio::test]
+    async fn agent_complete_unknown_agent_returns_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 51,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": {
+                        "agent_id": "nonexistent-agent",
+                        "summary": {
+                            "spec_ref": "specs/system/example.md",
+                            "decisions": [{"what": "used retry", "why": "spec says so", "confidence": "high"}],
+                            "uncertainties": ["timeout behavior undefined"],
+                            "conversation_sha": "abc123"
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not found") || text.contains("Agent not found"));
+    }
+
+    // ── AgentCompleted MessageKind roundtrips ─────────────────────────────────
+
+    #[test]
+    fn agent_completed_message_kind_roundtrip() {
+        use gyre_common::MessageKind;
+        let k = MessageKind::AgentCompleted;
+        assert_eq!(k.as_str(), "agent_completed");
+        assert!(k.server_only());
+        assert_eq!(k.tier(), gyre_common::MessageTier::Event);
+        let json = serde_json::to_string(&k).unwrap();
+        let back: MessageKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MessageKind::AgentCompleted);
+    }
+
+    #[test]
+    fn reconciliation_completed_message_kind_roundtrip() {
+        use gyre_common::MessageKind;
+        let k = MessageKind::ReconciliationCompleted;
+        assert_eq!(k.as_str(), "reconciliation_completed");
+        assert!(k.server_only());
+        assert_eq!(k.tier(), gyre_common::MessageTier::Event);
+        let json = serde_json::to_string(&k).unwrap();
+        let back: MessageKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MessageKind::ReconciliationCompleted);
+    }
+
+    // ── AgentCompletionSummary parsing in build_agent_completed_payload ───────
+
+    #[test]
+    fn build_agent_completed_payload_with_summary() {
+        use gyre_common::{AgentCompletionSummary, Decision};
+        let summary = AgentCompletionSummary {
+            spec_ref: Some("specs/system/example.md".to_string()),
+            decisions: vec![Decision {
+                what: "used retry".to_string(),
+                why: "spec says so".to_string(),
+                confidence: "high".to_string(),
+                alternatives_considered: Some(vec!["no retry".to_string()]),
+            }],
+            uncertainties: vec!["timeout behavior undefined".to_string()],
+            conversation_sha: Some("abc123".to_string()),
+        };
+        let task_id = Id::new("task-abc");
+        let payload = build_agent_completed_payload("agent-1", Some(&task_id), &Some(summary));
+        assert_eq!(payload["agent_id"], "agent-1");
+        assert_eq!(payload["task_id"], "task-abc");
+        assert_eq!(payload["spec_ref"], "specs/system/example.md");
+        assert_eq!(payload["decisions"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["conversation_sha"], "abc123");
+    }
+
+    #[test]
+    fn build_agent_completed_payload_without_summary() {
+        let payload = build_agent_completed_payload("agent-2", None, &None);
+        assert_eq!(payload["agent_id"], "agent-2");
+        assert!(payload.get("task_id").is_none() || payload["task_id"].is_null());
+        assert_eq!(payload["decisions"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 0);
+        assert!(payload.get("spec_ref").is_none() || payload["spec_ref"].is_null());
     }
 }

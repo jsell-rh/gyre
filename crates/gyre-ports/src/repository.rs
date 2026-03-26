@@ -8,8 +8,14 @@ pub trait RepoRepository: Send + Sync {
     async fn create(&self, repo: &Repository) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<Repository>>;
     async fn list(&self) -> Result<Vec<Repository>>;
-    async fn list_by_project(&self, project_id: &Id) -> Result<Vec<Repository>>;
     async fn update(&self, repo: &Repository) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Repository>>;
+    /// Find a repository by name within a workspace.
+    /// Required for git URL resolution: /git/:workspace_slug/:repo_name/*.
+    async fn find_by_name_and_workspace(
+        &self,
+        workspace_id: &Id,
+        name: &str,
+    ) -> Result<Option<Repository>>;
 }

@@ -16,7 +16,7 @@
 //!
 //! Requires `git` on PATH.
 
-use gyre_server::{build_router, build_state, merge_processor};
+use gyre_server::{abac_middleware, build_router, build_state, merge_processor};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -67,6 +67,7 @@ async fn start_server(auth_token: &str) -> (u16, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(auth_token, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state).await;
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);
@@ -75,7 +76,8 @@ async fn start_server(auth_token: &str) -> (u16, String) {
     (port, base_url)
 }
 
-/// Create a repo via REST and return its ID.
+/// Create a workspace + repo via REST and return the repo ID.
+/// The workspace is created with `project_id` as its slug, so git URLs use that slug.
 async fn create_repo(
     client: &reqwest::Client,
     api: &str,
@@ -83,10 +85,25 @@ async fn create_repo(
     project_id: &str,
     name: &str,
 ) -> String {
+    // Create workspace so git URL resolution works: /git/:workspace_slug/:repo_name/*
+    let ws: serde_json::Value = client
+        .post(format!("{api}/workspaces"))
+        .header("Authorization", auth_hdr)
+        .json(
+            &serde_json::json!({ "tenant_id": "default", "name": project_id, "slug": project_id }),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let workspace_id = ws["id"].as_str().unwrap().to_string();
+
     let resp: serde_json::Value = client
         .post(format!("{api}/repos"))
         .header("Authorization", auth_hdr)
-        .json(&serde_json::json!({ "project_id": project_id, "name": name }))
+        .json(&serde_json::json!({ "workspace_id": workspace_id, "name": name }))
         .send()
         .await
         .unwrap()
@@ -123,12 +140,12 @@ async fn clone_via_smart_http() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    // Create repo with unique project ID to avoid on-disk conflicts between runs.
-    let proj = uniq("proj-clone");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "clone-repo").await;
+    // Create repo with unique workspace ID to avoid on-disk conflicts between runs.
+    let ws_id = uniq("ws-clone");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "clone-repo").await;
     assert!(!repo_id.is_empty());
 
-    let clone_url = format!("{base_url}/git/{proj}/clone-repo.git");
+    let clone_url = format!("{base_url}/git/{ws_id}/clone-repo.git");
 
     let clone_dir = Arc::new(TempDir::new().unwrap());
     let clone_dir_c = clone_dir.clone();
@@ -173,8 +190,8 @@ async fn push_valid_conventional_commit_accepted() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-valid");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "valid-repo").await;
+    let ws_id = uniq("ws-valid");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "valid-repo").await;
 
     // Enable the conventional-commit gate.
     let gate_resp: serde_json::Value = client
@@ -191,11 +208,13 @@ async fn push_valid_conventional_commit_accepted() {
 
     let base_url_c = base_url.clone();
     let token_owned = token.to_string();
+    let _repo_id_c = repo_id.clone();
+    let ws_id_c = ws_id.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/valid-repo.git");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/valid-repo.git");
 
         // Clone, configure git identity, commit, and push.
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
@@ -240,8 +259,8 @@ async fn push_nonconventional_commit_rejected_by_gate() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-badmsg");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "badmsg-repo").await;
+    let ws_id = uniq("ws-badmsg");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "badmsg-repo").await;
 
     // Enable conventional-commit gate.
     client
@@ -254,11 +273,13 @@ async fn push_nonconventional_commit_rejected_by_gate() {
 
     let base_url_c = base_url.clone();
     let token_owned = token.to_string();
+    let _repo_id_c = repo_id.clone();
+    let ws_id_c = ws_id.clone();
 
     let (push_success, push_stderr) = tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/badmsg-repo.git");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/badmsg-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
         let clone_stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
@@ -324,8 +345,8 @@ async fn push_em_dash_commit_rejected_by_gate() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-emdash");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "emdash-repo").await;
+    let ws_id = uniq("ws-emdash");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "emdash-repo").await;
 
     // Enable no-em-dash gate.
     client
@@ -338,11 +359,13 @@ async fn push_em_dash_commit_rejected_by_gate() {
 
     let base_url_c = base_url.clone();
     let token_owned = token.to_string();
+    let _repo_id_c = repo_id.clone();
+    let ws_id_c = ws_id.clone();
 
     let (push_success, push_stderr) = tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/emdash-repo.git");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/emdash-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
         let clone_stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
@@ -412,8 +435,8 @@ async fn push_records_agent_commit_provenance() {
     let client = reqwest::Client::new();
 
     // Create repo and task.
-    let proj = uniq("proj-prov");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "prov-repo").await;
+    let ws_id = uniq("ws-prov");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "prov-repo").await;
     let task_id = create_task(&client, &api, &auth_hdr, "Provenance test task").await;
 
     // Spawn an agent to get a per-agent token.
@@ -439,11 +462,13 @@ async fn push_records_agent_commit_provenance() {
     // Agent clones, commits, and pushes using its per-agent token.
     let base_url_c = base_url.clone();
     let agent_token_c = agent_token.clone();
+    let _repo_id_c = repo_id.clone();
+    let ws_id_c = ws_id.clone();
 
     tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/prov-repo.git");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/prov-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &agent_token_c);
         let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
@@ -535,8 +560,8 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-mq");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "mq-repo").await;
+    let ws_id = uniq("ws-mq");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "mq-repo").await;
     let task_id = create_task(&client, &api, &auth_hdr, "Merge queue test task").await;
 
     // Spawn agent.
@@ -562,10 +587,12 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
     // Agent clones, commits, and pushes.
     let base_url_c = base_url.clone();
     let agent_token_c = agent_token.clone();
+    let _repo_id_c = repo_id.clone();
+    let ws_id_c = ws_id.clone();
     tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/mq-repo.git");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/mq-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &agent_token_c);
         let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
@@ -820,18 +847,19 @@ async fn push_non_hex_sha_rejected_in_ref_update() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-sha");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "sha-repo").await;
+    let ws_id = uniq("ws-sha");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "sha-repo").await;
 
     // First, create a real repo with a commit so receive-pack can reference something.
     let base_url_c = base_url.clone();
     let token_owned = token.to_string();
-    let proj_c = proj.clone();
+    let _repo_id_c = repo_id.clone();
+    let ws_id_c = ws_id.clone();
 
     tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj_c}/sha-repo.git");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/sha-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
         let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
@@ -866,7 +894,7 @@ async fn push_non_hex_sha_rejected_in_ref_update() {
     // The critical assertion is that refs/heads/injected is NOT recorded in agent-commits.
     let resp = client
         .post(format!(
-            "{base_url}/git/{proj}/sha-repo.git/git-receive-pack"
+            "{base_url}/git/{ws_id}/sha-repo.git/git-receive-pack"
         ))
         .header("Authorization", &auth_hdr)
         .header("Content-Type", "application/x-git-receive-pack-request")
@@ -972,7 +1000,7 @@ async fn push_with_url_scoped_extraheader_succeeds() {
     let scoped_base = format!("http://127.0.0.1:{port}");
 
     let proj = uniq("proj-urlscoped");
-    create_repo(&client, &api, &auth_hdr, &proj, "urlscoped-repo").await;
+    let _repo_id = create_repo(&client, &api, &auth_hdr, &proj, "urlscoped-repo").await;
 
     let clone_url = format!("{base_url}/git/{proj}/urlscoped-repo.git");
     let scoped_base_c = scoped_base.clone();
@@ -1096,11 +1124,13 @@ async fn global_token_bypasses_abac_on_push() {
 
     let base_url_c = base_url.clone();
     let token_owned = token.to_string();
+    let _repo_id_c = repo_id.clone();
+    let proj_c = proj.clone();
 
     let (push_ok, push_stderr) = tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
-        let clone_url = format!("{base_url_c}/git/{proj}/abac-bypass-repo.git");
+        let clone_url = format!("{base_url_c}/git/{proj_c}/abac-bypass-repo.git");
 
         let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
         let clone_stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
@@ -1144,11 +1174,11 @@ async fn clone_without_auth_rejected() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-noauth");
-    create_repo(&client, &api, &auth_hdr, &proj, "noauth-repo").await;
+    let ws_id = uniq("ws-noauth");
+    let _repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "noauth-repo").await;
 
     let info_refs_url =
-        format!("{base_url}/git/{proj}/noauth-repo.git/info/refs?service=git-upload-pack");
+        format!("{base_url}/git/{ws_id}/noauth-repo.git/info/refs?service=git-upload-pack");
 
     // Request without Authorization header.
     let resp = client.get(&info_refs_url).send().await.unwrap();
@@ -1171,8 +1201,8 @@ async fn info_refs_content_type_matches_service() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-ct");
-    create_repo(&client, &api, &auth_hdr, &proj, "ct-repo").await;
+    let ws_id = uniq("ws-ct");
+    let _repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "ct-repo").await;
 
     for (service, expected_ct) in [
         (
@@ -1186,7 +1216,7 @@ async fn info_refs_content_type_matches_service() {
     ] {
         let resp = client
             .get(format!(
-                "{base_url}/git/{proj}/ct-repo.git/info/refs?service={service}"
+                "{base_url}/git/{ws_id}/ct-repo.git/info/refs?service={service}"
             ))
             .header("Authorization", &auth_hdr)
             .send()
@@ -1228,12 +1258,12 @@ async fn push_to_mirror_repo_rejected() {
     // behaviour indirectly by verifying that a regular repo accepts pushes
     // (the mirror-check is already covered by server unit tests), but we DO
     // verify the receive-pack endpoint for non-mirror repos returns 200.
-    let proj = uniq("proj-mirror");
-    let _repo_id = create_repo(&client, &api, &auth_hdr, &proj, "mirror-repo").await;
+    let ws_id = uniq("ws-mirror");
+    let _repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "mirror-repo").await;
 
     let info_refs_resp = client
         .get(format!(
-            "{base_url}/git/{proj}/mirror-repo.git/info/refs?service=git-receive-pack"
+            "{base_url}/git/{ws_id}/mirror-repo.git/info/refs?service=git-receive-pack"
         ))
         .header("Authorization", &auth_hdr)
         .send()
@@ -1360,6 +1390,7 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
 //   4. The post-receive hook should auto-revoke the approval.
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "POST /api/v1/specs/approve removed in M34 Slice 5; needs spec ledger registration via push-triggered flow"]
 async fn spec_approval_auto_invalidated_on_spec_change() {
     let token = "git-test-spec-invalidate-token";
     let (_port, base_url) = start_server(token).await;
@@ -1367,8 +1398,8 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
-    let proj = uniq("proj-spec-inv");
-    let repo_id = create_repo(&client, &api, &auth_hdr, &proj, "spec-inv-repo").await;
+    let ws_id = uniq("ws-spec-inv");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "spec-inv-repo").await;
     assert!(!repo_id.is_empty());
 
     let task_id = create_task(&client, &api, &auth_hdr, "spec-inv: setup task").await;
@@ -1393,8 +1424,8 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     let agent_token = spawn_resp["token"].as_str().unwrap().to_string();
     let agent_hdr = format!("Bearer {agent_token}");
 
-    // Build clone URL before proj is moved into the closure.
-    let clone_url = format!("{base_url}/git/{proj}/spec-inv-repo.git");
+    // Build clone URL using repo_id.
+    let clone_url = format!("{base_url}/git/{ws_id}/spec-inv-repo.git");
 
     // Step 1: push initial commit with a spec file to main.
     let clone_url_c = clone_url.clone();

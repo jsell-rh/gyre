@@ -3,6 +3,42 @@ use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Trust level controlling how much autonomy agents have within a workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum TrustLevel {
+    /// Human reviews everything before merge.
+    Supervised,
+    /// Agents merge if gates pass, alert on failures (default).
+    #[default]
+    Guided,
+    /// Only interrupt for exceptions.
+    Autonomous,
+    /// Direct ABAC policy manipulation.
+    Custom,
+}
+
+impl std::fmt::Display for TrustLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrustLevel::Supervised => write!(f, "Supervised"),
+            TrustLevel::Guided => write!(f, "Guided"),
+            TrustLevel::Autonomous => write!(f, "Autonomous"),
+            TrustLevel::Custom => write!(f, "Custom"),
+        }
+    }
+}
+
+impl TrustLevel {
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "Supervised" => TrustLevel::Supervised,
+            "Autonomous" => TrustLevel::Autonomous,
+            "Custom" => TrustLevel::Custom,
+            _ => TrustLevel::Guided,
+        }
+    }
+}
+
 /// Governance and coordination boundary. Groups related repos with shared budgets and policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
@@ -14,6 +50,10 @@ pub struct Workspace {
     pub budget: Option<BudgetConfig>,
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
+    /// How much autonomy agents have in this workspace (default: Guided).
+    pub trust_level: TrustLevel,
+    /// LLM model override for workspace queries (default: GYRE_LLM_MODEL env).
+    pub llm_model: Option<String>,
     pub created_at: u64,
 }
 
@@ -34,6 +74,8 @@ impl Workspace {
             budget: None,
             max_repos: None,
             max_agents_per_repo: None,
+            trust_level: TrustLevel::Guided,
+            llm_model: None,
             created_at,
         }
     }
@@ -146,6 +188,8 @@ mod tests {
         assert_eq!(ws.slug, "my-workspace");
         assert!(ws.description.is_none());
         assert!(ws.budget.is_none());
+        assert_eq!(ws.trust_level, TrustLevel::Guided);
+        assert!(ws.llm_model.is_none());
     }
 
     #[test]

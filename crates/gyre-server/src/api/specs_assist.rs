@@ -1,0 +1,434 @@
+//! S3.3: Spec Editing Backend — assist/save/prompts
+//!
+//! POST /api/v1/repos/:id/specs/assist   — LLM-assisted editing (SSE stream, stubbed LLM)
+//! POST /api/v1/repos/:id/specs/save     — commit spec to feature branch + create MR
+//! POST /api/v1/repos/:id/prompts/save   — direct commit to default branch (stubbed)
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::sse::{Event, Sse},
+    Json,
+};
+use futures_util::stream;
+use gyre_common::{Id, Notification, NotificationType};
+use gyre_domain::{MergeRequest, MrStatus};
+use serde::{Deserialize, Serialize};
+use std::{sync::Arc, time::Duration};
+
+use crate::AppState;
+
+use super::error::ApiError;
+use super::{new_id, now_secs};
+
+// ── Request / Response types ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SpecAssistRequest {
+    pub spec_path: String,
+    pub instruction: String,
+    pub draft_content: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DiffOp {
+    pub op: String,
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Deserialize)]
+pub struct SpecSaveRequest {
+    pub spec_path: String,
+    pub content: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct SpecSaveResponse {
+    pub branch: String,
+    pub mr_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct PromptSaveRequest {
+    pub prompt_path: String,
+    pub content: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct PromptSaveResponse {
+    pub commit_sha: String,
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Derive a URL-safe slug from a spec path for branch naming.
+///
+/// e.g. "specs/system/payment-retry.md" -> "specs-system-payment-retry-a1b2"
+///
+/// The 4-char hex suffix is a deterministic hash of the full original path,
+/// preventing collisions between paths that produce the same slug segment
+/// (e.g. "system/payment-retry.md" and "system/payment-retry-v2.md").
+fn spec_path_slug(spec_path: &str) -> String {
+    let without_ext = spec_path.trim_end_matches(".md");
+    let slug = without_ext.replace('/', "-").to_lowercase();
+    let hash: u32 = spec_path
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    format!("{}-{:04x}", slug, hash & 0xffff)
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+/// POST /api/v1/repos/:id/specs/assist
+///
+/// LLM-assisted spec editing. Returns an SSE stream with partial explanation
+/// chunks and a final complete event containing the diff.
+///
+/// ABAC: resource_type "spec", action "generate".
+///
+/// The LLM call is stubbed — a simulated diff is produced from the instruction
+/// text. The SSE format (partial/complete/error events) and ABAC mapping are
+/// correct per ui-layout.md §3 "LLM Endpoint Contract".
+pub async fn assist_spec(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Json(req): Json<SpecAssistRequest>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
+    let repo_id_typed = Id::new(&repo_id);
+    let _repo = state
+        .repos
+        .find_by_id(&repo_id_typed)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
+
+    let explanation = format!(
+        "Applying instruction to {}: {}",
+        req.spec_path, req.instruction
+    );
+    let diff = vec![DiffOp {
+        op: "add".to_string(),
+        path: "## Changes".to_string(),
+        content: format!(
+            "<!-- Instruction: {} -->\n\n{}",
+            req.instruction,
+            req.draft_content.as_deref().unwrap_or("")
+        ),
+    }];
+
+    let partial_data = serde_json::to_string(&serde_json::json!({
+        "explanation": format!("Analyzing spec at {}...", req.spec_path)
+    }))
+    .unwrap_or_default();
+
+    let complete_data = serde_json::to_string(&serde_json::json!({
+        "diff": diff,
+        "explanation": explanation,
+    }))
+    .unwrap_or_default();
+
+    // Stream: one partial explanation chunk, then the complete event.
+    let events: Vec<Result<Event, std::convert::Infallible>> = vec![
+        Ok(Event::default().event("partial").data(partial_data)),
+        Ok(Event::default().event("complete").data(complete_data)),
+    ];
+    let s = stream::iter(events);
+    Ok(Sse::new(s).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
+}
+
+/// POST /api/v1/repos/:id/specs/save
+///
+/// Commits a spec change to a `spec-edit/<slug>-<uuid>` feature branch and
+/// auto-creates an MR targeting the default branch. If an existing open MR
+/// for the same spec_path exists (matched by branch prefix), returns it.
+///
+/// Creates a priority-2 (High) "Spec pending approval" notification. The
+/// notification's entity_id is the MR ID so the Inbox "Approve" action can
+/// enqueue the MR.
+///
+/// ABAC: resource_type "spec", action "write".
+pub async fn save_spec(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Json(req): Json<SpecSaveRequest>,
+) -> Result<(StatusCode, Json<SpecSaveResponse>), ApiError> {
+    let repo_id_typed = Id::new(&repo_id);
+    let repo = state
+        .repos
+        .find_by_id(&repo_id_typed)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
+
+    let slug = spec_path_slug(&req.spec_path);
+    let branch_prefix = format!("spec-edit/{}", slug);
+
+    // Check for an existing open MR for this spec_path (matched by branch prefix).
+    let all_mrs = state
+        .merge_requests
+        .list_by_repo(&repo_id_typed)
+        .await
+        .unwrap_or_default();
+    let existing_mr = all_mrs
+        .into_iter()
+        .find(|mr| mr.status == MrStatus::Open && mr.source_branch.starts_with(&branch_prefix));
+
+    if let Some(mr) = existing_mr {
+        // Existing open MR found — return it (appending a new commit is stubbed).
+        return Ok((
+            StatusCode::OK,
+            Json(SpecSaveResponse {
+                branch: mr.source_branch,
+                mr_id: mr.id.to_string(),
+            }),
+        ));
+    }
+
+    // Generate new branch: spec-edit/<slug>-<short_uuid>
+    let short_uuid = &uuid::Uuid::new_v4().to_string().replace('-', "")[..8];
+    let branch_name = format!("{}-{}", branch_prefix, short_uuid);
+
+    // Stub: real impl writes req.content to req.spec_path on the new branch
+    // via git_ops (git_ops port does not yet expose a write-file method).
+
+    let now = now_secs();
+    let mr_id = new_id();
+    let mut mr = MergeRequest::new(
+        mr_id.clone(),
+        repo_id_typed.clone(),
+        format!("Spec edit: {}", req.spec_path),
+        branch_name.clone(),
+        repo.default_branch.clone(),
+        now,
+    );
+    mr.workspace_id = repo.workspace_id.clone();
+
+    state
+        .merge_requests
+        .create(&mr)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
+    // user_id/tenant_id are placeholders — real impl resolves workspace
+    // Admin/Developer members from workspace_id and fans out per-user.
+    let notif_id = new_id();
+    let mut notif = Notification::new(
+        notif_id,
+        repo.workspace_id.clone(),
+        Id::new("system"), // placeholder; real impl fans out to workspace members
+        NotificationType::SpecPendingApproval,
+        format!("Spec pending approval: {}", req.spec_path),
+        "system", // placeholder; real impl resolves from workspace lookup
+        now as i64,
+    );
+    notif.entity_ref = Some(mr_id.to_string());
+    // Non-fatal — MR is created even if notification fails.
+    let _ = state.notifications.create(&notif).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SpecSaveResponse {
+            branch: branch_name,
+            mr_id: mr_id.to_string(),
+        }),
+    ))
+}
+
+/// POST /api/v1/repos/:id/prompts/save
+///
+/// Direct commit of a prompt template to the default branch — no MR, no
+/// approval notification. Prompt templates in `specs/prompts/` are in
+/// spec-lifecycle's `ignored_paths`, enabling fast iteration without formal
+/// spec approval.
+///
+/// ABAC: resource_type "spec", action "generate" (not "write") so that
+/// Supervised trust's `trust:require-human-mr-review` policy does not block
+/// prompt iteration.
+///
+/// The actual git write is stubbed — returns a fake commit SHA.
+pub async fn save_prompt(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Json(_req): Json<PromptSaveRequest>,
+) -> Result<(StatusCode, Json<PromptSaveResponse>), ApiError> {
+    let repo_id_typed = Id::new(&repo_id);
+    state
+        .repos
+        .find_by_id(&repo_id_typed)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
+
+    // Stub: real impl commits _req.content to _req.prompt_path on the default
+    // branch via git_ops (requires a write-file method not yet in the port).
+    let fake_sha = format!("{:040x}", uuid::Uuid::new_v4().as_u128());
+    Ok((
+        StatusCode::CREATED,
+        Json(PromptSaveResponse {
+            commit_sha: fake_sha,
+        }),
+    ))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::test_state;
+    use axum::{body::Body, Router};
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        crate::api::api_router().with_state(test_state())
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn assist_spec_not_found_returns_404() {
+        let app = app();
+        let body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add error handling section",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/no-such-repo/specs/assist")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn save_spec_not_found_returns_404() {
+        let app = app();
+        let body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "content": "# Vision\n\nContent here.",
+            "message": "Add vision spec",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/no-such-repo/specs/save")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn save_prompt_not_found_returns_404() {
+        let app = app();
+        let body = serde_json::json!({
+            "prompt_path": "specs/prompts/specs-assist.md",
+            "content": "# Updated prompt",
+            "message": "Tweak specs-assist prompt",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/no-such-repo/prompts/save")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn save_spec_creates_mr_for_existing_repo() {
+        let app = app();
+        // Create a repo first.
+        let create_body = serde_json::json!({
+            "name": "spec-edit-test",
+            "workspace_id": "ws-1",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        // Save a spec — should create an MR.
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "content": "# Vision\n\nContent here.",
+            "message": "Add vision spec",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(json["branch"].as_str().unwrap().starts_with("spec-edit/"));
+        assert!(!json["mr_id"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn spec_path_slug_no_collision() {
+        let s1 = spec_path_slug("specs/system/payment-retry.md");
+        let s2 = spec_path_slug("specs/system/payment-retry-v2.md");
+        assert_ne!(s1, s2, "different paths must produce different slugs");
+        assert!(s1.starts_with("specs-system-payment-retry-"));
+    }
+
+    #[test]
+    fn spec_path_slug_format() {
+        let slug = spec_path_slug("specs/system/vision.md");
+        // Must match: lowercase, no slashes, ends with 4-hex-char suffix
+        assert!(slug.starts_with("specs-system-vision-"));
+        let parts: Vec<&str> = slug.rsplitn(2, '-').collect();
+        assert_eq!(parts[0].len(), 4);
+        assert!(parts[0].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}

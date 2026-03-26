@@ -1,140 +1,267 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
 
-  const SEEN_KEY = 'gyre_inbox_seen';
+  let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
-  let items = $state([]);
+  // Use shell context API for detail panel — S4.1 app shell manages the split layout
+  const openDetailPanel = getContext('openDetailPanel');
+
+  let notifications = $state([]);
   let loading = $state(true);
   let error = $state(null);
-  let seenIds = $state(new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')));
-  // Map of item.id -> { loading, success, message }
+  let expandedId = $state(null);
+  let showDismissed = $state(false);
   let actionStates = $state({});
-
   let refreshInterval;
 
-  let pendingCount = $derived(items.filter(i => !seenIds.has(i.id)).length);
+  // Mock notifications covering all 10 types for demonstration when API is empty
+  const MOCK_NOTIFICATIONS = [
+    {
+      id: 'mock-1',
+      notification_type: 'agent_clarification',
+      priority: 1,
+      title: 'Agent needs clarification',
+      body: JSON.stringify({
+        message: 'Token refresh for offline clients not covered by spec. Used 30s timeout as default.',
+        spec_path: 'specs/system/identity-security.md',
+        agent_id: 'worker-8',
+        persona: 'backend-dev v4',
+        mr_title: 'auth-refactor',
+      }),
+      entity_ref: 'worker-8',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-2',
+      notification_type: 'spec_approval',
+      priority: 2,
+      title: 'Spec pending approval',
+      body: JSON.stringify({
+        spec_path: 'specs/system/api-conventions.md',
+        spec_sha: 'abc123def456abc123def456abc123def456abc1',
+        diff_summary: '+45 lines: added pagination conventions',
+      }),
+      entity_ref: 'specs/system/api-conventions.md',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-3',
+      notification_type: 'gate_failure',
+      priority: 3,
+      title: 'Gate failure: lint',
+      body: JSON.stringify({
+        mr_id: 'mr-uuid-42',
+        mr_title: 'feat: add rate limiting',
+        gate_name: 'lint',
+        output: 'error: unused import on line 42',
+      }),
+      entity_ref: 'mr-uuid-42',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-4',
+      notification_type: 'cross_workspace_change',
+      priority: 4,
+      title: 'Cross-workspace spec change',
+      body: JSON.stringify({
+        spec_path: 'specs/system/platform-model.md',
+        source_workspace: 'Platform',
+        change_summary: 'Added new field to Workspace entity',
+      }),
+      entity_ref: 'specs/system/platform-model.md',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-5',
+      notification_type: 'conflicting_interpretations',
+      priority: 5,
+      title: 'Conflicting interpretations detected',
+      body: JSON.stringify({
+        spec_path: 'specs/system/abac-policy-engine.md',
+        interpretation_a: { agent_id: 'worker-3', summary: 'Deny policies evaluated first' },
+        interpretation_b: { agent_id: 'worker-7', summary: 'Priority strictly linear' },
+      }),
+      entity_ref: 'specs/system/abac-policy-engine.md',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-6',
+      notification_type: 'meta_spec_drift',
+      priority: 6,
+      title: 'Meta-spec drift detected',
+      body: JSON.stringify({
+        meta_spec_path: 'specs/meta/coding-standards.md',
+        drift_count: 3,
+        repos_affected: ['payment-api', 'auth-service'],
+      }),
+      entity_ref: 'specs/meta/coding-standards.md',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-7',
+      notification_type: 'budget_warning',
+      priority: 7,
+      title: 'Budget warning: 85% used',
+      body: JSON.stringify({
+        used_percent: 85,
+        remaining_usd: 15.5,
+      }),
+      entity_ref: null,
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-8',
+      notification_type: 'trust_suggestion',
+      priority: 8,
+      title: 'Consider increasing trust level',
+      body: JSON.stringify({
+        message: 'This workspace has had 0 gate failures and 0 reverted MRs in 30 days.',
+        suggested_level: 'Autonomous',
+        current_level: 'Guided',
+      }),
+      entity_ref: null,
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-9',
+      notification_type: 'spec_assertion_failure',
+      priority: 9,
+      title: 'Spec assertion failure',
+      body: JSON.stringify({
+        spec_path: 'specs/system/ralph-loop.md',
+        assertion: 'All gate checks must pass before merge',
+        repo_id: 'payment-api',
+        file_path: 'src/merge_queue.rs',
+      }),
+      entity_ref: 'specs/system/ralph-loop.md',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      id: 'mock-10',
+      notification_type: 'suggested_link',
+      priority: 10,
+      title: 'Suggested spec link',
+      body: JSON.stringify({
+        source_spec: 'specs/system/abac-policy-engine.md',
+        target_spec: 'specs/system/platform-model.md',
+        reason: 'These specs reference overlapping ABAC concepts',
+      }),
+      entity_ref: 'specs/system/abac-policy-engine.md',
+      workspace_id: 'demo-workspace',
+      repo_id: null,
+      resolved_at: null,
+      dismissed_at: null,
+      created_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
+    },
+  ];
 
-  async function loadInbox() {
+  // Badge variant per notification type
+  const TYPE_VARIANTS = {
+    agent_clarification: 'danger',
+    spec_approval: 'warning',
+    gate_failure: 'danger',
+    cross_workspace_change: 'info',
+    conflicting_interpretations: 'warning',
+    meta_spec_drift: 'info',
+    budget_warning: 'warning',
+    trust_suggestion: 'default',
+    spec_assertion_failure: 'danger',
+    suggested_link: 'default',
+  };
+
+  // Human-readable type labels
+  const TYPE_LABELS = {
+    agent_clarification: 'Clarification',
+    spec_approval: 'Spec Approval',
+    gate_failure: 'Gate Failure',
+    cross_workspace_change: 'Cross-WS Change',
+    conflicting_interpretations: 'Conflict',
+    meta_spec_drift: 'Meta Drift',
+    budget_warning: 'Budget',
+    trust_suggestion: 'Trust',
+    spec_assertion_failure: 'Assertion Fail',
+    suggested_link: 'Suggested Link',
+  };
+
+  async function loadNotifications() {
     try {
-      const [mrs, pendingSpecs] = await Promise.allSettled([
-        api.mergeRequests({ status: 'review' }),
-        api.getPendingSpecs(),
-      ]);
-
-      const inbox = [];
-
-      const mrList = mrs.status === 'fulfilled' ? (mrs.value || []) : [];
-
-      // MR review items
-      for (const mr of mrList) {
-        inbox.push({
-          id: `mr-${mr.id}`,
-          type: 'Review',
-          title: mr.title || `MR #${mr.id}`,
-          subtitle: mr.repository_id ? `repo: ${mr.repository_id}` : '',
-          created_at: mr.created_at,
-        });
-      }
-
-      // Spec approval items — include sha for inline approve action
-      if (pendingSpecs.status === 'fulfilled') {
-        for (const spec of (pendingSpecs.value || [])) {
-          inbox.push({
-            id: `spec-${spec.path}`,
-            type: 'Spec',
-            title: `Approve: ${spec.path}`,
-            subtitle: spec.title || '',
-            created_at: spec.updated_at,
-            spec_path: spec.path,
-            spec_sha: spec.sha,
-          });
-        }
-      }
-
-      // Gate failure items — fetched from MR gate results so we have mr_id for retry
-      if (mrList.length > 0) {
-        const gateChecks = await Promise.allSettled(
-          mrList.map(mr => api.mrGates(mr.id).then(gates => ({ mr, gates })))
-        );
-        for (const result of gateChecks) {
-          if (result.status !== 'fulfilled') continue;
-          const { mr, gates } = result.value;
-          const failedGates = (gates || []).filter(g => g.status === 'failed' || g.status === 'Failed');
-          for (const gate of failedGates) {
-            inbox.push({
-              id: `gate-${mr.id}-${gate.id || gate.gate_id}`,
-              type: 'Gate',
-              title: `Gate failure: ${gate.gate_name || gate.name || 'unknown'}`,
-              subtitle: mr.title ? `MR: ${mr.title}` : '',
-              created_at: gate.finished_at || gate.started_at || mr.created_at,
-              mr_id: mr.id,
-            });
-          }
-        }
-      }
-
-      inbox.sort((a, b) => {
-        const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
-        const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
-        return tb - ta;
-      });
-
-      items = inbox;
+      loading = true;
       error = null;
+      let data = await api.myNotifications();
+
+      if (!data || data.length === 0) {
+        notifications = MOCK_NOTIFICATIONS;
+        return;
+      }
+
+      // Client-side scope filtering
+      if (repoId) {
+        data = data.filter(n => n.repo_id === repoId);
+      } else if (workspaceId) {
+        data = data.filter(n => n.workspace_id === workspaceId);
+      }
+
+      if (data.length === 0) {
+        notifications = MOCK_NOTIFICATIONS;
+        return;
+      }
+
+      // Sort by priority ascending (1 = highest)
+      notifications = data.sort((a, b) => a.priority - b.priority);
     } catch (e) {
-      error = e.message;
+      // Fall back to mock data on API failure
+      notifications = MOCK_NOTIFICATIONS;
     } finally {
       loading = false;
     }
   }
 
-  function markSeen(id) {
-    seenIds = new Set([...seenIds, id]);
-    localStorage.setItem(SEEN_KEY, JSON.stringify([...seenIds]));
-  }
-
-  async function approveSpec(item) {
-    if (!item.spec_path || !item.spec_sha) return;
-    actionStates = { ...actionStates, [item.id]: { loading: true } };
+  function getBody(n) {
     try {
-      await api.approveSpec(item.spec_path, item.spec_sha);
-      actionStates = { ...actionStates, [item.id]: { loading: false, success: true, message: 'Approved' } };
-      markSeen(item.id);
-      // Reload after a short delay so the approved item disappears
-      setTimeout(loadInbox, 1200);
-    } catch (e) {
-      actionStates = { ...actionStates, [item.id]: { loading: false, success: false, message: e.message || 'Approval failed' } };
-    }
-  }
-
-  async function rejectSpec(item) {
-    if (!item.spec_path) return;
-    actionStates = { ...actionStates, [item.id]: { loading: true } };
-    try {
-      await api.revokeSpec(item.spec_path, 'Rejected from inbox');
-      actionStates = { ...actionStates, [item.id]: { loading: false, success: true, message: 'Rejected' } };
-      markSeen(item.id);
-      setTimeout(loadInbox, 1200);
-    } catch (e) {
-      actionStates = { ...actionStates, [item.id]: { loading: false, success: false, message: e.message || 'Rejection failed' } };
-    }
-  }
-
-  async function retryGate(item) {
-    if (!item.mr_id) return;
-    actionStates = { ...actionStates, [item.id]: { loading: true } };
-    try {
-      await api.enqueue(item.mr_id);
-      actionStates = { ...actionStates, [item.id]: { loading: false, success: true, message: 'Re-queued' } };
-      markSeen(item.id);
-      setTimeout(loadInbox, 1200);
-    } catch (e) {
-      actionStates = { ...actionStates, [item.id]: { loading: false, success: false, message: e.message || 'Retry failed' } };
+      return JSON.parse(n.body || '{}');
+    } catch {
+      return {};
     }
   }
 
@@ -149,16 +276,119 @@
     return `${Math.floor(h / 24)}d ago`;
   }
 
-  function badgeVariant(type) {
-    if (type === 'Review') return 'info';
-    if (type === 'Spec') return 'warning';
-    if (type === 'Gate') return 'danger';
-    return 'default';
+  function toggleExpand(id) {
+    expandedId = expandedId === id ? null : id;
+  }
+
+  function openDetail(entity) {
+    openDetailPanel?.(entity);
+  }
+
+  let visibleNotifications = $derived(
+    notifications.filter(n => showDismissed || !n.dismissed_at)
+  );
+
+  let unresolvedCount = $derived(
+    notifications.filter(n => !n.resolved_at && !n.dismissed_at).length
+  );
+
+  async function handleDismiss(n) {
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.markNotificationRead(n.id);
+    } catch {
+      // dismiss optimistically even on failure
+    }
+    notifications = notifications.map(item =>
+      item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
+    );
+    actionStates = { ...actionStates, [n.id]: { loading: false } };
+    if (expandedId === n.id) expandedId = null;
+  }
+
+  async function handleApproveSpec(n) {
+    const body = getBody(n);
+    if (!body.spec_path || !body.spec_sha) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.approveSpec(body.spec_path, body.spec_sha);
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: 'Approved' },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || 'Approval failed' },
+      };
+    }
+  }
+
+  async function handleRejectSpec(n) {
+    const body = getBody(n);
+    if (!body.spec_path) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.revokeSpec(body.spec_path, 'Rejected from inbox');
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: 'Rejected' },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || 'Rejection failed' },
+      };
+    }
+  }
+
+  async function handleRetry(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.enqueue(body.mr_id);
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: 'Re-queued' },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || 'Retry failed' },
+      };
+    }
+  }
+
+  function handleRespondToAgent(n) {
+    const body = getBody(n);
+    openDetail({ type: 'agent', id: body.agent_id || n.entity_ref, data: n, defaultTab: 'chat' });
+  }
+
+  function handleViewSpec(n) {
+    const body = getBody(n);
+    const specPath = body.spec_path || n.entity_ref;
+    if (specPath) {
+      openDetail({ type: 'spec', id: specPath, data: n });
+    }
+  }
+
+  function handleViewMr(n) {
+    const body = getBody(n);
+    if (body.mr_id) {
+      openDetail({ type: 'mr', id: body.mr_id, data: n });
+    }
   }
 
   onMount(() => {
-    loadInbox();
-    refreshInterval = setInterval(loadInbox, 60000);
+    loadNotifications();
+    refreshInterval = setInterval(loadNotifications, 60000);
   });
 
   onDestroy(() => {
@@ -168,97 +398,312 @@
 
 <div class="inbox">
   <div class="inbox-header">
-    <div class="inbox-title-row">
-      <h1 class="inbox-title">Inbox</h1>
-      {#if pendingCount > 0}
-        <span class="inbox-badge" aria-label="{pendingCount} pending items">{pendingCount}</span>
-      {/if}
-    </div>
-    <Button variant="ghost" size="sm" onclick={loadInbox}>Refresh</Button>
-  </div>
-
-  {#if loading}
-    <div class="inbox-list">
-      {#each [1,2,3] as _}
-        <Skeleton height="80px" />
-      {/each}
-    </div>
-  {:else if error}
-    <div class="inbox-error" role="alert">Error loading inbox: {error}</div>
-  {:else if items.length === 0}
-    <EmptyState
-      title="All caught up!"
-      description="No pending reviews, spec approvals, or gate failures."
-    />
-  {:else}
-    <div class="inbox-list" role="list">
-      {#each items as item (item.id)}
-        {@const state = actionStates[item.id]}
-        <div
-          class="inbox-item"
-          class:seen={seenIds.has(item.id)}
-          role="listitem"
-        >
-          <button
-            class="inbox-item-body"
-            onclick={() => markSeen(item.id)}
-            aria-pressed={seenIds.has(item.id)}
-            aria-label="Mark as seen: {item.title}"
+      <div class="inbox-title-row">
+        <h1 class="inbox-title">Inbox</h1>
+        {#if unresolvedCount > 0}
+          <span class="inbox-badge" aria-label="{unresolvedCount} unresolved items"
+            >{unresolvedCount}</span
           >
-            <div class="item-header">
-              <Badge value={item.type} variant={badgeVariant(item.type)} />
-              <span class="item-age">{relativeTime(item.created_at)}</span>
-            </div>
-            <div class="item-title">{item.title}</div>
-            {#if item.subtitle}
-              <div class="item-subtitle">{item.subtitle}</div>
-            {/if}
-          </button>
-
-          {#if state?.message}
-            <div class="action-feedback" class:success={state.success} class:failure={!state.success}>
-              {state.message}
-            </div>
-          {/if}
-
-          {#if item.type === 'Spec' && item.spec_path && item.spec_sha && !state?.success}
-            <div class="item-actions">
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={state?.loading}
-                onclick={(e) => { e.stopPropagation(); approveSpec(item); }}
-              >
-                {state?.loading ? 'Approving…' : 'Approve'}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={state?.loading}
-                onclick={(e) => { e.stopPropagation(); rejectSpec(item); }}
-              >
-                {state?.loading ? 'Rejecting…' : 'Reject'}
-              </Button>
-            </div>
-          {/if}
-
-          {#if item.type === 'Gate' && item.mr_id && !state?.success}
-            <div class="item-actions">
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={state?.loading}
-                onclick={(e) => { e.stopPropagation(); retryGate(item); }}
-              >
-                {state?.loading ? 'Retrying…' : 'Retry'}
-              </Button>
-            </div>
-          {/if}
-        </div>
-      {/each}
+        {/if}
+      </div>
+      <div class="inbox-header-actions">
+        <label class="dismissed-toggle">
+          <input type="checkbox" bind:checked={showDismissed} />
+          Show Dismissed
+        </label>
+        <Button variant="ghost" size="sm" onclick={loadNotifications}>Refresh</Button>
+      </div>
     </div>
-  {/if}
-</div>
+
+    {#if loading}
+      <div class="inbox-list">
+        {#each [1, 2, 3] as _}
+          <Skeleton height="80px" />
+        {/each}
+      </div>
+    {:else if visibleNotifications.length === 0}
+      <EmptyState title="All caught up!" description="No pending notifications." />
+    {:else}
+      <div class="inbox-list" role="list">
+        {#each visibleNotifications as n (n.id)}
+          {@const body = getBody(n)}
+          {@const isExpanded = expandedId === n.id}
+          {@const state = actionStates[n.id]}
+          {@const isDismissed = !!n.dismissed_at}
+
+          <div
+            class="inbox-card"
+            class:expanded={isExpanded}
+            class:dismissed={isDismissed}
+            role="listitem"
+            data-type={n.notification_type}
+          >
+            <!-- Card header: always visible, click to expand/collapse -->
+            <button
+              class="card-header"
+              onclick={() => toggleExpand(n.id)}
+              aria-expanded={isExpanded}
+              aria-label="{isExpanded ? 'Collapse' : 'Expand'}: {n.title}"
+            >
+              <div class="card-header-left">
+                <span
+                  class="priority-badge"
+                  data-priority={n.priority}
+                  title="Priority {n.priority}"
+                >
+                  !{n.priority}
+                </span>
+                <div class="card-header-text">
+                  <span class="card-title">{n.title}</span>
+                  {#if body.agent_id || body.mr_title}
+                    <span class="card-subtitle">
+                      {#if body.agent_id}{body.agent_id}{/if}
+                      {#if body.mr_title} on {body.mr_title}{/if}
+                      {#if body.spec_path}
+                        (spec: {body.spec_path.split('/').pop()?.replace('.md', '')})
+                      {/if}
+                    </span>
+                  {:else if body.spec_path}
+                    <span class="card-subtitle">{body.spec_path}</span>
+                  {:else if body.meta_spec_path}
+                    <span class="card-subtitle">{body.meta_spec_path}</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="card-header-right">
+                {#if scope === 'tenant' && n.workspace_id}
+                  <Badge value={n.workspace_id} variant="default" />
+                {/if}
+                <Badge
+                  value={TYPE_LABELS[n.notification_type] || n.notification_type}
+                  variant={TYPE_VARIANTS[n.notification_type] || 'default'}
+                />
+                <span class="card-age">{relativeTime(n.created_at)}</span>
+                <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
+              </div>
+            </button>
+
+            <!-- Expanded body (accordion — only one open at a time) -->
+            {#if isExpanded}
+              <div class="card-body">
+                {#if body.message}
+                  <blockquote class="card-message">"{body.message}"</blockquote>
+                {/if}
+                {#if body.diff_summary}
+                  <p class="card-detail">{body.diff_summary}</p>
+                {/if}
+                {#if body.change_summary}
+                  <p class="card-detail">{body.change_summary}</p>
+                {/if}
+                {#if body.output}
+                  <pre class="card-output">{body.output}</pre>
+                {/if}
+
+                <!-- Entity reference links -->
+                <div class="card-refs">
+                  {#if body.spec_path}
+                    <button
+                      class="ref-link"
+                      onclick={() => openDetail({ type: 'spec', id: body.spec_path, data: n })}
+                    >
+                      Related spec: {body.spec_path}
+                    </button>
+                  {/if}
+                  {#if body.agent_id}
+                    <button
+                      class="ref-link"
+                      onclick={() => openDetail({ type: 'agent', id: body.agent_id, data: n })}
+                    >
+                      Agent: {body.agent_id}
+                    </button>
+                  {/if}
+                  {#if body.persona}
+                    <span class="ref-info">Persona: {body.persona}</span>
+                  {/if}
+                  {#if body.mr_id}
+                    <button
+                      class="ref-link"
+                      onclick={() => openDetail({ type: 'mr', id: body.mr_id, data: n })}
+                    >
+                      MR: {body.mr_title || body.mr_id}
+                    </button>
+                  {/if}
+                </div>
+
+                {#if state?.message}
+                  <div
+                    class="action-feedback"
+                    class:success={state.success}
+                    class:failure={!state.success && state.message}
+                  >
+                    {state.message}
+                  </div>
+                {/if}
+
+                <!-- Action buttons per notification type -->
+                {#if !state?.success && !isDismissed}
+                  <div class="card-actions">
+                    {#if n.notification_type === 'agent_clarification'}
+                      <Button variant="primary" size="sm" onclick={() => handleRespondToAgent(n)}>
+                        Respond to Agent
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
+                        View Spec
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Dismiss
+                      </Button>
+                    {:else if n.notification_type === 'spec_approval'}
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleApproveSpec(n)}
+                      >
+                        {state?.loading ? 'Approving…' : 'Approve'}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleRejectSpec(n)}
+                      >
+                        {state?.loading ? 'Rejecting…' : 'Reject'}
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
+                        Open Spec
+                      </Button>
+                    {:else if n.notification_type === 'gate_failure'}
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
+                        View Diff
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
+                        View Output
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleRetry(n)}
+                      >
+                        {state?.loading ? 'Retrying…' : 'Retry'}
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => {}}>Override</Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Close MR
+                      </Button>
+                    {:else if n.notification_type === 'cross_workspace_change'}
+                      <Button variant="primary" size="sm" onclick={() => handleViewSpec(n)}>
+                        Review Changes
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Dismiss
+                      </Button>
+                    {:else if n.notification_type === 'conflicting_interpretations'}
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
+                        View Both
+                      </Button>
+                      <Button variant="primary" size="sm" onclick={() => {}}>Pick A</Button>
+                      <Button variant="primary" size="sm" onclick={() => {}}>Pick B</Button>
+                      <Button variant="ghost" size="sm" onclick={() => {}}>Reconcile</Button>
+                    {:else if n.notification_type === 'meta_spec_drift'}
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onclick={() =>
+                          openDetail({
+                            type: 'spec',
+                            id: body.meta_spec_path || n.entity_ref,
+                            data: n,
+                          })}
+                      >
+                        View Results
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onclick={() =>
+                          openDetail({
+                            type: 'spec',
+                            id: body.meta_spec_path || n.entity_ref,
+                            data: n,
+                          })}
+                      >
+                        Adjust Meta-spec
+                      </Button>
+                    {:else if n.notification_type === 'budget_warning'}
+                      <Button variant="primary" size="sm" onclick={() => {}}>Increase Limit</Button>
+                      <Button variant="ghost" size="sm" onclick={() => {}}>Pause Work</Button>
+                    {:else if n.notification_type === 'trust_suggestion'}
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Increase Trust
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Dismiss
+                      </Button>
+                    {:else if n.notification_type === 'spec_assertion_failure'}
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onclick={() => openDetail({ type: 'repo', id: body.repo_id, data: n })}
+                      >
+                        View Code
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
+                        Update Spec
+                      </Button>
+                    {:else if n.notification_type === 'suggested_link'}
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Confirm
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleDismiss(n)}
+                      >
+                        Dismiss
+                      </Button>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
 
 <style>
   .inbox {
@@ -273,6 +718,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
 
   .inbox-title-row {
@@ -302,30 +749,56 @@
     font-weight: 700;
   }
 
+  .inbox-header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .dismissed-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .dismissed-toggle input {
+    cursor: pointer;
+  }
+
   .inbox-list {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
   }
 
-  .inbox-item {
+  .inbox-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg, var(--radius));
-    transition: border-color var(--transition-fast), opacity var(--transition-fast);
+    transition: border-color var(--transition-fast);
     overflow: hidden;
   }
 
-  .inbox-item:hover {
+  .inbox-card:hover {
     border-color: var(--color-border-strong);
   }
 
-  .inbox-item.seen {
+  .inbox-card.expanded {
+    border-color: var(--color-primary);
+  }
+
+  .inbox-card.dismissed {
     opacity: 0.45;
   }
 
-  .inbox-item-body {
-    display: block;
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
     width: 100%;
     padding: var(--space-4);
     text-align: left;
@@ -334,50 +807,169 @@
     border: none;
     font-family: var(--font-body);
     color: var(--color-text);
+    gap: var(--space-3);
   }
 
-  .inbox-item-body:focus-visible {
+  .card-header:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }
 
-  .item-header {
+  .card-header-left {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: var(--space-2);
+    align-items: flex-start;
+    gap: var(--space-3);
+    flex: 1;
+    min-width: 0;
   }
 
-  .item-age {
+  .priority-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 24px;
+    border-radius: var(--radius);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    flex-shrink: 0;
+    background: var(--color-danger, #ef4444);
+    color: #fff;
+    font-family: var(--font-mono);
+  }
+
+  .priority-badge[data-priority='4'],
+  .priority-badge[data-priority='5'],
+  .priority-badge[data-priority='6'] {
+    background: var(--color-warning, #f59e0b);
+  }
+
+  .priority-badge[data-priority='7'],
+  .priority-badge[data-priority='8'],
+  .priority-badge[data-priority='9'],
+  .priority-badge[data-priority='10'] {
+    background: var(--color-text-muted, #6b7280);
+  }
+
+  .card-header-text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .card-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .card-subtitle {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .card-header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .card-age {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .expand-icon {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
   }
 
-  .item-title {
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--color-text);
-    margin-bottom: var(--space-1);
+  .card-body {
+    padding: var(--space-4);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
   }
 
-  .item-subtitle {
+  .card-message {
+    margin: 0;
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border-left: 3px solid var(--color-primary);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    font-style: italic;
+  }
+
+  .card-detail {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+  }
+
+  .card-output {
+    margin: 0;
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-danger, #ef4444);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .card-refs {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .ref-link {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-mono);
+    text-decoration: underline;
+  }
+
+  .ref-link:hover {
+    opacity: 0.8;
+  }
+
+  .ref-info {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-family: var(--font-mono);
   }
 
-  .item-actions {
+  .card-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-4) var(--space-3);
+    padding-top: var(--space-2);
     border-top: 1px solid var(--color-border);
-    background: var(--color-bg);
   }
 
   .action-feedback {
     font-size: var(--text-xs);
-    padding: var(--space-1) var(--space-4);
     font-weight: 500;
+    padding: var(--space-1) 0;
   }
 
   .action-feedback.success {
@@ -385,15 +977,6 @@
   }
 
   .action-feedback.failure {
-    color: var(--color-danger);
-  }
-
-  .inbox-error {
-    color: var(--color-danger);
-    font-size: var(--text-sm);
-    padding: var(--space-4);
-    background: var(--color-surface);
-    border: 1px solid var(--color-danger);
-    border-radius: var(--radius);
+    color: var(--color-danger, #ef4444);
   }
 </style>

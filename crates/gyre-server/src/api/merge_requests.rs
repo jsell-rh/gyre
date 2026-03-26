@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
-use crate::domain_events::DomainEvent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -190,6 +189,7 @@ fn mr_status_str(s: &MrStatus) -> String {
         MrStatus::Approved => "approved",
         MrStatus::Merged => "merged",
         MrStatus::Closed => "closed",
+        MrStatus::Reverted => "reverted",
     }
     .to_string()
 }
@@ -200,6 +200,7 @@ fn parse_mr_status(s: &str) -> Result<MrStatus, ApiError> {
         "approved" => Ok(MrStatus::Approved),
         "merged" => Ok(MrStatus::Merged),
         "closed" => Ok(MrStatus::Closed),
+        "reverted" => Ok(MrStatus::Reverted),
         _ => Err(ApiError::InvalidInput(format!("unknown MR status: {s}"))),
     }
 }
@@ -309,9 +310,14 @@ pub async fn create_mr(
             facets,
         })
         .await;
-    let _ = state.event_tx.send(DomainEvent::MrCreated {
-        id: mr.id.to_string(),
-    });
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(mr.workspace_id.clone()),
+            gyre_common::message::MessageKind::MrCreated,
+            Some(serde_json::json!({"mr_id": mr.id.to_string()})),
+        )
+        .await;
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
@@ -434,6 +440,19 @@ pub async fn list_mrs(
     Ok(Json(mrs.into_iter().map(MrResponse::from).collect()))
 }
 
+/// GET /api/v1/workspaces/:workspace_id/merge-requests — list MRs scoped to a workspace.
+/// Primary access pattern per api-conventions.md §1.1.
+pub async fn list_workspace_mrs(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Vec<MrResponse>>, ApiError> {
+    let mrs = state
+        .merge_requests
+        .list_by_workspace(&Id::new(workspace_id))
+        .await?;
+    Ok(Json(mrs.into_iter().map(MrResponse::from).collect()))
+}
+
 pub async fn get_mr(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -464,10 +483,27 @@ pub async fn transition_mr_status(
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
-    let _ = state.event_tx.send(DomainEvent::MrStatusChanged {
-        id: mr.id.to_string(),
-        status: req.status.clone(),
-    });
+    {
+        let ws_id = mr.workspace_id.clone();
+        let kind = if is_merge {
+            gyre_common::message::MessageKind::MrMerged
+        } else {
+            gyre_common::message::MessageKind::MrStatusChanged
+        };
+        let payload = if is_merge {
+            serde_json::json!({"mr_id": mr.id.to_string()})
+        } else {
+            serde_json::json!({"mr_id": mr.id.to_string(), "status": req.status})
+        };
+        state
+            .emit_event(
+                Some(ws_id.clone()),
+                gyre_common::message::Destination::Workspace(ws_id),
+                kind,
+                Some(payload),
+            )
+            .await;
+    }
 
     // Auto-track mr.merged analytics event
     if is_merge {
@@ -1116,6 +1152,8 @@ mod tests {
             spec_ref: None,
             spec_fully_approved: true,
             author_agent_id: Some("agent-1".to_string()),
+            conversation_sha: None,
+            completion_summary: None,
         };
 
         let bundle = sign_attestation(attestation, &state.agent_signing_key);
@@ -1156,6 +1194,8 @@ mod tests {
             spec_ref: None,
             spec_fully_approved: true,
             author_agent_id: None,
+            conversation_sha: None,
+            completion_summary: None,
         };
         let bundle = sign_attestation(attestation, &state.agent_signing_key);
         state.attestation_store.save(&mr_id, &bundle).await.unwrap();

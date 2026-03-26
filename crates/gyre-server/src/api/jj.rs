@@ -228,24 +228,7 @@ mod tests {
     }
 
     async fn create_project_and_repo(app: Router) -> (Router, String) {
-        let proj = serde_json::json!({ "name": "test-project", "description": null });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/projects")
-                    .header("Authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&proj).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let proj_json = body_json(resp).await;
-        let project_id = proj_json["id"].as_str().unwrap().to_string();
-
-        let repo = serde_json::json!({ "name": "test-repo", "project_id": project_id, "description": null });
+        let repo = serde_json::json!({ "name": "test-repo", "workspace_id": "test-ws" });
         let resp = app
             .clone()
             .oneshot(

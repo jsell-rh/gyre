@@ -505,6 +505,95 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
     }
 }
 
+/// Validate a raw token string and return an `AuthenticatedAgent`.
+///
+/// Used by the WebSocket handler which receives the token as a message payload
+/// rather than an HTTP Authorization header.
+pub async fn authenticate_token(
+    token: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthenticatedAgent, &'static str> {
+    // 1. Global auth token.
+    if tokens_equal(token, &state.auth_token) {
+        return Ok(AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Admin],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+        });
+    }
+
+    // 2. Per-agent tokens.
+    {
+        let token_pairs = state
+            .kv_store
+            .kv_list("agent_tokens")
+            .await
+            .unwrap_or_default();
+        if let Some(agent_id) = token_pairs
+            .iter()
+            .find(|(_, t)| t.as_str() == token)
+            .map(|(id, _)| id.clone())
+        {
+            let jwt_claims = if token.starts_with("ey") {
+                match state.agent_signing_key.validate(token, &state.base_url) {
+                    Ok(agent_claims) => serde_json::to_value(&agent_claims).ok(),
+                    Err(_) => return Err("Invalid or expired agent token"),
+                }
+            } else {
+                None
+            };
+            return Ok(AuthenticatedAgent {
+                agent_id,
+                user_id: None,
+                roles: vec![UserRole::Agent],
+                tenant_id: "default".to_string(),
+                jwt_claims,
+            });
+        }
+    }
+
+    // 2.5. JWT token not in agent_tokens — check if revoked.
+    if token.starts_with("ey")
+        && state
+            .agent_signing_key
+            .validate(token, &state.base_url)
+            .is_ok()
+    {
+        return Err("Agent token has been revoked");
+    }
+
+    // 3. API keys.
+    if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
+        if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+            return Ok(AuthenticatedAgent {
+                agent_id: user.display_name.clone(),
+                user_id: Some(user.id),
+                roles: user.roles,
+                tenant_id: "default".to_string(),
+                jwt_claims: None,
+            });
+        }
+    }
+
+    // 4. Keycloak JWT.
+    if let Some(jwt_cfg) = &state.jwt_config {
+        if let Ok(auth) = validate_jwt(token, jwt_cfg, state).await {
+            return Ok(auth);
+        }
+    }
+
+    // 5. Federated JWT.
+    if token.starts_with("ey") {
+        if let Some(auth) = validate_federated_jwt(token, state).await {
+            return Ok(auth);
+        }
+    }
+
+    Err("Invalid token")
+}
+
 /// Public wrapper for middleware JWT validation (checks token validity only).
 pub async fn validate_jwt_middleware(
     token: &str,
@@ -808,33 +897,10 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
     })
 }
 
-// -- AdminOnly extractor ------------------------------------------------------
-
-/// Extractor that requires the caller to have Admin role (or be "system").
-pub struct AdminOnly {
-    pub agent_id: String,
-    pub user_id: Option<Id>,
-}
-
-#[axum::async_trait]
-impl FromRequestParts<Arc<AppState>> for AdminOnly {
-    type Rejection = Response;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let auth = AuthenticatedAgent::from_request_parts(parts, state).await?;
-        if auth.agent_id == "system" || auth.roles.contains(&UserRole::Admin) {
-            Ok(AdminOnly {
-                agent_id: auth.agent_id,
-                user_id: auth.user_id,
-            })
-        } else {
-            Err((StatusCode::FORBIDDEN, "Admin role required").into_response())
-        }
-    }
-}
+// AdminOnly extractor removed (M34 Slice 4). ABAC middleware is the sole
+// authorization layer. Handlers that previously used AdminOnly now use
+// AuthenticatedAgent directly; ABAC middleware enforces admin-only access
+// via the admin-all-operations built-in policy.
 
 // -- Tests --------------------------------------------------------------------
 

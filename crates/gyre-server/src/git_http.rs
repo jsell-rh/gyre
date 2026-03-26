@@ -3,10 +3,13 @@
 //! Implements the Git smart HTTP protocol by shelling out to `git upload-pack`
 //! and `git receive-pack`. This is the same approach used by GitLab, Gitea, etc.
 //!
-//! Supported routes:
-//!   GET  /git/:project/:repo/info/refs?service={git-upload-pack|git-receive-pack}
-//!   POST /git/:project/:repo/git-upload-pack
-//!   POST /git/:project/:repo/git-receive-pack
+//! Supported routes (M34 Slice 6 — workspace-slug/repo-name format):
+//!   GET  /git/:workspace_slug/:repo_name/info/refs?service={git-upload-pack|git-receive-pack}
+//!   POST /git/:workspace_slug/:repo_name/git-upload-pack
+//!   POST /git/:workspace_slug/:repo_name/git-receive-pack
+//!
+//! The server resolves workspace_slug + repo_name → Repository entity via the
+//! WorkspaceRepository and RepoRepository ports. ABAC validates workspace access.
 
 use axum::{
     body::Body,
@@ -62,40 +65,53 @@ fn service_header(service: &str) -> Vec<u8> {
 // Repo lookup
 // ---------------------------------------------------------------------------
 
-/// Resolve `:project` + `:repo` URL segments to a Repository record.
+/// Resolve `:workspace_slug` + `:repo_name` URL segments to a Repository record.
 ///
-/// * `project`  — the project_id (UUID string) used when the repo was created.
-/// * `repo_seg` — the repo segment from the URL, e.g. `my-repo.git`.
-async fn resolve_repo(
+/// * `tenant_id`      — the caller's tenant ID (from auth context).
+/// * `workspace_slug` — the workspace slug from the URL path (unique within tenant).
+/// * `repo_name`      — the repository name, e.g. `my-repo` or `my-repo.git`.
+///
+/// Resolution steps:
+///   1. Look up the workspace by slug under the caller's tenant.
+///   2. Look up the repo by name within that workspace.
+async fn resolve_repo_by_slug(
     state: &Arc<AppState>,
-    project: &str,
-    repo_seg: &str,
+    tenant_id: &str,
+    workspace_slug: &str,
+    repo_name: &str,
 ) -> Result<gyre_domain::Repository, Response> {
-    let repo_name = repo_seg.strip_suffix(".git").unwrap_or(repo_seg);
+    let repo_name = repo_name.strip_suffix(".git").unwrap_or(repo_name);
+    let tid = Id::new(tenant_id);
 
-    let repos = state
-        .repos
-        .list_by_project(&Id::new(project))
+    let workspace = state
+        .workspaces
+        .find_by_slug(&tid, workspace_slug)
         .await
-        .map_err(|e| git_err(format!("db error: {e}")))?;
+        .map_err(|e| git_err(format!("db error: {e}")))?
+        .ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
 
-    repos
-        .into_iter()
-        .find(|r| r.name == repo_name)
+    state
+        .repos
+        .find_by_name_and_workspace(&workspace.id, repo_name)
+        .await
+        .map_err(|e| git_err(format!("db error: {e}")))?
         .ok_or_else(|| {
             not_found(format!(
-                "repo '{repo_name}' not found in project '{project}'"
+                "repo '{repo_name}' not found in workspace '{workspace_slug}'"
             ))
         })
 }
 
 /// Resolve to just the filesystem path (convenience wrapper).
-async fn resolve_repo_path(
+async fn resolve_repo_path_by_slug(
     state: &Arc<AppState>,
-    project: &str,
-    repo_seg: &str,
+    tenant_id: &str,
+    workspace_slug: &str,
+    repo_name: &str,
 ) -> Result<String, Response> {
-    resolve_repo(state, project, repo_seg).await.map(|r| r.path)
+    resolve_repo_by_slug(state, tenant_id, workspace_slug, repo_name)
+        .await
+        .map(|r| r.path)
 }
 
 // ---------------------------------------------------------------------------
@@ -104,12 +120,12 @@ async fn resolve_repo_path(
 
 #[derive(Deserialize)]
 pub struct GitPath {
-    project: String,
-    repo: String,
+    workspace_slug: String,
+    repo_name: String,
 }
 
 // ---------------------------------------------------------------------------
-// GET /git/:project/:repo/info/refs?service=git-{upload,receive}-pack
+// GET /git/:workspace_slug/:repo_name/info/refs?service=git-{upload,receive}-pack
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -119,9 +135,12 @@ pub struct InfoRefsQuery {
 
 pub async fn git_info_refs(
     State(state): State<Arc<AppState>>,
-    Path(GitPath { project, repo }): Path<GitPath>,
+    Path(GitPath {
+        workspace_slug,
+        repo_name,
+    }): Path<GitPath>,
     Query(InfoRefsQuery { service }): Query<InfoRefsQuery>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
 ) -> Response {
     let subcommand = match service.as_str() {
         "git-upload-pack" => "upload-pack",
@@ -133,10 +152,12 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path = match resolve_repo_path(&state, &project, &repo).await {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    let repo_path =
+        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
+        {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -173,19 +194,24 @@ pub async fn git_info_refs(
 }
 
 // ---------------------------------------------------------------------------
-// POST /git/:project/:repo/git-upload-pack  (clone / fetch)
+// POST /git/:repo_id/:repo/git-upload-pack  (clone / fetch)
 // ---------------------------------------------------------------------------
 
 pub async fn git_upload_pack(
     State(state): State<Arc<AppState>>,
-    Path(GitPath { project, repo }): Path<GitPath>,
-    _auth: AuthenticatedAgent,
+    Path(GitPath {
+        workspace_slug,
+        repo_name,
+    }): Path<GitPath>,
+    auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let repo_path = match resolve_repo_path(&state, &project, &repo).await {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    let repo_path =
+        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
+        {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
@@ -207,31 +233,28 @@ pub async fn git_upload_pack(
 }
 
 // ---------------------------------------------------------------------------
-// POST /git/:project/:repo/git-receive-pack  (push)
+// POST /git/:repo_id/:repo/git-receive-pack  (push)
 // ---------------------------------------------------------------------------
 
 pub async fn git_receive_pack(
     State(state): State<Arc<AppState>>,
-    Path(GitPath { project, repo }): Path<GitPath>,
+    Path(GitPath {
+        workspace_slug,
+        repo_name,
+    }): Path<GitPath>,
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    info!(
-        agent_id = %auth.agent_id,
-        has_jwt_claims = auth.jwt_claims.is_some(),
-        project = %project,
-        repo = %repo,
-        "git-receive-pack: push attempt"
-    );
-    let resolved = match resolve_repo(&state, &project, &repo).await {
-        Ok(r) => r,
-        Err(r) => return r,
-    };
+    let resolved =
+        match resolve_repo_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await {
+            Ok(r) => r,
+            Err(r) => return r,
+        };
     if resolved.is_mirror {
         warn!(
             agent_id = %auth.agent_id,
-            project = %project,
-            repo = %repo,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
             "git-receive-pack 403: repository is a read-only mirror"
         );
         return (
@@ -241,6 +264,7 @@ pub async fn git_receive_pack(
             .into_response();
     }
     let repo_id = resolved.id.to_string();
+    let repo_workspace_id = resolved.workspace_id.clone();
     let repo_path = resolved.path;
     let default_branch = resolved.default_branch;
 
@@ -263,6 +287,13 @@ pub async fn git_receive_pack(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    // HSI §5: Extract conversation turn header for provenance linking.
+    let conversation_turn: Option<u32> = req
+        .headers()
+        .get("x-gyre-conversation-turn")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => return git_err(format!("failed to read request body: {e}")),
@@ -282,26 +313,28 @@ pub async fn git_receive_pack(
             check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates, &auth.agent_id).await
         {
             undo_ref_updates(&repo_path, &ref_updates).await;
-            // Broadcast PushRejected domain event.
-            let _ = state
-                .event_tx
-                .send(crate::domain_events::DomainEvent::PushRejected {
-                    repo_id: repo_id.clone(),
-                    branch: ref_updates
-                        .first()
-                        .map(|u| u.refname.clone())
-                        .unwrap_or_default(),
-                    agent_id: auth.agent_id.clone(),
-                    reason: rejection.clone(),
-                });
+            // Emit PushRejected event via unified message bus.
+            state
+                .emit_event(
+                    Some(repo_workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                    gyre_common::message::MessageKind::PushRejected,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id,
+                        "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
+                        "agent_id": auth.agent_id,
+                        "reason": rejection,
+                    })),
+                )
+                .await;
             return (StatusCode::FORBIDDEN, rejection).into_response();
         }
     }
 
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
-    // M13.2: Resolve agent context (task_id, ralph_step, parent_agent_id, spawned_by) for provenance.
-    let (task_id, ralph_step, parent_agent_id, spawned_by_user_id) =
+    // M13.2: Resolve agent context (task_id, parent_agent_id, spawned_by) for provenance.
+    let (task_id, parent_agent_id, spawned_by_user_id) =
         resolve_agent_context(&state, &auth.agent_id).await;
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.
@@ -315,12 +348,11 @@ pub async fn git_receive_pack(
         "agent_id": auth.agent_id,
         "commit_count": ref_updates.len(),
         "task_id": task_id,
-        "ralph_step": ralph_step,
     });
 
     // M13.3: Append sideband feedback to git output.
     let mut output_with_feedback = output;
-    let feedback = build_feedback_sideband(&branch, task_id.as_deref(), ralph_step.as_deref());
+    let feedback = build_feedback_sideband(&branch, task_id.as_deref());
     output_with_feedback.extend_from_slice(&feedback);
 
     // Post-receive: record agent-commit mappings + broadcast PushAccepted event.
@@ -354,15 +386,21 @@ pub async fn git_receive_pack(
     let state_clone = state.clone();
     let repo_path_clone = repo_path.clone();
     let agent_id = auth.agent_id.clone();
+    let tenant_id_clone = auth.tenant_id.clone();
     let task_id_clone = task_id.clone();
-    let ralph_step_clone = ralph_step.clone();
     let parent_agent_id_clone = parent_agent_id.clone();
     let spawned_by_clone = spawned_by_user_id.clone();
     let model_context_clone = model_context.clone();
     let repo_id_clone = repo_id.clone();
+    let repo_workspace_id_clone = repo_workspace_id.clone();
+    // Save workspace ID string before the clone is moved into PushAccepted event destination.
+    let repo_workspace_id_str = repo_workspace_id.to_string();
     let branch_clone = branch.clone();
     let attestation_level_clone = attestation_level.to_string();
     let default_branch_clone = default_branch;
+    let conversation_turn_clone = conversation_turn;
+    let push_tenant_id = auth.tenant_id.clone();
+    let push_workspace_id = repo_workspace_id.clone();
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
@@ -370,24 +408,40 @@ pub async fn git_receive_pack(
             &ref_updates,
             &agent_id,
             task_id_clone.as_deref(),
-            ralph_step_clone.as_deref(),
             parent_agent_id_clone.as_deref(),
             spawned_by_clone.as_deref(),
             model_context_clone.as_deref(),
             &attestation_level_clone,
         )
         .await;
-        // Broadcast PushAccepted domain event.
-        let _ = state_clone
-            .event_tx
-            .send(crate::domain_events::DomainEvent::PushAccepted {
-                repo_id: repo_id_clone.clone(),
-                branch: branch_clone,
-                agent_id,
-                commit_count,
-                task_id: task_id_clone,
-                ralph_step: ralph_step_clone,
-            });
+
+        // HSI §5: Record turn-commit links for conversation provenance.
+        if let Some(turn) = conversation_turn_clone {
+            record_turn_commit_links(
+                &state_clone,
+                &agent_id,
+                &tenant_id_clone,
+                turn,
+                &ref_updates,
+                crate::api::now_secs(),
+            )
+            .await;
+        }
+        // Emit PushAccepted event via unified message bus.
+        state_clone
+            .emit_event(
+                Some(repo_workspace_id_clone.clone()),
+                gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
+                gyre_common::message::MessageKind::PushAccepted,
+                Some(serde_json::json!({
+                    "repo_id": repo_id_clone,
+                    "branch": branch_clone,
+                    "agent_id": agent_id,
+                    "commit_count": commit_count as u64,
+                    "task_id": task_id_clone,
+                })),
+            )
+            .await;
         // Spec lifecycle: auto-create tasks for spec changes on the default branch.
         process_spec_lifecycle(
             &state_clone,
@@ -399,6 +453,14 @@ pub async fn git_receive_pack(
         .await;
         // Spec registry: sync ledger from manifest on pushes to the default branch (M21.1).
         let default_ref = format!("refs/heads/{default_branch_clone}");
+        // Resolve workspace tenant_id for cross-workspace link resolution.
+        let workspace_tenant_id = state_clone
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(&repo_workspace_id_str))
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id);
         for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
             let now = crate::api::now_secs();
             crate::spec_registry::sync_spec_ledger(
@@ -407,6 +469,10 @@ pub async fn git_receive_pack(
                 &repo_path_clone,
                 &update.new_sha,
                 now,
+                Some(repo_id_clone.as_str()),
+                Some(&state_clone.workspaces),
+                Some(&state_clone.repos),
+                workspace_tenant_id.as_ref(),
             )
             .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
@@ -418,13 +484,48 @@ pub async fn git_receive_pack(
             )
             .await;
             // Knowledge graph: extract Rust symbols and architecture (M30b).
+            // When the push is from an agent with a task, enrich the delta with
+            // agent context and run a post-extraction divergence check (HSI §8).
             let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            let agent_push_ctx = if !agent_id.is_empty() {
+                // Look up the agent's current task to obtain the spec_ref.
+                let spec_ref = if let Some(ref tid) = task_id_clone {
+                    state_clone
+                        .tasks
+                        .find_by_id(&gyre_common::Id::new(tid.clone()))
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|t| t.spec_path)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if spec_ref.is_empty() {
+                    None
+                } else {
+                    Some(crate::graph_extraction::AgentPushContext {
+                        agent_id: agent_id.clone(),
+                        spec_ref,
+                        workspace_id: push_workspace_id.to_string(),
+                        tenant_id: push_tenant_id.clone(),
+                    })
+                }
+            } else {
+                None
+            };
+            let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+                notification_repo: state_clone.notifications.as_ref(),
+                membership_repo: state_clone.workspace_memberships.as_ref(),
+            });
             crate::graph_extraction::extract_and_store_graph(
                 &repo_path_clone,
                 &repo_id_clone,
                 &update.new_sha,
                 state_clone.graph_store.as_ref(),
                 &git_bin,
+                agent_push_ctx,
+                divergence_ports,
             )
             .await;
         }
@@ -439,67 +540,31 @@ pub async fn git_receive_pack(
 }
 
 /// Resolve the task context for an agent to populate commit provenance (M13.2).
-/// Returns (task_id, ralph_step, parent_agent_id, spawned_by_user_id).
+/// Returns (task_id, parent_agent_id, spawned_by_user_id).
 async fn resolve_agent_context(
     state: &Arc<AppState>,
     agent_id: &str,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let agent = match state.agents.find_by_id(&Id::new(agent_id)).await {
         Ok(Some(a)) => a,
-        _ => return (None, None, None, None),
+        _ => return (None, None, None),
     };
 
     let parent_agent_id = agent.parent_id.map(|id| id.to_string());
     let spawned_by_user_id = agent.spawned_by.clone();
 
-    let task_id = match &agent.current_task_id {
-        Some(tid) => tid.to_string(),
-        None => return (None, None, parent_agent_id, spawned_by_user_id),
-    };
+    let task_id = agent.current_task_id.map(|id| id.to_string());
 
-    // Derive ralph_step from the task's current status.
-    let ralph_step = match state.tasks.find_by_id(&Id::new(&task_id)).await {
-        Ok(Some(task)) => {
-            use gyre_domain::TaskStatus;
-            let step = match task.status {
-                TaskStatus::Backlog => "spec",
-                TaskStatus::InProgress => "implement",
-                TaskStatus::Review => "review",
-                TaskStatus::Done => "merge",
-                TaskStatus::Blocked => "implement",
-            };
-            Some(step.to_string())
-        }
-        _ => None,
-    };
-
-    (
-        Some(task_id),
-        ralph_step,
-        parent_agent_id,
-        spawned_by_user_id,
-    )
+    (task_id, parent_agent_id, spawned_by_user_id)
 }
 
 /// Build git sideband-64k pkt-lines carrying human-readable push feedback (M13.3).
-fn build_feedback_sideband(
-    branch: &str,
-    task_id: Option<&str>,
-    ralph_step: Option<&str>,
-) -> Vec<u8> {
+fn build_feedback_sideband(branch: &str, task_id: Option<&str>) -> Vec<u8> {
     let mut lines = vec![format!(
         "remote: [GYRE] Push accepted for branch {branch}\n"
     )];
     if let Some(tid) = task_id {
         lines.push(format!("remote: [GYRE] Task: {tid}\n"));
-    }
-    if let Some(step) = ralph_step {
-        lines.push(format!("remote: [GYRE] Ralph step: {step}\n"));
     }
 
     let mut out = Vec::new();
@@ -643,7 +708,6 @@ async fn record_pushed_commits(
     updates: &[RefUpdate],
     agent_id: &str,
     task_id: Option<&str>,
-    ralph_step: Option<&str>,
     parent_agent_id: Option<&str>,
     spawned_by_user_id: Option<&str>,
     model_context: Option<&str>,
@@ -671,9 +735,6 @@ async fn record_pushed_commits(
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     let mut total_recorded = 0usize;
-
-    // Derive RalphStep from the string for provenance.
-    let ralph_step_enum = ralph_step.and_then(gyre_domain::RalphStep::from_str);
 
     for update in updates {
         // Walk new commits: git log {old}..{new} --format="%H"
@@ -716,7 +777,6 @@ async fn record_pushed_commits(
             )
             .with_provenance(
                 task_id.map(str::to_string),
-                ralph_step_enum.clone(),
                 spawned_by_user_id.map(str::to_string),
                 parent_agent_id.map(str::to_string),
                 model_context.map(str::to_string),
@@ -730,6 +790,54 @@ async fn record_pushed_commits(
         }
     }
     total_recorded
+}
+
+// ---------------------------------------------------------------------------
+// Conversation provenance (HSI §5)
+// ---------------------------------------------------------------------------
+
+/// Record `TurnCommitLink` entries for each ref update in this push.
+///
+/// Called from `git_receive_pack` when `X-Gyre-Conversation-Turn` header is present.
+/// Links are stored without `conversation_sha` (back-filled at upload time).
+async fn record_turn_commit_links(
+    state: &Arc<AppState>,
+    agent_id: &str,
+    tenant_id: &str,
+    turn_number: u32,
+    ref_updates: &[RefUpdate],
+    now: u64,
+) {
+    use gyre_common::TurnCommitLink;
+    let aid = Id::new(agent_id);
+    let tid = Id::new(tenant_id);
+
+    // Get the list of files changed across all commits in this push.
+    // For simplicity, we record one TurnCommitLink per ref update.
+    for update in ref_updates {
+        if update.new_sha.chars().all(|c| c == '0') {
+            // Skip branch deletion.
+            continue;
+        }
+        let link = TurnCommitLink {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            agent_id: aid.clone(),
+            turn_number,
+            commit_sha: update.new_sha.clone(),
+            files_changed: Vec::new(), // files are not parsed here; filled in opportunistically
+            conversation_sha: None,
+            timestamp: now,
+            tenant_id: tid.clone(),
+        };
+        if let Err(e) = state.conversations.record_turn_link(&link).await {
+            warn!(
+                agent_id = %agent_id,
+                commit_sha = %update.new_sha,
+                error = %e,
+                "Failed to record turn_commit_link"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,27 +1253,160 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    let _ = state
-                        .event_tx
-                        .send(crate::domain_events::DomainEvent::SpecChanged {
-                            repo_id: repo_id.to_string(),
-                            spec_path: path,
-                            change_kind: match status_char {
-                                'A' => "added",
-                                'M' => "modified",
-                                'D' => "deleted",
-                                'R' => "renamed",
-                                _ => "unknown",
-                            }
-                            .to_string(),
-                            task_id: task_id.to_string(),
-                        });
-                    let _ = state
-                        .event_tx
-                        .send(crate::domain_events::DomainEvent::TaskCreated {
-                            id: task_id.to_string(),
-                        });
+                    // Look up workspace_id from repo for proper scoping.
+                    let ws_id = state
+                        .repos
+                        .find_by_id(&gyre_common::Id::new(repo_id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.workspace_id)
+                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    let change_kind = match status_char {
+                        'A' => "added",
+                        'M' => "modified",
+                        'D' => "deleted",
+                        'R' => "renamed",
+                        _ => "unknown",
+                    };
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id.clone()),
+                            gyre_common::message::MessageKind::SpecChanged,
+                            Some(serde_json::json!({
+                                "repo_id": repo_id,
+                                "spec_path": path,
+                                "change_kind": change_kind,
+                                "task_id": task_id.to_string(),
+                            })),
+                        )
+                        .await;
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id),
+                            gyre_common::message::MessageKind::TaskCreated,
+                            Some(serde_json::json!({"task_id": task_id.to_string()})),
+                        )
+                        .await;
+
+                    // Cross-workspace spec change notification (priority 4):
+                    // Find inbound cross-workspace links targeting this spec path
+                    // and notify Admin/Developer members of each dependent workspace.
+                    notify_cross_workspace_dependents(state, repo_id, &path).await;
                 }
+            }
+        }
+    }
+}
+
+/// Notify Admin and Developer members of workspaces that have cross-workspace spec links
+/// pointing to the given changed spec. Creates one priority-4 notification per dependent
+/// workspace member (Admin or Developer role).
+async fn notify_cross_workspace_dependents(
+    state: &Arc<crate::AppState>,
+    source_repo_id: &str,
+    changed_spec_path: &str,
+) {
+    // Collect inbound cross-workspace links pointing to this spec path.
+    // A cross-workspace link has `source_repo_id` set to a different repo than `source_repo_id`.
+    let inbound_links: Vec<crate::spec_registry::SpecLinkEntry> = {
+        let store = state.spec_links_store.lock().await;
+        store
+            .iter()
+            .filter(|l| {
+                l.target_path == changed_spec_path
+                    && l.source_repo_id.as_deref() != Some(source_repo_id)
+                    && l.source_repo_id.is_some()
+            })
+            .cloned()
+            .collect()
+    };
+
+    if inbound_links.is_empty() {
+        return;
+    }
+
+    let now = crate::api::now_secs();
+
+    // Collect unique source repo IDs from inbound links.
+    let mut notified_workspaces: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for link in &inbound_links {
+        let dep_repo_id = match &link.source_repo_id {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+
+        // Look up the dependent repo to get its workspace_id.
+        let dep_repo = match state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&dep_repo_id))
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let ws_id_str = dep_repo.workspace_id.to_string();
+        if notified_workspaces.contains(&ws_id_str) {
+            continue;
+        }
+        notified_workspaces.insert(ws_id_str.clone());
+
+        // Get workspace and its tenant_id for notification construction.
+        let dep_workspace = match state
+            .workspaces
+            .find_by_id(&dep_repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(ws) => ws,
+            None => continue,
+        };
+
+        // Get workspace members (Admin + Developer roles receive this notification).
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&dep_repo.workspace_id)
+            .await
+            .unwrap_or_default();
+
+        for member in members {
+            use gyre_domain::WorkspaceRole;
+            if !matches!(
+                member.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            ) {
+                continue;
+            }
+
+            let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
+            let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
+            let title = format!("Cross-workspace spec changed: {display}");
+            let body = format!(
+                "{display} changed in repo {}. Your spec {} depends on it. Review for impact.",
+                source_repo_id, link.source_path
+            );
+            let mut notif = gyre_common::Notification::new(
+                notif_id,
+                dep_repo.workspace_id.clone(),
+                member.user_id,
+                gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                title,
+                dep_workspace.tenant_id.to_string(),
+                now as i64,
+            );
+            notif.body = Some(body);
+            notif.entity_ref = Some(changed_spec_path.to_string());
+
+            if let Err(e) = state.notifications.create(&notif).await {
+                tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
             }
         }
     }
@@ -1348,14 +1589,27 @@ mod tests {
         routing::{get, post},
         Router,
     };
-    use gyre_domain::Repository;
+    use gyre_domain::{Repository, Workspace};
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    // Build a router with git routes and a real bare repo.
-    async fn git_app_with_repo() -> (Router, Arc<crate::AppState>, TempDir, String, String) {
+    const TEST_WS_SLUG: &str = "test-ws";
+    const TEST_REPO_NAME: &str = "my-repo";
+
+    /// Build a router with git routes and a real bare repo.
+    ///
+    /// M34 Slice 6: Routes use workspace_slug/repo_name format.
+    /// Returns (router, state, tmp_dir, workspace_slug, repo_name, repo_path).
+    async fn git_app_with_repo() -> (
+        Router,
+        Arc<crate::AppState>,
+        TempDir,
+        String,
+        String,
+        String,
+    ) {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("test-proj").join("my-repo.git");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -1370,12 +1624,27 @@ mod tests {
         assert!(status.success(), "git init --bare failed");
 
         let state = test_state();
-        let project_id = "test-proj-id";
+
+        // Create a workspace with a known slug under the default tenant.
+        let ws = Workspace {
+            id: Id::new("ws-test"),
+            tenant_id: Id::new("default"),
+            name: "Test Workspace".to_string(),
+            slug: TEST_WS_SLUG.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+        };
+        state.workspaces.create(&ws).await.unwrap();
 
         let repo = Repository {
             id: Id::new("repo-1"),
-            project_id: Id::new(project_id),
-            name: "my-repo".to_string(),
+            workspace_id: Id::new("ws-test"),
+            name: TEST_REPO_NAME.to_string(),
             path: repo_path.to_str().unwrap().to_string(),
             default_branch: "main".to_string(),
             created_at: 0,
@@ -1383,22 +1652,34 @@ mod tests {
             mirror_url: None,
             mirror_interval_secs: None,
             last_mirror_sync: None,
-            workspace_id: None,
         };
         state.repos.create(&repo).await.unwrap();
 
         let repo_path_str = repo_path.to_str().unwrap().to_string();
 
         let app = Router::new()
-            .route("/git/:project/:repo/info/refs", get(git_info_refs))
-            .route("/git/:project/:repo/git-upload-pack", post(git_upload_pack))
             .route(
-                "/git/:project/:repo/git-receive-pack",
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-upload-pack",
+                post(git_upload_pack),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-receive-pack",
                 post(git_receive_pack),
             )
             .with_state(state.clone());
 
-        (app, state, tmp, project_id.to_string(), repo_path_str)
+        (
+            app,
+            state,
+            tmp,
+            TEST_WS_SLUG.to_string(),
+            TEST_REPO_NAME.to_string(),
+            repo_path_str,
+        )
     }
 
     fn auth_header() -> &'static str {
@@ -1407,12 +1688,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_upload_pack_without_auth_returns_401() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -1424,12 +1705,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_invalid_token_returns_401() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", "Bearer wrong-token")
                     .body(Body::empty())
@@ -1442,12 +1723,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_upload_pack_returns_200_with_correct_content_type() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1464,12 +1745,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_receive_pack_returns_200_with_correct_content_type() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-receive-pack"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-receive-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1486,12 +1767,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_unknown_service_returns_400() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-bogus"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-bogus"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1504,13 +1785,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_unknown_repo_returns_404() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, _ws_slug, _repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/git/{project}/no-such-repo.git/info/refs?service=git-upload-pack"
-                    ))
+                    // nonexistent workspace-slug → 404
+                    .uri("/git/no-such-workspace/no-such-repo/info/refs?service=git-upload-pack")
                     .header("Authorization", auth_header())
                     .body(Body::empty())
                     .unwrap(),
@@ -1522,12 +1802,12 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_body_starts_with_service_header() {
-        let (app, _state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", auth_header())
                     .body(Body::empty())
@@ -1548,7 +1828,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_token_accepted_for_info_refs() {
-        let (app, state, _tmp, project, _path) = git_app_with_repo().await;
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         state
             .kv_store
             .kv_set("agent_tokens", "agent-7", "my-agent-token".to_string())
@@ -1559,7 +1839,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/git/{project}/my-repo.git/info/refs?service=git-upload-pack"
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
                     ))
                     .header("Authorization", "Bearer my-agent-token")
                     .body(Body::empty())
@@ -1573,13 +1853,19 @@ mod tests {
     /// End-to-end: git clone via smart HTTP using actual git binary.
     #[tokio::test(flavor = "multi_thread")]
     async fn git_clone_empty_repo_via_smart_http() {
-        let (_, state, _tmp, project, _path) = git_app_with_repo().await;
+        let (_, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
 
         let app = Router::new()
-            .route("/git/:project/:repo/info/refs", get(git_info_refs))
-            .route("/git/:project/:repo/git-upload-pack", post(git_upload_pack))
             .route(
-                "/git/:project/:repo/git-receive-pack",
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-upload-pack",
+                post(git_upload_pack),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-receive-pack",
                 post(git_receive_pack),
             )
             .with_state(state);
@@ -1589,7 +1875,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let clone_dir = TempDir::new().unwrap();
-        let url = format!("http://127.0.0.1:{port}/git/{project}/my-repo.git");
+        let url = format!("http://127.0.0.1:{port}/git/{ws_slug}/{repo_name}");
 
         // Run git clone in a blocking thread so we don't starve the async executor.
         let clone_target = clone_dir.path().join("cloned");

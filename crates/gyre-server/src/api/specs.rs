@@ -517,6 +517,82 @@ pub async fn revoke_spec_approval(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/v1/specs/:path/reject — reject a spec (human decision)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RejectSpecRequest {
+    pub reason: String,
+}
+
+pub async fn reject_spec(
+    State(state): State<Arc<AppState>>,
+    Path(encoded_path): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
+    Json(req): Json<RejectSpecRequest>,
+) -> Result<Json<SpecLedgerResponse>, ApiError> {
+    let spec_path = encoded_path;
+    let now = now_secs();
+
+    // Only Admin or Developer roles can reject specs.
+    let is_authorized = auth.agent_id == "system"
+        || auth.roles.contains(&gyre_domain::UserRole::Admin)
+        || auth.roles.contains(&gyre_domain::UserRole::Developer);
+    if !is_authorized {
+        return Err(ApiError::Forbidden(
+            "only Admin or Developer roles can reject specs".to_string(),
+        ));
+    }
+
+    // Fetch the spec from the ledger.
+    let mut entry = state
+        .spec_ledger
+        .find_by_path(&spec_path)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("spec '{spec_path}' not in registry")))?;
+
+    // Set status to Rejected.
+    entry.approval_status = ApprovalStatus::Rejected;
+    entry.updated_at = now;
+    let _ = state.spec_ledger.save(&entry).await;
+
+    // Close any associated MRs from spec-edit/* branches that reference this spec.
+    // A spec-edit MR has spec_ref set to "spec_path@sha" and source_branch "spec-edit/...".
+    let prefix = format!("{spec_path}@");
+    let all_mrs = state.merge_requests.list().await.unwrap_or_default();
+    for mut mr in all_mrs {
+        let is_spec_mr = mr
+            .spec_ref
+            .as_deref()
+            .map(|s| s.starts_with(&prefix) || s == spec_path.as_str())
+            .unwrap_or(false);
+        let is_spec_edit_branch = mr.source_branch.starts_with("spec-edit/");
+        if is_spec_mr && is_spec_edit_branch && mr.status == gyre_domain::MrStatus::Open {
+            mr.status = gyre_domain::MrStatus::Closed;
+            mr.updated_at = now;
+            let _ = state.merge_requests.update(&mr).await;
+        }
+    }
+
+    // Record rejection reason in the approval history for audit.
+    let rejection_note = SpecApprovalEvent {
+        id: new_id().to_string(),
+        spec_path: spec_path.clone(),
+        spec_sha: entry.current_sha.clone(),
+        approver_type: "human".to_string(),
+        approver_id: format!("user:{}", auth.agent_id),
+        persona: None,
+        approved_at: now,
+        revoked_at: Some(now),
+        revoked_by: Some(auth.agent_id.clone()),
+        revocation_reason: Some(format!("rejected: {}", req.reason)),
+    };
+    let _ = state.spec_approval_history.record(&rejection_note).await;
+
+    Ok(Json(entry.into()))
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/specs/:path/history — approval history
 // ---------------------------------------------------------------------------
 
@@ -546,6 +622,12 @@ pub struct SpecLinkResponse {
     pub source_path: String,
     pub link_type: String,
     pub target_path: String,
+    /// Resolved target repo UUID. Null for unresolved cross-workspace links.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_repo_id: Option<String>,
+    /// Human-readable composite path (e.g. "@platform-core/api-svc/system/auth.md").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_display: Option<String>,
     pub target_sha: Option<String>,
     pub reason: Option<String>,
     pub status: String,
@@ -560,6 +642,8 @@ impl From<SpecLinkEntry> for SpecLinkResponse {
             source_path: e.source_path,
             link_type: e.link_type.to_string(),
             target_path: e.target_path,
+            target_repo_id: e.target_repo_id,
+            target_display: e.target_display,
             target_sha: e.target_sha,
             reason: e.reason,
             status: e.status,
@@ -712,7 +796,12 @@ pub async fn get_spec_progress(
 
     let open_tasks = linked_tasks
         .iter()
-        .filter(|t| !matches!(t.status, gyre_domain::TaskStatus::Done))
+        .filter(|t| {
+            !matches!(
+                t.status,
+                gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+            )
+        })
         .count();
     let completed_tasks = linked_tasks
         .iter()
@@ -734,6 +823,7 @@ pub async fn get_spec_progress(
                 gyre_domain::TaskStatus::Review => "review",
                 gyre_domain::TaskStatus::Done => "done",
                 gyre_domain::TaskStatus::Blocked => "blocked",
+                gyre_domain::TaskStatus::Cancelled => "cancelled",
             }
             .to_string(),
             priority: match &t.priority {
@@ -756,6 +846,7 @@ pub async fn get_spec_progress(
                 gyre_domain::MrStatus::Approved => "approved",
                 gyre_domain::MrStatus::Merged => "merged",
                 gyre_domain::MrStatus::Closed => "closed",
+                gyre_domain::MrStatus::Reverted => "reverted",
             }
             .to_string(),
             spec_ref: mr.spec_ref.clone(),
@@ -1109,8 +1200,11 @@ mod tests {
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "child-implements-parent".to_string(),
             source_path: "system/child.md".to_string(),
+            source_repo_id: None,
             link_type: SpecLinkType::Implements,
             target_path: "system/parent.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
             target_sha: None,
             reason: None,
             status: "active".to_string(),
@@ -1161,8 +1255,11 @@ mod tests {
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "child-implements-parent".to_string(),
             source_path: "system/child.md".to_string(),
+            source_repo_id: None,
             link_type: SpecLinkType::Implements,
             target_path: "system/parent.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
             target_sha: None,
             reason: None,
             status: "active".to_string(),
@@ -1214,8 +1311,11 @@ mod tests {
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "new-conflicts-old".to_string(),
             source_path: "system/new.md".to_string(),
+            source_repo_id: None,
             link_type: SpecLinkType::ConflictsWith,
             target_path: "system/old.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
             target_sha: None,
             reason: Some("incompatible permission model".to_string()),
             status: "active".to_string(),
@@ -1260,8 +1360,11 @@ mod tests {
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "new-conflicts-old".to_string(),
             source_path: "system/new.md".to_string(),
+            source_repo_id: None,
             link_type: SpecLinkType::ConflictsWith,
             target_path: "system/old.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
             target_sha: None,
             reason: None,
             status: "active".to_string(),
@@ -1326,8 +1429,11 @@ mod tests {
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "a-depends-b".to_string(),
             source_path: "system/a.md".to_string(),
+            source_repo_id: None,
             link_type: SpecLinkType::DependsOn,
             target_path: "system/b.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
             target_sha: None,
             reason: None,
             status: "active".to_string(),
@@ -1377,8 +1483,11 @@ mod tests {
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "b-implements-a".to_string(),
             source_path: "system/b.md".to_string(),
+            source_repo_id: None,
             link_type: SpecLinkType::Implements,
             target_path: "system/a.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
             target_sha: None,
             reason: None,
             status: "active".to_string(),
@@ -1463,8 +1572,11 @@ specs:
                     new_links.push(crate::spec_registry::SpecLinkEntry {
                         id: format!("{}-{}-{}", entry.path, link.link_type, link.target),
                         source_path: entry.path.clone(),
+                        source_repo_id: None,
                         link_type: link.link_type.clone(),
                         target_path: link.target.clone(),
+                        target_repo_id: None,
+                        target_display: None,
                         target_sha: link.target_sha.clone(),
                         reason: link.reason.clone(),
                         status: "active".to_string(),
