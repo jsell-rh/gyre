@@ -279,11 +279,26 @@ pub async fn get_repo_graph(
         all_nodes
     };
 
-    let edges = state
+    let all_edges = state
         .graph_store
         .list_edges(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
+
+    // When concept filtering is active, restrict edges to those where both
+    // endpoints are in the matched node set (consistent with /graph/concept/:name).
+    let edges: Vec<GraphEdge> = if q.concept.is_some() {
+        let node_ids: std::collections::HashSet<String> =
+            nodes.iter().map(|n| n.id.to_string()).collect();
+        all_edges
+            .into_iter()
+            .filter(|e| {
+                node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
+            })
+            .collect()
+    } else {
+        all_edges
+    };
 
     Ok(Json(KnowledgeGraphResponse {
         repo_id: id,

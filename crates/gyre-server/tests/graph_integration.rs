@@ -741,7 +741,8 @@ async fn test_push_triggers_graph_extraction() {
 
 // ── New endpoints: S3.5 workspace-scoped graph endpoints ─────────────────────
 
-/// GET /api/v1/repos/{id}/graph?concept= — concept query param filters by substring.
+/// GET /api/v1/repos/{id}/graph?concept= — concept query param filters nodes and
+/// restricts edges to those where both endpoints are in the matched node set.
 #[tokio::test]
 async fn test_full_graph_concept_query_param() {
     let ctx = Ctx::new().await;
@@ -749,10 +750,16 @@ async fn test_full_graph_concept_query_param() {
 
     let auth_node = make_node(&repo_id, "AuthService", NodeType::Type);
     let task_node = make_node(&repo_id, "TaskProcessor", NodeType::Type);
+    let auth_id = auth_node.id.clone();
+    let task_id = task_node.id.clone();
     ctx.state.graph_store.create_node(auth_node).await.unwrap();
     ctx.state.graph_store.create_node(task_node).await.unwrap();
 
-    // Filter for "auth" — only AuthService should match.
+    // Cross-concept edge: AuthService → TaskProcessor.
+    let cross_edge = make_edge(&repo_id, &auth_id, &task_id, EdgeType::DependsOn);
+    ctx.state.graph_store.create_edge(cross_edge).await.unwrap();
+
+    // Filter for "auth" — only AuthService should match; cross-concept edge excluded.
     let resp = ctx
         .get(&format!("/api/v1/repos/{repo_id}/graph?concept=auth"))
         .await;
@@ -761,12 +768,17 @@ async fn test_full_graph_concept_query_param() {
     let nodes = body["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 1, "expected only AuthService");
     assert_eq!(nodes[0]["name"], "AuthService");
+    assert!(
+        body["edges"].as_array().unwrap().is_empty(),
+        "cross-concept edge should be excluded"
+    );
 
-    // No filter — all nodes returned.
+    // No filter — all nodes and the edge are returned.
     let resp_all = ctx.get(&format!("/api/v1/repos/{repo_id}/graph")).await;
     assert_eq!(resp_all.status(), 200);
     let body_all: Value = resp_all.json().await.unwrap();
     assert_eq!(body_all["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(body_all["edges"].as_array().unwrap().len(), 1);
 }
 
 /// GET /api/v1/workspaces/{id}/graph/concept/{name} — workspace-scoped concept search.
