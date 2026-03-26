@@ -249,6 +249,18 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/:path/history", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/links", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/progress", "spec", None),
+                // ── Spec editing backend (S3.3) ────────────────────────────
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/specs/assist",
+                    "spec",
+                    Some("generate"),
+                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/specs/save", "spec", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/prompts/save",
+                    "spec",
+                    Some("generate"),
+                ),
                 // ── Merge Queue ────────────────────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/merge-queue/enqueue",
@@ -364,7 +376,28 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/graph", "graph", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/graph/concept/:concept_name",
+                    "graph",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "graph", None),
+                // ── Explorer views (S3.1) ───────────────────────────────────
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views",
+                    "explorer_view",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views/generate",
+                    "explorer_view",
+                    Some("generate"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views/:view_id",
+                    "explorer_view",
+                    None,
+                ),
                 // ── Meta-specs ─────────────────────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:path/blast-radius",

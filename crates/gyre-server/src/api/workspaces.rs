@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{BudgetConfig, UserRole, Workspace};
+use gyre_domain::{BudgetConfig, TrustLevel, UserRole, Workspace};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -25,6 +25,8 @@ pub struct CreateWorkspaceRequest {
     pub budget: Option<BudgetConfig>,
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
+    pub trust_level: Option<String>,
+    pub llm_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,11 +36,15 @@ pub struct UpdateWorkspaceRequest {
     pub budget: Option<BudgetConfig>,
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
+    pub trust_level: Option<String>,
+    pub llm_model: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct ListWorkspacesQuery {
     pub tenant_id: Option<String>,
+    /// Filter by workspace slug (for cross-workspace spec link resolution).
+    pub slug: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +57,8 @@ pub struct WorkspaceResponse {
     pub budget: Option<BudgetConfig>,
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
+    pub trust_level: String,
+    pub llm_model: Option<String>,
     pub created_at: u64,
 }
 
@@ -65,6 +73,8 @@ impl From<Workspace> for WorkspaceResponse {
             budget: ws.budget,
             max_repos: ws.max_repos,
             max_agents_per_repo: ws.max_agents_per_repo,
+            trust_level: ws.trust_level.to_string(),
+            llm_model: ws.llm_model,
             created_at: ws.created_at,
         }
     }
@@ -100,6 +110,10 @@ pub async fn create_workspace(
     ws.budget = req.budget;
     ws.max_repos = req.max_repos;
     ws.max_agents_per_repo = req.max_agents_per_repo;
+    if let Some(tl) = req.trust_level {
+        ws.trust_level = TrustLevel::from_db_str(&tl);
+    }
+    ws.llm_model = req.llm_model;
     state.workspaces.create(&ws).await?;
     Ok((StatusCode::CREATED, Json(WorkspaceResponse::from(ws))))
 }
@@ -120,6 +134,15 @@ pub async fn list_workspaces(
         .workspaces
         .list_by_tenant(&Id::new(&tenant_id))
         .await?;
+    // Optional ?slug= filter for cross-workspace spec link resolution.
+    let workspaces: Vec<_> = if let Some(slug) = q.slug {
+        workspaces
+            .into_iter()
+            .filter(|ws| ws.slug == slug)
+            .collect()
+    } else {
+        workspaces
+    };
     Ok(Json(
         workspaces
             .into_iter()
@@ -173,6 +196,12 @@ pub async fn update_workspace(
     }
     if let Some(max_agents) = req.max_agents_per_repo {
         ws.max_agents_per_repo = Some(max_agents);
+    }
+    if let Some(tl) = req.trust_level {
+        ws.trust_level = TrustLevel::from_db_str(&tl);
+    }
+    if let Some(model) = req.llm_model {
+        ws.llm_model = Some(model);
     }
     state.workspaces.update(&ws).await?;
     Ok(Json(WorkspaceResponse::from(ws)))

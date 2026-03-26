@@ -31,6 +31,8 @@ impl SpecLedgerRow {
         let approval_status = match self.approval_status.as_str() {
             "approved" => ApprovalStatus::Approved,
             "deprecated" => ApprovalStatus::Deprecated,
+            "revoked" => ApprovalStatus::Revoked,
+            "rejected" => ApprovalStatus::Rejected,
             _ => ApprovalStatus::Pending,
         };
         SpecLedgerEntry {
@@ -72,6 +74,8 @@ fn approval_status_str(s: &ApprovalStatus) -> &'static str {
         ApprovalStatus::Pending => "pending",
         ApprovalStatus::Approved => "approved",
         ApprovalStatus::Deprecated => "deprecated",
+        ApprovalStatus::Revoked => "revoked",
+        ApprovalStatus::Rejected => "rejected",
     }
 }
 

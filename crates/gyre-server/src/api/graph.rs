@@ -53,6 +53,7 @@ pub struct GraphNodeResponse {
     pub created_at: u64,
     pub complexity: Option<u32>,
     pub churn_count_30d: u32,
+    pub test_coverage: Option<f64>,
 }
 
 impl From<GraphNode> for GraphNodeResponse {
@@ -77,6 +78,7 @@ impl From<GraphNode> for GraphNodeResponse {
             created_at: n.created_at,
             complexity: n.complexity,
             churn_count_30d: n.churn_count_30d,
+            test_coverage: n.test_coverage,
         }
     }
 }
@@ -115,6 +117,12 @@ pub struct KnowledgeGraphResponse {
 pub struct NodeWithEdgesResponse {
     pub node: GraphNodeResponse,
     pub edges: Vec<GraphEdgeResponse>,
+}
+
+#[derive(Deserialize)]
+pub struct RepoGraphQuery {
+    /// Optional case-insensitive substring filter on node name / qualified_name.
+    pub concept: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -242,24 +250,55 @@ fn parse_confidence(s: &str) -> SpecConfidence {
 
 /// GET /api/v1/repos/{id}/graph
 /// Returns the full knowledge graph (all nodes + all edges) for a repository.
+/// Optional `?concept=<substring>` filters nodes by case-insensitive substring
+/// match on `name` or `qualified_name`.
 pub async fn get_repo_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<RepoGraphQuery>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
 
-    let nodes = state
+    let all_nodes = state
         .graph_store
         .list_nodes(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
 
-    let edges = state
+    let nodes: Vec<GraphNode> = if let Some(pattern) = &q.concept {
+        let pat = pattern.to_lowercase();
+        all_nodes
+            .into_iter()
+            .filter(|n| {
+                n.name.to_lowercase().contains(&pat)
+                    || n.qualified_name.to_lowercase().contains(&pat)
+            })
+            .collect()
+    } else {
+        all_nodes
+    };
+
+    let all_edges = state
         .graph_store
         .list_edges(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
+
+    // When concept filtering is active, restrict edges to those where both
+    // endpoints are in the matched node set (consistent with /graph/concept/:name).
+    let edges: Vec<GraphEdge> = if q.concept.is_some() {
+        let node_ids: std::collections::HashSet<String> =
+            nodes.iter().map(|n| n.id.to_string()).collect();
+        all_edges
+            .into_iter()
+            .filter(|e| {
+                node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
+            })
+            .collect()
+    } else {
+        all_edges
+    };
 
     Ok(Json(KnowledgeGraphResponse {
         repo_id: id,
@@ -710,12 +749,78 @@ pub async fn link_node_to_spec(
     ))
 }
 
-/// GET /api/v1/repos/{id}/graph/predict
-/// Structural prediction stub — returns an empty predictions array.
+/// GET /workspaces/{id}/graph/concept/{name}
+/// Workspace-scoped concept search — filters nodes across all repos in the workspace
+/// by case-insensitive substring match on `name` or `qualified_name`.
 ///
-/// The full implementation would accept ?spec_path=&draft= and predict
-/// which code elements need to be added/modified to implement a spec change.
-pub async fn get_graph_predictions(
+/// This avoids downloading the full workspace graph for concept queries.
+pub async fn get_workspace_graph_concept(
+    State(state): State<Arc<AppState>>,
+    Path((id, concept_name)): Path<(String, String)>,
+) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
+    require_workspace(&state, &id).await?;
+    let pattern = concept_name.to_lowercase();
+
+    let repo_ids: Vec<String> = state
+        .kv_store
+        .kv_get("workspace_repos", &id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+
+    let mut matched_nodes = Vec::new();
+    let mut matched_edges = Vec::new();
+
+    for rid in &repo_ids {
+        let repo_id = Id::new(rid);
+        let all_nodes = state
+            .graph_store
+            .list_nodes(&repo_id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let nodes: Vec<GraphNode> = all_nodes
+            .into_iter()
+            .filter(|n| {
+                n.name.to_lowercase().contains(&pattern)
+                    || n.qualified_name.to_lowercase().contains(&pattern)
+            })
+            .collect();
+
+        let node_ids: std::collections::HashSet<String> =
+            nodes.iter().map(|n| n.id.to_string()).collect();
+
+        let all_edges = state
+            .graph_store
+            .list_edges(&repo_id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let edges: Vec<GraphEdge> = all_edges
+            .into_iter()
+            .filter(|e| {
+                node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
+            })
+            .collect();
+
+        matched_nodes.extend(nodes);
+        matched_edges.extend(edges);
+    }
+
+    Ok(Json(KnowledgeGraphResponse {
+        repo_id: id,
+        nodes: matched_nodes.into_iter().map(Into::into).collect(),
+        edges: matched_edges.into_iter().map(Into::into).collect(),
+    }))
+}
+
+/// GET /api/v1/repos/{id}/graph/predict (legacy compat)
+/// POST /api/v1/repos/{id}/graph/predict
+/// Structural prediction stub — returns an empty predictions array.
+/// Request body (POST): `{spec_path, draft_content}` — reserved for future implementation.
+pub async fn predict_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<PredictResponse>, ApiError> {
@@ -751,6 +856,7 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         created_at: now,
         complexity: None,
         churn_count_30d: 0,
+        test_coverage: None,
     }
 }
 

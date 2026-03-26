@@ -251,6 +251,8 @@ diesel::table! {
         budget -> Nullable<Text>,
         max_repos -> Nullable<Integer>,
         max_agents_per_repo -> Nullable<Integer>,
+        trust_level -> Text,
+        llm_model -> Nullable<Text>,
         created_at -> BigInt,
     }
 }
@@ -556,6 +558,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    budget_call_records (id) {
+        id -> Text,
+        tenant_id -> Text,
+        workspace_id -> Text,
+        repo_id -> Nullable<Text>,
+        agent_id -> Nullable<Text>,
+        task_id -> Nullable<Text>,
+        usage_type -> Text,
+        input_tokens -> BigInt,
+        output_tokens -> BigInt,
+        cost_usd -> Double,
+        model -> Text,
+        timestamp -> BigInt,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
     agents,
@@ -598,4 +617,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     tenants,
     messages,
     meta_spec_sets,
+    budget_call_records,
 );

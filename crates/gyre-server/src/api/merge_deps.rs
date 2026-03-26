@@ -262,6 +262,7 @@ pub async fn get_queue_graph(
                 MrStatus::Approved => "approved",
                 MrStatus::Merged => "merged",
                 MrStatus::Closed => "closed",
+                MrStatus::Reverted => "reverted",
             };
             nodes.push(GraphNode {
                 mr_id: mr.id.to_string(),

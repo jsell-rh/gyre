@@ -291,6 +291,28 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register abandoned_branch_check job (runs daily, ui-layout.md §3)
+    registry
+        .register(
+            JobDefinition {
+                name: "abandoned_branch_check".to_string(),
+                description:
+                    "Flags spec-edit/* MRs with no activity for >7 days as priority-9 Inbox items"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |_state| async move {
+                // Stub: real impl queries open MRs where source_branch starts with
+                // "spec-edit/" and updated_at < now - 604800 (7 days in seconds),
+                // then creates priority-9 notifications for workspace Admin/Developer
+                // members per the HSI §8 Inbox priority table.
+                tracing::debug!("abandoned_branch_check: stub, no-op");
+                Ok(())
+            },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

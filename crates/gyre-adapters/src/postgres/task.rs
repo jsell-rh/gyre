@@ -16,6 +16,7 @@ fn status_to_str(s: &TaskStatus) -> &'static str {
         TaskStatus::Review => "Review",
         TaskStatus::Done => "Done",
         TaskStatus::Blocked => "Blocked",
+        TaskStatus::Cancelled => "Cancelled",
     }
 }
 
@@ -26,6 +27,7 @@ fn str_to_status(s: &str) -> Result<TaskStatus> {
         "Review" => Ok(TaskStatus::Review),
         "Done" => Ok(TaskStatus::Done),
         "Blocked" => Ok(TaskStatus::Blocked),
+        "Cancelled" => Ok(TaskStatus::Cancelled),
         other => Err(anyhow!("unknown task status: {}", other)),
     }
 }
