@@ -282,25 +282,25 @@ describe('Briefing S4.3', () => {
   });
 
   describe('Mock/fallback data', () => {
-    it('shows mock briefing when API returns empty data', async () => {
+    it('shows empty state when API returns empty data', async () => {
       const { api } = await import('../lib/api.js');
       api.getWorkspaceBriefing.mockResolvedValue({
         completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null,
       });
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => {
-        expect(screen.getByText('Payment retry logic')).toBeTruthy();
+        expect(screen.getByText('All caught up')).toBeTruthy();
       });
     });
 
-    it('shows mock briefing on API 404 error', async () => {
+    it('shows empty state on API 404 error', async () => {
       const { api } = await import('../lib/api.js');
       api.getWorkspaceBriefing.mockRejectedValue(
         new Error('API /workspaces/ws-1/briefing: 404 Not Found')
       );
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => {
-        expect(screen.getByText('Payment retry logic')).toBeTruthy();
+        expect(screen.getByText('All caught up')).toBeTruthy();
       });
     });
   });
