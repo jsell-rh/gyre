@@ -5,12 +5,15 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import { getContext } from 'svelte';
 
+  const navigate = getContext('navigate');
+
+  // ── State ──────────────────────────────────────────────────────────────────
   let me = $state(null);
-  let agents = $state([]);
-  let tasks = $state([]);
-  let mrs = $state([]);
   let notifications = $state([]);
+  let judgments = $state([]);
+  let workspaces = $state([]);
   let loading = $state(true);
   let editing = $state(false);
   let saving = $state(false);
@@ -18,11 +21,47 @@
   let activeTab = $state('info');
   let unread = $state(0);
 
+  // Notification preferences — per-type toggles.
+  // Per HSI §12, stored in user_notification_preferences table (backend).
+  // Using localStorage as fallback until backend endpoint is wired.
+  const NOTIF_TYPES = [
+    { id: 'SpecApproval',      label: 'Spec Approvals' },
+    { id: 'GateOverride',      label: 'Gate Overrides' },
+    { id: 'TrustChange',       label: 'Trust Level Changes' },
+    { id: 'MetaSpecEdit',      label: 'Meta-Spec Edits' },
+    { id: 'MergeRequestReview',label: 'Merge Request Reviews' },
+    { id: 'MergeRequestMerged',label: 'Merge Request Merged' },
+    { id: 'AgentFailure',      label: 'Agent Failures' },
+    { id: 'TrustSuggestion',   label: 'Trust Suggestions' },
+    { id: 'SpecDrift',         label: 'Spec Drift Alerts' },
+    { id: 'AgentNeedsClarification', label: 'Agent Clarification Requests' },
+  ];
+
+  function loadPrefs() {
+    try {
+      const raw = localStorage.getItem('gyre_notif_prefs');
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+    return Object.fromEntries(NOTIF_TYPES.map(t => [t.id, true]));
+  }
+
+  let notifPrefs = $state(loadPrefs());
+  let prefsSaving = $state(false);
+
+  async function savePrefs() {
+    prefsSaving = true;
+    try {
+      localStorage.setItem('gyre_notif_prefs', JSON.stringify(notifPrefs));
+      showToast('Notification preferences saved', { type: 'success' });
+    } catch { /* ignore */ }
+    prefsSaving = false;
+  }
+
   const tabs = [
-    { id: 'info', label: 'Profile' },
-    { id: 'agents', label: 'My Agents' },
-    { id: 'tasks', label: 'My Tasks' },
-    { id: 'mrs', label: 'My MRs' },
+    { id: 'info',        label: 'Profile' },
+    { id: 'memberships', label: 'Workspaces' },
+    { id: 'ledger',      label: 'Judgment Ledger' },
+    { id: 'notif-prefs', label: 'Notification Preferences' },
     { id: 'notifications', label: 'Notifications' },
   ];
 
@@ -31,12 +70,11 @@
   async function loadAll() {
     loading = true;
     try {
-      const [meR, agR, tkR, mrR, ntR] = await Promise.allSettled([
+      const [meR, ntR, jdR, wsR] = await Promise.allSettled([
         api.me(),
-        api.myAgents(),
-        api.myTasks(),
-        api.myMrs(),
         api.myNotifications(),
+        api.myJudgments(),
+        api.workspaces(),
       ]);
       if (meR.status === 'fulfilled') {
         me = meR.value;
@@ -46,22 +84,18 @@
           locale: me.locale ?? '',
         };
       }
-      if (agR.status === 'fulfilled') {
-        const raw = agR.value;
-        agents = Array.isArray(raw?.agents) ? raw.agents : Array.isArray(raw) ? raw : [];
-      }
-      if (tkR.status === 'fulfilled') {
-        const raw = tkR.value;
-        tasks = Array.isArray(raw?.tasks) ? raw.tasks : Array.isArray(raw) ? raw : [];
-      }
-      if (mrR.status === 'fulfilled') {
-        const raw = mrR.value;
-        mrs = Array.isArray(raw?.merge_requests) ? raw.merge_requests : Array.isArray(raw) ? raw : [];
-      }
       if (ntR.status === 'fulfilled') {
         const raw = ntR.value;
         notifications = Array.isArray(raw?.notifications) ? raw.notifications : Array.isArray(raw) ? raw : [];
         unread = notifications.filter(n => !n.read).length;
+      }
+      if (jdR.status === 'fulfilled') {
+        const raw = jdR.value;
+        judgments = Array.isArray(raw?.judgments) ? raw.judgments : Array.isArray(raw?.items) ? raw.items : Array.isArray(raw) ? raw : [];
+      }
+      if (wsR.status === 'fulfilled') {
+        const raw = wsR.value;
+        workspaces = Array.isArray(raw?.workspaces) ? raw.workspaces : Array.isArray(raw) ? raw : [];
       }
     } catch (e) {
       showToast('Failed to load profile: ' + e.message, { type: 'error' });
@@ -91,37 +125,48 @@
     } catch { /* ignore */ }
   }
 
-  function statusColor(s) {
-    const v = (s ?? '').toLowerCase();
-    if (v === 'active') return 'success';
-    if (v === 'dead' || v === 'failed') return 'danger';
-    if (v === 'idle') return 'info';
-    return 'default';
+  function judgmentEventColor(ev) {
+    if (!ev) return 'default';
+    const e = ev.toLowerCase();
+    if (e.includes('approv')) return 'success';
+    if (e.includes('revok') || e.includes('reject') || e.includes('invalidat')) return 'danger';
+    if (e.includes('override') || e.includes('trust')) return 'warning';
+    if (e.includes('meta') || e.includes('edit') || e.includes('publish')) return 'info';
+    return 'neutral';
   }
 
-  function priorityColor(p) {
-    const v = (p ?? '').toLowerCase();
-    if (v === 'high' || v === 'critical') return 'danger';
-    if (v === 'medium') return 'warning';
-    return 'default';
+  function judgmentLabel(j) {
+    return j.event_type ?? j.event ?? j.action ?? j.type ?? 'event';
+  }
+
+  function judgmentTarget(j) {
+    return j.spec_path ?? j.path ?? j.resource_id ?? j.mr_id ?? j.resource ?? '—';
+  }
+
+  function judgmentWorkspace(j) {
+    return j.workspace_name ?? j.workspace_slug ?? j.workspace_id ?? null;
   }
 
   function notifColor(type) {
     const t = (type ?? '').toLowerCase();
-    if (t.includes('failure') || t.includes('conflict')) return 'danger';
-    if (t.includes('merged') || t.includes('complete')) return 'success';
-    if (t.includes('review')) return 'info';
+    if (t.includes('failure') || t.includes('conflict') || t.includes('drift')) return 'danger';
+    if (t.includes('merged') || t.includes('complete') || t.includes('approval')) return 'success';
+    if (t.includes('review') || t.includes('clarification')) return 'info';
     return 'default';
   }
 
   function rel(ts) {
     if (!ts) return '—';
-    const d = new Date(ts);
+    const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
     const secs = Math.floor((Date.now() - d.getTime()) / 1000);
     if (secs < 60) return `${secs}s ago`;
     if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
     if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
     return `${Math.floor(secs/86400)}d ago`;
+  }
+
+  function switchWorkspace(ws) {
+    navigate?.('inbox', { type: 'workspace', workspaceId: ws.id });
   }
 </script>
 
@@ -173,7 +218,7 @@
     </div>
   {/if}
 
-  <Tabs {tabs} bind:activeTab />
+  <Tabs {tabs} bind:active={activeTab} />
 
   <div class="tab-body">
     {#if loading}
@@ -181,7 +226,7 @@
     {:else if activeTab === 'info'}
       {#if me}
         <div class="info-grid">
-          {#each [['Username', me.username],['Email', me.email],['Display Name', me.display_name],['Timezone', me.timezone],['Locale', me.locale],['Role', me.global_role]] as [label, val]}
+          {#each [['Username', me.username],['Email', me.email],['Display Name', me.display_name],['Timezone', me.timezone],['Locale', me.locale],['Role', me.global_role],['Auth Provider', me.oidc_issuer]] as [label, val]}
             {#if val}
               <div class="info-row">
                 <span class="info-label">{label}</span>
@@ -194,59 +239,85 @@
         <EmptyState message="Profile data unavailable." />
       {/if}
 
-    {:else if activeTab === 'agents'}
-      {#if agents.length === 0}
-        <EmptyState message="No agents spawned by you." />
+    {:else if activeTab === 'memberships'}
+      <!-- Workspace memberships with quick-switch -->
+      {#if workspaces.length === 0}
+        <EmptyState message="No workspace memberships." />
       {:else}
-        <table class="data-table">
-          <thead><tr><th>Name</th><th>Status</th><th>Created</th></tr></thead>
-          <tbody>
-            {#each agents as a}
-              <tr>
-                <td>{a.name}</td>
-                <td><Badge variant={statusColor(a.status)} value={a.status} /></td>
-                <td class="muted">{rel(a.created_at)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        <div class="memberships-list">
+          {#each workspaces as ws}
+            <div class="membership-item">
+              <div class="membership-info">
+                <span class="membership-name">{ws.name ?? ws.slug ?? ws.id}</span>
+                {#if ws.role}
+                  <Badge value={ws.role} color="neutral" />
+                {/if}
+              </div>
+              {#if ws.trust_level}
+                <span class="membership-trust muted">Trust: {ws.trust_level}</span>
+              {/if}
+              <button
+                class="btn-switch"
+                onclick={() => switchWorkspace(ws)}
+                aria-label="Switch to {ws.name ?? ws.id} workspace"
+              >
+                Switch
+              </button>
+            </div>
+          {/each}
+        </div>
       {/if}
 
-    {:else if activeTab === 'tasks'}
-      {#if tasks.length === 0}
-        <EmptyState message="No tasks assigned to you." />
+    {:else if activeTab === 'ledger'}
+      <!-- Judgment Ledger: chronological log of human judgment decisions -->
+      <!-- Sourced from GET /api/v1/users/me/judgments -->
+      {#if judgments.length === 0}
+        <EmptyState message="No judgment events recorded. Spec approvals, gate overrides, trust changes, and meta-spec edits will appear here." />
       {:else}
-        <table class="data-table">
-          <thead><tr><th>Title</th><th>Status</th><th>Priority</th></tr></thead>
-          <tbody>
-            {#each tasks as t}
-              <tr>
-                <td>{t.title}</td>
-                <td><Badge variant={statusColor(t.status)} value={t.status} /></td>
-                <td><Badge variant={priorityColor(t.priority)} value={t.priority ?? 'medium'} /></td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        <div class="ledger-list">
+          {#each judgments as j}
+            <div class="ledger-item">
+              <div class="ledger-row">
+                <Badge value={judgmentLabel(j)} color={judgmentEventColor(judgmentLabel(j))} />
+                <span class="ledger-target mono">{judgmentTarget(j)}</span>
+                <span class="ledger-time muted">{rel(j.timestamp ?? j.created_at ?? j.approved_at)}</span>
+              </div>
+              <div class="ledger-meta">
+                {#if judgmentWorkspace(j)}
+                  <span class="ledger-ws muted">{judgmentWorkspace(j)}</span>
+                {/if}
+                {#if j.sha || j.spec_sha}
+                  <span class="ledger-sha mono muted">{(j.sha ?? j.spec_sha).slice(0, 7)}</span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
       {/if}
 
-    {:else if activeTab === 'mrs'}
-      {#if mrs.length === 0}
-        <EmptyState message="No merge requests authored by you." />
-      {:else}
-        <table class="data-table">
-          <thead><tr><th>Title</th><th>Status</th><th>Created</th></tr></thead>
-          <tbody>
-            {#each mrs as mr}
-              <tr>
-                <td>{mr.title}</td>
-                <td><Badge variant={statusColor(mr.status)} value={mr.status} /></td>
-                <td class="muted">{rel(mr.created_at)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
+    {:else if activeTab === 'notif-prefs'}
+      <!-- Notification Preferences: per-type toggles (HSI §12) -->
+      <div class="prefs-section">
+        <p class="prefs-desc">Choose which notification types you receive in your Inbox.</p>
+        <div class="prefs-list">
+          {#each NOTIF_TYPES as nt}
+            <label class="pref-row">
+              <input
+                type="checkbox"
+                class="pref-checkbox"
+                bind:checked={notifPrefs[nt.id]}
+                aria-label="Enable {nt.label} notifications"
+              />
+              <span class="pref-label">{nt.label}</span>
+            </label>
+          {/each}
+        </div>
+        <div class="prefs-actions">
+          <button class="btn-primary" onclick={savePrefs} disabled={prefsSaving}>
+            {prefsSaving ? 'Saving…' : 'Save Preferences'}
+          </button>
+        </div>
+      </div>
 
     {:else if activeTab === 'notifications'}
       {#if notifications.length === 0}
@@ -375,26 +446,74 @@
 
   .tab-body { flex: 1; overflow-y: auto; padding: var(--space-6); }
 
+  /* Profile info */
   .info-grid { display: flex; flex-direction: column; gap: var(--space-3); max-width: 480px; }
   .info-row { display: flex; gap: var(--space-4); font-size: var(--text-sm); }
   .info-label { color: var(--color-text-muted); width: 120px; flex-shrink: 0; }
   .info-val { color: var(--color-text); }
 
-  .data-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
-  .data-table th {
-    text-align: left;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-text-muted);
-    font-weight: 500;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  /* Workspace memberships */
+  .memberships-list { display: flex; flex-direction: column; gap: var(--space-2); }
+  .membership-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
   }
-  .data-table td { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); color: var(--color-text); }
+  .membership-info { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
+  .membership-name { font-size: var(--text-sm); font-weight: 500; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .membership-trust { font-size: var(--text-xs); }
+  .btn-switch {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .btn-switch:hover { border-color: var(--color-primary); color: var(--color-primary); }
 
-  .muted { color: var(--color-text-muted); font-size: var(--text-xs); }
+  /* Judgment Ledger */
+  .ledger-list { display: flex; flex-direction: column; gap: var(--space-2); }
+  .ledger-item {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .ledger-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .ledger-target { font-size: var(--text-xs); color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .ledger-time { font-size: var(--text-xs); margin-left: auto; flex-shrink: 0; }
+  .ledger-meta { display: flex; align-items: center; gap: var(--space-3); }
+  .ledger-ws { font-size: var(--text-xs); }
+  .ledger-sha { font-size: var(--text-xs); }
 
+  /* Notification Preferences */
+  .prefs-section { display: flex; flex-direction: column; gap: var(--space-4); max-width: 480px; }
+  .prefs-desc { margin: 0; font-size: var(--text-sm); color: var(--color-text-secondary); }
+  .prefs-list { display: flex; flex-direction: column; gap: var(--space-3); }
+  .pref-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+  .pref-checkbox { accent-color: var(--color-primary); width: 16px; height: 16px; cursor: pointer; }
+  .pref-label { flex: 1; }
+  .prefs-actions { display: flex; }
+
+  /* Notifications */
   .notif-list { display: flex; flex-direction: column; gap: var(--space-3); }
   .notif-item {
     background: var(--color-surface-elevated);
@@ -419,4 +538,7 @@
     padding: 1px 6px;
   }
   .mark-read-btn:hover { color: var(--color-success); border-color: var(--color-success); }
+
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--color-text-muted); }
 </style>

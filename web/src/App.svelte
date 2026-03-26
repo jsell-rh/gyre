@@ -10,6 +10,7 @@
   import SpecDashboard from './components/SpecDashboard.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import AdminPanel from './components/AdminPanel.svelte';
+  import UserProfile from './components/UserProfile.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
@@ -86,7 +87,7 @@
   }
 
   // ── URL routing ───────────────────────────────────────────────────────
-  const NAV_ITEMS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin'];
+  const NAV_ITEMS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin', 'profile'];
 
   export function parseUrl(pathname) {
     const parts = pathname.split('/').filter(Boolean);
@@ -444,7 +445,7 @@
               aria-label="User menu"
               onkeydown={(e) => { if (e.key === 'Escape') userMenuOpen = false; }}
             >
-              <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('admin'); userMenuOpen = false; }}>
+              <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
                 Profile
               </button>
               <button class="user-dropdown-item" role="menuitem" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
@@ -476,6 +477,8 @@
             <MetaSpecs workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'admin'}
             <AdminPanel workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
+          {:else if currentNav === 'profile'}
+            <UserProfile />
           {/if}
         </div>
       </ContentArea>
