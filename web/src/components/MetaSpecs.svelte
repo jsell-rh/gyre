@@ -109,6 +109,8 @@
   let previewInterval = $state(null);
 
   let impactTab       = $state('architecture');
+  let previewApiResult  = $state(null);   // full API response when preview_id is used
+  let isSimulatedPreview = $state(false); // true when falling back to client-side simulation
 
   let suggestions      = $state([]);
   let nextSuggestionId = 0;
@@ -160,6 +162,8 @@
   async function startPreview() {
     previewState = 'running';
     previewProgress = selectedSpecPaths.map(path => ({ path, status: 'running' }));
+    previewApiResult = null;
+    isSimulatedPreview = false;
 
     let usedPreviewId = null;
     try {
@@ -169,12 +173,14 @@
         spec_paths: selectedSpecPaths,
       });
       usedPreviewId = res?.preview_id ?? null;
+      if (res && !usedPreviewId) previewApiResult = res;
     } catch { /* stub not implemented */ }
 
     if (usedPreviewId) {
       previewId = usedPreviewId;
       pollPreview();
     } else {
+      isSimulatedPreview = true;
       simulatePreview();
     }
   }
@@ -186,9 +192,15 @@
       try {
         const status = await api.previewPersonaStatus(workspaceId, previewId);
         previewProgress = status.specs ?? previewProgress;
-        if (status.state === 'complete') { stopPreview(); previewState = 'complete'; }
+        if (status.state === 'complete') {
+          previewApiResult = status;
+          isSimulatedPreview = false;
+          stopPreview();
+          previewState = 'complete';
+        }
       } catch {
         clearInterval(previewInterval);
+        isSimulatedPreview = true;
         simulatePreview();
       }
       if (elapsed > 30000) { stopPreview(); previewState = 'complete'; }
@@ -416,22 +428,55 @@
                 <button class="impact-tab" class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
                 <button class="impact-tab" class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
               </div>
-              {#if impactTab === 'architecture'}
+              {#if isSimulatedPreview}
+                <div class="impact-content impact-unavailable">
+                  <span class="impact-unavailable-label">Preview unavailable — showing example layout.</span>
+                  {#if impactTab === 'architecture'}
+                    <div class="arch-diff">
+                      <div class="arch-line add">+ ErrorHandler module (payment-domain)</div>
+                      <div class="arch-line mod">~ ChargeService: +3 error result returns</div>
+                      <div class="arch-line ctx">= 45 types unchanged</div>
+                    </div>
+                  {:else}
+                    <div class="code-diff">
+                      {#each previewProgress as item (item.path)}
+                        <div class="code-diff-file">
+                          <div class="code-diff-path">{item.path}</div>
+                          <pre class="code-diff-body">--- original
++++ modified
+@@ persona system prompt applied @@</pre>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {:else if impactTab === 'architecture'}
                 <div class="impact-content arch-diff">
-                  <div class="arch-line add">+ ErrorHandler module (payment-domain)</div>
-                  <div class="arch-line mod">~ ChargeService: +3 error result returns</div>
-                  <div class="arch-line ctx">= 45 types unchanged</div>
+                  {#if previewApiResult?.architecture_diff?.length}
+                    {#each previewApiResult.architecture_diff as line}
+                      <div class="arch-line" class:add={line.startsWith('+')} class:mod={line.startsWith('~')} class:ctx={line.startsWith('=')}>{line}</div>
+                    {/each}
+                  {:else}
+                    <span class="impact-empty">No architecture changes detected.</span>
+                  {/if}
                 </div>
               {:else}
                 <div class="impact-content code-diff">
-                  {#each previewProgress as item (item.path)}
-                    <div class="code-diff-file">
-                      <div class="code-diff-path">{item.path}</div>
-                      <pre class="code-diff-body">--- original
-+++ modified
-@@ persona system prompt applied @@</pre>
-                    </div>
-                  {/each}
+                  {#if previewApiResult?.specs_diff?.length}
+                    {#each previewApiResult.specs_diff as item (item.path)}
+                      <div class="code-diff-file">
+                        <div class="code-diff-path">{item.path}</div>
+                        <pre class="code-diff-body">{item.diff}</pre>
+                      </div>
+                    {/each}
+                  {:else}
+                    {#each previewProgress as item (item.path)}
+                      <div class="code-diff-file">
+                        <div class="code-diff-path">{item.path}</div>
+                        <pre class="code-diff-body">No diff available.</pre>
+                      </div>
+                    {/each}
+                  {/if}
                 </div>
               {/if}
             </div>
@@ -736,6 +781,9 @@
   .code-diff-file { border: 1px solid var(--color-border, #333); border-radius: 4px; overflow: hidden; }
   .code-diff-path { padding: 0.3rem 0.6rem; background: var(--color-surface-elevated, #1a1a1a); font-family: var(--font-mono, monospace); font-size: 0.8rem; color: var(--color-text-muted, #888); border-bottom: 1px solid var(--color-border, #333); }
   .code-diff-body { margin: 0; padding: 0.5rem 0.75rem; font-family: var(--font-mono, monospace); font-size: 0.8rem; color: var(--color-text, #eee); line-height: 1.5; }
+  .impact-unavailable { display: flex; flex-direction: column; gap: 0.75rem; }
+  .impact-unavailable-label { font-size: 0.78rem; color: var(--color-text-muted, #888); font-style: italic; }
+  .impact-empty { font-size: 0.85rem; color: var(--color-text-muted, #888); }
 
   /* ── Detail panel ── */
   .detail-tabs { display: flex; margin-bottom: 1rem; border-bottom: 1px solid var(--color-border, #333); }

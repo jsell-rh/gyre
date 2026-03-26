@@ -412,13 +412,13 @@ export const api = {
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  workspaceAbacPolicies: (id) => request(`/workspaces/${id}/abac-policies`),
+  workspaceAbacPolicies: (id) => request(`/policies?scope=Workspace&scope_id=${id}`),
   createWorkspaceAbacPolicy: (id, data) =>
-    request(`/workspaces/${id}/abac-policies`, { method: 'POST', body: JSON.stringify(data) }),
+    request('/policies', { method: 'POST', body: JSON.stringify({ ...data, scope: 'Workspace', scope_id: id }) }),
   deleteWorkspaceAbacPolicy: (id, policyId) =>
-    request(`/workspaces/${id}/abac-policies/${policyId}`, { method: 'DELETE' }),
+    request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
-    request(`/workspaces/${id}/abac-policies/simulate`, { method: 'POST', body: JSON.stringify(data) }),
+    request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
   // Explorer saved views (HSI §3)
   explorerViews: (workspaceId) => request(`/workspaces/${workspaceId}/explorer-views`),
   saveExplorerView: (workspaceId, data) =>

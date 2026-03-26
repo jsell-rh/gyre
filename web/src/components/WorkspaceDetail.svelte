@@ -18,6 +18,30 @@
   let loading = $state(true);
   let activeTab = $state('budget');
 
+  let budgetFormOpen = $state(false);
+  let budgetSaving = $state(false);
+  let budgetForm = $state({ max_tokens_per_day: '', max_cost_per_day: '', max_concurrent_agents: '', max_agent_lifetime_secs: '' });
+
+  async function saveBudget() {
+    budgetSaving = true;
+    try {
+      const data = {};
+      if (budgetForm.max_tokens_per_day !== '') data.max_tokens_per_day = Number(budgetForm.max_tokens_per_day);
+      if (budgetForm.max_cost_per_day !== '') data.max_cost_per_day = Number(budgetForm.max_cost_per_day);
+      if (budgetForm.max_concurrent_agents !== '') data.max_concurrent_agents = Number(budgetForm.max_concurrent_agents);
+      if (budgetForm.max_agent_lifetime_secs !== '') data.max_agent_lifetime_secs = Number(budgetForm.max_agent_lifetime_secs);
+      await api.setWorkspaceBudget(workspace.id, data);
+      showToast('Budget updated', { type: 'success' });
+      budgetFormOpen = false;
+      const b = await api.workspaceBudget(workspace.id);
+      budget = b;
+    } catch (e) {
+      showToast('Failed to save budget: ' + e.message, { type: 'error' });
+    } finally {
+      budgetSaving = false;
+    }
+  }
+
   const tabs = [
     { id: 'budget', label: 'Budget' },
     { id: 'repos', label: 'Repos' },
@@ -145,6 +169,35 @@
           </div>
           {#if !budget.config?.max_tokens_per_day && !budget.config?.max_cost_per_day && !budget.config?.max_concurrent_agents}
             <EmptyState message="No budget limits configured for this workspace." />
+          {/if}
+          {#if !budgetFormOpen}
+            <button class="configure-budget-btn" onclick={() => { budgetFormOpen = true; budgetForm = { max_tokens_per_day: budget.config?.max_tokens_per_day ?? '', max_cost_per_day: budget.config?.max_cost_per_day ?? '', max_concurrent_agents: budget.config?.max_concurrent_agents ?? '', max_agent_lifetime_secs: budget.config?.max_agent_lifetime_secs ?? '' }; }}>Configure Budget</button>
+          {:else}
+            <form class="budget-form" onsubmit={(e) => { e.preventDefault(); saveBudget(); }}>
+              <h4 class="budget-form-title">Set Budget Limits</h4>
+              <div class="budget-form-fields">
+                <label class="budget-field">
+                  <span>Max Tokens / Day</span>
+                  <input type="number" min="0" placeholder="e.g. 1000000" bind:value={budgetForm.max_tokens_per_day} />
+                </label>
+                <label class="budget-field">
+                  <span>Max Cost / Day ($)</span>
+                  <input type="number" min="0" step="0.01" placeholder="e.g. 10.00" bind:value={budgetForm.max_cost_per_day} />
+                </label>
+                <label class="budget-field">
+                  <span>Max Concurrent Agents</span>
+                  <input type="number" min="0" placeholder="e.g. 5" bind:value={budgetForm.max_concurrent_agents} />
+                </label>
+                <label class="budget-field">
+                  <span>Max Agent Lifetime (secs)</span>
+                  <input type="number" min="0" placeholder="e.g. 3600" bind:value={budgetForm.max_agent_lifetime_secs} />
+                </label>
+              </div>
+              <div class="budget-form-actions">
+                <button type="submit" class="btn-primary" disabled={budgetSaving}>{budgetSaving ? 'Saving…' : 'Save'}</button>
+                <button type="button" class="btn-secondary" onclick={() => budgetFormOpen = false}>Cancel</button>
+              </div>
+            </form>
           {/if}
         </div>
       {:else}
@@ -370,4 +423,34 @@
   .team-name { font-weight: 600; color: var(--color-text); margin-bottom: var(--space-1); }
   .team-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-bottom: var(--space-2); }
   .team-meta { font-size: var(--text-xs); }
+
+  .configure-budget-btn {
+    margin-top: var(--space-4);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .configure-budget-btn:hover { opacity: 0.88; }
+
+  .budget-form {
+    margin-top: var(--space-5);
+    max-width: 480px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-5);
+  }
+  .budget-form-title { margin: 0 0 var(--space-4); font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+  .budget-form-fields { display: flex; flex-direction: column; gap: var(--space-3); }
+  .budget-field { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); color: var(--color-text-secondary); }
+  .budget-field input { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text); font-size: var(--text-sm); }
+  .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
+  .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: #fff; border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
+  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
+  .btn-secondary:hover { color: var(--color-text); }
 </style>
