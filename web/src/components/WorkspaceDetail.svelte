@@ -491,8 +491,8 @@
   .budget-field input { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text); font-size: var(--text-sm); }
   .budget-field input:focus-visible {
     outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-color: var(--color-focus, #4db0ff);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
   }
   .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
   .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
