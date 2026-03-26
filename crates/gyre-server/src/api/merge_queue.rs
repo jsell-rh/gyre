@@ -63,13 +63,18 @@ pub async fn enqueue(
 ) -> Result<(StatusCode, Json<QueueEntryResponse>), ApiError> {
     let priority = req.priority.unwrap_or(50);
     let mr_id = Id::new(req.merge_request_id);
+    // Verify the MR exists before enqueueing — prevents a FK constraint violation (500)
+    // when the inbox retry button sends a fake or stale MR ID.
+    let mr = state
+        .merge_requests
+        .find_by_id(&mr_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("merge request {} not found", mr_id)))?;
     let entry = MergeQueueEntry::new(new_id(), mr_id.clone(), priority, now_secs());
     state.merge_queue.enqueue(&entry).await?;
 
     // Trigger quality gate execution if this MR has an associated repo with gates.
-    if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
-        crate::gate_executor::trigger_gates_for_mr(state.clone(), mr_id, mr.repository_id).await;
-    }
+    crate::gate_executor::trigger_gates_for_mr(state.clone(), mr_id, mr.repository_id).await;
 
     Ok((StatusCode::CREATED, Json(QueueEntryResponse::from(entry))))
 }
@@ -108,11 +113,31 @@ pub async fn cancel_entry(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
+    use gyre_domain::MergeRequest;
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    use crate::AppState;
+
+    async fn make_app() -> (Router, Arc<AppState>) {
+        let state = test_state();
+        let router = crate::api::api_router().with_state(state.clone());
+        (router, state)
+    }
+
+    /// Create a real MR in the in-memory repo so enqueue can verify it exists.
+    async fn seed_mr(state: &Arc<AppState>, mr_id: &str) {
+        let mr = MergeRequest::new(
+            Id::new(mr_id),
+            Id::new("repo-1"),
+            "Test MR",
+            "feat/test",
+            "main",
+            0,
+        );
+        state.merge_requests.create(&mr).await.unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -122,7 +147,13 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    async fn enqueue_entry(app: Router, mr_id: &str, priority: Option<u32>) -> (Router, String) {
+    async fn enqueue_entry(
+        app: Router,
+        state: &Arc<AppState>,
+        mr_id: &str,
+        priority: Option<u32>,
+    ) -> (Router, String) {
+        seed_mr(state, mr_id).await;
         let mut body = serde_json::json!({ "merge_request_id": mr_id });
         if let Some(p) = priority {
             body["priority"] = serde_json::json!(p);
@@ -147,14 +178,15 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_returns_created() {
-        let app = app();
-        let (_, id) = enqueue_entry(app, "mr-1", None).await;
+        let (app, state) = make_app().await;
+        let (_, id) = enqueue_entry(app, &state, "mr-1", None).await;
         assert!(!id.is_empty());
     }
 
     #[tokio::test]
     async fn enqueue_with_priority() {
-        let app = app();
+        let (app, state) = make_app().await;
+        seed_mr(&state, "mr-1").await;
         let body = serde_json::json!({ "merge_request_id": "mr-1", "priority": 100 });
         let resp = app
             .oneshot(
@@ -174,8 +206,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enqueue_nonexistent_mr_returns_404() {
+        let (app, _state) = make_app().await;
+        let body = serde_json::json!({ "merge_request_id": "does-not-exist" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-queue/enqueue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn list_queue_initially_empty() {
-        let resp = app()
+        let (app, _state) = make_app().await;
+        let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-queue")
@@ -191,9 +242,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_queue_shows_enqueued() {
-        let app = app();
-        let (app, _) = enqueue_entry(app.clone(), "mr-1", Some(50)).await;
-        let (app, _) = enqueue_entry(app.clone(), "mr-2", Some(75)).await;
+        let (app, state) = make_app().await;
+        let (app, _) = enqueue_entry(app.clone(), &state, "mr-1", Some(50)).await;
+        let (app, _) = enqueue_entry(app.clone(), &state, "mr-2", Some(75)).await;
 
         let resp = app
             .oneshot(
@@ -211,8 +262,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_queued_entry() {
-        let app = app();
-        let (app, id) = enqueue_entry(app, "mr-1", None).await;
+        let (app, state) = make_app().await;
+        let (app, id) = enqueue_entry(app, &state, "mr-1", None).await;
 
         let resp = app
             .oneshot(
@@ -229,7 +280,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_not_found() {
-        let resp = app()
+        let (app, _state) = make_app().await;
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")

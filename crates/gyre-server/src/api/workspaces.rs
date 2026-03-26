@@ -20,7 +20,9 @@ pub struct CreateWorkspaceRequest {
     /// tenant_id derived from their auth context and this field is ignored.
     pub tenant_id: Option<String>,
     pub name: String,
-    pub slug: String,
+    /// Slug is optional — auto-derived from name (lowercase, spaces → hyphens,
+    /// non-alphanumeric stripped) when omitted. Callers may supply an explicit slug.
+    pub slug: Option<String>,
     pub description: Option<String>,
     pub budget: Option<BudgetConfig>,
     pub max_repos: Option<u32>,
@@ -105,7 +107,18 @@ pub async fn create_workspace(
         auth.tenant_id
     };
     let now = now_secs();
-    let mut ws = Workspace::new(new_id(), Id::new(&tenant_id), req.name, req.slug, now);
+    let slug = req.slug.unwrap_or_else(|| {
+        req.name
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    });
+    let mut ws = Workspace::new(new_id(), Id::new(&tenant_id), req.name, slug, now);
     ws.description = req.description;
     ws.budget = req.budget;
     ws.max_repos = req.max_repos;
