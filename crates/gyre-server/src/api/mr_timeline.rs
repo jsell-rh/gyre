@@ -193,7 +193,8 @@ pub async fn get_mr_timeline(
     //    MergeQueueEnqueued events.
     {
         // We query from the MR's creation time with a generous window.
-        let since_ts = mr.created_at.saturating_sub(60); // 60s before creation
+        // Message.created_at is epoch milliseconds; MR.created_at is epoch seconds.
+        let since_ts = mr.created_at.saturating_sub(60) * 1000; // 60s before creation, in ms
         let messages = match state
             .messages
             .list_by_workspace(&workspace_id, None, Some(since_ts), None, None, Some(500))
