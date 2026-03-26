@@ -13,6 +13,7 @@ pub mod code_awareness;
 pub mod compose;
 pub mod compute;
 pub mod container;
+pub mod conversations;
 pub mod dependencies;
 pub mod discover;
 pub mod error;

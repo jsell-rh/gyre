@@ -286,6 +286,7 @@ mod tests {
             ws_connection_workspaces: base.ws_connection_workspaces.clone(),
             traces: base.traces.clone(),
             otlp_config: base.otlp_config.clone(),
+            conversations: base.conversations.clone(),
         });
         crate::build_router(state)
     }

@@ -124,6 +124,50 @@ pub async fn check_repo_abac(
     ))
 }
 
+/// Check workspace-level ABAC for read access (used by per-handler auth in conversation endpoint).
+///
+/// Returns `Ok(())` if access is allowed, `Err(reason)` if denied.
+/// This mirrors `check_repo_abac` but scoped to a workspace resource.
+pub async fn check_workspace_abac_for_read(
+    state: &AppState,
+    workspace_id: &str,
+    claims: &serde_json::Value,
+) -> Result<(), String> {
+    let raw = state
+        .kv_store
+        .kv_get("abac_policies", workspace_id)
+        .await
+        .ok()
+        .flatten();
+
+    let ws_policies: Vec<AbacPolicy> = match raw {
+        None => return Ok(()), // No policies = unrestricted.
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            tracing::error!(
+                security = "abac_policy_parse_fail",
+                workspace_id = workspace_id,
+                err = %e,
+                "DENY: corrupt ABAC policy data"
+            );
+            format!("ABAC policy data corrupt for workspace {workspace_id}")
+        })?,
+    };
+
+    if ws_policies.is_empty() {
+        return Ok(());
+    }
+
+    for policy in &ws_policies {
+        if evaluate_policy(policy, claims) {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "ABAC denied: no policy satisfied for workspace {workspace_id}"
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------

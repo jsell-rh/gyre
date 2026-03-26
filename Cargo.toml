@@ -100,6 +100,10 @@ walkdir = "2"
 
 # Concurrent hash map for in-memory stores (TelemetryBuffer)
 dashmap = "6"
+# Zstd compression (conversation provenance)
+zstd = "0.13"
+# Hex encoding for SHA digests
+hex = "0.4"
 
 # Internal crates
 gyre-common = { path = "crates/gyre-common" }

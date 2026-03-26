@@ -287,6 +287,13 @@ pub async fn git_receive_pack(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    // HSI §5: Extract conversation turn header for provenance linking.
+    let conversation_turn: Option<u32> = req
+        .headers()
+        .get("x-gyre-conversation-turn")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => return git_err(format!("failed to read request body: {e}")),
@@ -379,6 +386,7 @@ pub async fn git_receive_pack(
     let state_clone = state.clone();
     let repo_path_clone = repo_path.clone();
     let agent_id = auth.agent_id.clone();
+    let tenant_id_clone = auth.tenant_id.clone();
     let task_id_clone = task_id.clone();
     let parent_agent_id_clone = parent_agent_id.clone();
     let spawned_by_clone = spawned_by_user_id.clone();
@@ -388,6 +396,7 @@ pub async fn git_receive_pack(
     let branch_clone = branch.clone();
     let attestation_level_clone = attestation_level.to_string();
     let default_branch_clone = default_branch;
+    let conversation_turn_clone = conversation_turn;
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
@@ -401,6 +410,19 @@ pub async fn git_receive_pack(
             &attestation_level_clone,
         )
         .await;
+
+        // HSI §5: Record turn-commit links for conversation provenance.
+        if let Some(turn) = conversation_turn_clone {
+            record_turn_commit_links(
+                &state_clone,
+                &agent_id,
+                &tenant_id_clone,
+                turn,
+                &ref_updates,
+                crate::api::now_secs(),
+            )
+            .await;
+        }
         // Emit PushAccepted event via unified message bus.
         state_clone
             .emit_event(
@@ -717,6 +739,54 @@ async fn record_pushed_commits(
         }
     }
     total_recorded
+}
+
+// ---------------------------------------------------------------------------
+// Conversation provenance (HSI §5)
+// ---------------------------------------------------------------------------
+
+/// Record `TurnCommitLink` entries for each ref update in this push.
+///
+/// Called from `git_receive_pack` when `X-Gyre-Conversation-Turn` header is present.
+/// Links are stored without `conversation_sha` (back-filled at upload time).
+async fn record_turn_commit_links(
+    state: &Arc<AppState>,
+    agent_id: &str,
+    tenant_id: &str,
+    turn_number: u32,
+    ref_updates: &[RefUpdate],
+    now: u64,
+) {
+    use gyre_common::TurnCommitLink;
+    let aid = Id::new(agent_id);
+    let tid = Id::new(tenant_id);
+
+    // Get the list of files changed across all commits in this push.
+    // For simplicity, we record one TurnCommitLink per ref update.
+    for update in ref_updates {
+        if update.new_sha.chars().all(|c| c == '0') {
+            // Skip branch deletion.
+            continue;
+        }
+        let link = TurnCommitLink {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            agent_id: aid.clone(),
+            turn_number,
+            commit_sha: update.new_sha.clone(),
+            files_changed: Vec::new(), // files are not parsed here; filled in opportunistically
+            conversation_sha: None,
+            timestamp: now,
+            tenant_id: tid.clone(),
+        };
+        if let Err(e) = state.conversations.record_turn_link(&link).await {
+            warn!(
+                agent_id = %agent_id,
+                commit_sha = %update.new_sha,
+                error = %e,
+                "Failed to record turn_commit_link"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

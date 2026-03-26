@@ -15,6 +15,7 @@ pub mod attestation;
 pub mod audit;
 pub mod budget;
 pub mod container_audit;
+pub mod conversation;
 pub mod dependency;
 pub mod kv_store;
 pub mod merge_queue;
@@ -176,6 +177,8 @@ mod tests {
             "meta_spec_sets",
             "gate_traces",
             "trace_spans",
+            "conversations",
+            "turn_commit_links",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;
