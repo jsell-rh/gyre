@@ -1182,4 +1182,16 @@
   .btn-secondary:active {
     opacity: 0.85;
   }
+
+  .user-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .user-dropdown-item:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
+    background: var(--color-border);
+    color: var(--color-text);
+  }
 </style>

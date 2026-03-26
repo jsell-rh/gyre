@@ -1022,4 +1022,22 @@
   .risk-detail-item { display: flex; flex-direction: column; align-items: center; gap: 2px; }
   .risk-detail-val { font-size: var(--text-sm); font-weight: 700; font-family: var(--font-mono); color: var(--color-text); line-height: 1; }
   .risk-detail-label { font-size: 9px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .close-btn:focus-visible,
+  .spec-link-btn:focus-visible,
+  .sort-col:focus-visible,
+  .tool-btn:focus-visible,
+  .layout-btn:focus-visible,
+  .banner-action:focus-visible,
+  .ctx-item:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .list-row:focus-visible,
+  .risk-row:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
+    background: var(--color-surface-elevated);
+  }
 </style>

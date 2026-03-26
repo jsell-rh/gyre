@@ -1482,4 +1482,14 @@
     text-align: center;
     padding: var(--space-4) 0;
   }
+
+  .view-spawned-link:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .start-interrogation:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>
