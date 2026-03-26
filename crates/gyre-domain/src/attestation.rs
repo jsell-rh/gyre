@@ -28,6 +28,10 @@ pub struct MergeAttestation {
     pub spec_fully_approved: bool,
     /// Agent ID of the MR author.
     pub author_agent_id: Option<String>,
+    /// SHA-256 of the agent's conversation at the time of merge (HSI §4).
+    /// Populated from the `AgentCompleted` message payload when the MR is merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_sha: Option<String>,
 }
 
 /// Signed attestation bundle returned by `GET /api/v1/merge-requests/{id}/attestation`.

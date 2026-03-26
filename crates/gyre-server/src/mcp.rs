@@ -803,13 +803,45 @@ fn resource_definitions() -> Value {
                 "description": "List merge queue entries for a repository. URI: queue://{repo_id}",
                 "mimeType": "application/json",
                 "uriTemplate": "queue://{repo_id}"
+            },
+            {
+                "uri": "conversation://context",
+                "name": "Conversation Context",
+                "description": "Original agent conversation history for interrogation agents (HSI §4). Only accessible to the spawned interrogation agent.",
+                "mimeType": "application/json"
             }
         ]
     })
 }
 
-async fn handle_resource_read(state: &AppState, uri: &str) -> Value {
-    if let Some(raw_path) = uri.strip_prefix("spec://") {
+async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: &str) -> Value {
+    if uri == "conversation://context" {
+        // HSI §4: Serve the original agent's conversation to the interrogation agent.
+        // The context is scoped to the calling agent — each interrogation agent can
+        // only see its own conversation context, not another agent's.
+        let agent_id = &auth.agent_id;
+        match state
+            .kv_store
+            .kv_get("interrogation_context", agent_id.as_str())
+            .await
+        {
+            Ok(Some(blob)) => json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": blob
+                }]
+            }),
+            Ok(None) => json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": "{\"turns\": [], \"note\": \"No conversation context available for this agent.\"}"
+                }]
+            }),
+            Err(e) => json!({"error": format!("failed to read conversation context: {e}")}),
+        }
+    } else if let Some(raw_path) = uri.strip_prefix("spec://") {
         let safe_path = raw_path.trim_start_matches('/');
         if safe_path.contains("..") || safe_path.starts_with('/') {
             return json!({"error": "invalid spec path — path traversal not allowed"});
@@ -930,7 +962,7 @@ pub async fn mcp_handler(
             if uri.is_empty() {
                 JsonRpcResponse::err(id, INVALID_PARAMS, "missing required field: uri")
             } else {
-                let result = handle_resource_read(&state, uri).await;
+                let result = handle_resource_read(&state, &auth, uri).await;
                 JsonRpcResponse::ok(id, result)
             }
         }
