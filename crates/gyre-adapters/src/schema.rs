@@ -692,3 +692,51 @@ diesel::table! {
         tenant_id -> Text,
     }
 }
+
+diesel::table! {
+    graph_nodes (id) {
+        id -> Text,
+        repo_id -> Text,
+        node_type -> Text,
+        name -> Text,
+        qualified_name -> Text,
+        file_path -> Text,
+        line_start -> Integer,
+        line_end -> Integer,
+        visibility -> Text,
+        doc_comment -> Nullable<Text>,
+        spec_path -> Nullable<Text>,
+        spec_confidence -> Text,
+        last_modified_sha -> Text,
+        last_modified_by -> Nullable<Text>,
+        last_modified_at -> BigInt,
+        created_sha -> Text,
+        created_at -> BigInt,
+        complexity -> Nullable<Integer>,
+        churn_count_30d -> Integer,
+        test_coverage -> Nullable<Double>,
+    }
+}
+
+diesel::table! {
+    graph_edges (id) {
+        id -> Text,
+        repo_id -> Text,
+        source_id -> Text,
+        target_id -> Text,
+        edge_type -> Text,
+        metadata -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    graph_deltas (id) {
+        id -> Text,
+        repo_id -> Text,
+        commit_sha -> Text,
+        timestamp -> BigInt,
+        agent_id -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
+        delta_json -> Text,
+    }
+}

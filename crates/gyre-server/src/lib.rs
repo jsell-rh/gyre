@@ -868,7 +868,11 @@ pub fn build_state(
             mem::MemNotificationRepository::default()
         ),
         wg_config: WireGuardConfig::from_env(),
-        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
+        graph_store: if let Some(ref d) = sqlite_db {
+            Arc::clone(d) as Arc<dyn GraphPort>
+        } else {
+            Arc::new(gyre_adapters::MemGraphStore::new()) as Arc<dyn GraphPort>
+        },
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
