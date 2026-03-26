@@ -2547,5 +2547,56 @@ pub fn test_state() -> Arc<crate::AppState> {
         ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        traces: Arc::new(MemTraceRepository::default()),
+        otlp_config: crate::otlp_receiver::OtlpServerConfig {
+            enabled: false,
+            grpc_port: 4317,
+            max_spans_per_trace: 10_000,
+        },
     })
+}
+
+// ── In-memory TraceRepository ────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemTraceRepository {
+    store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
+    payloads: Arc<Mutex<HashMap<(String, String), gyre_ports::trace::SpanPayload>>>,
+}
+
+#[async_trait]
+impl gyre_ports::TraceRepository for MemTraceRepository {
+    async fn store(&self, trace: &gyre_common::GateTrace) -> Result<()> {
+        let mut guard = self.store.lock().await;
+        // Replace any existing trace for same MR (capped at most recent).
+        guard.retain(|_, v| v.mr_id != trace.mr_id);
+        guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
+        Ok(())
+    }
+
+    async fn get_by_mr(&self, mr_id: &Id) -> Result<Option<gyre_common::GateTrace>> {
+        Ok(self.store.lock().await.get(mr_id.as_str()).cloned())
+    }
+
+    async fn get_span_payload(
+        &self,
+        gate_run_id: &Id,
+        span_id: &str,
+    ) -> Result<Option<gyre_ports::trace::SpanPayload>> {
+        let guard = self.payloads.lock().await;
+        let key = (gate_run_id.as_str().to_string(), span_id.to_string());
+        Ok(guard.get(&key).map(|p| gyre_ports::trace::SpanPayload {
+            input: p.input.clone(),
+            output: p.output.clone(),
+        }))
+    }
+
+    async fn promote_to_attestation(&self, _mr_id: &Id) -> Result<()> {
+        Ok(()) // no-op for in-memory (no eviction logic needed in tests)
+    }
+
+    async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(mr_id.as_str());
+        Ok(())
+    }
 }

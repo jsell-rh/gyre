@@ -35,6 +35,7 @@ pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub mod notifications;
+pub mod otlp_receiver;
 pub mod policy_engine;
 pub mod stale_agents;
 pub mod stale_peers;
@@ -57,7 +58,8 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
     SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository,
     WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
@@ -334,6 +336,10 @@ pub struct AppState {
     /// Workspace subscriptions per connection — used to scope UserPresence broadcasts.
     /// connection_id → list of subscribed workspace IDs.
     pub ws_connection_workspaces: Arc<RwLock<HashMap<u64, Vec<gyre_common::Id>>>>,
+    /// Gate-time OTel trace capture repository (HSI §3a).
+    pub traces: Arc<dyn TraceRepository>,
+    /// OTLP receiver server configuration (HSI §3a). From GYRE_OTLP_* env vars.
+    pub otlp_config: otlp_receiver::OtlpServerConfig,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -882,6 +888,8 @@ pub fn build_state(
         ws_connections: Arc::new(RwLock::new(HashMap::new())),
         ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
+        traces: store!(dyn TraceRepository, mem::MemTraceRepository::default()),
+        otlp_config: otlp_receiver::OtlpServerConfig::from_env(),
     })
 }
 

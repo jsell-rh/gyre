@@ -32,6 +32,7 @@ impl QualityGateRow {
             "required_approvals" => GateType::RequiredApprovals,
             "agent_review" => GateType::AgentReview,
             "agent_validation" => GateType::AgentValidation,
+            "trace_capture" => GateType::TraceCapture,
             _ => GateType::TestCommand,
         };
         QualityGate {
@@ -69,6 +70,7 @@ fn gate_type_str(gt: &GateType) -> &'static str {
         GateType::RequiredApprovals => "required_approvals",
         GateType::AgentReview => "agent_review",
         GateType::AgentValidation => "agent_validation",
+        GateType::TraceCapture => "trace_capture",
     }
 }
 

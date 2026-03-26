@@ -71,6 +71,7 @@ fn gate_type_str(t: &GateType) -> String {
         GateType::RequiredApprovals => "required_approvals",
         GateType::AgentReview => "agent_review",
         GateType::AgentValidation => "agent_validation",
+        GateType::TraceCapture => "trace_capture",
     }
     .to_string()
 }
@@ -182,6 +183,9 @@ pub async fn create_gate(
         }
         GateType::AgentReview | GateType::AgentValidation => {
             // persona is optional — defaults to "personas/default.md" at execution time.
+        }
+        GateType::TraceCapture => {
+            // config is optional — defaults are applied at execution time.
         }
     }
 

@@ -576,6 +576,40 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    gate_traces (id) {
+        id -> Text,
+        mr_id -> Text,
+        gate_run_id -> Text,
+        commit_sha -> Text,
+        captured_at -> BigInt,
+        tenant_id -> Text,
+        permanent -> Integer,
+    }
+}
+
+diesel::table! {
+    trace_spans (span_id, gate_trace_id) {
+        span_id -> Text,
+        gate_trace_id -> Text,
+        parent_span_id -> Nullable<Text>,
+        operation_name -> Text,
+        service_name -> Text,
+        kind -> Text,
+        start_time -> BigInt,
+        duration_us -> BigInt,
+        attributes -> Text,
+        input_summary -> Nullable<Text>,
+        output_summary -> Nullable<Text>,
+        payload_blob -> Nullable<Binary>,
+        status -> Text,
+        graph_node_id -> Nullable<Text>,
+    }
+}
+
+diesel::joinable!(trace_spans -> gate_traces (gate_trace_id));
+
+
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
     agents,
@@ -620,6 +654,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     meta_spec_sets,
     budget_call_records,
     user_workspace_state,
+    gate_traces,
+    trace_spans,
 );
 
 diesel::table! {
