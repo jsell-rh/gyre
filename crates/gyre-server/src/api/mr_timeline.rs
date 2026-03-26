@@ -529,6 +529,7 @@ mod tests {
         let events = json["events"].as_array().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "GateResult");
+        assert_eq!(events[0]["detail"]["gate"], "cargo-test");
         assert_eq!(events[0]["detail"]["status"], "pass");
         assert_eq!(events[0]["timestamp"], 2100);
     }
