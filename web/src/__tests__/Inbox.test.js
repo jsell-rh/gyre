@@ -125,7 +125,7 @@ describe('Inbox', () => {
   it('shows priority badge on each card', async () => {
     api.myNotifications.mockResolvedValue([makeNotification({ priority: 1 })]);
     const { findByText } = render(Inbox);
-    expect(await findByText('!1')).toBeTruthy();
+    expect(await findByText('P1')).toBeTruthy();
   });
 
   it('sorts notifications by priority ascending', async () => {
