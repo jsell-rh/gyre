@@ -55,7 +55,7 @@
   <div class="toolbar">
     <h2>Analytics Events</h2>
     <div class="filters">
-      <select bind:value={eventFilter} onchange={load}>
+      <select bind:value={eventFilter} onchange={load} aria-label="Filter by event name">
         <option value="">All Events</option>
         {#each EVENT_NAMES as name}
           <option value={name}>{name}</option>

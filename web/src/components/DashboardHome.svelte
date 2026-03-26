@@ -336,7 +336,8 @@
     transition: border-color var(--transition-fast);
   }
 
-  .qa-input:focus { outline: none; border-color: var(--color-primary); }
+  .qa-input:focus:not(:focus-visible) { outline: none; }
+  .qa-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   /* Page header */
   .page-header {

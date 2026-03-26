@@ -635,7 +635,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-primary);
-    background: rgba(238, 0, 0, 0.08);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-sm);
   }
@@ -699,7 +699,7 @@
   .now-btn:hover {
     background: var(--color-primary);
     border-color: var(--color-primary);
-    color: #fff;
+    color: var(--color-text-inverse, #fff);
   }
 
   .timeline-empty {
@@ -771,7 +771,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-primary);
-    background: rgba(238, 0, 0, 0.08);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-sm);
     flex-shrink: 0;

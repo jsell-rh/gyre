@@ -145,7 +145,7 @@
   // Status timeline steps
   const TIMELINE_STEPS = ['created', 'reviewed', 'approved', 'queued', 'merged'];
 
-  let timelineStep = $derived(() => {
+  let timelineStep = $derived.by(() => {
     if (mr.status === 'merged') return 4;
     if (mr.status === 'approved') return reviews.length > 0 ? 2 : 1;
     if (reviews.length > 0) return 1;
@@ -352,12 +352,12 @@
         <div class="timeline-card">
           <div class="timeline">
             {#each TIMELINE_STEPS as step, i}
-              <div class="timeline-step" class:done={i <= timelineStep()} class:active={i === timelineStep()}>
+              <div class="timeline-step" class:done={i <= timelineStep} class:active={i === timelineStep}>
                 <div class="timeline-dot"></div>
                 <span class="timeline-label">{step}</span>
               </div>
               {#if i < TIMELINE_STEPS.length - 1}
-                <div class="timeline-line" class:done={i < timelineStep()}></div>
+                <div class="timeline-line" class:done={i < timelineStep}></div>
               {/if}
             {/each}
           </div>
@@ -1297,7 +1297,8 @@
     padding: var(--space-1) var(--space-2);
     min-width: 0;
   }
-  .dep-input:focus { outline: none; border-color: var(--color-primary); }
+  .dep-input:focus:not(:focus-visible) { outline: none; }
+  .dep-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
   .dep-add-btn {
     background: rgba(0,102,204,0.1);
     border: 1px solid rgba(0,102,204,0.3);

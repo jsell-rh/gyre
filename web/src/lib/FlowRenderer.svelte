@@ -263,7 +263,7 @@
   .play-btn.playing {
     border-color: var(--color-primary);
     color: var(--color-primary);
-    background: rgba(59, 130, 246, 0.1);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
   }
 
   .scrub-label {
@@ -311,7 +311,7 @@
   .speed-btn.active {
     border-color: var(--color-primary);
     color: var(--color-primary);
-    background: rgba(59, 130, 246, 0.1);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
   }
 
   .flow-wrapper {

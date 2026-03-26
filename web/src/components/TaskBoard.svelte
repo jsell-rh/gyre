@@ -118,11 +118,11 @@
     </div>
     <div class="page-actions">
       <div class="filters">
-        <select bind:value={filterPriority} class="filter-select">
+        <select bind:value={filterPriority} class="filter-select" aria-label="Filter by priority">
           <option value="">{$t('tasks.filters.all_priorities')}</option>
           {#each priorities as p}<option value={p}>{p}</option>{/each}
         </select>
-        <select bind:value={filterAgent} class="filter-select">
+        <select bind:value={filterAgent} class="filter-select" aria-label="Filter by agent">
           <option value="">{$t('tasks.filters.all_agents')}</option>
           {#each agents as a}<option value={a}>{a}</option>{/each}
         </select>
@@ -259,7 +259,8 @@
     transition: border-color var(--transition-fast);
   }
 
-  .form-input:focus { outline: none; border-color: var(--color-primary); }
+  .form-input:focus:not(:focus-visible) { outline: none; }
+  .form-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-color: var(--color-primary); }
 
   .form-textarea { resize: vertical; min-height: 5rem; }
 

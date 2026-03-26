@@ -573,6 +573,7 @@
                     class="action-feedback"
                     class:success={state.success}
                     class:failure={!state.success && state.message}
+                    role="alert"
                   >
                     {state.message}
                   </div>
@@ -1036,6 +1037,11 @@
   .retry-btn:hover {
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
+  }
+
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   .action-feedback {

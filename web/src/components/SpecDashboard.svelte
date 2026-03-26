@@ -52,6 +52,7 @@
   let newSpecPath = $state('');
   let newSpecContent = $state('# New Spec\n\n## Overview\n\n');
   let newSpecSaving = $state(false);
+  let pathTouched = $state(false);
 
   // ── Constants ───────────────────────────────────────────────────────────────
   const STATUS_FILTERS = ['all', 'approved', 'pending', 'deprecated'];
@@ -99,12 +100,12 @@
   });
 
   // ── Derived: filtered + sorted ──────────────────────────────────────────────
-  const allKinds = $derived(() => {
+  const allKinds = $derived.by(() => {
     const set = new Set(specs.map((s) => s.kind || 'feature'));
     return ['all', ...Array.from(set).sort()];
   });
 
-  const filtered = $derived(() => {
+  const filtered = $derived.by(() => {
     let result = specs;
     if (filterStatus !== 'all') {
       result = result.filter((s) => s.approval_status === filterStatus);
@@ -248,10 +249,10 @@
       {/each}
     </div>
 
-    {#if allKinds().length > 2}
+    {#if allKinds.length > 2}
       <div class="filter-group" role="group" aria-label="Filter by kind">
         <span class="filter-label">Kind:</span>
-        {#each allKinds() as k}
+        {#each allKinds as k}
           <button
             class="pill"
             class:active={filterKind === k}
@@ -280,7 +281,7 @@
         <button class="retry-btn" onclick={load}>Retry</button>
       </div>
 
-    {:else if filtered().length === 0}
+    {:else if filtered.length === 0}
       <EmptyState
         title="No specs found"
         description={filterStatus === 'all' && filterKind === 'all'
@@ -291,7 +292,7 @@
     {:else if scope === 'repo'}
       <!-- Repo scope: progress bar list -->
       <ul class="spec-list" role="list">
-        {#each filtered() as spec (spec.path)}
+        {#each filtered as spec (spec.path)}
           {@const pct = Math.round(progressFraction(spec.path) * 100)}
           {@const label = progressLabel(spec.path)}
           <li
@@ -343,7 +344,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each filtered() as spec (spec.path)}
+          {#each filtered as spec (spec.path)}
             <tr
               role="row"
               class:selected={selectedPath === spec.path}
@@ -384,7 +385,14 @@
         type="text"
         bind:value={newSpecPath}
         placeholder="system/my-feature.md"
+        aria-required="true"
+        aria-invalid={pathTouched && !newSpecPath.trim() ? 'true' : 'false'}
+        aria-describedby={pathTouched && !newSpecPath.trim() ? 'path-error' : undefined}
+        onblur={() => { pathTouched = true; }}
       />
+      {#if pathTouched && !newSpecPath.trim()}
+        <span id="path-error" style="color: var(--color-danger); font-size: var(--text-xs);">Path is required</span>
+      {/if}
       <label class="field-label" for="new-spec-content">Content</label>
       <textarea
         id="new-spec-content"

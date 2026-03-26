@@ -16,7 +16,7 @@
   import Modal from './lib/Modal.svelte';
   import ScopeBreadcrumb from './lib/ScopeBreadcrumb.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
-  import { onMount, setContext } from 'svelte';
+  import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
 
   // ── Primary navigation state ─────────────────────────────────────────
@@ -61,6 +61,12 @@
   $effect(() => {
     if (shortcutsOpen && shortcutsModalEl) {
       shortcutsModalEl.querySelector('button')?.focus();
+    }
+  });
+
+  $effect(() => {
+    if (userMenuOpen) {
+      tick().then(() => userMenuEl?.querySelector('[role="menuitem"]')?.focus());
     }
   });
 
@@ -479,14 +485,14 @@
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}
             >
-              <button class="user-dropdown-item" role="menuitem" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
                 Profile
               </button>
-              <button class="user-dropdown-item" role="menuitem" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
                 API Token
               </button>
               <div class="user-dropdown-divider" role="separator"></div>
-              <button class="user-dropdown-item" role="menuitem" onclick={() => { localStorage.removeItem('gyre_auth_token'); hasToken = false; userMenuOpen = false; }}>
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { localStorage.removeItem('gyre_auth_token'); hasToken = false; userMenuOpen = false; }}>
                 Sign out
               </button>
             </div>
@@ -1108,8 +1114,13 @@
     box-sizing: border-box;
   }
 
-  .token-input:focus {
+  .token-input:focus:not(:focus-visible) {
     outline: none;
+  }
+
+  .token-input:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
     border-color: var(--color-primary);
   }
 
