@@ -5,6 +5,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
+  import { toastInfo } from '../lib/toast.svelte.js';
 
   /**
    * Briefing View — S4.3
@@ -180,6 +181,7 @@
         ...briefing,
         cross_workspace: briefing.cross_workspace.filter(x => x.id !== item.id),
       };
+      toastInfo('Item dismissed');
     }
   }
 

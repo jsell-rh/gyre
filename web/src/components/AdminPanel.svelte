@@ -94,6 +94,7 @@
   let policyForm = $state({ name: '', effect: 'Allow', actions: [], resource_types: [] });
   let policyFormLoading = $state(false);
   let deleteConfirmModal = $state(null);
+  let deleteInProgress = $state(false);
 
   let simulateForm = $state({ action: 'merge', resource_type: 'mr' });
   let simulateResult = $state(null);
@@ -454,27 +455,32 @@
     const modal = deleteConfirmModal;
     if (!modal) return;
 
-    if (modal.kind === 'policy') {
-      await deletePolicy(modal.policyId);
-      return;
-    }
+    deleteInProgress = true;
+    try {
+      if (modal.kind === 'policy') {
+        await deletePolicy(modal.policyId);
+        return;
+      }
 
-    deleteConfirmModal = null;
+      deleteConfirmModal = null;
 
-    if (modal.kind === 'member') {
-      try {
-        await api.removeWorkspaceMember(workspaceId, modal.userId);
-        wsMembers = wsMembers.filter(m => (m.id ?? m.user_id) !== modal.userId);
-        toastSuccess('Member removed.');
-      } catch (e) { toastError(e.message); }
-    } else if (modal.kind === 'gate') {
-      await confirmDeleteGate(modal.gateId);
-    } else if (modal.kind === 'compute') {
-      try {
-        await api.computeDelete(modal.computeId);
-        tenantCompute = tenantCompute.filter(t => t.id !== modal.computeId);
-        toastSuccess('Compute target deleted.');
-      } catch (e) { toastError(e.message); }
+      if (modal.kind === 'member') {
+        try {
+          await api.removeWorkspaceMember(workspaceId, modal.userId);
+          wsMembers = wsMembers.filter(m => (m.id ?? m.user_id) !== modal.userId);
+          toastSuccess('Member removed.');
+        } catch (e) { toastError(e.message); }
+      } else if (modal.kind === 'gate') {
+        await confirmDeleteGate(modal.gateId);
+      } else if (modal.kind === 'compute') {
+        try {
+          await api.computeDelete(modal.computeId);
+          tenantCompute = tenantCompute.filter(t => t.id !== modal.computeId);
+          toastSuccess('Compute target deleted.');
+        } catch (e) { toastError(e.message); }
+      }
+    } finally {
+      deleteInProgress = false;
     }
   }
 
@@ -980,7 +986,15 @@
   <div class="modal-backdrop" role="presentation" onclick={cancelTrustChange}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Change Trust Level"
     bind:this={trustModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') cancelTrustChange(); }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') cancelTrustChange();
+      if (e.key === 'Tab' && trustModalEl) {
+        const focusable = trustModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const first = focusable[0]; const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }}>
     <h3 class="modal-title">Change Trust Level</h3>
     <p class="modal-desc">{trustChangeDescription(trustConfirmModal.to)}</p>
     <div class="modal-actions">
@@ -1017,7 +1031,15 @@
   <div class="modal-backdrop" role="presentation" onclick={() => newMemberModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Member"
     bind:this={memberModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') newMemberModal = false; }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') newMemberModal = false;
+      if (e.key === 'Tab' && memberModalEl) {
+        const focusable = memberModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const first = focusable[0]; const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }}>
     <h3 class="modal-title">Add Member</h3>
     <div class="form-field">
       <label class="form-label" for="member-email">Email address</label>
@@ -1089,7 +1111,15 @@
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
     aria-label={deleteConfirmModal.kind === 'member' ? 'Remove Member' : deleteConfirmModal.kind === 'gate' ? 'Remove Gate' : deleteConfirmModal.kind === 'compute' ? 'Delete Compute Target' : 'Delete Policy'}
     bind:this={deleteConfirmModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') deleteConfirmModal = null; }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') deleteConfirmModal = null;
+      if (e.key === 'Tab' && deleteConfirmModalEl) {
+        const focusable = deleteConfirmModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const first = focusable[0]; const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }}>
     <h3 class="modal-title">
       {#if deleteConfirmModal.kind === 'member'}Remove Member
       {:else if deleteConfirmModal.kind === 'gate'}Remove Gate
@@ -1099,8 +1129,9 @@
     <p class="modal-desc">{deleteConfirmModal.label ?? 'This cannot be undone.'}</p>
     <div class="modal-actions">
       <button class="secondary-btn" onclick={() => deleteConfirmModal = null}>Cancel</button>
-      <button class="kill-btn" onclick={confirmDelete}>
-        {#if deleteConfirmModal.kind === 'member'}Remove Member
+      <button class="kill-btn" onclick={confirmDelete} disabled={deleteInProgress}>
+        {#if deleteInProgress}Deleting\u2026
+        {:else if deleteConfirmModal.kind === 'member'}Remove Member
         {:else if deleteConfirmModal.kind === 'gate'}Remove Gate
         {:else if deleteConfirmModal.kind === 'compute'}Delete
         {:else}Delete Policy{/if}
@@ -1114,7 +1145,15 @@
   <div class="modal-backdrop" role="presentation" onclick={() => newWorkspaceModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="New Workspace"
     bind:this={newWorkspaceModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') newWorkspaceModal = false; }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') newWorkspaceModal = false;
+      if (e.key === 'Tab' && newWorkspaceModalEl) {
+        const focusable = newWorkspaceModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const first = focusable[0]; const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }}>
     <h3 class="modal-title">New Workspace</h3>
     <div class="form-field">
       <label class="form-label" for="wsf-name">Name</label>

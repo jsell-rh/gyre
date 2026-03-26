@@ -198,7 +198,7 @@
     <div class="page-actions">
       <div class="view-toggle">
         <button class="toggle-btn" class:active={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Grid view" aria-label="Grid view" aria-pressed={viewMode === 'grid'}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <rect x="1" y="1" width="6" height="6" rx="1"/>
             <rect x="9" y="1" width="6" height="6" rx="1"/>
             <rect x="1" y="9" width="6" height="6" rx="1"/>
@@ -206,7 +206,7 @@
           </svg>
         </button>
         <button class="toggle-btn" class:active={viewMode === 'table'} onclick={() => (viewMode = 'table')} title="Table view" aria-label="Table view" aria-pressed={viewMode === 'table'}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <rect x="1" y="2" width="14" height="2" rx="1"/>
             <rect x="1" y="7" width="14" height="2" rx="1"/>
             <rect x="1" y="12" width="14" height="2" rx="1"/>
