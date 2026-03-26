@@ -1,5 +1,5 @@
 <script>
-  import DetailPanel from './DetailPanel.stub.svelte';
+  import DetailPanel from './DetailPanel.svelte';
 
   /**
    * ContentArea — applies the right layout pattern based on `layout` prop and detailPanel state.

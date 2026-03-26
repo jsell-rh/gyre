@@ -13,6 +13,8 @@
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
+  import ScopeBreadcrumb from './lib/ScopeBreadcrumb.svelte';
+  import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import { onMount, setContext } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
 
@@ -29,21 +31,24 @@
   let detailPanel = $state({ open: false, entity: null });
 
   // ── WebSocket ────────────────────────────────────────────────────────
+  let wsStore = $state(null);
   let wsStatus = $state('disconnected');
 
   $effect(() => {
     const store = createWsStore();
+    wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
     return () => {
       unsub();
       store.destroy();
+      wsStore = null;
     };
   });
 
   // ── UI state ─────────────────────────────────────────────────────────
   let searchOpen = $state(false);
   let shortcutsOpen = $state(false);
-  let wsDropdownOpen = $state(false);
+
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(!!localStorage.getItem('gyre_auth_token'));
@@ -143,10 +148,21 @@
   setContext('getScope', () => scope);
   setContext('openDetailPanel', openDetailPanel);
 
+  // ── ScopeBreadcrumb onnavigate handler ───────────────────────────────
+  function onBreadcrumbNavigate(view, ctx) {
+    if (ctx.scope === 'tenant') {
+      setScope({ type: 'tenant' }, view || currentNav);
+    } else if (ctx.scope === 'workspace' && ctx.workspace) {
+      const ws = workspaces.find(w => w.id === ctx.workspace.id) || ctx.workspace;
+      currentWorkspace = ws;
+      localStorage.setItem('gyre_workspace_id', ws.id);
+      setScope({ type: 'workspace', workspaceId: ws.id }, view || 'inbox');
+    }
+  }
+
   // ── Workspace switching (breadcrumb dropdown) ─────────────────────────
   function selectWorkspace(ws) {
     currentWorkspace = ws;
-    wsDropdownOpen = false;
     localStorage.setItem('gyre_workspace_id', ws.id);
     setScope({ type: 'workspace', workspaceId: ws.id }, 'inbox');
   }
@@ -188,7 +204,6 @@
     // Esc: close detail panel or go up one scope level
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; return; }
-      if (wsDropdownOpen) { wsDropdownOpen = false; return; }
       if (detailPanel.open) { closeDetailPanel(); return; }
       if (scope.type === 'repo') {
         setScope({ type: 'workspace', workspaceId: scope.workspaceId });
@@ -254,20 +269,6 @@
   });
 
   // Breadcrumb segments
-  let scopeCrumbs = $derived.by(() => {
-    const crumbs = [{ label: 'Gyre', action: () => setScope({ type: 'tenant' }, 'explorer') }];
-    if (scope.type !== 'tenant' && currentWorkspace) {
-      crumbs.push({
-        label: currentWorkspace.name,
-        action: null, // workspace segment handled by dropdown
-        isWorkspace: true,
-      });
-    }
-    if (scope.type === 'repo' && scope.repoId) {
-      crumbs.push({ label: scope.repoId, action: null });
-    }
-    return crumbs;
-  });
 
   // ── Mount: entrypoint flow + URL routing ──────────────────────────────
   onMount(async () => {
@@ -339,14 +340,6 @@
     window.addEventListener('popstate', handlePopstate);
     window.addEventListener('keydown', handleKeydown);
 
-    // Close workspace dropdown on outside click
-    function handleOutsideClick(e) {
-      if (!e.target.closest('.ws-dropdown-wrap')) {
-        wsDropdownOpen = false;
-      }
-    }
-    window.addEventListener('click', handleOutsideClick, true);
-
     return () => {
       window.removeEventListener('popstate', handlePopstate);
       window.removeEventListener('keydown', handleKeydown);
@@ -367,59 +360,14 @@
   <div class="main">
     <!-- Topbar (48px) -->
     <header class="topbar">
-      <!-- Left: scope breadcrumb -->
-      <nav class="breadcrumb" aria-label="Scope breadcrumb">
-        {#each scopeCrumbs as crumb, i}
-          {#if i > 0}
-            <span class="breadcrumb-sep" aria-hidden="true">›</span>
-          {/if}
-
-          {#if crumb.isWorkspace}
-            <!-- Workspace segment: click opens dropdown -->
-            <div class="ws-dropdown-wrap">
-              <button
-                class="breadcrumb-btn"
-                class:active={wsDropdownOpen}
-                onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
-                aria-haspopup="listbox"
-                aria-expanded={wsDropdownOpen}
-                aria-label="Switch workspace: {crumb.label}"
-              >
-                {crumb.label}
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10" aria-hidden="true">
-                  <path d="M6 9l6 6 6-6"/>
-                </svg>
-              </button>
-
-              {#if wsDropdownOpen}
-                <ul class="ws-dropdown" role="listbox" aria-label="Select workspace">
-                  {#each workspaces as ws}
-                    <li role="option" aria-selected={ws.id === scope.workspaceId}>
-                      <button
-                        class="ws-dropdown-item"
-                        class:selected={ws.id === scope.workspaceId}
-                        onclick={() => selectWorkspace(ws)}
-                      >
-                        {ws.name}
-                      </button>
-                    </li>
-                  {/each}
-                  {#if workspaces.length === 0}
-                    <li class="ws-dropdown-empty">No workspaces</li>
-                  {/if}
-                </ul>
-              {/if}
-            </div>
-
-          {:else if crumb.action}
-            <button class="breadcrumb-btn" onclick={crumb.action}>
-              {crumb.label}
-            </button>
-          {:else}
-            <span class="breadcrumb-current">{crumb.label}</span>
-          {/if}
-        {/each}
-      </nav>
+      <!-- Left: scope breadcrumb (S4.8 ScopeBreadcrumb) -->
+      <ScopeBreadcrumb
+        tenant={{ id: 'default', name: 'Gyre' }}
+        workspace={scope.type !== 'tenant' ? currentWorkspace : null}
+        repo={null}
+        {workspaces}
+        onnavigate={onBreadcrumbNavigate}
+      />
 
       <!-- Center: Cmd+K search trigger -->
       <div class="topbar-center">
@@ -528,10 +476,12 @@
       <!-- Spacer -->
       <span class="status-spacer"></span>
 
-      <!-- Presence avatars stub (replaced by S4.8) -->
-      <span class="status-item status-presence" aria-hidden="true" title="Active users (S4.8 pending)">
-        <span class="presence-stub"></span>
-      </span>
+      <!-- Presence avatars (S4.8 PresenceAvatars) -->
+      {#if scope.type === 'workspace' && scope.workspaceId}
+        <span class="status-item status-presence">
+          <PresenceAvatars workspaceId={scope.workspaceId} wsStore={wsStore} />
+        </span>
+      {/if}
 
       <!-- WebSocket status -->
       <span
@@ -649,101 +599,6 @@
     gap: var(--space-4);
   }
 
-  /* Breadcrumb */
-  .breadcrumb {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    flex: 0 0 auto;
-  }
-
-  .breadcrumb-sep {
-    color: var(--color-text-muted);
-    font-size: var(--text-xs);
-    user-select: none;
-  }
-
-  .breadcrumb-btn {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    font-family: var(--font-body);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius);
-    transition: color var(--transition-fast), background var(--transition-fast);
-    white-space: nowrap;
-  }
-
-  .breadcrumb-btn:hover, .breadcrumb-btn.active {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-  }
-
-  .breadcrumb-current {
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--color-text);
-    padding: var(--space-1) var(--space-2);
-  }
-
-  /* Workspace dropdown */
-  .ws-dropdown-wrap {
-    position: relative;
-  }
-
-  .ws-dropdown {
-    position: absolute;
-    top: calc(100% + var(--space-1));
-    left: 0;
-    z-index: 100;
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-md);
-    list-style: none;
-    margin: 0;
-    padding: var(--space-1) 0;
-    min-width: 180px;
-    max-height: 280px;
-    overflow-y: auto;
-  }
-
-  .ws-dropdown-item {
-    display: block;
-    width: 100%;
-    padding: var(--space-2) var(--space-3);
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    text-align: left;
-    transition: background var(--transition-fast), color var(--transition-fast);
-    white-space: nowrap;
-  }
-
-  .ws-dropdown-item:hover {
-    background: var(--color-border);
-    color: var(--color-text);
-  }
-
-  .ws-dropdown-item.selected {
-    color: var(--color-primary);
-    font-weight: 500;
-  }
-
-  .ws-dropdown-empty {
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    font-style: italic;
-  }
 
   /* Center search trigger */
   .topbar-center {
@@ -935,16 +790,6 @@
     transition: width var(--transition-normal);
   }
 
-  /* Presence stub */
-  .presence-stub {
-    display: inline-block;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--color-surface-elevated);
-    border: 1px dashed var(--color-border-strong);
-    opacity: 0.5;
-  }
 
   /* WebSocket status */
   .ws-dot {

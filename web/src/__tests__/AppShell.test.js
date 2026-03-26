@@ -183,6 +183,7 @@ vi.mock('../lib/ws.js', () => ({
   createWsStore: () => ({
     onStatus: vi.fn().mockReturnValue(() => {}),
     destroy: vi.fn(),
+    subscribe: vi.fn().mockReturnValue(() => {}),
   }),
 }));
 
