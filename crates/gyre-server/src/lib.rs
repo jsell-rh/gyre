@@ -40,6 +40,7 @@ pub mod policy_engine;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
+pub mod trust_suggestion;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
