@@ -4,6 +4,7 @@ pub mod id;
 pub mod message;
 pub mod notification;
 pub mod protocol;
+pub mod trace;
 pub mod view_spec;
 
 pub use error::GyreError;
@@ -12,3 +13,4 @@ pub use id::Id;
 pub use message::{Destination, Message, MessageKind, MessageOrigin, MessageTier, TelemetryBuffer};
 pub use notification::{Notification, NotificationType};
 pub use protocol::{ActivityEventData, AgEventType, SubscribeScope, WsMessage};
+pub use trace::{GateTrace, SpanKind, SpanStatus, TraceSpan};

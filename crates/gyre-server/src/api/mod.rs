@@ -43,6 +43,7 @@ pub mod speculative;
 pub mod stack_attest;
 pub mod tasks;
 pub mod tenants;
+pub mod traces;
 pub mod users;
 pub mod version;
 pub mod workload;
@@ -276,6 +277,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/merge-requests/:id/atomic-group",
             put(merge_deps::set_atomic_group),
+        )
+        // Gate-time trace capture (HSI §3a)
+        .route(
+            "/api/v1/merge-requests/:id/trace",
+            get(traces::get_trace_for_mr),
+        )
+        .route(
+            "/api/v1/trace-spans/:span_id/payload",
+            get(traces::get_span_payload),
         )
         // Release automation (Admin only)
         .route("/api/v1/release/prepare", post(release::release_prepare))

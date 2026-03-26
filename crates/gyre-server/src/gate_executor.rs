@@ -8,6 +8,7 @@ use uuid::Uuid;
 use gyre_common::Id;
 use gyre_domain::{GateResult, GateStatus, GateType, Review, ReviewDecision};
 
+use crate::otlp_receiver::TraceCaptureConfig;
 use crate::AppState;
 
 /// Default timeout for agent-based gates (5 minutes).
@@ -79,6 +80,7 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         ),
         GateType::AgentReview => run_agent_review_gate(&state, &gate, &mr_id).await,
         GateType::AgentValidation => run_agent_validation_gate(&state, &gate, &mr_id).await,
+        GateType::TraceCapture => run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await,
     };
 
     let finished_at = now_secs();
@@ -515,6 +517,102 @@ async fn run_validation_agent_process(
                     ),
                 )
             }
+        }
+    }
+}
+
+/// Run a TraceCapture gate (observational — always passes).
+///
+/// Lifecycle:
+/// 1. Parse gate config (otlp_port, test_command, max_spans, capture_external).
+/// 2. Start an OTLP HTTP receiver on otlp_port.
+/// 3. Run test_command with OTel env vars injected.
+/// 4. Stop the receiver; collect captured spans.
+/// 5. Resolve span-to-graph-node linkage (heuristic).
+/// 6. Store the GateTrace via TraceRepository::store.
+/// 7. Return Passed (trace capture is observational, not a quality gate).
+async fn run_trace_capture_gate(
+    state: &Arc<AppState>,
+    gate: &gyre_domain::QualityGate,
+    mr_id: &Id,
+    gate_run_id: &Id,
+) -> (GateStatus, String) {
+    // Parse config from gate.command field (JSON).
+    // Server-level OTLP config (env vars) provides the max_spans ceiling.
+    let mut config = gate
+        .command
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<TraceCaptureConfig>(c).ok())
+        .unwrap_or_default();
+    // Enforce the server-level max_spans cap so operators can bound memory usage.
+    config.max_spans = config.max_spans.min(state.otlp_config.max_spans_per_trace);
+
+    info!(
+        gate_id = %gate.id,
+        mr_id = %mr_id,
+        otlp_port = config.otlp_port,
+        test_command = %config.test_command,
+        "trace_capture gate: starting OTLP receiver"
+    );
+
+    // Look up commit SHA from MR (best effort).
+    let commit_sha = state
+        .merge_requests
+        .find_by_id(mr_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| mr.source_branch)
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Run the OTLP receiver + test command.
+    let capture_result = crate::otlp_receiver::run_trace_capture(
+        config,
+        mr_id.clone(),
+        gate_run_id.clone(),
+        commit_sha,
+    )
+    .await;
+
+    match capture_result {
+        Ok(trace) => {
+            let span_count = trace.spans.len();
+
+            // Resolve span-to-graph-node linkage (heuristic).
+            let trace = crate::otlp_receiver::resolve_graph_linkage(state, trace).await;
+
+            // Store via TraceRepository.
+            match state.traces.store(&trace).await {
+                Ok(()) => {
+                    info!(
+                        gate_id = %gate.id,
+                        mr_id = %mr_id,
+                        span_count,
+                        "trace_capture gate: stored {} spans",
+                        span_count
+                    );
+                    (
+                        GateStatus::Passed,
+                        format!("trace_capture gate: captured {span_count} spans for MR {mr_id}"),
+                    )
+                }
+                Err(e) => {
+                    warn!(gate_id = %gate.id, mr_id = %mr_id, error = %e, "trace_capture gate: failed to store trace");
+                    // Still pass — storage failure is not a quality gate failure.
+                    (
+                        GateStatus::Passed,
+                        format!("trace_capture gate: {span_count} spans captured but storage failed: {e}"),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            warn!(gate_id = %gate.id, mr_id = %mr_id, error = %e, "trace_capture gate: capture failed");
+            // TraceCapture always passes — capture failure is observational.
+            (
+                GateStatus::Passed,
+                format!("trace_capture gate: capture failed (observational only): {e}"),
+            )
         }
     }
 }
