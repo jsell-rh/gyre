@@ -624,11 +624,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/graph/predict",
-            get(graph::get_graph_predictions),
+            get(graph::predict_graph).post(graph::predict_graph),
         )
         .route(
             "/api/v1/workspaces/:id/graph",
             get(graph::get_workspace_graph),
+        )
+        .route(
+            "/api/v1/workspaces/:id/graph/concept/:concept_name",
+            get(graph::get_workspace_graph_concept),
         )
         .route(
             "/api/v1/workspaces/:id/briefing",
