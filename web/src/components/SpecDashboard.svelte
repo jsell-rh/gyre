@@ -351,6 +351,7 @@
               tabindex="0"
               onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
               aria-selected={selectedPath === spec.path}
+              aria-label="Spec: {spec.path}"
             >
               <td class="col-path">
                 <span class="spec-path" title={spec.path}>{spec.path}</span>
@@ -755,9 +756,6 @@
   .spec-editor:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
-  }
-
-  .spec-editor:focus-visible {
     border-color: var(--color-focus, #4db0ff);
   }
 
@@ -797,9 +795,6 @@
   .field-input:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
-  }
-
-  .field-input:focus-visible {
     border-color: var(--color-focus, #4db0ff);
   }
 

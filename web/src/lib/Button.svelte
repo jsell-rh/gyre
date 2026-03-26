@@ -9,6 +9,7 @@
     'aria-describedby': ariaDescribedby = undefined,
     'aria-pressed': ariaPressed = undefined,
     'aria-expanded': ariaExpanded = undefined,
+    'aria-busy': ariaBusy = undefined,
     children,
   } = $props();
 </script>
@@ -22,6 +23,7 @@
   aria-describedby={ariaDescribedby}
   aria-pressed={ariaPressed}
   aria-expanded={ariaExpanded}
+  aria-busy={ariaBusy}
 >
   {@render children?.()}
 </button>
