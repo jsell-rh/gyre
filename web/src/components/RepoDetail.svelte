@@ -701,7 +701,7 @@
         {#if showGateForm}
           <div class="gate-form">
             <input class="branch-select" placeholder="Gate name" bind:value={newGateName} />
-            <select class="branch-select" bind:value={newGateType}>
+            <select class="branch-select" bind:value={newGateType} aria-label="Gate type">
               {#each GATE_TYPES as t (t)}
                 <option value={t}>{t}</option>
               {/each}

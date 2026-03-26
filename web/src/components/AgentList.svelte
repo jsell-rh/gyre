@@ -309,7 +309,7 @@
         <Skeleton lines={8} height="2.5rem" />
       {/if}
     {:else if error}
-      <div class="error-msg">Error: {error}</div>
+      <div class="error-msg" role="alert">Error: {error}</div>
     {:else if filtered.length === 0}
       <EmptyState
         title="No agents found"
@@ -346,7 +346,7 @@
       <Table columns={tableColumns}>
         {#snippet children()}
           {#each filtered as a}
-            <tr class:row-selected={selected?.id === a.id} onclick={() => selectAgent(a)} style="cursor:pointer">
+            <tr class:row-selected={selected?.id === a.id} onclick={() => selectAgent(a)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectAgent(a); } }} tabindex="0" style="cursor:pointer">
               <td class="name-cell">{a.name}</td>
               <td><Badge value={a.status} /></td>
               <td class="muted" title={a.current_task_id ?? ''}>{taskLabel(a.current_task_id)}</td>

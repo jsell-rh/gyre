@@ -351,6 +351,7 @@
   }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -362,6 +363,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
   }
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .btn-danger-sm {
     padding: var(--space-1) var(--space-2);
@@ -373,6 +375,7 @@
     cursor: pointer;
   }
   .btn-danger-sm:hover { background: rgba(255, 80, 80, 0.08); }
+  .btn-danger-sm:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .btn-approve-sm {
     padding: var(--space-1) var(--space-2);
@@ -384,6 +387,7 @@
     cursor: pointer;
   }
   .btn-approve-sm:hover { background: rgba(63, 185, 80, 0.08); }
+  .btn-approve-sm:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
