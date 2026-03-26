@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::siem::{SiemTarget, TargetType};
-use crate::AppState;
+use crate::{
+    auth::AuthenticatedAgent,
+    siem::{SiemTarget, TargetType},
+    AppState,
+};
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
@@ -63,11 +66,16 @@ impl From<AuditEvent> for AuditEventResponse {
 
 pub async fn record_audit_event(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Json(req): Json<RecordAuditEventRequest>,
 ) -> Result<(StatusCode, Json<AuditEventResponse>), ApiError> {
+    // Bind agent_id to the verified caller identity to prevent audit trail forgery
+    // (NEW-31). The request body agent_id field is ignored — the audit record always
+    // reflects who actually made the call, not what the caller claims.
+    let agent_id = auth.agent_id.to_string();
     let event = AuditEvent::new(
         new_id(),
-        gyre_common::Id::new(req.agent_id),
+        gyre_common::Id::new(agent_id),
         AuditEventType::from_str(&req.event_type),
         req.path,
         req.details
@@ -257,8 +265,9 @@ mod tests {
     #[tokio::test]
     async fn record_audit_event_returns_201() {
         let app = app();
+        // agent_id in body is ignored — caller identity from token is used (NEW-31).
         let body = serde_json::json!({
-            "agent_id": "agent-1",
+            "agent_id": "forged-agent-id",
             "event_type": "file_access",
             "path": "/etc/hosts",
             "details": { "mode": "read" },
@@ -277,6 +286,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+        // Verify the recorded agent_id reflects the token identity, not the forged body value.
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(json["agent_id"].as_str().unwrap(), "forged-agent-id",
+            "audit event must not allow caller to forge agent_id (NEW-31)");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_event_agent_id_bound_to_caller() {
+        // NEW-31 regression: verify agent_id comes from auth, not request body.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        // Agent-role JWT with known sub.
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "known-agent-sub",
+                "preferred_username": "known-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/audit/events")
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"evil-agent","event_type":"file_access"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Must NOT be the forged value.
+        assert_ne!(json["agent_id"].as_str().unwrap(), "evil-agent",
+            "audit trail forgery must be prevented (NEW-31)");
     }
 
     #[tokio::test]
