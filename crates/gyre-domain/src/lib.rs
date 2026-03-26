@@ -58,7 +58,7 @@ pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use message_type::MessageType;
 pub use network_peer::NetworkPeer;
-pub use notification::{Notification, NotificationPriority, NotificationType};
+pub use notification::{Notification, NotificationType};
 pub use policy::{
     builtin_policies, Condition, ConditionOp, ConditionValue, Policy, PolicyDecision, PolicyEffect,
     PolicyScope,

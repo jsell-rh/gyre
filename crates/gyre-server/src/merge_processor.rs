@@ -499,12 +499,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
-            // Notify the MR author that their MR was merged (M22.8).
+            // Notify the MR author that their MR was merged (HSI §2).
             if let Some(ref author_id) = updated_mr.author_agent_id {
                 crate::notifications::notify_mr_merged(
                     state,
                     author_id,
+                    &updated_mr.workspace_id,
                     &updated_mr.id.to_string(),
+                    "default",
                 )
                 .await;
             }

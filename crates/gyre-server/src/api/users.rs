@@ -1,12 +1,13 @@
-//! User management, workspace membership, teams, and notification endpoints (M22.8).
+//! User management, workspace membership, teams, and notification endpoints (HSI §2).
 //!
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
 //! GET  /api/v1/users/me/agents
 //! GET  /api/v1/users/me/tasks
 //! GET  /api/v1/users/me/mrs
-//! GET  /api/v1/users/me/notifications
-//! PUT  /api/v1/users/me/notifications/:id/read
+//! GET  /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=&limit=&offset=
+//! POST /api/v1/notifications/:id/dismiss
+//! POST /api/v1/notifications/:id/resolve
 //! POST /api/v1/workspaces/:id/members   (invite)
 //! GET  /api/v1/workspaces/:id/members
 //! PUT  /api/v1/workspaces/:id/members/:user_id
@@ -15,17 +16,17 @@
 //! GET  /api/v1/workspaces/:id/teams
 //! PUT  /api/v1/workspaces/:id/teams/:team_id
 //! DELETE /api/v1/workspaces/:id/teams/:team_id
+//!
+//! All notification endpoints use per-handler auth (not ABAC):
+//! the handler verifies notification.user_id == caller AND notification.tenant_id == caller.tenant_id.
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use gyre_common::Id;
-use gyre_domain::{
-    Notification, NotificationPriority, NotificationType, Team, User, WorkspaceMembership,
-    WorkspaceRole,
-};
+use gyre_common::{Id, Notification, NotificationType};
+use gyre_domain::{Team, User, WorkspaceMembership, WorkspaceRole};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -226,54 +227,81 @@ pub async fn get_my_mrs(
 
 #[derive(Deserialize)]
 pub struct NotificationParams {
-    pub unread: Option<bool>,
+    pub workspace_id: Option<String>,
+    pub min_priority: Option<u8>,
+    pub max_priority: Option<u8>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
 }
 
 #[derive(Serialize)]
 pub struct NotificationResponse {
     pub id: String,
+    pub workspace_id: String,
     pub notification_type: String,
+    pub priority: u8,
     pub title: String,
-    pub body: String,
-    pub priority: String,
-    pub action_url: Option<String>,
-    pub read: bool,
-    pub read_at: Option<u64>,
-    pub created_at: u64,
+    pub body: Option<String>,
+    pub entity_ref: Option<String>,
+    pub repo_id: Option<String>,
+    pub resolved_at: Option<i64>,
+    pub dismissed_at: Option<i64>,
+    pub created_at: i64,
 }
 
 impl From<Notification> for NotificationResponse {
     fn from(n: Notification) -> Self {
         Self {
             id: n.id.to_string(),
-            notification_type: format!("{:?}", n.notification_type),
+            workspace_id: n.workspace_id.to_string(),
+            notification_type: n.notification_type.as_str().to_string(),
+            priority: n.priority,
             title: n.title,
             body: n.body,
-            priority: format!("{:?}", n.priority),
-            action_url: n.action_url,
-            read: n.read,
-            read_at: n.read_at,
+            entity_ref: n.entity_ref,
+            repo_id: n.repo_id,
+            resolved_at: n.resolved_at,
+            dismissed_at: n.dismissed_at,
             created_at: n.created_at,
         }
     }
 }
 
+/// GET /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=&limit=&offset=
+///
+/// No ABAC resource type — `/users/me/*` endpoints are implicitly scoped to the authenticated user.
 pub async fn get_my_notifications(
     auth: AuthenticatedAgent,
     Query(params): Query<NotificationParams>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
-    let unread_only = params.unread.unwrap_or(false);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
     let notifications = state
         .notifications
-        .list_by_user(&user_id, unread_only)
+        .list_for_user(
+            &user_id,
+            workspace_id.as_ref(),
+            params.min_priority,
+            params.max_priority,
+            limit,
+            offset,
+        )
         .await?;
     let items: Vec<NotificationResponse> = notifications.into_iter().map(Into::into).collect();
-    Ok(Json(serde_json::json!({"notifications": items})))
+    Ok(Json(serde_json::json!({
+        "notifications": items,
+        "limit": limit,
+        "offset": offset,
+    })))
 }
 
-pub async fn mark_notification_read(
+/// POST /api/v1/notifications/:id/dismiss
+///
+/// Per-handler auth: verifies notification belongs to caller AND caller.tenant_id matches.
+pub async fn dismiss_notification(
     auth: AuthenticatedAgent,
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -282,13 +310,49 @@ pub async fn mark_notification_read(
     let notif_id = Id::new(id);
     let notif = state
         .notifications
-        .find_by_id(&notif_id)
+        .get(&notif_id, &user_id)
         .await?
         .ok_or(ApiError::NotFound("Notification not found".to_string()))?;
-    if notif.user_id != user_id {
-        return Err(ApiError::Forbidden("Not your notification".to_string()));
+    // Cross-tenant guard: the notification's tenant must match the caller's tenant.
+    if notif.tenant_id != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant notification access denied".to_string(),
+        ));
     }
-    state.notifications.mark_read(&notif_id, now_secs()).await?;
+    state.notifications.dismiss(&notif_id, &user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct ResolveRequest {
+    pub action_taken: Option<String>,
+}
+
+/// POST /api/v1/notifications/:id/resolve
+///
+/// Per-handler auth: verifies notification belongs to caller AND caller.tenant_id matches.
+pub async fn resolve_notification(
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ResolveRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let notif_id = Id::new(id);
+    let notif = state
+        .notifications
+        .get(&notif_id, &user_id)
+        .await?
+        .ok_or(ApiError::NotFound("Notification not found".to_string()))?;
+    if notif.tenant_id != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant notification access denied".to_string(),
+        ));
+    }
+    state
+        .notifications
+        .resolve(&notif_id, &user_id, req.action_taken.as_deref())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -340,18 +404,18 @@ pub async fn invite_member(
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
 
-    // Notify the invited user.
+    // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action needed).
     let notif = Notification::new(
         new_id(),
+        membership.workspace_id.clone(),
         membership.user_id.clone(),
-        NotificationType::InvitationReceived,
-        "Workspace invitation",
+        NotificationType::TrustSuggestion,
         format!(
             "You have been invited to workspace {}",
             membership.workspace_id
         ),
-        NotificationPriority::Medium,
-        now,
+        auth.tenant_id.clone(),
+        now as i64,
     );
     let _ = state.notifications.create(&notif).await;
 

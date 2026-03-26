@@ -1,109 +1,52 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
-use gyre_common::Id;
-use gyre_domain::{Notification, NotificationPriority, NotificationType};
+use gyre_common::{Id, Notification, NotificationType};
 use gyre_ports::NotificationRepository;
 use std::sync::Arc;
 
 use super::SqliteStorage;
 use crate::schema::notifications;
 
-fn type_to_str(t: &NotificationType) -> &'static str {
-    match t {
-        NotificationType::SpecApprovalRequested => "SpecApprovalRequested",
-        NotificationType::PersonaApprovalRequested => "PersonaApprovalRequested",
-        NotificationType::AgentEscalation => "AgentEscalation",
-        NotificationType::AgentBudgetWarning => "AgentBudgetWarning",
-        NotificationType::AgentBudgetExhausted => "AgentBudgetExhausted",
-        NotificationType::AgentFailed => "AgentFailed",
-        NotificationType::GateFailure => "GateFailure",
-        NotificationType::GatePassed => "GatePassed",
-        NotificationType::MrMerged => "MrMerged",
-        NotificationType::MrNeedsReview => "MrNeedsReview",
-        NotificationType::MrReverted => "MrReverted",
-        NotificationType::BreakingChangeDetected => "BreakingChangeDetected",
-        NotificationType::SpecDriftDetected => "SpecDriftDetected",
-        NotificationType::InvitationReceived => "InvitationReceived",
-        NotificationType::MembershipChanged => "MembershipChanged",
-        NotificationType::SystemAlert => "SystemAlert",
-    }
-}
-
-fn str_to_type(s: &str) -> Result<NotificationType> {
-    match s {
-        "SpecApprovalRequested" => Ok(NotificationType::SpecApprovalRequested),
-        "PersonaApprovalRequested" => Ok(NotificationType::PersonaApprovalRequested),
-        "AgentEscalation" => Ok(NotificationType::AgentEscalation),
-        "AgentBudgetWarning" => Ok(NotificationType::AgentBudgetWarning),
-        "AgentBudgetExhausted" => Ok(NotificationType::AgentBudgetExhausted),
-        "AgentFailed" => Ok(NotificationType::AgentFailed),
-        "GateFailure" => Ok(NotificationType::GateFailure),
-        "GatePassed" => Ok(NotificationType::GatePassed),
-        "MrMerged" => Ok(NotificationType::MrMerged),
-        "MrNeedsReview" => Ok(NotificationType::MrNeedsReview),
-        "MrReverted" => Ok(NotificationType::MrReverted),
-        "BreakingChangeDetected" => Ok(NotificationType::BreakingChangeDetected),
-        "SpecDriftDetected" => Ok(NotificationType::SpecDriftDetected),
-        "InvitationReceived" => Ok(NotificationType::InvitationReceived),
-        "MembershipChanged" => Ok(NotificationType::MembershipChanged),
-        "SystemAlert" => Ok(NotificationType::SystemAlert),
-        other => Err(anyhow!("unknown notification type: {}", other)),
-    }
-}
-
-fn priority_to_str(p: &NotificationPriority) -> &'static str {
-    match p {
-        NotificationPriority::Low => "Low",
-        NotificationPriority::Medium => "Medium",
-        NotificationPriority::High => "High",
-        NotificationPriority::Urgent => "Urgent",
-    }
-}
-
-fn str_to_priority(s: &str) -> Result<NotificationPriority> {
-    match s {
-        "Low" => Ok(NotificationPriority::Low),
-        "Medium" => Ok(NotificationPriority::Medium),
-        "High" => Ok(NotificationPriority::High),
-        "Urgent" => Ok(NotificationPriority::Urgent),
-        other => Err(anyhow!("unknown notification priority: {}", other)),
-    }
-}
+// ── Row types ─────────────────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = notifications)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct NotificationRow {
     id: String,
+    workspace_id: String,
     user_id: String,
     notification_type: String,
+    priority: i32,
     title: String,
-    body: String,
-    entity_type: Option<String>,
-    entity_id: Option<String>,
-    priority: String,
-    action_url: Option<String>,
-    read: i32,
-    read_at: Option<i64>,
+    body: Option<String>,
+    entity_ref: Option<String>,
+    repo_id: Option<String>,
+    resolved_at: Option<i64>,
+    dismissed_at: Option<i64>,
     created_at: i64,
+    tenant_id: String,
 }
 
 impl NotificationRow {
     fn into_notification(self) -> Result<Notification> {
+        let ntype = NotificationType::parse(&self.notification_type)
+            .ok_or_else(|| anyhow!("unknown notification_type: {}", self.notification_type))?;
         Ok(Notification {
             id: Id::new(self.id),
+            workspace_id: Id::new(self.workspace_id),
             user_id: Id::new(self.user_id),
-            notification_type: str_to_type(&self.notification_type)?,
+            notification_type: ntype,
+            priority: self.priority.clamp(1, 10) as u8,
             title: self.title,
             body: self.body,
-            entity_type: self.entity_type,
-            entity_id: self.entity_id,
-            priority: str_to_priority(&self.priority)?,
-            action_url: self.action_url,
-            read: self.read != 0,
-            read_at: self.read_at.map(|v| v as u64),
-            created_at: self.created_at as u64,
+            entity_ref: self.entity_ref,
+            repo_id: self.repo_id,
+            resolved_at: self.resolved_at,
+            dismissed_at: self.dismissed_at,
+            created_at: self.created_at,
+            tenant_id: self.tenant_id,
         })
     }
 }
@@ -112,18 +55,21 @@ impl NotificationRow {
 #[diesel(table_name = notifications)]
 struct NewNotificationRow<'a> {
     id: &'a str,
+    workspace_id: &'a str,
     user_id: &'a str,
     notification_type: &'a str,
+    priority: i32,
     title: &'a str,
-    body: &'a str,
-    entity_type: Option<&'a str>,
-    entity_id: Option<&'a str>,
-    priority: &'a str,
-    action_url: Option<&'a str>,
-    read: i32,
-    read_at: Option<i64>,
+    body: Option<&'a str>,
+    entity_ref: Option<&'a str>,
+    repo_id: Option<&'a str>,
+    resolved_at: Option<i64>,
+    dismissed_at: Option<i64>,
     created_at: i64,
+    tenant_id: &'a str,
 }
+
+// ── Repository impl ───────────────────────────────────────────────────────────
 
 #[async_trait]
 impl NotificationRepository for SqliteStorage {
@@ -134,17 +80,18 @@ impl NotificationRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let row = NewNotificationRow {
                 id: n.id.as_str(),
+                workspace_id: n.workspace_id.as_str(),
                 user_id: n.user_id.as_str(),
-                notification_type: type_to_str(&n.notification_type),
+                notification_type: n.notification_type.as_str(),
+                priority: n.priority as i32,
                 title: &n.title,
-                body: &n.body,
-                entity_type: n.entity_type.as_deref(),
-                entity_id: n.entity_id.as_deref(),
-                priority: priority_to_str(&n.priority),
-                action_url: n.action_url.as_deref(),
-                read: n.read as i32,
-                read_at: n.read_at.map(|v| v as i64),
-                created_at: n.created_at as i64,
+                body: n.body.as_deref(),
+                entity_ref: n.entity_ref.as_deref(),
+                repo_id: n.repo_id.as_deref(),
+                resolved_at: n.resolved_at,
+                dismissed_at: n.dismissed_at,
+                created_at: n.created_at,
+                tenant_id: &n.tenant_id,
             };
             diesel::insert_into(notifications::table)
                 .values(&row)
@@ -157,36 +104,56 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
-    async fn find_by_id(&self, id: &Id) -> Result<Option<Notification>> {
+    async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let uid = user_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = notifications::table
-                .find(id.as_str())
+                .filter(notifications::id.eq(id.as_str()))
+                .filter(notifications::user_id.eq(uid.as_str()))
                 .first::<NotificationRow>(&mut *conn)
                 .optional()
-                .context("find notification by id")?;
+                .context("get notification")?;
             result.map(NotificationRow::into_notification).transpose()
         })
         .await?
     }
 
-    async fn list_by_user(&self, user_id: &Id, unread_only: bool) -> Result<Vec<Notification>> {
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
                 .filter(notifications::user_id.eq(uid.as_str()))
-                .order(notifications::created_at.desc())
+                .order(notifications::priority.asc())
+                .then_order_by(notifications::created_at.desc())
                 .into_boxed();
-            if unread_only {
-                query = query.filter(notifications::read.eq(0_i32));
+            if let Some(ref ws) = ws_id {
+                query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            if let Some(min_p) = min_priority {
+                query = query.filter(notifications::priority.ge(min_p as i32));
+            }
+            if let Some(max_p) = max_priority {
+                query = query.filter(notifications::priority.le(max_p as i32));
             }
             let rows = query
+                .limit(limit as i64)
+                .offset(offset as i64)
                 .load::<NotificationRow>(&mut *conn)
-                .context("list notifications by user")?;
+                .context("list notifications")?;
             rows.into_iter()
                 .map(NotificationRow::into_notification)
                 .collect()
@@ -194,56 +161,102 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
-    async fn count_unread(&self, user_id: &Id) -> Result<u64> {
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let uid = user_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            diesel::update(
+                notifications::table
+                    .filter(notifications::id.eq(id.as_str()))
+                    .filter(notifications::user_id.eq(uid.as_str())),
+            )
+            .set(notifications::dismissed_at.eq(now))
+            .execute(&mut *conn)
+            .context("dismiss notification")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn resolve(&self, id: &Id, user_id: &Id, _action_taken: Option<&str>) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let uid = user_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            diesel::update(
+                notifications::table
+                    .filter(notifications::id.eq(id.as_str()))
+                    .filter(notifications::user_id.eq(uid.as_str())),
+            )
+            .set(notifications::resolved_at.eq(now))
+            .execute(&mut *conn)
+            .context("resolve notification")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
-            let count = notifications::table
+            let mut query = notifications::table
                 .filter(notifications::user_id.eq(uid.as_str()))
-                .filter(notifications::read.eq(0_i32))
+                .filter(notifications::resolved_at.is_null())
+                .filter(notifications::dismissed_at.is_null())
+                .into_boxed();
+            if let Some(ref ws) = ws_id {
+                query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            let count = query
                 .count()
                 .get_result::<i64>(&mut *conn)
-                .context("count unread notifications")?;
+                .context("count unresolved notifications")?;
             Ok(count as u64)
         })
         .await?
     }
 
-    async fn mark_read(&self, id: &Id, now: u64) -> Result<()> {
+    async fn has_recent_dismissal(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        days: u32,
+    ) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
-        let id = id.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut conn = pool.get().context("get db connection")?;
-            diesel::update(notifications::table.find(id.as_str()))
-                .set((
-                    notifications::read.eq(1_i32),
-                    notifications::read_at.eq(now as i64),
-                ))
-                .execute(&mut *conn)
-                .context("mark notification read")?;
-            Ok(())
-        })
-        .await?
-    }
-
-    async fn mark_all_read(&self, user_id: &Id, now: u64) -> Result<()> {
-        let pool = Arc::clone(&self.pool);
+        let ws_id = workspace_id.clone();
         let uid = user_id.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let ntype = notification_type.to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(
-                notifications::table
-                    .filter(notifications::user_id.eq(uid.as_str()))
-                    .filter(notifications::read.eq(0_i32)),
-            )
-            .set((
-                notifications::read.eq(1_i32),
-                notifications::read_at.eq(now as i64),
-            ))
-            .execute(&mut *conn)
-            .context("mark all notifications read")?;
-            Ok(())
+            let cutoff = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                - (days as i64 * 86400);
+            let count = notifications::table
+                .filter(notifications::workspace_id.eq(ws_id.as_str()))
+                .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::notification_type.eq(&ntype))
+                .filter(notifications::dismissed_at.ge(cutoff))
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("has_recent_dismissal")?;
+            Ok(count > 0)
         })
         .await?
     }

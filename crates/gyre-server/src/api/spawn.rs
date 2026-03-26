@@ -902,12 +902,15 @@ pub async fn complete_agent(
         super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
 
-    // Notify the spawning user that an MR needs review (M22.8).
+    // Notify the spawning user that an MR needs review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify_mr_needs_review(
+        crate::notifications::notify(
             state.as_ref(),
-            spawned_by,
-            &mr.id.to_string(),
+            mr.workspace_id.clone(),
+            Id::new(spawned_by.clone()),
+            gyre_common::NotificationType::GateFailure,
+            format!("MR {} is ready for review", mr.id),
+            "default",
         )
         .await;
     }
