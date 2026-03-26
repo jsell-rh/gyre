@@ -15,6 +15,8 @@ pub enum TaskStatus {
     Review,
     Done,
     Blocked,
+    /// Task cancelled because a spec was rejected or it's no longer needed. Terminal.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,20 +71,24 @@ impl Task {
     }
 
     /// Enforce valid status transitions:
-    /// Backlog → InProgress
-    /// InProgress → Review | Blocked
-    /// Review → Done | InProgress
-    /// Blocked → InProgress
-    /// Done is terminal
+    /// Backlog → InProgress | Cancelled
+    /// InProgress → Review | Blocked | Cancelled
+    /// Review → Done | InProgress | Cancelled
+    /// Blocked → InProgress | Cancelled
+    /// Done and Cancelled are terminal
     pub fn transition_status(&mut self, new_status: TaskStatus) -> Result<(), TaskError> {
         let valid = matches!(
             (&self.status, &new_status),
             (TaskStatus::Backlog, TaskStatus::InProgress)
+                | (TaskStatus::Backlog, TaskStatus::Cancelled)
                 | (TaskStatus::InProgress, TaskStatus::Review)
                 | (TaskStatus::InProgress, TaskStatus::Blocked)
+                | (TaskStatus::InProgress, TaskStatus::Cancelled)
                 | (TaskStatus::Review, TaskStatus::Done)
                 | (TaskStatus::Review, TaskStatus::InProgress)
+                | (TaskStatus::Review, TaskStatus::Cancelled)
                 | (TaskStatus::Blocked, TaskStatus::InProgress)
+                | (TaskStatus::Blocked, TaskStatus::Cancelled)
         );
         if valid {
             self.status = new_status;
