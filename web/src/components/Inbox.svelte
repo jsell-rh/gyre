@@ -1,7 +1,6 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, getContext } from 'svelte';
   import { api } from '../lib/api.js';
-  import DetailPanelShell from '../lib/DetailPanelShell.svelte';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -9,12 +8,14 @@
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
+  // Use shell context API for detail panel — S4.1 app shell manages the split layout
+  const openDetailPanel = getContext('openDetailPanel');
+
   let notifications = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let expandedId = $state(null);
   let showDismissed = $state(false);
-  let detailEntity = $state(null);
   let actionStates = $state({});
   let refreshInterval;
 
@@ -280,11 +281,7 @@
   }
 
   function openDetail(entity) {
-    detailEntity = entity;
-  }
-
-  function handleDetailClose() {
-    detailEntity = null;
+    openDetailPanel?.(entity);
   }
 
   let visibleNotifications = $derived(
@@ -399,9 +396,8 @@
   });
 </script>
 
-<DetailPanelShell bind:entity={detailEntity} onclose={handleDetailClose}>
-  <div class="inbox">
-    <div class="inbox-header">
+<div class="inbox">
+  <div class="inbox-header">
       <div class="inbox-title-row">
         <h1 class="inbox-title">Inbox</h1>
         {#if unresolvedCount > 0}
@@ -708,7 +704,6 @@
       </div>
     {/if}
   </div>
-</DetailPanelShell>
 
 <style>
   .inbox {
