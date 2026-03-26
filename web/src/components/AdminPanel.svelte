@@ -918,7 +918,7 @@
                 </button>
               </div>
               {#if simulateResult}
-                <div class="simulate-result {simulateResult.error ? 'error' : (simulateResult.outcome ?? '').toLowerCase() === 'deny' ? 'deny' : 'allow'}">
+                <div class="simulate-result {simulateResult.error ? 'error' : (simulateResult.outcome ?? '').toLowerCase() === 'deny' ? 'deny' : 'allow'}" role="status" aria-live="polite">
                   {#if simulateResult.error}
                     Error: {simulateResult.error}
                   {:else}
@@ -1223,7 +1223,17 @@
   <div class="modal-backdrop" role="presentation" onclick={() => gateModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Gate"
     bind:this={gateModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') gateModal = false; }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { gateModal = false; return; }
+      if (e.key === 'Tab') {
+        const focusable = gateModalEl?.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable ?? []);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus(); } }
+        else { if (document.activeElement === last) { e.preventDefault(); first.focus(); } }
+      }
+    }}>
     <h3 class="modal-title">Add Gate</h3>
     <div class="form-field">
       <label class="form-label" for="gate-name">Name</label>
