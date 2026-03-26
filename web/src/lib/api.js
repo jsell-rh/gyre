@@ -402,4 +402,11 @@ export const api = {
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
   },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
+  // Meta-spec preview loop (S4.6)
+  previewPersona: (workspaceId, data) =>
+    request(`/workspaces/${workspaceId}/meta-specs/preview`, { method: 'POST', body: JSON.stringify(data) }),
+  previewPersonaStatus: (workspaceId, previewId) =>
+    request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
+  publishPersona: (workspaceId, personaId, data) =>
+    request(`/workspaces/${workspaceId}/personas/${personaId}/publish`, { method: 'POST', body: JSON.stringify(data) }),
 };
