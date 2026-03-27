@@ -1328,10 +1328,10 @@
   .dep-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* Syntax highlighting token colors */
-  :global(.hl-kw)  { color: #cc99ff; }
-  :global(.hl-str) { color: #99cc88; }
-  :global(.hl-cmt) { color: #6b7a8d; font-style: italic; }
-  :global(.hl-num) { color: #f09a3e; }
+  :global(.hl-kw)  { color: var(--color-blocked); }
+  :global(.hl-str) { color: var(--color-success); }
+  :global(.hl-cmt) { color: var(--color-text-muted); font-style: italic; }
+  :global(.hl-num) { color: var(--color-warning); }
 
   .back-btn:focus-visible,
   .meta-link-btn:focus-visible,
