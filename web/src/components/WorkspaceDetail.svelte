@@ -396,7 +396,7 @@
 
   .bar-fill {
     height: 100%;
-    background: var(--color-primary);
+    background: var(--color-success);
     border-radius: 999px;
     transition: width 0.4s ease;
   }
@@ -539,4 +539,8 @@
   .trust-select.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }
   .trust-select.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, transparent); }
   .trust-saving { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bar-fill { transition: none; }
+  }
 </style>
