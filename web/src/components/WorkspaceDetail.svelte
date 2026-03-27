@@ -518,7 +518,7 @@
   .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
   .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-link); color: var(--color-text-inverse); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
-  .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
+  .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; transition: background var(--transition-fast), color var(--transition-fast); }
   .btn-secondary:hover { color: var(--color-text); background: var(--color-surface-elevated); }
   .btn-primary:focus-visible,
   .btn-secondary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }

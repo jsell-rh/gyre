@@ -1092,7 +1092,7 @@
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
 
-  .clickable { cursor: pointer; }
+  .clickable { cursor: pointer; transition: background var(--transition-fast); }
   .clickable:hover { background: var(--color-surface-elevated); }
   .clickable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
@@ -1180,6 +1180,7 @@
     gap: var(--space-3);
     padding: var(--space-1) var(--space-3);
     border-bottom: 1px solid var(--color-border);
+    transition: background var(--transition-fast);
   }
 
   .blame-row:last-child { border-bottom: none; }

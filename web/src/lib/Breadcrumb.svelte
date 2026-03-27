@@ -58,6 +58,12 @@
     color: var(--color-link-hover);
   }
 
+  .crumb-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
   .crumb-sep {
     color: var(--color-text-muted);
     user-select: none;
