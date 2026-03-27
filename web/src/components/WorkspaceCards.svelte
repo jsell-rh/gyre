@@ -116,8 +116,8 @@
 
 <div class="workspace-cards">
   <div class="cards-header">
-    <h2>Explorer</h2>
-    <p class="subtitle">Select a workspace to explore its architecture</p>
+    <h2>Workspaces</h2>
+    <p class="subtitle">Select a workspace to explore its architecture and activity</p>
   </div>
 
   {#if loading}

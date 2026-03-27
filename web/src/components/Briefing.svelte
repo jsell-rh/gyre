@@ -204,9 +204,7 @@
         {#if !loading}
           <span class="briefing-since" data-testid="since-label">Since {sinceLabel}</span>
         {/if}
-        {#if scope === 'workspace' && workspaceName}
-          <span class="briefing-workspace">Workspace: {workspaceName}</span>
-        {/if}
+        <span class="briefing-scope-hint">{scope === 'tenant' ? 'All workspaces' : scope === 'repo' ? 'Repository' : ''}{scope === 'workspace' && workspaceName ? workspaceName : ''}</span>
         {#if trustLevel}
           <span class="briefing-trust">Trust: {trustLevel}</span>
         {/if}
@@ -532,8 +530,12 @@
 
       {#if !briefing.completed?.length && !briefing.in_progress?.length && !briefing.cross_workspace?.length && !briefing.exceptions?.length && !briefing.metrics}
         <EmptyState
-          title="All caught up"
-          description="No activity since your last visit."
+          title={scope === 'repo' ? 'No briefing for this repository' : 'All caught up'}
+          description={scope === 'tenant'
+            ? 'No activity across any workspace since your last visit.'
+            : scope === 'repo'
+              ? 'Briefings are available at the workspace level. Navigate up to see workspace activity.'
+              : 'No activity since your last visit.'}
         />
       {/if}
 
@@ -556,6 +558,7 @@
     gap: var(--space-6);
     max-width: 1000px;
     min-height: 100%;
+    overflow-y: auto;
   }
 
   .briefing-header {
@@ -584,9 +587,13 @@
     color: var(--color-text-muted);
   }
 
-  .briefing-workspace {
+  .briefing-scope-hint {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
   }
 
   .briefing-trust {
