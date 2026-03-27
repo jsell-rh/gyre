@@ -116,7 +116,7 @@
 
 <div class="workspace-cards">
   <div class="cards-header">
-    <h2>Explorer</h2>
+    <h1 class="page-title">Explorer</h1>
     <p class="subtitle">Select a workspace to explore its architecture</p>
   </div>
 
@@ -266,7 +266,7 @@
     flex-shrink: 0;
   }
 
-  .cards-header h2 {
+  .cards-header .page-title {
     margin: 0 0 var(--space-1);
     font-size: var(--text-xl);
     font-weight: 600;

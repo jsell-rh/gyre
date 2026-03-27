@@ -645,11 +645,11 @@
 
 <div class="panel">
   <div class="panel-header">
-    <h2>
+    <h1 class="page-title">
       {#if effectiveScope === 'repo'}Repo Admin
       {:else if effectiveScope === 'workspace'}Workspace Admin
       {:else}Admin{/if}
-    </h2>
+    </h1>
     <button class="refresh-btn" onclick={() => {
       if (effectiveScope === 'tenant') loadTenant();
       else if (effectiveScope === 'workspace') loadWorkspace();
@@ -1697,7 +1697,7 @@
     flex-shrink: 0;
   }
 
-  h2 {
+  .page-title {
     font-family: var(--font-display);
     font-size: var(--text-lg);
     font-weight: 600;

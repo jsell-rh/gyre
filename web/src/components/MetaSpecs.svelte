@@ -532,7 +532,7 @@
 <!-- ─── Repo scope redirect ──────────────────────────────────────────────────── -->
 {#if scope === 'repo'}
   <div class="meta-specs-view">
-    <div class="view-header"><h2>Meta-Specs</h2></div>
+    <div class="view-header"><h1 class="page-title">Meta-Specs</h1></div>
     <div class="repo-redirect">
       Meta-specs are workspace-scoped.
       {#if workspaceId}
@@ -549,7 +549,7 @@
   <div class="meta-specs-view workspace-view" aria-busy={wsLoading}>
     {#if scope !== 'repo'}
       <div class="view-header">
-        <h2>Meta-Specs</h2>
+        <h1 class="page-title">Meta-Specs</h1>
         <p class="subtitle">Preview how persona and principle changes affect your workspace specs.</p>
       </div>
     {/if}
@@ -740,7 +740,7 @@
     <!-- Top bar -->
     <div class="top-bar">
       <div class="top-bar-left">
-        <h2>Meta-Specs</h2>
+        <h1 class="page-title">Meta-Specs</h1>
         <p class="subtitle">Your primary encoding mechanism — personas, principles, standards, and process norms.</p>
       </div>
       <div class="top-bar-actions">
@@ -1188,7 +1188,7 @@
   /* ── Tenant top bar ── */
   .tenant-view { padding: var(--space-4) var(--space-6); height: calc(100vh - 80px); display: flex; flex-direction: column; overflow: hidden; }
   .top-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-3); flex-shrink: 0; }
-  .top-bar h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
+  .top-bar .page-title { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
   .top-bar-left { flex: 1; }
   .subtitle { margin: 0; color: var(--color-text-muted); font-size: var(--text-sm); }
 
@@ -1446,7 +1446,7 @@
   /* ── Workspace scope ── */
   .workspace-view { max-width: 1400px; }
   .view-header { margin-bottom: var(--space-6); }
-  .view-header h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
+  .view-header .page-title { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
   .split-layout { display: grid; grid-template-columns: 60fr 40fr; gap: var(--space-6); align-items: start; }
   .split-left { display: flex; flex-direction: column; gap: var(--space-4); }
   .split-right { display: flex; flex-direction: column; gap: var(--space-4); position: sticky; top: var(--space-4); }
