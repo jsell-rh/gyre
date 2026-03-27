@@ -41,6 +41,7 @@ pub mod spec_policy;
 pub mod task;
 pub mod team;
 pub mod tenant;
+pub mod tree_sitter_utils;
 pub mod user;
 pub mod user_profile;
 pub mod workspace;
