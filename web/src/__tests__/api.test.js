@@ -149,9 +149,12 @@ describe('api.js — auth header', () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ id: 'm1' }) })
     );
-    await api.createMirrorRepo({ name: 'mirror', project_id: 'p1', url: 'https://github.com/org/repo.git' });
+    await api.createMirrorRepo({ name: 'mirror', workspace_id: 'ws-p1', url: 'https://github.com/org/repo.git', interval_secs: 300 });
     const [url, options] = global.fetch.mock.calls[0];
     expect(url).toBe('/api/v1/repos/mirror');
     expect(options.method).toBe('POST');
+    const body = JSON.parse(options.body);
+    expect(body.workspace_id).toBe('ws-p1');
+    expect(body).not.toHaveProperty('project_id');
   });
 });
