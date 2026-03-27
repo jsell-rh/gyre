@@ -74,7 +74,7 @@
   // Subscribe to WebSocket presence events.
   $effect(() => {
     if (!wsStore) return;
-    const unsub = wsStore.subscribe((msg) => {
+    const unsub = wsStore.onMessage((msg) => {
       if (!msg) return;
       if (msg.type === 'UserPresence') {
         if (msg.view === 'disconnected') {

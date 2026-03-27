@@ -369,12 +369,38 @@
     gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
 
     gl.drawArrays(gl.POINTS, 0, particles.length);
+
+    // Clean up per-frame buffers to prevent GPU memory leak
+    gl.deleteBuffer(posBuf);
+    gl.deleteBuffer(colBuf);
   }
 
-  // Parse a CSS color string to RGBA (supports hsl and hex)
+  // Parse a CSS hsl() color string to RGBA [0..1].
+  // All particle colors from particleColor() use hsl(h, s%, l%) format.
   function cssColorToRGBA(color) {
-    // Simple fallback: return blue
-    return { r: 0.23, g: 0.51, b: 0.96, a: 1 };
+    const m = color.match(/hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)/);
+    if (!m) return { r: 0.23, g: 0.51, b: 0.96, a: 1 }; // fallback blue
+    const h = Number(m[1]) / 360;
+    const s = Number(m[2]) / 100;
+    const l = Number(m[3]) / 100;
+    // HSL to RGB conversion
+    if (s === 0) return { r: l, g: l, b: l, a: 1 };
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    return {
+      r: hue2rgb(p, q, h + 1/3),
+      g: hue2rgb(p, q, h),
+      b: hue2rgb(p, q, h - 1/3),
+      a: 1,
+    };
   }
 
   // Mouse interaction — find nearest particle to click
