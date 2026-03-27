@@ -827,7 +827,7 @@
   .panel-entity {
     display: flex;
     flex-direction: column;
-    gap: var(--space-0, 2px);
+    gap: 2px;
     overflow: hidden;
     min-width: 0;
   }
@@ -877,7 +877,7 @@
   }
 
   .panel-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -947,7 +947,7 @@
   .start-interrogation {
     padding: var(--space-3) var(--space-6);
     background: var(--color-primary);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     border: none;
     border-radius: var(--radius);
     font-family: var(--font-body);
@@ -962,7 +962,7 @@
   }
 
   .start-interrogation:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -1094,12 +1094,12 @@
   }
 
   .spec-editor-textarea:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
   .spec-editor-textarea:focus-visible {
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   /* LLM suggestion block */
@@ -1142,14 +1142,14 @@
   .diff-op {
     display: flex;
     flex-direction: column;
-    gap: var(--space-0, 2px);
+    gap: 2px;
   }
 
   .diff-badge {
     font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm, 2px);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
@@ -1204,7 +1204,7 @@
     color: var(--color-text-muted);
     font-weight: 500;
     display: block;
-    margin-bottom: var(--space-0, 2px);
+    margin-bottom: 2px;
   }
 
   .streaming-txt {
@@ -1220,7 +1220,7 @@
     width: 2px;
     height: 1em;
     background: var(--color-primary);
-    margin-left: var(--space-0, 2px);
+    margin-left: 2px;
     vertical-align: text-bottom;
     animation: blink 1s step-end infinite;
   }
@@ -1272,12 +1272,12 @@
   }
 
   .llm-textarea:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
   .llm-textarea:focus-visible {
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   .llm-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -1292,7 +1292,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     cursor: pointer;
     flex-shrink: 0;
     transition: background var(--transition-fast);
@@ -1302,7 +1302,7 @@
   .llm-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .llm-send:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -1360,7 +1360,7 @@
     height: 100%;
     background: var(--color-success);
     border-radius: var(--radius-sm);
-    transition: width var(--transition-slow, 0.3s);
+    transition: width var(--transition-slow);
   }
 
   .task-list {
@@ -1484,7 +1484,7 @@
   }
 
   .view-spawned-link:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

@@ -44,7 +44,7 @@
 <style>
   .badge {
     display: inline-block;
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
     font-family: var(--font-body);
     font-size: var(--text-xs);

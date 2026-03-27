@@ -1447,7 +1447,7 @@
 
   .ws-row { cursor: pointer; }
   .ws-row:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
@@ -1460,7 +1460,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     cursor: pointer;
     font-size: var(--text-sm);
     padding: var(--space-3) var(--space-4);
@@ -1508,7 +1508,7 @@
   .secondary-btn:focus-visible,
   .kill-btn:focus-visible,
   .refresh-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -1538,8 +1538,8 @@
   .filter-input:focus:not(:focus-visible) { outline: none; }
   .filter-input:focus-visible {
     outline: none;
-    border-color: var(--color-focus, #4db0ff);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
+    border-color: var(--color-focus);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 30%, transparent);
   }
   .filter-input.full-width { width: 100%; box-sizing: border-box; }
   .textarea { resize: vertical; min-height: 72px; }
@@ -1594,10 +1594,10 @@
   }
   .trust-option:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
   .trust-option:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
-  .trust-option.selected { border-color: var(--color-focus, #4db0ff); background: color-mix(in srgb, var(--color-focus, #4db0ff) 4%, transparent); }
+  .trust-option.selected { border-color: var(--color-focus); background: color-mix(in srgb, var(--color-focus) 4%, transparent); }
   .trust-radio {
     width: 18px;
     height: 18px;
@@ -1609,7 +1609,7 @@
     flex-shrink: 0;
     transition: border-color var(--transition-fast);
   }
-  .trust-option.selected .trust-radio { border-color: var(--color-focus, #4db0ff); }
+  .trust-option.selected .trust-radio { border-color: var(--color-focus); }
   .trust-radio-dot {
     width: 8px;
     height: 8px;
@@ -1617,8 +1617,8 @@
     background: transparent;
     transition: background var(--transition-fast);
   }
-  .trust-radio-dot.active { background: var(--color-focus, #4db0ff); }
-  .trust-option-body { display: flex; flex-direction: column; gap: var(--space-0, 2px); }
+  .trust-radio-dot.active { background: var(--color-focus); }
+  .trust-option-body { display: flex; flex-direction: column; gap: 2px; }
   .trust-option-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .trust-option-desc { font-size: var(--text-xs); color: var(--color-text-muted); }
   .trust-current {
@@ -1635,13 +1635,13 @@
   .trust-badge {
     font-size: var(--text-xs);
     font-weight: 500;
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
   }
-  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); }
-  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-blocked); }
+  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-link); }
   .trust-badge.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
   .trust-badge.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 
@@ -1649,7 +1649,7 @@
   .member-row { display: flex; align-items: center; gap: var(--space-3); }
   .member-avatar {
     width: 28px; height: 28px; border-radius: 50%;
-    background: var(--color-primary); color: var(--color-surface, #fff);
+    background: var(--color-primary); color: var(--color-text-inverse);
     display: flex; align-items: center; justify-content: center;
     font-size: var(--text-xs); font-weight: 700; flex-shrink: 0;
   }
@@ -1674,11 +1674,11 @@
     font-size: var(--text-xs);
     font-weight: 600;
     font-family: var(--font-mono);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
   }
   .policy-prefix-badge.builtin { background: var(--color-bg); color: var(--color-text-muted); border: 1px solid var(--color-border); }
-  .policy-prefix-badge.trust   { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .policy-prefix-badge.trust   { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-link); }
   .policy-prefix-badge.custom  { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
   .policy-row {
     display: flex;
@@ -1741,10 +1741,10 @@
   }
   .chip:hover { border-color: var(--color-border-strong); color: var(--color-text); }
   .chip:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
-  .chip.selected { background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent); border-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
+  .chip.selected { background: color-mix(in srgb, var(--color-focus) 12%, transparent); border-color: var(--color-focus); color: var(--color-focus); }
 
   /* Modal */
   .modal-backdrop {
@@ -1789,7 +1789,7 @@
     font-family: var(--font-body);
   }
   .target-select.narrow { width: auto; min-width: 120px; }
-  .target-select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .target-select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) {
     .budget-bar-fill,

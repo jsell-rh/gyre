@@ -632,7 +632,7 @@
   }
 
   .range-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -654,7 +654,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-sm);
@@ -666,10 +666,10 @@
   .apply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .error-banner {
-    background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 30%, transparent);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-warning, #d97706);
+    color: var(--color-warning);
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-3);
     display: flex;
@@ -689,7 +689,7 @@
     flex-direction: column;
     gap: var(--space-2);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
+    border-radius: var(--radius-lg);
     padding: var(--space-4);
     background: var(--color-surface);
   }
@@ -706,8 +706,8 @@
     margin: 0 0 var(--space-2) 0;
   }
 
-  .completed-icon { color: var(--color-success, #22c55e); }
-  .inprogress-icon { color: var(--color-warning, #f59e0b); }
+  .completed-icon { color: var(--color-success); }
+  .inprogress-icon { color: var(--color-warning); }
   .cross-icon { color: var(--color-text-secondary); }
   .exception-icon { color: var(--color-danger); }
 
@@ -749,16 +749,16 @@
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-link, #4db0ff);
+    color: var(--color-link);
     text-decoration: underline;
     text-underline-offset: 2px;
     transition: color var(--transition-fast);
   }
 
-  .entity-ref:hover { color: var(--color-link-hover, var(--color-link, #4db0ff)); }
+  .entity-ref:hover { color: var(--color-link-hover); }
   .agent-ref { color: var(--color-text-secondary); }
   .agent-ref:hover { color: var(--color-text); }
-  .mr-ref { color: var(--color-link, #4db0ff); }
+  .mr-ref { color: var(--color-link); }
 
   .item-detail {
     display: flex;
@@ -777,14 +777,14 @@
 
   .confidence-badge {
     font-size: var(--text-xs);
-    padding: var(--space-0, 1px) var(--space-1);
+    padding: 1px var(--space-1);
     border-radius: var(--radius-full);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
   }
 
-  .confidence-badge.confidence-high   { color: var(--color-success, #22c55e); }
-  .confidence-badge.confidence-medium { color: var(--color-warning, #f59e0b); }
+  .confidence-badge.confidence-high   { color: var(--color-success); }
+  .confidence-badge.confidence-medium { color: var(--color-warning); }
   .confidence-badge.confidence-low    { color: var(--color-danger); }
 
   .uncertainties {
@@ -792,9 +792,9 @@
     flex-direction: column;
     gap: var(--space-1);
     padding: var(--space-2) var(--space-3);
-    background: color-mix(in srgb, var(--color-warning, #f59e0b) 8%, transparent);
+    background: color-mix(in srgb, var(--color-warning) 8%, transparent);
     border-radius: var(--radius);
-    border-left: 3px solid var(--color-warning, #f59e0b);
+    border-left: 3px solid var(--color-warning);
     margin-left: calc(var(--space-2) + var(--text-sm));
   }
 
@@ -805,7 +805,7 @@
     font-size: var(--text-sm);
   }
 
-  .uncertainty-icon { color: var(--color-warning, #f59e0b); flex-shrink: 0; }
+  .uncertainty-icon { color: var(--color-warning); flex-shrink: 0; }
   .uncertainty-text { color: var(--color-text-secondary); font-style: italic; }
 
   .item-actions {
@@ -859,7 +859,7 @@
   .apply-btn:focus-visible,
   .entity-ref:focus-visible,
   .date-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -873,7 +873,7 @@
 
   .metrics-row {
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
+    border-radius: var(--radius-lg);
     padding: var(--space-4);
     background: var(--color-surface);
   }
@@ -908,7 +908,7 @@
 
   .chat-section {
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
+    border-radius: var(--radius-lg);
     padding: var(--space-4);
     background: var(--color-surface);
   }

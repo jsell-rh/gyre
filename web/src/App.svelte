@@ -809,7 +809,7 @@
     padding: 0 3px;
     background: var(--color-danger);
     color: var(--color-text-inverse);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     font-weight: 700;
     display: flex;
@@ -996,7 +996,7 @@
 
   .status-ws.connected .ws-dot {
     background: var(--color-success);
-    box-shadow: 0 0 4px color-mix(in srgb, var(--color-success, #22c55e) 50%, transparent);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--color-success) 50%, transparent);
   }
 
   .status-ws.error .ws-dot {

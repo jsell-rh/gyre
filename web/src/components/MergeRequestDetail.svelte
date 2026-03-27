@@ -921,7 +921,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
   }
 
@@ -1239,7 +1239,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
     flex-shrink: 0;
   }

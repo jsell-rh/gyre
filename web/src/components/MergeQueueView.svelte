@@ -437,7 +437,7 @@
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
-  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* Flow lanes */
   .flow-lanes {
@@ -491,7 +491,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
   }
 
@@ -656,7 +656,7 @@
     color: var(--color-danger);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     font-family: var(--font-body);
   }
   .cancel-btn-sm:hover:not(:disabled) {
@@ -690,7 +690,7 @@
   }
   .toggle-btn:last-child { border-right: none; }
   .toggle-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
-  .toggle-btn.active { background: var(--color-surface-elevated); color: var(--color-focus, #4db0ff); border-color: var(--color-focus, #4db0ff); font-weight: 600; }
+  .toggle-btn.active { background: var(--color-surface-elevated); color: var(--color-focus); border-color: var(--color-focus); font-weight: 600; }
 
   /* DAG view */
   .dag-list {
@@ -760,7 +760,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
   }
   .dag-free {
     font-size: var(--text-xs);
@@ -800,7 +800,7 @@
   .cancel-btn:focus-visible,
   .cancel-btn-sm:focus-visible,
   .toggle-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
