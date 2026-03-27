@@ -247,7 +247,7 @@
     white-space: nowrap;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     opacity: 0;
     pointer-events: none;
     transition: opacity var(--transition-fast);
@@ -273,5 +273,9 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-style: italic;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .avatar-wrap, .avatar-tooltip { transition: none; }
   }
 </style>

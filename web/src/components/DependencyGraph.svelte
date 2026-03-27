@@ -266,4 +266,8 @@
 
   .mono-sm { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); }
   .muted-sm { font-size: var(--text-sm); color: var(--color-text-muted); margin: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .close-btn { transition: none; }
+  }
 </style>

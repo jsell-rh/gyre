@@ -82,4 +82,8 @@
   .main-area.hidden {
     display: none;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .main-area { transition: none; }
+  }
 </style>

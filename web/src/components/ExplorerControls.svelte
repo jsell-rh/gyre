@@ -457,11 +457,11 @@
   /* Tab switcher (Architecture / Code) */
   .tab-switcher {
     display: flex;
-    gap: 2px;
+    gap: var(--space-1);
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
-    padding: 2px;
+    padding: var(--space-1);
   }
 
   .tab-btn {
@@ -612,19 +612,20 @@
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 0 2px;
+    padding: 0 var(--space-1);
     line-height: 1;
     transition: color var(--transition-fast);
   }
 
   .search-clear:hover { color: var(--color-text); }
+  .search-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 
   .search-hint {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     font-family: var(--font-mono);
     flex-shrink: 0;
   }
@@ -732,5 +733,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; opacity: 0.6; }
+    .tab-btn, .ctrl-btn, .search-clear { transition: none; }
   }
 </style>

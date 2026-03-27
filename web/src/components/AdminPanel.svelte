@@ -1618,7 +1618,7 @@
     transition: background var(--transition-fast);
   }
   .trust-radio-dot.active { background: var(--color-focus); }
-  .trust-option-body { display: flex; flex-direction: column; gap: 2px; }
+  .trust-option-body { display: flex; flex-direction: column; gap: var(--space-1); }
   .trust-option-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .trust-option-desc { font-size: var(--text-xs); color: var(--color-text-muted); }
   .trust-current {
@@ -1635,7 +1635,7 @@
   .trust-badge {
     font-size: var(--text-xs);
     font-weight: 500;
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
@@ -1674,7 +1674,7 @@
     font-size: var(--text-xs);
     font-weight: 600;
     font-family: var(--font-mono);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm);
   }
   .policy-prefix-badge.builtin { background: var(--color-bg); color: var(--color-text-muted); border: 1px solid var(--color-border); }

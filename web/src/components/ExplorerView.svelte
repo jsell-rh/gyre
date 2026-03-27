@@ -428,7 +428,7 @@
   .ws-repo-info {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     min-width: 0;
   }
 
@@ -699,7 +699,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 2px var(--space-2) 2px var(--space-3);
+    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
     background: color-mix(in srgb, var(--color-focus) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-focus) 30%, transparent);
     border-radius: var(--radius-full);
@@ -721,7 +721,7 @@
     cursor: pointer;
     font-size: var(--text-xs);
     line-height: 1;
-    padding: 0 2px;
+    padding: 0 var(--space-1);
     opacity: 0.7;
     transition: opacity var(--transition-fast);
   }

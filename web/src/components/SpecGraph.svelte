@@ -312,7 +312,7 @@
   .close-btn:hover { color: var(--color-text); }
   .close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
-  .panel-field { display: flex; flex-direction: column; gap: 2px; }
+  .panel-field { display: flex; flex-direction: column; gap: var(--space-1); }
   .field-label { font-size: var(--text-xs); color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .text-sm { font-size: var(--text-sm); color: var(--color-text); }
 
@@ -322,4 +322,8 @@
   .edge-row { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); }
   .edge-type { font-weight: 500; white-space: nowrap; }
   .mono-sm { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); word-break: break-all; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .close-btn { transition: none; }
+  }
 </style>
