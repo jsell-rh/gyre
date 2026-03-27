@@ -142,7 +142,7 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | Repo Lifecycle | Done | Repo entity extended with `status` (`active`/`archived`/`deleting`), `archived_at`; archive/unarchive/delete endpoints; archive side-effects (cancel tasks, stop agents, close MRs with `MRStatus::Reverted`); `TaskStatus::Cancelled`; user profile extended with notification prefs, API tokens, judgment ledger (migration 000036); migrations 000035–000037 |
 | UX Polish | Done | 48 batches (~750+ fixes): design tokens, ARIA, focus-visible, reduced-motion, keyboard nav, color-mix, space tokens, role=alert, aria-live, roving tabindex — WCAG 2.1 AA compliance sweep across all Svelte components |
 
-1080+ Rust + 434 vitest component + 50 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically. Migrations: 000001–000037.
+1257 Rust + 434 vitest component + 50 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically. Migrations: 000001–000037.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 
