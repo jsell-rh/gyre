@@ -296,16 +296,15 @@
 
     {:else if scope === 'repo'}
       <!-- Repo scope: progress bar list -->
-      <ul class="spec-list" role="listbox" aria-label="Specs">
+      <ul class="spec-list" role="list" aria-label="Specs">
         {#each filtered as spec (spec.path)}
           {@const pct = Math.round(progressFraction(spec.path) * 100)}
           {@const label = progressLabel(spec.path)}
           <li
             class="spec-row"
             class:selected={selectedPath === spec.path}
-            role="option"
             tabindex="0"
-            aria-selected={selectedPath === spec.path}
+            aria-current={selectedPath === spec.path ? 'true' : undefined}
             onclick={() => handleRowClick(spec)}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
@@ -494,7 +493,7 @@
   .pill {
     padding: var(--space-1) var(--space-3);
     border: 1px solid var(--color-border-strong);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     background: transparent;
     color: var(--color-text-secondary);
     font-family: var(--font-body);
@@ -510,7 +509,7 @@
   }
 
   .pill:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -569,7 +568,7 @@
   .sort-btn:hover { color: var(--color-text); }
 
   .sort-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -591,7 +590,7 @@
   }
 
   .specs-table tbody tr:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
@@ -657,7 +656,7 @@
   .spec-row.selected { background: color-mix(in srgb, var(--color-link) 6%, transparent); }
 
   .spec-row:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
@@ -696,15 +695,15 @@
   .progress-bar {
     height: 6px;
     background: var(--color-border);
-    border-radius: var(--radius-sm, 3px);
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
   .progress-fill {
     height: 100%;
     background: var(--color-success);
-    border-radius: var(--radius-sm, 3px);
-    transition: width var(--transition-slow, 0.3s);
+    border-radius: var(--radius-sm);
+    transition: width var(--transition-slow);
   }
 
   /* ── New spec modal body ─────────────────────────────────────────────────── */
@@ -773,9 +772,9 @@
   }
 
   .spec-editor:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   .modal-footer {
@@ -812,9 +811,9 @@
   }
 
   .field-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -844,16 +843,16 @@
   }
 
   .clear-filters-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
   /* ── Error banner ─────────────────────────────────────────────────────── */
   .error-banner {
-    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 30%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-danger, #ef4444);
+    color: var(--color-danger);
     font-size: var(--text-sm);
     padding: var(--space-3) var(--space-4);
     display: flex;
@@ -881,7 +880,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
