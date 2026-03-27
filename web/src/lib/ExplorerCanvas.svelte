@@ -607,9 +607,9 @@
       </button>
       {#if showRiskHeatmap}
         <span class="heatmap-legend">
-          <span class="hm-dot" style="background:#22c55e"></span>low
-          <span class="hm-dot" style="background:#eab308"></span>medium
-          <span class="hm-dot" style="background:#ef4444"></span>high
+          <span class="hm-dot" style="background:var(--color-success)"></span>low
+          <span class="hm-dot" style="background:var(--color-warning)"></span>medium
+          <span class="hm-dot" style="background:var(--color-danger)"></span>high
         </span>
       {/if}
 
@@ -661,6 +661,8 @@
           {@const ring = specLinkageOn ? specRingColor(node) : null}
           {@const scale = getNodeScale(node.id)}
           {@const opacity = encodedNodeOpacity(node)}
+          {@const nodeStroke = isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
+          {@const nodeStrokeWidth = isSelected || isHighlighted ? 2.5 : 1.5}
           <g class="graph-node" class:selected={isSelected} class:highlighted={isHighlighted}
             class:dimmed={isDimmed} class:spec-highlighted={isSpecHighlighted}
             data-node-id={node.id}
@@ -672,20 +674,16 @@
             <title>{getNodeTooltip(node)}</title>
             {#if shape === 'diamond'}
               <path d={diamondPath(0, 0, 22)} fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {:else if shape === 'ellipse'}
               <ellipse rx="28" ry="14" fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {:else if shape === 'hexagon'}
               <path d={hexPath(0, 0, 22)} fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {:else}
               <path d={rectPath(0, 0, 64, 28)} fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {/if}
             {#if ring}
               <circle class="spec-ring" r="36" fill="none" stroke={ring.color} stroke-width="2.5"
@@ -864,8 +862,8 @@
     display: flex; align-items: center; gap: var(--space-2);
     padding: var(--space-2) var(--space-4); font-size: var(--text-xs); flex-shrink: 0;
   }
-  .threshold-banner.info { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent); color: #60a5fa; }
-  .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: #fbbf24; }
+  .threshold-banner.info { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent); color: var(--color-info); }
+  .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: var(--color-warning); }
   .banner-action {
     margin-left: var(--space-2); background: transparent; border: 1px solid currentColor; color: inherit;
     border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
@@ -905,7 +903,7 @@
   }
   .tool-btn:hover { border-color: var(--color-focus); color: var(--color-text); }
   .tool-btn.active { background: color-mix(in srgb, var(--color-focus) 12%, transparent); border-color: var(--color-focus); color: var(--color-focus); }
-  .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: #eab308; color: #eab308; }
+  .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: var(--color-warning); color: var(--color-warning); }
 
   .layout-switcher {
     display: flex; align-items: center; gap: var(--space-1);
@@ -940,7 +938,7 @@
   .graph-area { flex: 1; display: flex; overflow: hidden; position: relative; }
   .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
   .graph-svg.panning { cursor: grabbing; }
-  .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
+  .graph-edge { stroke: var(--color-border-strong); stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
   .graph-node { cursor: pointer; }
   .graph-node:hover path, .graph-node:hover ellipse { filter: brightness(1.3); }
   .graph-node.selected path, .graph-node.selected ellipse { filter: brightness(1.4); }
