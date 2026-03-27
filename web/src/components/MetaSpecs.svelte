@@ -343,7 +343,7 @@
 
           {#if previewState === 'running'}
             <!-- Locked diff view -->
-            <div class="persona-diff" aria-label="Persona diff (read-only)">
+            <div class="persona-diff" role="region" aria-label="Persona diff (read-only)">
               {#each personaContent.split('\n') as line}
                 <div class="diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
               {/each}
@@ -437,9 +437,9 @@
                   ⚠ Preview unavailable — showing example layout only. Results are not based on real data.
                 </div>
               {/if}
-              <div class="impact-tabs">
-                <button class="impact-tab" class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
-                <button class="impact-tab" class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
+              <div class="impact-tabs" role="tablist">
+                <button class="impact-tab" role="tab" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
+                <button class="impact-tab" role="tab" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
               </div>
               {#if isSimulatedPreview}
                 <div class="impact-content impact-unavailable">
@@ -570,9 +570,9 @@
   <!-- Detail panel modal -->
   {#if detailSpec}
     <Modal title={detailSpec.title || detailSpec.path} onclose={() => detailSpec = null}>
-      <div class="detail-tabs">
-        <button class="detail-tab" class:active={detailTab === 'info'} onclick={() => detailTab = 'info'}>Info</button>
-        <button class="detail-tab" class:active={detailTab === 'content'} onclick={() => detailTab = 'content'}>Content</button>
+      <div class="detail-tabs" role="tablist">
+        <button class="detail-tab" role="tab" aria-selected={detailTab === 'info'} class:active={detailTab === 'info'} onclick={() => detailTab = 'info'}>Info</button>
+        <button class="detail-tab" role="tab" aria-selected={detailTab === 'content'} class:active={detailTab === 'content'} onclick={() => detailTab = 'content'}>Content</button>
       </div>
       {#if detailTab === 'info'}
         <div class="detail-info">
@@ -631,21 +631,21 @@
     max-width: 1400px;
   }
 
-  .view-header { margin-bottom: 1.5rem; }
-  .view-header h2 { margin: 0 0 0.25rem; font-size: 1.5rem; }
-  .subtitle { margin: 0; color: var(--color-text-muted, #888); font-size: 0.9rem; }
+  .view-header { margin-bottom: var(--space-6); }
+  .view-header h2 { margin: 0 0 0.25rem; font-size: var(--text-2xl); }
+  .subtitle { margin: 0; color: var(--color-text-muted, #888); font-size: var(--text-sm); }
 
   .repo-redirect {
-    padding: 1rem;
+    padding: var(--space-4);
     background: var(--color-surface-elevated, #1a1a1a);
     border: 1px solid var(--color-border, #333);
     border-radius: var(--radius, 6px);
     color: var(--color-text-muted, #888);
-    font-size: 0.9rem;
-    margin-bottom: 1rem;
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-4);
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   /* ── Filter pills ── */
@@ -667,11 +667,11 @@
   .catalog-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
   .catalog-table th {
     text-align: left;
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) 0.75rem;
     border-bottom: 2px solid var(--color-border, #333);
     color: var(--color-text-muted, #888);
     font-weight: 600;
-    font-size: 0.8rem;
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -805,7 +805,7 @@
   .impact-empty { font-size: 0.85rem; color: var(--color-text-muted, #888); }
 
   /* ── Detail panel ── */
-  .detail-tabs { display: flex; margin-bottom: 1rem; border-bottom: 1px solid var(--color-border, #333); }
+  .detail-tabs { display: flex; margin-bottom: var(--space-4); border-bottom: 1px solid var(--color-border, #333); }
   .detail-tab { padding: 0.4rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted, #888); cursor: pointer; font-size: var(--text-sm); font-family: var(--font-body, sans-serif); }
   .detail-tab.active { color: var(--color-text, #eee); border-bottom-color: var(--color-primary, #ee0000); }
   .detail-info { display: flex; flex-direction: column; gap: 0.6rem; }
@@ -819,7 +819,7 @@
   .blast-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   .blast-list li { display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem; padding: 0.3rem 0.5rem; background: var(--color-surface-elevated, #1a1a1a); border-radius: 4px; }
 
-  .mono { font-family: monospace; }
+  .mono { font-family: var(--font-mono, monospace); }
   .empty { color: var(--color-text-muted, #888); font-size: 0.88rem; margin: 0; }
   .error { color: var(--color-danger, #f55); font-size: 0.88rem; }
 

@@ -216,7 +216,7 @@
                     <span class="budget-pct budget-unknown">—</span>
                   {/if}
                 </div>
-                <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-valuenow={info?.budgetPct ?? 0} aria-valuemin="0" aria-valuemax="100">
+                <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-busy={info == null} aria-valuenow={info?.budgetPct ?? undefined} aria-valuemin="0" aria-valuemax="100">
                   <div
                     class="budget-bar-fill"
                     style="width: {info?.budgetPct ?? 0}%; background: {budgetBarColor(info?.budgetPct ?? null)}"

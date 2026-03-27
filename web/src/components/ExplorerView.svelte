@@ -497,7 +497,6 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
-    outline: none;
     min-width: 180px;
     max-width: 280px;
   }

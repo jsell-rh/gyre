@@ -531,7 +531,7 @@
     <Tabs tabs={REPO_TABS} bind:active={repoTab} />
   {/if}
 
-  <div class="admin-content" role="tabpanel" id="tabpanel-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}" aria-labelledby="tab-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}">
+  <div class="admin-content" role="tabpanel" id="tabpanel-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}" aria-labelledby="tab-{effectiveScope === 'tenant' ? tenantTab : effectiveScope === 'workspace' ? wsTab : repoTab}" aria-busy={loading}>
     {#if error}
       <div class="error-banner" role="alert">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
@@ -1261,7 +1261,17 @@
   <div class="modal-backdrop" role="presentation" onclick={() => computeModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Compute Target"
     bind:this={computeModalEl}
-    onkeydown={(e) => { if (e.key === 'Escape') computeModal = false; }}>
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { computeModal = false; return; }
+      if (e.key === 'Tab') {
+        const focusable = computeModalEl?.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable ?? []);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus(); } }
+        else { if (document.activeElement === last) { e.preventDefault(); first.focus(); } }
+      }
+    }}>
     <h3 class="modal-title">Add Compute Target</h3>
     <div class="form-field">
       <label class="form-label" for="ct-name">Name</label>
