@@ -75,7 +75,7 @@
       if (r.status === 'fulfilled') {
         next[id] = r.value;
       } else {
-        next[id] = { id, repoCount: 0, activeAgents: 0, budgetPct: null };
+        next[id] = { id, repoCount: 0, activeAgents: 0, budgetPct: null, error: true };
       }
     });
     enrichment = next;
@@ -177,8 +177,10 @@
                       <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
                     </svg>
                   </span>
-                  {#if info != null}
+                  {#if info != null && !info.error}
                     <span class="stat-val">{info.repoCount}</span>
+                  {:else if info?.error}
+                    <span class="stat-dash">&mdash;</span>
                   {:else}
                     <span class="stat-dash">…</span>
                   {/if}
@@ -193,8 +195,10 @@
                       <circle cx="12" cy="16" r="1" fill="currentColor"/>
                     </svg>
                   </span>
-                  {#if info != null}
+                  {#if info != null && !info.error}
                     <span class="stat-val">{info.activeAgents}</span>
+                  {:else if info?.error}
+                    <span class="stat-dash">&mdash;</span>
                   {:else}
                     <span class="stat-dash">…</span>
                   {/if}

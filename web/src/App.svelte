@@ -66,6 +66,10 @@
   });
 
   $effect(() => {
+    document.body.style.overflow = shortcutsOpen ? 'hidden' : '';
+  });
+
+  $effect(() => {
     if (userMenuOpen) {
       tick().then(() => userMenuEl?.querySelector('[role="menuitem"]')?.focus());
     }
@@ -499,6 +503,11 @@
               aria-label="User menu"
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}
+              onfocusout={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget)) {
+                  userMenuOpen = false;
+                }
+              }}
             >
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
                 Profile
@@ -523,7 +532,7 @@
           {#if currentNav === 'inbox'}
             <Inbox workspaceId={scope.workspaceId} scope={scope.type} />
           {:else if currentNav === 'briefing'}
-            <Briefing workspaceId={scope.workspaceId} workspaceName={currentWorkspace?.name} {trustLevel} />
+            <Briefing workspaceId={scope.workspaceId} workspaceName={currentWorkspace?.name} {trustLevel} scope={scope.type} />
           {:else if currentNav === 'explorer'}
             <ExplorerView {scope} />
           {:else if currentNav === 'specs'}
@@ -610,7 +619,7 @@
 
 <!-- Keyboard shortcut overlay -->
 {#if shortcutsOpen}
-  <div class="shortcuts-overlay" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => {
+  <div class="shortcuts-overlay" role="presentation" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => {
     if (e.key === 'Escape') { shortcutsOpen = false; return; }
     if (e.key === 'Tab' && shortcutsModalEl) {
       const focusable = Array.from(shortcutsModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'));

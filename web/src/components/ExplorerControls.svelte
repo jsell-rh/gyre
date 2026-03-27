@@ -56,9 +56,6 @@
   let currentTime = $state(0);
   const SPEEDS = ['0.25x', '0.5x', '1x', '2x', '4x'];
 
-  // Code sub-tab (repo scope)
-  let codeSubTab = $state('branches');
-
   onMount(() => {
     if (workspaceId) loadSavedViews();
     // Global '/' shortcut to focus search
@@ -336,6 +333,12 @@
         bind:this={searchInputEl}
         value={searchQuery}
         oninput={onSearchInput}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') {
+            e.stopPropagation();
+            if (searchQuery) { clearSearch(); } else { searchInputEl?.blur(); }
+          }
+        }}
         aria-label="Search nodes"
       />
       {#if searchQuery}
@@ -521,6 +524,11 @@
 
   .ctrl-select:focus {
     border-color: var(--color-primary);
+  }
+
+  .ctrl-select:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 
   .ctrl-select option:disabled {

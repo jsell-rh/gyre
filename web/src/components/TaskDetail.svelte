@@ -44,7 +44,10 @@
     loading = false;
   }
 
-  $effect(() => { load(); });
+  $effect(() => {
+    const _id = task.id; // explicit dependency — prevents re-fire on unrelated reactive updates
+    load();
+  });
 
   function fmtDate(ts) {
     if (!ts) return '—';
@@ -60,9 +63,9 @@
   };
 </script>
 
-<div class="task-detail">
+<div class="task-detail" aria-busy={loading}>
   <div class="detail-header">
-    <Button variant="secondary" onclick={onBack}>← Back</Button>
+    <Button variant="secondary" onclick={onBack} disabled={!onBack} aria-label="Go back to task list">← Back</Button>
     <div class="header-meta">
       {#if detail}
         <Badge value={detail.status} color={STATUS_COLORS[detail.status]} />
@@ -82,6 +85,9 @@
       </div>
     {:else if error}
       <EmptyState title="Failed to load task" description={error} />
+      <div class="retry-area">
+        <Button variant="secondary" onclick={load}>Retry</Button>
+      </div>
     {:else if detail}
       <h1 class="task-title">{detail.title}</h1>
 
@@ -355,6 +361,12 @@
     padding: 0;
     text-decoration: underline;
     text-underline-offset: 2px;
+  }
+
+  .retry-area {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-4);
   }
 
   .link-btn:hover { opacity: 0.8; }
