@@ -12,6 +12,7 @@
   let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
   let scopeObjects = $state([]);
+  let deleteConfirmId = $state(null);
 
   $effect(() => { load(); });
 
@@ -164,7 +165,7 @@
             {#if persona.approval_status !== 'Approved'}
               <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)} aria-label="Approve persona {persona.name}">Approve</button>
             {/if}
-            <button class="btn-danger-sm" onclick={() => { if (confirm('Delete this persona? This cannot be undone.')) deletePersona(persona.id); }} aria-label="Delete persona {persona.name}">Delete</button>
+            <button class="btn-danger-sm" onclick={() => (deleteConfirmId = persona.id)} aria-label="Delete persona {persona.name}">Delete</button>
           </div>
         </div>
       {/each}
@@ -220,6 +221,16 @@
     </div>
   </div>
 </Modal>
+
+{#if deleteConfirmId}
+  <Modal open={true} title="Delete Persona" onclose={() => (deleteConfirmId = null)}>
+    <p>Delete this persona? This cannot be undone.</p>
+    {#snippet footer()}
+      <button class="btn-secondary" onclick={() => (deleteConfirmId = null)}>Cancel</button>
+      <button class="btn-danger-sm" onclick={() => { deletePersona(deleteConfirmId); deleteConfirmId = null; }}>Delete</button>
+    {/snippet}
+  </Modal>
+{/if}
 
 <style>
   .persona-catalog {

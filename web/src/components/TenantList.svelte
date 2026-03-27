@@ -11,6 +11,7 @@
   let form = $state({ name: '', oidc_issuer: '' });
   let saving = $state(false);
   let deleting = $state(null);
+  let deleteConfirmId = $state(null);
 
   $effect(() => { load(); });
 
@@ -43,7 +44,7 @@
   }
 
   async function deleteTenant(id) {
-    if (!confirm('Delete this tenant? This cannot be undone.')) return;
+    deleteConfirmId = null;
     deleting = id;
     try {
       await api.deleteTenant(id);
@@ -86,7 +87,7 @@
             </div>
             <button
               class="btn-danger-sm"
-              onclick={() => deleteTenant(t.id)}
+              onclick={() => (deleteConfirmId = t.id)}
               disabled={deleting === t.id}
               aria-label="Delete tenant {t.name}"
             >
@@ -122,6 +123,18 @@
     </button>
   {/snippet}
 </Modal>
+
+{#if deleteConfirmId}
+  <Modal open={true} title="Delete Tenant" onclose={() => (deleteConfirmId = null)}>
+    <p>Delete this tenant? This cannot be undone.</p>
+    {#snippet footer()}
+      <button class="btn-secondary" onclick={() => (deleteConfirmId = null)}>Cancel</button>
+      <button class="btn-danger-sm" onclick={() => deleteTenant(deleteConfirmId)} disabled={deleting}>
+        {deleting ? 'Deleting…' : 'Delete'}
+      </button>
+    {/snippet}
+  </Modal>
+{/if}
 
 <style>
   .tenant-list { padding: var(--space-6); }
