@@ -280,7 +280,7 @@
     {:else if visibleNotifications.length === 0}
       <EmptyState title="All caught up!" description="No pending notifications." />
     {:else}
-      <div class="inbox-list" role="list" aria-live="polite" aria-label="Notifications">
+      <div class="inbox-list" role="list" aria-label="Notifications">
         {#each visibleNotifications as n (n.id)}
           {@const body = getBody(n)}
           {@const isExpanded = expandedId === n.id}
@@ -598,9 +598,9 @@
     min-width: 22px;
     height: 22px;
     padding: 0 var(--space-1);
-    background: var(--color-focus, #4db0ff);
-    color: var(--color-text-inverse, #fff);
-    border-radius: 999px;
+    background: var(--color-focus);
+    color: var(--color-text-inverse);
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     font-weight: 700;
   }
@@ -634,7 +634,7 @@
   .inbox-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
+    border-radius: var(--radius-lg);
     transition: border-color var(--transition-fast);
     overflow: hidden;
   }
@@ -664,10 +664,11 @@
     font-family: var(--font-body);
     color: var(--color-text);
     gap: var(--space-3);
+    transition: background var(--transition-fast);
   }
 
   .card-header:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -690,7 +691,7 @@
     font-weight: 700;
     flex-shrink: 0;
     background: var(--color-danger);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     font-family: var(--font-mono);
   }
 
@@ -760,7 +761,7 @@
     margin: 0;
     padding: var(--space-3);
     background: var(--color-surface);
-    border-left: 3px solid var(--color-focus, #4db0ff);
+    border-left: 3px solid var(--color-focus);
     border-radius: 0 var(--radius) var(--radius) 0;
     font-size: var(--text-sm);
     color: var(--color-text);
@@ -805,11 +806,11 @@
   }
 
   .ref-link:hover {
-    opacity: 0.8;
+    color: var(--color-link-hover);
   }
 
   .ref-link:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -828,10 +829,10 @@
   }
 
   .error-banner {
-    background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-warning, #f59e0b) 30%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-warning, #d97706);
+    color: var(--color-danger);
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-3);
     display: flex;
@@ -859,7 +860,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -870,11 +871,11 @@
   }
 
   .action-feedback.success {
-    color: var(--color-success, #22c55e);
+    color: var(--color-success);
   }
 
   .action-feedback.failure {
-    color: var(--color-danger, #ef4444);
+    color: var(--color-danger);
   }
 
   .coming-soon-note {

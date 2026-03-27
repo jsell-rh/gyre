@@ -114,7 +114,8 @@
   --text-muted:    var(--color-text-secondary);
   --text-dim:      var(--color-text-muted);
   --accent:        var(--color-link);
-  --accent-muted:  color-mix(in srgb, var(--color-focus, #4db0ff) 10%, transparent);
+  --accent-muted:  color-mix(in srgb, var(--color-focus) 10%, transparent);
+  --color-text-inverse: #ffffff;
 }
 
 /* ============================================================

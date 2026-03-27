@@ -161,7 +161,7 @@ describe('SpecDashboard', () => {
   // ── Repo scope: progress bars ─────────────────────────────────────────────
   it('shows spec list (not table) for repo scope', async () => {
     render(SpecDashboard, { props: { scope: 'repo', repoId: 'repo-1' } });
-    await waitFor(() => expect(screen.getByRole('listbox')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('list', { name: /Specs/ })).toBeTruthy());
     expect(screen.queryByRole('table')).toBeNull();
   });
 
@@ -178,9 +178,9 @@ describe('SpecDashboard', () => {
 
   it('repo spec rows show status icons', async () => {
     render(SpecDashboard, { props: { scope: 'repo', repoId: 'repo-1' } });
-    await waitFor(() => expect(screen.getByRole('listbox')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('list', { name: /Specs/ })).toBeTruthy());
     // Approved spec should show ✓
-    const rows = screen.getAllByRole('option');
+    const rows = screen.getAllByRole('listitem');
     const specRowTexts = rows.map((r) => r.textContent ?? '');
     expect(specRowTexts.some((t) => t.includes('✓'))).toBe(true);
   });

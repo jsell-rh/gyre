@@ -1342,7 +1342,7 @@
     font-family: var(--font-body);
     transition: border-color var(--transition-fast);
   }
-  .refresh-btn:hover:not(:disabled) { border-color: var(--color-border-strong); }
+  .refresh-btn:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-text); }
   .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .admin-content {
@@ -1469,7 +1469,7 @@
     transition: opacity var(--transition-fast);
     white-space: nowrap;
   }
-  .primary-btn:hover { opacity: 0.88; }
+  .primary-btn:hover { background: var(--color-primary-hover); }
   .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .secondary-btn {
@@ -1570,8 +1570,8 @@
   .budget-header { display: flex; justify-content: space-between; align-items: baseline; }
   .budget-label { font-size: var(--text-sm); color: var(--color-text-muted); }
   .budget-amount { font-size: var(--text-lg); font-weight: 600; font-family: var(--font-display); color: var(--color-text); }
-  .budget-bar-track { height: 8px; background: var(--color-surface-elevated); border-radius: var(--radius-sm, 4px); overflow: hidden; }
-  .budget-bar-fill { height: 100%; background: var(--color-success); border-radius: var(--radius-sm, 4px); transition: width var(--transition-normal); }
+  .budget-bar-track { height: 8px; background: var(--color-surface-elevated); border-radius: var(--radius-sm); overflow: hidden; }
+  .budget-bar-fill { height: 100%; background: var(--color-success); border-radius: var(--radius-sm); transition: width var(--transition-normal); }
   .budget-bar-fill.warning { background: var(--color-warning); }
   .budget-bar-fill.danger  { background: var(--color-danger); }
   .budget-pct { font-size: var(--text-xs); color: var(--color-text-muted); margin: 0; }
