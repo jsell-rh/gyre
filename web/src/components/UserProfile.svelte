@@ -332,7 +332,9 @@
                 <Badge variant={notifColor(notif.notification_type)} value={notif.notification_type ?? 'info'} />
                 <span class="notif-time muted">{rel(notif.created_at)}</span>
                 {#if !notif.read}
-                  <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label="Mark as read">✓</button>
+                  <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label="Mark as read">
+                    <span aria-hidden="true">✓</span>
+                  </button>
                 {/if}
               </div>
               <p class="notif-msg">{notif.message ?? notif.title ?? ''}</p>
@@ -394,8 +396,8 @@
     background: var(--color-danger);
     color: var(--color-surface, #fff);
     border-radius: 999px;
-    font-size: 9px;
-    padding: 0 4px;
+    font-size: var(--text-xs);
+    padding: 0 var(--space-1);
     min-width: 14px;
     text-align: center;
   }
@@ -544,7 +546,8 @@
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 1px 6px;
+    padding: var(--space-0, 2px) var(--space-1);
+    transition: color var(--transition-fast), border-color var(--transition-fast);
   }
   .mark-read-btn:hover { color: var(--color-success); border-color: var(--color-success); }
 
@@ -559,5 +562,11 @@
   .pref-checkbox:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mark-read-btn { transition: none; }
   }
 </style>

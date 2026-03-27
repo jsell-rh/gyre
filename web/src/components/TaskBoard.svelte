@@ -151,7 +151,7 @@
       {/each}
     </div>
   {:else if error}
-    <div class="error-msg">
+    <div class="error-msg" role="alert">
       <p>Error: {error}</p>
       <button class="btn-retry" onclick={() => { error = null; loadTasks(); }}>Retry</button>
     </div>
@@ -191,10 +191,10 @@
                   </div>
                 {/if}
                 {#if task.pr_link}
-                  <a class="pr-link" href={task.pr_link} target="_blank" rel="noreferrer">PR ↗</a>
+                  <a class="pr-link" href={task.pr_link} target="_blank" rel="noreferrer">PR ↗<span class="sr-only"> (opens in new tab)</span></a>
                 {/if}
                 {#if task.spec_path}
-                  <span class="spec-chip" title={task.spec_path}>📋 spec</span>
+                  <span class="spec-chip" title={task.spec_path}><span aria-hidden="true">📋</span> spec</span>
                 {/if}
               </div>
             {:else}
@@ -320,7 +320,7 @@
   .col-count {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 0.1rem 0.45rem;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: 99px;
     background: var(--color-surface-elevated);
     color: var(--color-text-secondary);
@@ -386,11 +386,11 @@
   .label-pills { display: flex; gap: var(--space-1); flex-wrap: wrap; }
 
   .label-pill {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    padding: 0.05rem 0.4rem;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -409,7 +409,7 @@
     border: 1px solid var(--color-primary, #58a6ff);
     color: var(--color-primary, #58a6ff);
     border-radius: var(--radius-full);
-    padding: 1px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     cursor: default;
   }
 
@@ -442,5 +442,16 @@
   .filter-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  .btn-retry:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .task-card { transition: none; }
   }
 </style>
