@@ -657,7 +657,7 @@
   }
 
   .ctrl-ask::placeholder { color: var(--color-text-muted); }
-  .ctrl-ask:disabled { opacity: 0.6; }
+  .ctrl-ask:disabled { opacity: 0.6; cursor: not-allowed; }
 
   .ask-btn {
     border: none;

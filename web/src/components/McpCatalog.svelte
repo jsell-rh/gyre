@@ -381,4 +381,15 @@
     white-space: pre;
     line-height: 1.6;
   }
+  .tool-header:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .raw-schema-toggle:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
 </style>

@@ -44,7 +44,7 @@
   }
 </script>
 
-<div class="workspace-list">
+<div class="workspace-list" aria-busy={loading}>
   <div class="list-header">
     <div>
       <h2>Workspaces</h2>

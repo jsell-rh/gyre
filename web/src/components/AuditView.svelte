@@ -111,7 +111,7 @@
   }
 </script>
 
-<div class="audit-view">
+<div class="audit-view" aria-busy={loading}>
   <div class="view-header">
     <div class="header-left">
       <h2>Audit Events</h2>
