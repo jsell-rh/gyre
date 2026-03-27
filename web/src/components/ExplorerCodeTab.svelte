@@ -231,7 +231,7 @@
           </thead>
           <tbody>
             {#each filteredCommits as commit}
-              <tr class="table-row" tabindex="0" role="button" aria-label="Commit {commit.sha ?? commit.id ?? ''}">
+              <tr class="table-row" aria-label="Commit {commit.sha ?? commit.id ?? ''}">
                 <td class="mono">{(commit.sha ?? commit.id ?? '').slice(0, 7)}</td>
                 <td class="commit-msg">{commit.message ?? commit.summary ?? '—'}</td>
                 <td class="secondary">{commit.author ?? commit.author_name ?? '—'}</td>
