@@ -516,5 +516,11 @@
 
   @media (prefers-reduced-motion: reduce) {
     .budget-bar-fill { transition: none; }
+    .ws-filter,
+    .enter-btn,
+    .btn-secondary,
+    .retry-btn {
+      transition: none;
+    }
   }
 </style>

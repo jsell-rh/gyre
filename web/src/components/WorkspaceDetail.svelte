@@ -238,14 +238,14 @@
           {/if}
         </div>
       {:else}
-        <EmptyState title="No budget data available." />
+        <EmptyState title="No budget data available." description="Budget information is not configured for this workspace." />
       {/if}
     </div>
 
   {:else if activeTab === 'repos'}
     <div class="tab-body">
       {#if repos.length === 0}
-        <EmptyState title="No repos in this workspace." />
+        <EmptyState title="No repos in this workspace." description="Add repositories to start tracking work here." />
       {:else}
         <table class="data-table">
           <thead>
@@ -273,7 +273,7 @@
   {:else if activeTab === 'members'}
     <div class="tab-body">
       {#if members.length === 0}
-        <EmptyState title="No members in this workspace." />
+        <EmptyState title="No members in this workspace." description="Members can be added from the admin panel." />
       {:else}
         <table class="data-table">
           <thead>
@@ -295,7 +295,7 @@
   {:else if activeTab === 'teams'}
     <div class="tab-body">
       {#if teams.length === 0}
-        <EmptyState title="No teams in this workspace." />
+        <EmptyState title="No teams in this workspace." description="Teams can be added from the admin panel." />
       {:else}
         <div class="teams-grid">
           {#each teams as team}
@@ -434,7 +434,7 @@
   .repo-link-btn {
     background: none;
     border: none;
-    color: var(--color-primary);
+    color: var(--color-link);
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);

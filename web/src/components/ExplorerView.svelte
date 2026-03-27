@@ -394,7 +394,7 @@
   }
 
   .ws-repo-card:hover {
-    border-color: var(--color-primary);
+    border-color: var(--color-focus, #4db0ff);
     background: var(--color-surface-elevated);
   }
 
@@ -438,7 +438,7 @@
 
   .ws-repo-explore {
     font-size: var(--text-sm);
-    color: var(--color-primary);
+    color: var(--color-link);
     flex-shrink: 0;
     font-weight: 500;
   }
@@ -671,7 +671,7 @@
     width: 12px;
     height: 12px;
     border: 2px solid var(--color-border-strong);
-    border-top-color: var(--color-primary);
+    border-top-color: var(--color-focus, #4db0ff);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
@@ -687,11 +687,11 @@
     align-items: center;
     gap: var(--space-2);
     padding: 2px var(--space-2) 2px var(--space-3);
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
     border-radius: 999px;
     font-size: var(--text-xs);
-    color: var(--color-primary);
+    color: var(--color-focus, #4db0ff);
     font-family: var(--font-mono);
   }
 

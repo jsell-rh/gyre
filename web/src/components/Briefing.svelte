@@ -623,6 +623,10 @@
     background-size: 10px;
   }
 
+  .range-select:hover {
+    border-color: var(--color-border-strong);
+  }
+
   .range-select:focus:not(:focus-visible) {
     outline: none;
   }

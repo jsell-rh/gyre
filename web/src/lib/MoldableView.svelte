@@ -272,14 +272,14 @@
             <div class="list-empty-concept">
               <EmptyState
                 title="No nodes matching '{conceptQuery}'"
-                message="Try a shorter term or check spelling."
+                description="Try a shorter term or check spelling."
               />
             </div>
           {:else if filteredNodes.length === 0 && !conceptFilterIds}
             <div class="list-empty-concept">
               <EmptyState
                 title="No graph data yet"
-                message="Push code to trigger graph extraction."
+                description="Push code to trigger graph extraction."
               />
             </div>
           {:else}
@@ -352,7 +352,7 @@
           <div class="timeline-empty">
             <EmptyState
               title="No architectural changes recorded yet."
-              message={repoId ? "Push code to trigger graph extraction and populate the timeline." : "Select a repository above to view its architectural timeline."}
+              description={repoId ? "Push code to trigger graph extraction and populate the timeline." : "Select a repository above to view its architectural timeline."}
             />
           </div>
         {:else if timelineLoading}
@@ -649,8 +649,8 @@
   .spec-tag {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 8%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-sm);
   }
@@ -785,8 +785,8 @@
   .tl-node-spec {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 8%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-sm);
     flex-shrink: 0;
@@ -938,9 +938,12 @@
 
   @media (prefers-reduced-motion: reduce) {
     .timeline-spinner { animation: none; border-color: var(--color-border); border-top-color: var(--color-text-muted); }
+    .view-tab,
     .tl-node-row,
     .list-row,
     .marker-pip,
-    .now-btn { transition: none; }
+    .now-btn,
+    .sort-btn,
+    .filter-select { transition: none; }
   }
 </style>

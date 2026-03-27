@@ -396,7 +396,7 @@
         onblur={() => { pathTouched = true; }}
       />
       {#if pathTouched && !newSpecPath.trim()}
-        <span id="path-error" style="color: var(--color-danger); font-size: var(--text-xs);">Path is required</span>
+        <span id="path-error" role="alert" style="color: var(--color-danger); font-size: var(--text-xs);">Path is required</span>
       {/if}
       <label class="field-label" for="new-spec-content">Content</label>
       <textarea
@@ -511,9 +511,9 @@
   }
 
   .pill.active {
-    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
-    border-color: var(--color-primary);
-    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-link) 12%, transparent);
+    border-color: var(--color-link);
+    color: var(--color-link);
     font-weight: 500;
   }
 
@@ -591,7 +591,7 @@
   }
 
   .specs-table tr.selected td {
-    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+    background: color-mix(in srgb, var(--color-link) 6%, transparent);
   }
 
   .col-path { max-width: 240px; }
@@ -645,7 +645,7 @@
 
   .spec-row:hover { background: var(--color-surface-elevated); }
 
-  .spec-row.selected { background: color-mix(in srgb, var(--color-primary) 6%, transparent); }
+  .spec-row.selected { background: color-mix(in srgb, var(--color-link) 6%, transparent); }
 
   .spec-row .spec-path {
     flex: 1;
@@ -869,5 +869,19 @@
   .retry-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pill,
+    .sort-btn,
+    .specs-table tr,
+    .spec-row,
+    .progress-fill,
+    .spec-editor,
+    .field-input,
+    .clear-filters-btn {
+      transition: none;
+      animation: none;
+    }
   }
 </style>
