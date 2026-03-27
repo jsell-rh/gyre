@@ -281,8 +281,8 @@
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm, 3px);
-    padding: var(--space-0, 2px) var(--space-1);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-1);
     font-weight: 500;
   }
 
@@ -292,8 +292,8 @@
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm, 3px);
-    padding: var(--space-0, 2px) var(--space-1);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-1);
   }
 
   .repo-url {
@@ -328,7 +328,7 @@
   }
 
   .form-input:focus:not(:focus-visible) { outline: none; }
-  .form-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .form-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .error-msg {
     padding: var(--space-8);
