@@ -173,7 +173,16 @@
 
 <div class="moldable-view">
   <!-- View switcher tabs -->
-  <div class="view-tabs" role="tablist" aria-label="View mode">
+  <div class="view-tabs" role="tablist" aria-label="View mode"
+    onkeydown={(e) => {
+      const views = ['graph', 'list', 'timeline', 'flow'];
+      const idx = views.indexOf(activeView);
+      if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % views.length; activeView = views[ni]; document.getElementById('tab-' + views[ni])?.focus(); }
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx - 1 + views.length) % views.length; activeView = views[ni]; document.getElementById('tab-' + views[ni])?.focus(); }
+      if (e.key === 'Home') { e.preventDefault(); activeView = views[0]; document.getElementById('tab-' + views[0])?.focus(); }
+      if (e.key === 'End')  { e.preventDefault(); activeView = views[views.length - 1]; document.getElementById('tab-' + views[views.length - 1])?.focus(); }
+    }}
+  >
     <button
       class="view-tab"
       id="tab-graph"
@@ -181,6 +190,7 @@
       role="tab"
       aria-selected={activeView === 'graph'}
       aria-controls="tabpanel-graph"
+      tabindex={activeView === 'graph' ? 0 : -1}
       onclick={() => (activeView = 'graph')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -196,6 +206,7 @@
       role="tab"
       aria-selected={activeView === 'list'}
       aria-controls="tabpanel-list"
+      tabindex={activeView === 'list' ? 0 : -1}
       onclick={() => (activeView = 'list')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -211,6 +222,7 @@
       role="tab"
       aria-selected={activeView === 'timeline'}
       aria-controls="tabpanel-timeline"
+      tabindex={activeView === 'timeline' ? 0 : -1}
       onclick={() => (activeView = 'timeline')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -225,6 +237,7 @@
       role="tab"
       aria-selected={activeView === 'flow'}
       aria-controls="tabpanel-flow"
+      tabindex={activeView === 'flow' ? 0 : -1}
       onclick={() => (activeView = 'flow')}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">

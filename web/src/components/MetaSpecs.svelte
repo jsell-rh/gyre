@@ -120,7 +120,7 @@
       specs = Array.isArray(all) ? all : [];
       // Auto-select first if nothing selected
       if (specs.length > 0 && !selected) {
-        selectSpec(specs[0]);
+        selectSpec(specs[0], true);
       }
     } catch (e) {
       error = e.message;
@@ -128,7 +128,10 @@
     loading = false;
   }
 
-  function selectSpec(spec) {
+  function selectSpec(spec, force = false) {
+    if (!force && editDirty && selected && selected.id !== spec.id) {
+      if (!confirm('You have unsaved changes. Discard them?')) return;
+    }
     selected = spec;
     editContent = spec.prompt || '';
     editDirty = false;
@@ -246,7 +249,7 @@
       specs = [created, ...specs];
       createMode = false;
       createForm = { kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false };
-      selectSpec(created);
+      selectSpec(created, true);
       toastSuccess('Created "' + created.name + '" — now pending review');
     } catch (e) {
       toastError('Create failed: ' + (e?.message ?? 'unknown error'));
@@ -262,7 +265,7 @@
       specs = specs.filter(s => s.id !== deleteTarget.id);
       if (selected?.id === deleteTarget.id) {
         selected = specs.length > 0 ? specs[0] : null;
-        if (selected) selectSpec(selected);
+        if (selected) selectSpec(selected, true);
       }
       deleteTarget = null;
       toastSuccess('Deleted');

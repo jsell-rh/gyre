@@ -271,18 +271,33 @@
 
     <!-- Architecture / Code tab switcher — only shown when a repo is selected -->
     {#if selectedRepoId}
-      <div class="explorer-tabs" role="tablist" aria-label="Explorer view">
+      <div class="explorer-tabs" role="tablist" aria-label="Explorer view"
+        onkeydown={(e) => {
+          const tabs = ['architecture', 'code'];
+          const idx = tabs.indexOf(explorerTab);
+          if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+            e.preventDefault();
+            const ni = (idx + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+            explorerTab = tabs[ni];
+            document.getElementById('explorer-tab-' + tabs[ni])?.focus();
+          }
+        }}
+      >
         <button
           class="explorer-tab-btn {explorerTab === 'architecture' ? 'active' : ''}"
           role="tab"
+          id="explorer-tab-architecture"
           aria-selected={explorerTab === 'architecture'}
+          tabindex={explorerTab === 'architecture' ? 0 : -1}
           onclick={() => { explorerTab = 'architecture'; }}
           type="button"
         >Architecture</button>
         <button
           class="explorer-tab-btn {explorerTab === 'code' ? 'active' : ''}"
           role="tab"
+          id="explorer-tab-code"
           aria-selected={explorerTab === 'code'}
+          tabindex={explorerTab === 'code' ? 0 : -1}
           onclick={() => { explorerTab = 'code'; }}
           type="button"
         >Code</button>
