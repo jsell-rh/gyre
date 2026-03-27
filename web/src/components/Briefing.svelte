@@ -672,6 +672,10 @@
     color: var(--color-warning, #d97706);
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-3);
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
   }
 
   .skeleton-stack {
@@ -773,7 +777,7 @@
 
   .confidence-badge {
     font-size: var(--text-xs);
-    padding: 1px 6px;
+    padding: var(--space-0, 1px) var(--space-1);
     border-radius: 999px;
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);

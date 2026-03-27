@@ -65,6 +65,7 @@
   let newGateCmd = $state('');
   let creatingGate = $state(false);
   let deletingGateId = $state(null);
+  let confirmDeleteGate = $state(null);
   const GATE_TYPES = ['TestCommand', 'LintCommand', 'AgentReview', 'AgentValidation', 'RequiredApprovals'];
   const BUILTIN_PUSH_GATES = ['conventional-commit', 'task-ref', 'no-em-dash'];
 
@@ -336,12 +337,11 @@
   }
 
   async function deleteGate(gateId) {
-    const gate = gates.find(g => g.id === gateId);
-    if (!confirm(`Delete gate "${gate?.name ?? gateId}"? This cannot be undone.`)) return;
     deletingGateId = gateId;
     try {
       await api.deleteRepoGate(repo.id, gateId);
       gates = gates.filter(g => g.id !== gateId);
+      confirmDeleteGate = null;
       toastSuccess('Gate deleted.');
     } catch (e) {
       toastError(e.message);
@@ -433,7 +433,10 @@
 
   <div class="tab-content" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}" tabindex="0">
     {#if error}
-      <div class="error-msg" role="alert">Error: {error}</div>
+      <div class="error-msg" role="alert">
+        Error: {error}
+        <button class="retry-btn" onclick={() => { error = null; if (activeTab === 'commits') loadCommits(selectedBranch); else loadBranches(); }}>Retry</button>
+      </div>
     {:else if loading && (activeTab === 'branches' || activeTab === 'commits')}
       <Skeleton lines={8} height="2.5rem" />
     {:else if activeTab === 'branches'}
@@ -552,7 +555,10 @@
 
     {:else if activeTab === 'activity'}
       {#if activityError}
-        <div class="error-msg" role="alert">Error: {activityError}</div>
+        <div class="error-msg" role="alert">
+          Error: {activityError}
+          <button class="retry-btn" onclick={() => { activityError = null; loadActivity(); }}>Retry</button>
+        </div>
       {:else if hotFilesLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else}
@@ -610,7 +616,10 @@
       {#if policyLoading}
         <Skeleton lines={8} height="2.5rem" />
       {:else if policyError}
-        <div class="error-msg" role="alert">Error: {policyError}</div>
+        <div class="error-msg" role="alert">
+          Error: {policyError}
+          <button class="retry-btn" onclick={() => { policyError = null; loadPolicy(); }}>Retry</button>
+        </div>
       {:else}
         <div class="policy-section">
           <h3 class="section-title">Spec Policy</h3>
@@ -685,7 +694,10 @@
 
     {:else if activeTab === 'gates'}
       {#if gatesError}
-        <div class="error-msg" role="alert">Error: {gatesError}</div>
+        <div class="error-msg" role="alert">
+          Error: {gatesError}
+          <button class="retry-btn" onclick={() => { gatesError = null; loadGates(); }}>Retry</button>
+        </div>
       {:else if gatesLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else}
@@ -728,14 +740,35 @@
                   <td><Badge value={gate.gate_type ?? gate.kind ?? '—'} /></td>
                   <td class="secondary-cell mono">{gate.command ?? gate.config?.command ?? '—'}</td>
                   <td>
-                    <button
-                      class="gate-del-btn"
-                      onclick={() => deleteGate(gate.id)}
-                      disabled={deletingGateId === gate.id}
-                      aria-label="Delete gate {gate.name}"
-                    >
-                      {deletingGateId === gate.id ? '…' : 'Delete'}
-                    </button>
+                    {#if confirmDeleteGate === gate.id}
+                      <span class="confirm-delete-inline">
+                        <span class="confirm-text">Are you sure?</span>
+                        <button
+                          class="gate-del-btn confirm"
+                          onclick={() => deleteGate(gate.id)}
+                          disabled={deletingGateId === gate.id}
+                          aria-label="Confirm delete gate {gate.name}"
+                        >
+                          {deletingGateId === gate.id ? '…' : 'Confirm'}
+                        </button>
+                        <button
+                          class="gate-del-btn cancel"
+                          onclick={() => { confirmDeleteGate = null; }}
+                          aria-label="Cancel delete"
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    {:else}
+                      <button
+                        class="gate-del-btn"
+                        onclick={() => { confirmDeleteGate = gate.id; }}
+                        disabled={deletingGateId === gate.id}
+                        aria-label="Delete gate {gate.name}"
+                      >
+                        Delete
+                      </button>
+                    {/if}
                   </td>
                 </tr>
               {/each}
@@ -767,7 +800,10 @@
 
     {:else if activeTab === 'aibom'}
       {#if aibomError}
-        <div class="error-msg" role="alert">Error: {aibomError}</div>
+        <div class="error-msg" role="alert">
+          Error: {aibomError}
+          <button class="retry-btn" onclick={() => { aibomError = null; loadAibom(); }}>Retry</button>
+        </div>
       {:else if aibomLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else if !aibom}
@@ -863,7 +899,10 @@
         {/if}
       </div>
       {#if jjError}
-        <div class="error-msg" role="alert">{jjError}</div>
+        <div class="error-msg" role="alert">
+          {jjError}
+          <button class="retry-btn" onclick={() => { jjError = null; loadJjLog(); }}>Retry</button>
+        </div>
       {:else if jjLoading}
         <Skeleton lines={6} height="2.5rem" />
       {:else if jjChanges.length === 0}
@@ -1365,6 +1404,27 @@
     background: color-mix(in srgb, var(--color-danger) 20%, transparent);
   }
   .gate-del-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .gate-del-btn.cancel {
+    background: var(--color-surface);
+    border-color: var(--color-border);
+    color: var(--color-text-secondary);
+  }
+  .gate-del-btn.cancel:hover { background: var(--color-surface-elevated); }
+  .gate-del-btn.confirm {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+  }
+  .confirm-delete-inline {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    white-space: nowrap;
+  }
+  .confirm-text {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
   .push-gates-list {
     display: flex;
     flex-direction: column;
@@ -1416,11 +1476,33 @@
   .jj-success { font-size: var(--text-sm); color: var(--color-success); }
 
   .error-msg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
     padding: var(--space-8);
     color: var(--color-danger);
     text-align: center;
     font-size: var(--text-sm);
   }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-body);
+    white-space: nowrap;
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   /* AIBOM tab */
   .aibom-header {

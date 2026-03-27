@@ -8,10 +8,16 @@
   let version = $state(null);
   let loading = $state(true);
 
-  $effect(() => {
+  function fetchVersion() {
+    loading = true;
+    version = null;
     api.version()
       .then((data) => { version = data; loading = false; })
       .catch(() => { loading = false; });
+  }
+
+  $effect(() => {
+    fetchVersion();
   });
 
   // Relative uptime via interval update
@@ -43,13 +49,13 @@
 
   <div class="content">
     <!-- Server Info Card -->
-    <div class="info-card">
+    <section class="info-card" aria-labelledby="settings-server-info">
       <div class="card-header">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
           <rect x="2" y="3" width="20" height="14" rx="2"/>
           <path d="M8 21h8M12 17v4"/>
         </svg>
-        <h3>{$t('settings.server_info.title')}</h3>
+        <h3 id="settings-server-info">{$t('settings.server_info.title')}</h3>
       </div>
 
       {#if loading}
@@ -80,21 +86,22 @@
         </div>
       {:else}
         <div class="error-row">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
             <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
           </svg>
           <span>{$t('settings.server_info.unreachable')}</span>
+          <button class="btn-retry" onclick={() => { fetchVersion(); }}>Retry</button>
         </div>
       {/if}
-    </div>
+    </section>
 
     <!-- WebSocket Connection -->
-    <div class="info-card">
+    <section class="info-card" aria-labelledby="settings-websocket">
       <div class="card-header">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
           <path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/>
         </svg>
-        <h3>{$t('settings.websocket.title')}</h3>
+        <h3 id="settings-websocket">{$t('settings.websocket.title')}</h3>
       </div>
 
       <div class="ws-status-row">
@@ -105,15 +112,15 @@
           <span class="ws-sublabel">{$t('settings.websocket.sublabel')}</span>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- Environment / Configuration -->
-    <div class="info-card">
+    <section class="info-card" aria-labelledby="settings-config">
       <div class="card-header">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
           <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
         </svg>
-        <h3>{$t('settings.config.title')}</h3>
+        <h3 id="settings-config">{$t('settings.config.title')}</h3>
       </div>
 
       <table class="config-table">
@@ -138,15 +145,15 @@
           </tr>
         </tbody>
       </table>
-    </div>
+    </section>
 
     <!-- Language -->
-    <div class="info-card">
+    <section class="info-card" aria-labelledby="settings-language">
       <div class="card-header">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
           <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
         </svg>
-        <h3>{$t('settings.language.title')}</h3>
+        <h3 id="settings-language">{$t('settings.language.title')}</h3>
       </div>
       <div class="lang-row">
         <label class="lang-label" for="lang-select">{$t('settings.language.label')}</label>
@@ -156,12 +163,13 @@
           {/each}
         </select>
       </div>
-    </div>
+    </section>
 
     <!-- About -->
-    <div class="info-card about-card">
+    <section class="info-card about-card" aria-labelledby="settings-about">
+      <h3 id="settings-about" class="sr-only">{$t('settings.about.title', { default: 'About' })}</h3>
       <div class="gyre-logo">
-        <span class="logo-text">Gyre</span>
+        <span class="logo-text" aria-hidden="true">Gyre</span>
         <span class="logo-sub">{$t('settings.about.tagline')}</span>
       </div>
       <p class="about-desc">
@@ -170,7 +178,7 @@
       {#if version}
         <div class="version-tag">v{version.version}</div>
       {/if}
-    </div>
+    </section>
   </div>
 </div>
 
@@ -220,9 +228,7 @@
     transition: border-color var(--transition-fast);
   }
 
-  .info-card:hover {
-    border-color: var(--color-border-strong);
-  }
+
 
   .card-header {
     display: flex;
@@ -332,7 +338,7 @@
   .ws-status-text {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
   }
 
   .ws-label {
@@ -462,12 +468,26 @@
 
   .lang-select:focus:not(:focus-visible) {
     outline: none;
-    border-color: var(--color-primary);
   }
   .lang-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
+
+  .btn-retry {
+    margin-left: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .btn-retry:hover { background: var(--color-surface-hover); }
+  .btn-retry:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
     .ws-dot.pulse { animation: none; }
