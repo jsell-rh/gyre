@@ -156,15 +156,16 @@
   {/snippet}
 </Modal>
 
-<div class="dashboard">
+<div class="dashboard" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? '' : 'Dashboard loaded'}</span>
   <!-- Page header -->
   <div class="page-header">
-    <h1 class="page-title">Dashboard</h1>
+    <h1 class="page-title">{$t('dashboard.title')}</h1>
     <p class="page-desc">Platform overview and quick actions</p>
   </div>
 
   <!-- Metric cards -->
-  <section class="metrics">
+  <section class="metrics" aria-label="Dashboard metrics">
     <button class="metric-card" onclick={() => onnavigate?.('agents')}>
       <div class="metric-label">{$t('dashboard.metrics.active_agents')}</div>
       {#if loading}
@@ -207,7 +208,7 @@
   </section>
 
   <!-- Quick actions -->
-  <section class="quick-actions">
+  <section class="quick-actions" aria-label="Quick actions">
     <Button variant="secondary" onclick={() => (showNewProject = true)}>{$t('dashboard.quick_actions.new_project')}</Button>
     <Button variant="secondary" onclick={() => (showNewTask = true)}>{$t('dashboard.quick_actions.new_task')}</Button>
     <Button variant="secondary" onclick={seedDemoData} disabled={seedLoading}>
@@ -233,12 +234,14 @@
       {:else}
         <div class="agent-grid">
           {#each agents as agent}
-            <div class="agent-chip" title="{agent.name}: {agent.status}">
+            <div class="agent-chip" aria-label="{agent.name}, status: {agent.status}">
               <span
                 class="agent-dot"
                 style="background: {agentStatusColor(agent.status)}"
+                aria-hidden="true"
               ></span>
               <span class="agent-name">{agent.name}</span>
+              <span class="sr-only">{agent.status}</span>
             </div>
           {/each}
         </div>
@@ -550,6 +553,12 @@
   }
 
   .view-all:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .queue-item.processing { animation: none; }
+  }
 
   @media (max-width: 900px) {
     .metrics { grid-template-columns: repeat(2, 1fr); }

@@ -16,6 +16,7 @@
   let members = $state([]);
   let teams = $state([]);
   let loading = $state(true);
+  let error = $state(null);
   let activeTab = $state('budget');
 
   let budgetFormOpen = $state(false);
@@ -63,6 +64,7 @@
     { id: 'repos', label: 'Repos' },
     { id: 'members', label: 'Members' },
     { id: 'teams', label: 'Teams' },
+    { id: 'policies', label: 'Policies' },
   ];
 
   $effect(() => {
@@ -71,6 +73,7 @@
 
   async function loadAll() {
     loading = true;
+    error = null;
     try {
       const [b, r, m, t] = await Promise.allSettled([
         api.workspaceBudget(workspace.id),
@@ -82,7 +85,12 @@
       if (r.status === 'fulfilled') repos = r.value ?? [];
       if (m.status === 'fulfilled') members = m.value ?? [];
       if (t.status === 'fulfilled') teams = t.value ?? [];
+      const allFailed = [b, r, m, t].every((p) => p.status === 'rejected');
+      if (allFailed) {
+        error = 'Failed to load workspace details. All requests failed.';
+      }
     } catch (e) {
+      error = 'Failed to load workspace details';
       showToast('Failed to load workspace details', { type: 'error' });
     } finally {
       loading = false;
@@ -153,7 +161,14 @@
 
   <Tabs {tabs} bind:active={activeTab} />
 
-  <div role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
+  {#if error}
+    <div class="error-banner">
+      <p>{error}</p>
+      <button class="btn-retry" onclick={() => { error = null; loadAll(); }}>Retry</button>
+    </div>
+  {/if}
+
+  <div role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}" aria-busy={loading}>
   {#if loading}
     <div class="tab-body">
       <Skeleton lines={5} />
@@ -312,6 +327,11 @@
         </div>
       {/if}
     </div>
+
+  {:else if activeTab === 'policies'}
+    <div class="tab-body">
+      <EmptyState title="No policies configured" description="ABAC policies will be manageable here." />
+    </div>
   {/if}
   </div>
 </div>
@@ -414,7 +434,7 @@
 
   .data-table th {
     text-align: left;
-    padding: var(--space-3) var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--color-border);
     color: var(--color-text-muted);
     font-weight: 500;
@@ -539,6 +559,29 @@
   .trust-select.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }
   .trust-select.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, transparent); }
   .trust-saving { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+  .error-banner {
+    padding: var(--space-4) var(--space-6);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
+    color: var(--color-danger);
+    font-size: var(--text-sm);
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .error-banner p { margin: 0; }
+
+  .btn-retry {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .btn-retry:hover { background: var(--color-surface-hover); }
 
   @media (prefers-reduced-motion: reduce) {
     .bar-fill { transition: none; }

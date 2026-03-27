@@ -20,7 +20,8 @@
   let branches = $state([]);
   let mrs = $state([]);
   let queue = $state([]);
-  let loading = $state(false);
+  let loading = $state(true);
+  let error = $state(null);
   let filterQuery = $state('');
 
   // Sort state
@@ -38,6 +39,7 @@
   async function loadTab(tab) {
     if (!repoId) return;
     loading = true;
+    error = null;
     filterQuery = '';
     try {
       if (tab === 'branches') {
@@ -49,7 +51,7 @@
         queue = Array.isArray(all) ? all.filter(e => e.repository_id === repoId || e.repo_id === repoId) : [];
       }
     } catch (e) {
-      showToast('Failed to load ' + tab + ': ' + e.message, { type: 'error' });
+      error = 'Failed to load ' + tab + ': ' + e.message;
     } finally {
       loading = false;
     }
@@ -143,8 +145,13 @@
   </div>
 
   <!-- Content -->
-  <div class="table-wrap" role="tabpanel">
-    {#if loading}
+  <div class="table-wrap" role="tabpanel" aria-busy={loading}>
+    {#if error}
+      <div class="error-banner" role="alert">
+        <span>{error}</span>
+        <button class="retry-btn" onclick={() => { error = null; loadTab(subTab); }}>Retry</button>
+      </div>
+    {:else if loading}
       <Skeleton lines={6} />
     {:else if subTab === 'branches'}
       {#if filteredBranches.length === 0}
@@ -161,7 +168,7 @@
           </thead>
           <tbody>
             {#each filteredBranches as branch}
-              <tr class="table-row" onclick={() => onRowClick(branch, 'branch')} tabindex="0" role="button" aria-label="View branch {branch.name}">
+              <tr class="table-row" onclick={() => onRowClick(branch, 'branch')} tabindex="0" role="button" aria-label="View branch {branch.name}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(branch, 'branch'); } }}>
                 <td class="mono">{branch.name}</td>
                 <td class="secondary">{branch.last_commit ? branch.last_commit.slice(0, 7) : '—'}</td>
                 <td class="secondary">{branch.author ?? '—'}</td>
@@ -187,7 +194,7 @@
           </thead>
           <tbody>
             {#each filteredMrs as mr}
-              <tr class="table-row" onclick={() => onRowClick(mr, 'mr')} tabindex="0" role="button" aria-label="View MR {mr.title}">
+              <tr class="table-row" onclick={() => onRowClick(mr, 'mr')} tabindex="0" role="button" aria-label="View MR {mr.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(mr, 'mr'); } }}>
                 <td>{mr.title}</td>
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
                 <td class="secondary">{mr.author_id ?? '—'}</td>
@@ -212,7 +219,7 @@
           </thead>
           <tbody>
             {#each filteredQueue as entry}
-              <tr class="table-row" onclick={() => onRowClick(entry, 'mr')} tabindex="0" role="button" aria-label="View queue entry">
+              <tr class="table-row" onclick={() => onRowClick(entry, 'mr')} tabindex="0" role="button" aria-label="View queue entry" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(entry, 'mr'); } }}>
                 <td class="mono">{entry.merge_request_id ?? entry.mr_id ?? '—'}</td>
                 <td>{entry.priority ?? '—'}</td>
                 <td><span class="status-badge">{entry.status ?? 'queued'}</span></td>
@@ -355,4 +362,42 @@
   .status-badge.status-open { background: color-mix(in srgb, var(--color-success) 10%, transparent); border-color: color-mix(in srgb, var(--color-success) 40%, transparent); color: var(--color-success); }
   .status-badge.status-merged { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-color: color-mix(in srgb, var(--color-info) 40%, transparent); color: var(--color-info); }
   .status-badge.status-closed { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); color: var(--color-danger); }
+
+  .sort-btn:focus-visible,
+  .subtab-btn:focus-visible,
+  .filter-input:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .error-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid var(--color-danger);
+    border-radius: var(--radius);
+    color: var(--color-danger);
+    font-size: var(--text-sm);
+  }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-body);
+    white-space: nowrap;
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 </style>

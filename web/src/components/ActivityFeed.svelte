@@ -53,10 +53,16 @@
     return 'muted';
   }
 
-  $effect(() => {
+  function loadActivity() {
+    loading = true;
+    error = null;
     api.activity(200)
       .then((data) => { events = data; loading = false; })
       .catch((err) => { error = err.message; loading = false; });
+  }
+
+  $effect(() => {
+    loadActivity();
   });
 
   $effect(() => {
@@ -72,7 +78,7 @@
 <div class="page">
   <div class="page-hdr">
     <div>
-      <h1 class="page-title">Activity Feed</h1>
+      <h1 class="page-title" id="activity-title">Activity Feed</h1>
       <p class="page-desc">Real-time event stream from agents and system components</p>
     </div>
   </div>
@@ -119,7 +125,10 @@
       {/each}
     </div>
   {:else if error}
-    <div class="error-msg">Error: {error}</div>
+    <div class="error-msg">
+      <p>Error: {error}</p>
+      <button class="btn-retry" onclick={() => { loadActivity(); }}>Retry</button>
+    </div>
   {:else if filtered.length === 0}
     <EmptyState
       title="No events found"
@@ -128,7 +137,7 @@
         : 'No activity events yet. Events will appear here as agents perform actions.'}
     />
   {:else}
-    <div class="timeline" aria-live="polite" aria-label="Activity events">
+    <div class="timeline" aria-live="polite" aria-labelledby="activity-title">
       {#each filtered as e (e.event_id)}
         <article class="timeline-item">
           <div class="timeline-node" aria-hidden="true">
@@ -301,10 +310,27 @@
     margin: 0;
   }
 
+  .pill:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   .error-msg {
     padding: var(--space-8);
     color: var(--color-danger);
     text-align: center;
     font-size: var(--text-sm);
   }
+
+  .btn-retry {
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .btn-retry:hover { background: var(--color-surface-hover); }
 </style>
