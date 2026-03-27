@@ -829,7 +829,7 @@
               </div>
               {#each policyGroups.builtin as policy}
                 <div class="policy-row readonly">
-                  <span class="policy-name mono">{policy.name}</span>
+                  <span class="policy-name mono" title={policy.name}>{policy.name}</span>
                   <span class="policy-effect {(policy.effect ?? '').toLowerCase()}">{policy.effect ?? '—'}</span>
                   <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
                 </div>
@@ -847,7 +847,7 @@
               </div>
               {#each policyGroups.trust as policy}
                 <div class="policy-row {wsTrustLevel !== 'Custom' ? 'readonly' : ''}">
-                  <span class="policy-name mono">{policy.name}</span>
+                  <span class="policy-name mono" title={policy.name}>{policy.name}</span>
                   <span class="policy-effect {(policy.effect ?? '').toLowerCase()}">{policy.effect ?? '—'}</span>
                   <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
                   {#if wsTrustLevel === 'Custom'}
@@ -871,7 +871,7 @@
             {:else}
               {#each policyGroups.custom as policy}
                 <div class="policy-row">
-                  <span class="policy-name mono">{policy.name}</span>
+                  <span class="policy-name mono" title={policy.name}>{policy.name}</span>
                   <span class="policy-effect {(policy.effect ?? '').toLowerCase()}">{policy.effect ?? '—'}</span>
                   <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
                   {#if wsTrustLevel === 'Custom'}
@@ -992,7 +992,7 @@
           <div class="policy-group">
             {#each repoPolicies as policy}
               <div class="policy-row readonly">
-                <span class="policy-name mono">{policy.name}</span>
+                <span class="policy-name mono" title={policy.name}>{policy.name}</span>
                 <span class="policy-effect {(policy.effect ?? '').toLowerCase()}">{policy.effect ?? '—'}</span>
                 <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
               </div>
@@ -1783,6 +1783,17 @@
   .target-select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) {
-    .budget-bar-fill { transition: none; }
+    .budget-bar-fill,
+    .trust-option,
+    .trust-radio,
+    .trust-radio-dot,
+    .chip,
+    .filter-input,
+    .primary-btn,
+    .secondary-btn,
+    .kill-btn,
+    .refresh-btn,
+    .data-table tbody tr,
+    .policy-row { transition: none; }
   }
 </style>

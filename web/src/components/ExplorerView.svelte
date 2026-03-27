@@ -665,7 +665,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .spinner { animation: none; }
+    .spinner { animation: none; display: none; }
   }
 
   .concept-chip {

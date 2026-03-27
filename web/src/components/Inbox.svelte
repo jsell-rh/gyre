@@ -317,9 +317,9 @@
                       {/if}
                     </span>
                   {:else if body.spec_path}
-                    <span class="card-subtitle">{body.spec_path}</span>
+                    <span class="card-subtitle" title={body.spec_path}>{body.spec_path}</span>
                   {:else if body.meta_spec_path}
-                    <span class="card-subtitle">{body.meta_spec_path}</span>
+                    <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path}</span>
                   {/if}
                 </div>
               </div>
@@ -876,5 +876,9 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-style: italic;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inbox-card { transition: none; }
   }
 </style>

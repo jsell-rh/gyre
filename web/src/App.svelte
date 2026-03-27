@@ -459,6 +459,7 @@
           class="inbox-badge-btn"
           onclick={() => navigate('inbox')}
           aria-label={inboxBadge > 0 ? `${inboxBadge} unresolved inbox items` : 'Inbox'}
+          aria-current={currentNav === 'inbox' ? 'page' : undefined}
           title="Inbox"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -596,7 +597,7 @@
         title="WebSocket: {wsStatus}"
       >
         <span class="ws-dot" aria-hidden="true"></span>
-        WS
+        WS: {wsStatus}
       </span>
     </footer>
   </div>
@@ -912,6 +913,10 @@
 
   .content-inner.faded {
     opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .content-inner { transition: none; }
   }
 
   /* Status bar (24px) */
