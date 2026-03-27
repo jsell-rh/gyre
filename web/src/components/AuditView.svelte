@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -46,7 +47,7 @@
     loading = false;
   }
 
-  $effect(() => {
+  onMount(() => {
     loadHistory();
   });
 

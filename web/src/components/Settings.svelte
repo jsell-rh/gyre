@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { t, locale } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -16,7 +17,7 @@
       .catch(() => { loading = false; });
   }
 
-  $effect(() => {
+  onMount(() => {
     fetchVersion();
   });
 
