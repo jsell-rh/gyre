@@ -225,16 +225,15 @@ describe('Inbox', () => {
     });
   });
 
-  it('gate_failure: shows View Diff, Retry, Override, Close MR when expanded', async () => {
+  it('gate_failure: shows View MR, Retry Gate, Dismiss when expanded', async () => {
     api.myNotifications.mockResolvedValue([gateFailureNotif]);
     const { findByRole } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Gate failure/ });
     await fireEvent.click(header);
     await waitFor(() => {
-      expect(document.body.textContent).toContain('Retry');
-      expect(document.body.textContent).toContain('View Diff');
-      expect(document.body.textContent).toContain('Override');
-      expect(document.body.textContent).toContain('Close MR');
+      expect(document.body.textContent).toContain('Retry Gate');
+      expect(document.body.textContent).toContain('View MR');
+      expect(document.body.textContent).toContain('Dismiss');
     });
   });
 
@@ -264,12 +263,12 @@ describe('Inbox', () => {
     );
   });
 
-  it('calls enqueue when Retry is clicked for gate_failure', async () => {
+  it('calls enqueue when Retry Gate is clicked for gate_failure', async () => {
     api.myNotifications.mockResolvedValue([gateFailureNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Gate failure/ });
     await fireEvent.click(header);
-    const retryBtn = await findByText('Retry');
+    const retryBtn = await findByText('Retry Gate');
     await fireEvent.click(retryBtn);
     expect(api.enqueue).toHaveBeenCalledWith('mr-uuid-42');
   });
