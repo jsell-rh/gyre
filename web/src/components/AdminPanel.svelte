@@ -1340,7 +1340,7 @@
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-3);
     font-family: var(--font-body);
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--transition-fast), color var(--transition-fast);
   }
   .refresh-btn:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-text); }
   .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
