@@ -338,7 +338,7 @@
     glInitialized = true;
   }
 
-  // Persistent WebGL buffers — reused each frame to avoid GPU memory leak
+  // Persistent WebGL buffers — reused across frames to prevent GPU memory leak
   let glPosBuf = $state(null);
   let glColBuf = $state(null);
 
@@ -367,7 +367,7 @@
       return [c.r, c.g, c.b, 1.0];
     }));
 
-    // Reuse buffers instead of creating new ones each frame
+    // Reuse buffers instead of creating new ones every frame
     if (!glPosBuf) glPosBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuf);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
@@ -382,6 +382,22 @@
 
     gl.drawArrays(gl.POINTS, 0, particles.length);
   }
+
+  // Clean up WebGL resources on unmount
+  $effect(() => {
+    return () => {
+      if (glCtx && glProgram) {
+        if (glPosBuf) glCtx.deleteBuffer(glPosBuf);
+        if (glColBuf) glCtx.deleteBuffer(glColBuf);
+        glCtx.deleteProgram(glProgram);
+        glPosBuf = null;
+        glColBuf = null;
+        glProgram = null;
+        glInitialized = false;
+        glCtx = null;
+      }
+    };
+  });
 
   // Parse a CSS color string to RGBA (supports hsl and hex)
   function cssColorToRGBA(color) {
@@ -440,13 +456,15 @@
   {height}
   class="flow-canvas"
   data-testid="flow-canvas"
+  role="img"
   onclick={onCanvasClick}
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}
   tabindex="0"
   role="img"
   aria-label="Particle flow animation — {activeParticles.length} active traces"
->Particle flow animation showing {activeParticles.length} active traces across {nodes.length} nodes.</canvas>
+  aria-roledescription="interactive particle animation canvas"
+></canvas>
 
 <style>
   .flow-canvas {
