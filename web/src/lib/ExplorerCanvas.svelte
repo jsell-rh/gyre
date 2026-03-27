@@ -698,7 +698,7 @@
               {encodedNodeLabel(node)}
             </text>
             {#if isSelected}
-              <circle r="4" cx="26" cy="-12" fill="var(--color-primary)" />
+              <circle r="4" cx="26" cy="-12" fill="var(--color-focus, #4db0ff)" />
             {/if}
             {#if isRiskHighlighted && !isSelected}
               <circle r="4" cx="26" cy="-12" fill="#eab308" />
@@ -897,7 +897,7 @@
     font-family: var(--font-body); transition: border-color var(--transition-fast), color var(--transition-fast);
   }
   .tool-btn:hover { border-color: var(--color-focus, #4db0ff); color: var(--color-text); }
-  .tool-btn.active { background: color-mix(in srgb, var(--color-success) 12%, transparent); border-color: #22c55e; color: #22c55e; }
+  .tool-btn.active { background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent); border-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
   .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: #eab308; color: #eab308; }
 
   .layout-switcher {
@@ -915,7 +915,7 @@
   .layout-btn.active { background: var(--color-link, var(--color-focus, #4db0ff)); color: #fff; }
   .layout-spinner {
     display: inline-block; width: 12px; height: 12px;
-    border: 2px solid var(--color-border); border-top-color: var(--color-primary);
+    border: 2px solid var(--color-border); border-top-color: var(--color-focus, #4db0ff);
     border-radius: 50%; animation: spin 0.6s linear infinite; margin-left: 4px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -1055,6 +1055,12 @@
     .risk-row,
     .ctx-item {
       transition: none;
+    }
+    .graph-node,
+    .graph-node:hover path,
+    .graph-node:hover ellipse {
+      transition: none;
+      filter: none;
     }
   }
 </style>
