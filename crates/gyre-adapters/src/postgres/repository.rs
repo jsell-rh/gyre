@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::Repository;
+use gyre_domain::{RepoStatus, Repository};
 use gyre_ports::RepoRepository;
 use std::sync::Arc;
 
@@ -25,10 +25,14 @@ struct RepositoryRow {
     #[allow(dead_code)]
     tenant_id: String,
     workspace_id: String,
+    description: Option<String>,
+    status: String,
+    updated_at: i64,
 }
 
 impl From<RepositoryRow> for Repository {
     fn from(r: RepositoryRow) -> Self {
+        use std::str::FromStr;
         Repository {
             id: Id::new(r.id),
             name: r.name,
@@ -40,6 +44,9 @@ impl From<RepositoryRow> for Repository {
             mirror_interval_secs: r.mirror_interval_secs.map(|v| v as u64),
             last_mirror_sync: r.last_mirror_sync.map(|v| v as u64),
             workspace_id: Id::new(r.workspace_id),
+            description: r.description,
+            status: RepoStatus::from_str(&r.status).unwrap_or(RepoStatus::Active),
+            updated_at: r.updated_at as u64,
         }
     }
 }
@@ -58,6 +65,9 @@ struct NewRepositoryRow<'a> {
     last_mirror_sync: Option<i64>,
     tenant_id: &'a str,
     workspace_id: &'a str,
+    description: Option<&'a str>,
+    status: &'a str,
+    updated_at: i64,
 }
 
 #[async_trait]
@@ -67,6 +77,7 @@ impl RepoRepository for PgStorage {
         let r = repo.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            let status_str = r.status.to_string();
             let row = NewRepositoryRow {
                 id: r.id.as_str(),
                 name: &r.name,
@@ -79,6 +90,9 @@ impl RepoRepository for PgStorage {
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
                 tenant_id: "default",
                 workspace_id: r.workspace_id.as_str(),
+                description: r.description.as_deref(),
+                status: &status_str,
+                updated_at: r.updated_at as i64,
             };
             diesel::insert_into(repositories::table)
                 .values(&row)
@@ -93,6 +107,9 @@ impl RepoRepository for PgStorage {
                     repositories::mirror_interval_secs.eq(row.mirror_interval_secs),
                     repositories::last_mirror_sync.eq(row.last_mirror_sync),
                     repositories::workspace_id.eq(row.workspace_id),
+                    repositories::description.eq(row.description),
+                    repositories::status.eq(row.status),
+                    repositories::updated_at.eq(row.updated_at),
                 ))
                 .execute(&mut *conn)
                 .context("insert repository")?;
@@ -138,6 +155,7 @@ impl RepoRepository for PgStorage {
         let r = repo.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            let status_str = r.status.to_string();
             diesel::update(repositories::table.find(r.id.as_str()))
                 .set((
                     repositories::name.eq(&r.name),
@@ -148,6 +166,9 @@ impl RepoRepository for PgStorage {
                     repositories::mirror_interval_secs.eq(r.mirror_interval_secs.map(|v| v as i64)),
                     repositories::last_mirror_sync.eq(r.last_mirror_sync.map(|v| v as i64)),
                     repositories::workspace_id.eq(r.workspace_id.as_str()),
+                    repositories::description.eq(r.description.as_deref()),
+                    repositories::status.eq(&status_str),
+                    repositories::updated_at.eq(r.updated_at as i64),
                 ))
                 .execute(&mut *conn)
                 .context("update repository")?;

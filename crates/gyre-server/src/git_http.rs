@@ -1641,18 +1641,13 @@ mod tests {
         };
         state.workspaces.create(&ws).await.unwrap();
 
-        let repo = Repository {
-            id: Id::new("repo-1"),
-            workspace_id: Id::new("ws-test"),
-            name: TEST_REPO_NAME.to_string(),
-            path: repo_path.to_str().unwrap().to_string(),
-            default_branch: "main".to_string(),
-            created_at: 0,
-            is_mirror: false,
-            mirror_url: None,
-            mirror_interval_secs: None,
-            last_mirror_sync: None,
-        };
+        let repo = Repository::new(
+            Id::new("repo-1"),
+            Id::new("ws-test"),
+            TEST_REPO_NAME,
+            repo_path.to_str().unwrap(),
+            0,
+        );
         state.repos.create(&repo).await.unwrap();
 
         let repo_path_str = repo_path.to_str().unwrap().to_string();
