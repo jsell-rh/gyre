@@ -72,7 +72,7 @@
 {#if open}
   <div class="modal-backdrop">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" onclick={close} role="presentation"></div>
+    <div class="modal-overlay" onclick={close} role="presentation" aria-hidden="true"></div>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       class="modal modal-{size}"
@@ -118,7 +118,7 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    background: color-mix(in srgb, var(--color-surface, #0a0a0a) 60%, transparent);
+    background: color-mix(in srgb, var(--color-surface) 60%, transparent);
     backdrop-filter: blur(2px);
   }
 
@@ -187,7 +187,7 @@
   }
 
   .modal-close:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

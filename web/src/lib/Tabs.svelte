@@ -115,7 +115,7 @@
 
   .tab-btn.active {
     color: var(--color-text);
-    border-bottom-color: var(--color-link, var(--color-focus, #4db0ff));
+    border-bottom-color: var(--color-link);
   }
 
   .tab-btn:disabled {
@@ -124,7 +124,7 @@
   }
 
   .tab-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -136,15 +136,15 @@
     height: 18px;
     padding: 0 var(--space-1);
     background: var(--color-surface-elevated);
-    border-radius: var(--radius-full, 9999px);
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     font-weight: 600;
   }
 
   .tab-btn.active .tab-count {
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent);
-    color: var(--color-focus, #4db0ff);
+    background: color-mix(in srgb, var(--color-focus) 12%, transparent);
+    color: var(--color-focus);
   }
 
   .tab-icon {

@@ -360,11 +360,11 @@
   }
 
   .avatar {
-    width: 48px;
-    height: 48px;
+    width: var(--space-12);
+    height: var(--space-12);
     border-radius: 50%;
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 15%, transparent);
-    color: var(--color-focus, #4db0ff);
+    background: color-mix(in srgb, var(--color-focus) 15%, transparent);
+    color: var(--color-focus);
     font-weight: 700;
     font-size: var(--text-xl);
     display: flex;
@@ -385,6 +385,7 @@
     color: var(--color-text-secondary);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: border-color var(--transition-fast);
   }
   .btn-edit:hover { border-color: var(--color-text-muted); }
 
@@ -394,8 +395,8 @@
     top: -4px;
     right: -6px;
     background: var(--color-danger);
-    color: var(--color-surface, #fff);
-    border-radius: 999px;
+    color: #fff;
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     padding: 0 var(--space-1);
     min-width: 14px;
@@ -426,8 +427,8 @@
   .field-input:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible {
     outline: none;
-    border-color: var(--color-focus, #4db0ff);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
+    border-color: var(--color-focus);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 30%, transparent);
   }
 
   .edit-actions { display: flex; gap: var(--space-2); align-items: center; }
@@ -437,11 +438,11 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-surface, #fff);
+    color: #fff;
     font-size: var(--text-sm);
     cursor: pointer;
   }
-  .btn-primary:hover:not(:disabled) { opacity: 0.88; }
+  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .btn-secondary {
@@ -487,8 +488,9 @@
     cursor: pointer;
     flex-shrink: 0;
     white-space: nowrap;
+    transition: border-color var(--transition-fast), color var(--transition-fast);
   }
-  .btn-switch:hover { border-color: var(--color-link, var(--color-focus, #4db0ff)); color: var(--color-link, var(--color-focus, #4db0ff)); }
+  .btn-switch:hover { border-color: var(--color-link); color: var(--color-link); }
 
   /* Judgment Ledger */
   .ledger-list { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -520,7 +522,7 @@
     font-size: var(--text-sm);
     color: var(--color-text);
   }
-  .pref-checkbox { accent-color: var(--color-focus, #4db0ff); width: 16px; height: 16px; cursor: pointer; }
+  .pref-checkbox { accent-color: var(--color-focus); width: 16px; height: 16px; cursor: pointer; }
   .pref-label { flex: 1; }
   .prefs-actions { display: flex; }
 
@@ -535,7 +537,7 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .notif-item.unread { border-left: 3px solid var(--color-focus, #4db0ff); }
+  .notif-item.unread { border-left: 3px solid var(--color-focus); }
   .notif-top { display: flex; align-items: center; gap: var(--space-2); }
   .notif-time { margin-left: auto; font-size: var(--text-xs); }
   .notif-msg { margin: 0; font-size: var(--text-sm); color: var(--color-text-secondary); }
@@ -560,7 +562,7 @@
   .btn-switch:focus-visible,
   .mark-read-btn:focus-visible,
   .pref-checkbox:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
