@@ -448,5 +448,6 @@
   @media (prefers-reduced-motion: reduce) {
     .cursor { animation: none; }
     .spin { animation: none; }
+    .chat-input { transition: none; }
   }
 </style>

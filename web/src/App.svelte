@@ -458,7 +458,7 @@
         <button
           class="inbox-badge-btn"
           onclick={() => navigate('inbox')}
-          aria-label="{inboxBadge} unresolved inbox items"
+          aria-label={inboxBadge > 0 ? `${inboxBadge} unresolved inbox items` : 'Inbox'}
           title="Inbox"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -565,7 +565,13 @@
             aria-valuemax="100"
             aria-label="Budget {budgetPct}%"
           >
-            <span class="budget-bar-fill" style="width: {budgetPct}%; background: {budgetPct > 90 ? 'var(--color-danger)' : budgetPct > 70 ? 'var(--color-warning)' : 'var(--color-success)'}"></span>
+            <span
+              class="budget-bar-fill"
+              class:bar-danger={budgetPct > 90}
+              class:bar-warn={budgetPct > 70 && budgetPct <= 90}
+              class:bar-ok={budgetPct <= 70}
+              style="width: {budgetPct}%"
+            ></span>
           </span>
         </span>
       {/if}
@@ -603,7 +609,20 @@
 
 <!-- Keyboard shortcut overlay -->
 {#if shortcutsOpen}
-  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => e.key === 'Escape' && (shortcutsOpen = false)}>
+  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => {
+    if (e.key === 'Escape') { shortcutsOpen = false; return; }
+    if (e.key === 'Tab' && shortcutsModalEl) {
+      const focusable = Array.from(shortcutsModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+      } else {
+        if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }
+  }}>
     <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="presentation">
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
@@ -935,8 +954,12 @@
     height: 100%;
     border-radius: 2px;
     transition: width var(--transition-normal);
+    background: var(--color-success);
   }
 
+  .budget-bar-fill.bar-danger { background: var(--color-danger); }
+  .budget-bar-fill.bar-warn { background: var(--color-warning); }
+  .budget-bar-fill.bar-ok { background: var(--color-success); }
 
   /* WebSocket status */
   .ws-dot {
@@ -980,7 +1003,7 @@
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: color-mix(in srgb, #000 60%, transparent);
+    background: color-mix(in srgb, var(--color-bg, #000) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;

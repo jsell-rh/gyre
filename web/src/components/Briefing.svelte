@@ -655,6 +655,7 @@
   }
 
   .apply-btn:hover { background: var(--color-primary-hover); }
+  .apply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .error-banner {
     background: color-mix(in srgb, var(--color-warning, #f59e0b) 12%, transparent);
@@ -901,4 +902,8 @@
   }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .apply-btn { transition: none; }
+  }
 </style>

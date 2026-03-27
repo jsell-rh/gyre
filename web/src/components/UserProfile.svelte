@@ -315,7 +315,7 @@
           {/each}
         </div>
         <div class="prefs-actions">
-          <button class="btn-primary" onclick={savePrefs} disabled={prefsSaving}>
+          <button class="btn-primary" onclick={savePrefs} disabled={prefsSaving} aria-busy={prefsSaving}>
             {prefsSaving ? 'Saving…' : 'Save Preferences'}
           </button>
         </div>
@@ -439,6 +439,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
   }
+  .btn-primary:hover:not(:disabled) { opacity: 0.88; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .btn-secondary {
@@ -450,6 +451,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
   }
+  .btn-secondary:hover { border-color: var(--color-text-muted); color: var(--color-text); }
 
   .tab-body { flex: 1; overflow-y: auto; padding: var(--space-6); }
 
