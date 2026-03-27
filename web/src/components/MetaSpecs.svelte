@@ -323,7 +323,9 @@
     {#if loading}
       <div class="split-layout"><div class="split-left"><Skeleton /></div><div class="split-right"><Skeleton /></div></div>
     {:else if error}
-      <EmptyState title="Failed to load" description={error} />
+      <div role="alert">
+        <EmptyState title="Failed to load" description={error} />
+      </div>
       <button class="retry-btn" onclick={loadWorkspaceData}>Retry</button>
     {:else}
       <div class="split-layout" data-testid="preview-loop">
@@ -533,7 +535,9 @@
     {#if loading}
       <Skeleton />
     {:else if error}
-      <EmptyState title="Failed to load meta-specs" description={error} />
+      <div role="alert">
+        <EmptyState title="Failed to load meta-specs" description={error} />
+      </div>
       <button class="retry-btn" onclick={loadTenantSpecs}>Retry</button>
     {:else if filtered.length === 0}
       <EmptyState
