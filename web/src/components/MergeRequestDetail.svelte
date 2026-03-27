@@ -21,6 +21,7 @@
   let addDepInput = $state('');
   let addingDep = $state(false);
   let removingDepId = $state(null);
+  let submitting = $state(false);
 
   // Diff / Files tab state
   let activeTab = $state('overview'); // 'overview' | 'files'
@@ -77,6 +78,7 @@
   }
 
   async function submitReview(decision) {
+    submitting = true;
     try {
       const review = await api.submitReview(mr.id, {
         reviewer_agent_id: 'dashboard',
@@ -87,6 +89,8 @@
       toastSuccess(decision === 'approved' ? 'MR approved.' : 'Changes requested.');
     } catch (e) {
       toastError(e.message);
+    } finally {
+      submitting = false;
     }
   }
 
@@ -327,7 +331,8 @@
             <button
               class="action-btn approve"
               onclick={() => submitReview('approved')}
-              disabled={mr.status === 'merged' || mr.status === 'closed'}
+              disabled={submitting || mr.status === 'merged' || mr.status === 'closed'}
+              aria-busy={submitting}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
               Approve
@@ -335,13 +340,14 @@
             <button
               class="action-btn changes"
               onclick={() => submitReview('changes_requested')}
-              disabled={mr.status === 'merged' || mr.status === 'closed'}
+              disabled={submitting || mr.status === 'merged' || mr.status === 'closed'}
+              aria-busy={submitting}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
               Request Changes
             </button>
             {#if mr.status === 'approved'}
-              <button class="action-btn enqueue" onclick={addToQueue} disabled={enqueueing}>
+              <button class="action-btn enqueue" onclick={addToQueue} disabled={submitting || enqueueing} aria-busy={submitting}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M3 12h18M3 6h18M3 18h12"/></svg>
                 {enqueueing ? 'Adding…' : 'Add to Queue'}
               </button>
@@ -646,7 +652,7 @@
     word-break: break-all;
   }
 
-  .meta-link-btn:hover { color: color-mix(in srgb, var(--color-link) 80%, transparent); text-decoration: underline; }
+  .meta-link-btn:hover { color: var(--color-link); text-decoration: underline; }
 
   .branch-ref {
     font-family: var(--font-mono);

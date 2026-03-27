@@ -262,7 +262,10 @@
       // Reload policies — trust transition rewrites trust: policies
       wsPolicies = await api.workspaceAbacPolicies(workspaceId)
         .then(r => Array.isArray(r) ? r : (r?.policies ?? []))
-        .catch(() => wsPolicies);
+        .catch((e) => {
+          toastError('Policies may be stale — please refresh.');
+          return wsPolicies;
+        });
     } catch (e) {
       if (e.message?.includes('409')) {
         toastError('Trust level transition failed — policies could not be created');
@@ -562,7 +565,7 @@
             </thead>
             <tbody>
               {#each tenantWorkspaces as ws}
-                <tr>
+                <tr tabindex="0" class="ws-row" onclick={() => navigate('workspace-detail', { workspace: ws })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('workspace-detail', { workspace: ws }); } }}>
                   <td class="agent-name">{ws.name}</td>
                   <td>
                     <span class="trust-badge trust-{(ws.trust_level ?? 'autonomous').toLowerCase()}">
@@ -657,7 +660,7 @@
         {:else if !workspace}
           <EmptyState title="Workspace not found" description="Could not load workspace settings." />
         {:else}
-          <div class="form-section">
+          <div class="form-section" aria-busy={wsSettingsSaving}>
             <h3 class="section-title">General</h3>
             <div class="form-field">
               <label class="form-label" for="ws-name">Name</label>
@@ -1441,6 +1444,12 @@
   .data-table tbody tr:hover { background: var(--color-surface-elevated); }
   .data-table td { padding: var(--space-3) var(--space-4); vertical-align: middle; color: var(--color-text); }
   .table-scroll { overflow-x: auto; }
+
+  .ws-row { cursor: pointer; }
+  .ws-row:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
+  }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .dim { color: var(--color-text-muted); font-size: var(--text-xs); }

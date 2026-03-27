@@ -71,7 +71,7 @@
     try {
       specs = await api.specsForWorkspace(workspaceId);
       if (scope === 'repo' && repoId) {
-        loadProgressMap();
+        loadProgressMap().catch(e => console.error('Progress load failed:', e));
       }
     } catch (e) {
       error = e.message;
@@ -267,7 +267,7 @@
   </div>
 
   <!-- ── Content area ───────────────────────────────────────────────────────── -->
-  <div class="content-area">
+  <div class="content-area" aria-busy={loading}>
     {#if loading}
       <div class="skeleton-rows">
         {#each Array(7) as _}
@@ -590,6 +590,11 @@
     transition: background var(--transition-fast);
   }
 
+  .specs-table tbody tr:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
+  }
+
   .specs-table tr:hover td {
     background: var(--color-surface-elevated);
   }
@@ -650,6 +655,11 @@
   .spec-row:hover { background: var(--color-surface-elevated); }
 
   .spec-row.selected { background: color-mix(in srgb, var(--color-link) 6%, transparent); }
+
+  .spec-row:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
+  }
 
   .spec-row .spec-path {
     flex: 1;

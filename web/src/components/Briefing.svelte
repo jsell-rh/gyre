@@ -499,8 +499,8 @@
 
       <!-- METRICS -->
       {#if briefing.metrics}
-        <section class="metrics-row" data-testid="section-metrics">
-          <h2 class="section-heading metrics-heading">METRICS</h2>
+        <section class="metrics-row" data-testid="section-metrics" aria-labelledby="briefing-metrics">
+          <h2 class="section-heading metrics-heading" id="briefing-metrics">METRICS</h2>
           <div class="metrics-grid">
             {#if briefing.metrics.mrs_count != null}
               <div class="metric-cell" data-testid="metric-mrs">

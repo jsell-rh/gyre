@@ -793,6 +793,7 @@
     .entries-table tbody tr,
     .dag-node,
     .cancel-btn,
+    .cancel-btn-sm,
     .toggle-btn,
     .refresh-btn {
       transition: none;

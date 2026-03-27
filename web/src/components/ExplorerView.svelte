@@ -197,7 +197,7 @@
     {:else}
       <div class="ws-repo-grid">
         {#each wsRepos as repo (repo.id)}
-          <button class="ws-repo-card" onclick={() => selectRepo(repo)}>
+          <button class="ws-repo-card" onclick={() => selectRepo(repo)} aria-label="Explore {repo.name} repository">
             <div class="ws-repo-card-left">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="ws-repo-icon" aria-hidden="true">
                 <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
@@ -285,7 +285,17 @@
           />
         </div>
 
-        <span aria-live="polite" class="sr-only">{conceptLoading ? 'Searching…' : ''}</span>
+        <span aria-live="polite" class="sr-only">
+          {#if conceptLoading}
+            Searching…
+          {:else if conceptNodes !== null && conceptQuery.trim()}
+            {#if conceptNodes.length > 0}
+              {conceptNodes.length} concept{conceptNodes.length === 1 ? '' : 's'} found
+            {:else}
+              No concepts found
+            {/if}
+          {/if}
+        </span>
         {#if conceptLoading}
           <span class="search-loading">
             <span class="spinner" aria-hidden="true"></span>
@@ -628,6 +638,7 @@
 
   .search-input-wrap:focus-within {
     border-color: var(--color-focus, #4db0ff);
+    box-shadow: 0 0 0 2px var(--color-focus, #4db0ff);
   }
 
   .search-icon {

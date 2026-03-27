@@ -38,6 +38,7 @@
   let ttyLines = $state([]);
   let ttyWs = $state(null);
   let ttyConnecting = $state(false);
+  let ttyError = $state(false);
   let containerRecord = $state(null);
   let spawnModalEl = $state(null);
   let spawnTriggerEl = $state(null);
@@ -144,6 +145,7 @@
     if (tab === 'terminal' && selected) {
       closeTtyWs();
       ttyConnecting = true;
+      ttyError = false;
       const token = localStorage.getItem('gyre_auth_token') || 'test-token';
       const ws = new WebSocket(api.agentTtyUrl(selected.id));
       ttyWs = ws;
@@ -154,7 +156,7 @@
         ttyLines = [...ttyLines, ev.data];
       };
       ws.onclose = () => { ttyConnecting = false; };
-      ws.onerror = () => { ttyConnecting = false; };
+      ws.onerror = () => { ttyConnecting = false; ttyError = true; };
     } else if (tab !== 'terminal') {
       closeTtyWs();
     }
@@ -447,7 +449,7 @@
             <AgentCardPanel agentId={selected.id} />
           </div>
         {:else if detailTab === 'logs'}
-          <div class="logs-panel" role="tabpanel" id="dtabpanel-logs" aria-labelledby="dtab-logs">
+          <div class="logs-panel" role="tabpanel" id="dtabpanel-logs" aria-labelledby="dtab-logs" aria-busy={logsLoading}
             {#if logsLoading}
               <p class="logs-empty">Loading logs…</p>
             {:else if agentLogLines.length === 0}
@@ -462,6 +464,9 @@
           </div>
         {:else}
           <div class="logs-panel tty-panel" role="tabpanel" id="dtabpanel-terminal" aria-labelledby="dtab-terminal">
+            {#if ttyError}
+              <div role="alert" class="tty-error">Connection failed. Reconnect or view logs tab.</div>
+            {/if}
             {#if ttyConnecting}
               <p class="logs-empty">Connecting…</p>
             {:else if ttyLines.length === 0}
@@ -715,6 +720,14 @@
     line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  .tty-error {
+    color: var(--color-danger, #ef4444);
+    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-sm);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 25%, transparent);
   }
 
   .tty-panel { height: 360px; }

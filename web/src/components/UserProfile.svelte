@@ -238,13 +238,13 @@
           {/each}
         </div>
       {:else}
-        <EmptyState description="Profile data unavailable." />
+        <EmptyState title="No profile data" description="Profile data unavailable." />
       {/if}
 
     {:else if activeTab === 'memberships'}
       <!-- Workspace memberships with quick-switch -->
       {#if workspaces.length === 0}
-        <EmptyState description="No workspace memberships." />
+        <EmptyState title="No workspaces" description="No workspace memberships." />
       {:else}
         <div class="memberships-list">
           {#each workspaces as ws}
@@ -274,7 +274,7 @@
       <!-- Judgment Ledger: chronological log of human judgment decisions -->
       <!-- Sourced from GET /api/v1/users/me/judgments -->
       {#if judgments.length === 0}
-        <EmptyState description="No judgment events recorded. Spec approvals, gate overrides, trust changes, and meta-spec edits will appear here." />
+        <EmptyState title="No activity recorded" description="No judgment events recorded. Spec approvals, gate overrides, trust changes, and meta-spec edits will appear here." />
       {:else}
         <div class="ledger-list">
           {#each judgments as j}
@@ -323,7 +323,7 @@
 
     {:else if activeTab === 'notifications'}
       {#if notifications.length === 0}
-        <EmptyState description="No notifications." />
+        <EmptyState title="No notifications" description="No notifications." />
       {:else}
         <div class="notif-list">
           {#each notifications as notif}
@@ -555,7 +555,8 @@
   .btn-secondary:focus-visible,
   .btn-primary:focus-visible,
   .btn-switch:focus-visible,
-  .mark-read-btn:focus-visible {
+  .mark-read-btn:focus-visible,
+  .pref-checkbox:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
