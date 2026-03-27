@@ -340,7 +340,7 @@
   }
 
   .qa-input:focus:not(:focus-visible) { outline: none; }
-  .qa-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .qa-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   /* Page header */
   .page-header {
@@ -387,7 +387,7 @@
     background: var(--color-surface-elevated);
   }
 
-  .metric-card:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .metric-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .metric-label {
     font-size: var(--text-xs);
@@ -552,7 +552,7 @@
     color: var(--color-link-hover);
   }
 
-  .view-all:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .view-all:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 

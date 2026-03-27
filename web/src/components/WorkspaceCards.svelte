@@ -300,9 +300,9 @@
 
   .ws-filter:focus:not(:focus-visible) { outline: none; }
   .ws-filter:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   .cards-grid {
@@ -448,17 +448,17 @@
     gap: var(--space-1);
     background: transparent;
     border: none;
-    color: var(--color-link, var(--color-focus, #4db0ff));
+    color: var(--color-link);
     font-family: var(--font-body);
     font-size: var(--text-sm);
     font-weight: 500;
     cursor: pointer;
     padding: 0;
-    transition: opacity var(--transition-fast);
+    transition: color var(--transition-fast);
   }
 
   .enter-btn:hover {
-    opacity: 0.75;
+    color: var(--color-link-hover);
   }
 
   .btn-secondary {
@@ -479,7 +479,7 @@
 
   .enter-btn:focus-visible,
   .btn-secondary:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -515,7 +515,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

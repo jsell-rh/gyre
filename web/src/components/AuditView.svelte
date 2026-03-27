@@ -269,7 +269,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--space-0, 2px);
+    gap: 2px;
   }
 
   .stat-val {
@@ -397,7 +397,7 @@
   }
   .filter-select:focus-visible,
   .filter-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -470,7 +470,7 @@
   .tab-btn:focus-visible,
   .clear-btn:focus-visible,
   .search-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
