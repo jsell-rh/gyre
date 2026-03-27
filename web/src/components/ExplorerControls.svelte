@@ -622,7 +622,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm, 3px);
+    border-radius: var(--radius-sm);
     padding: 2px var(--space-1);
     font-family: var(--font-mono);
     flex-shrink: 0;

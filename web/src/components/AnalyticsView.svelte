@@ -157,7 +157,7 @@
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     color: var(--color-text);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     cursor: pointer;
@@ -206,7 +206,7 @@
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     background: var(--color-bg, var(--color-surface));
     flex-wrap: wrap;
   }
@@ -219,7 +219,7 @@
     grid-column: 1 / -1;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     padding: var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-muted);
@@ -233,7 +233,7 @@
   .retry-btn {
     background: color-mix(in srgb, var(--color-primary) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     color: var(--color-primary);
     cursor: pointer;
     font-size: var(--text-xs);

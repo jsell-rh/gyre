@@ -644,7 +644,7 @@
     padding: var(--space-4);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     color: var(--color-text-muted);
     font-size: var(--text-sm);
     margin-bottom: var(--space-4);
@@ -708,7 +708,7 @@
     padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     color: var(--color-text);
     font-size: var(--text-sm);
   }
@@ -719,7 +719,7 @@
     padding: var(--space-3);
     background: var(--color-surface-elevated, #141414);
     border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     color: var(--color-text);
     font-family: var(--font-mono);
     font-size: var(--text-sm);
@@ -735,7 +735,7 @@
     padding: var(--space-3);
     background: var(--color-surface-elevated, #141414);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     font-family: var(--font-mono);
     font-size: var(--text-sm);
     overflow-x: auto;
@@ -748,7 +748,7 @@
   .editor-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
 
   /* ── Spec selector ── */
-  .spec-selector { background: var(--color-surface, #111); border: 1px solid var(--color-border); border-radius: var(--radius, 6px); overflow: hidden; }
+  .spec-selector { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
   .spec-selector-header {
     display: flex;
     justify-content: space-between;
@@ -777,9 +777,9 @@
 
   /* ── Preview progress ── */
   .preview-progress {
-    background: var(--color-surface, #111);
+    background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     padding: var(--space-4);
     display: flex;
     flex-direction: column;
@@ -794,7 +794,7 @@
   .progress-summary { font-size: var(--text-sm); color: var(--color-text-muted); }
 
   /* ── Impact panel ── */
-  .impact-panel { background: var(--color-surface, #111); border: 1px solid var(--color-border); border-radius: var(--radius, 6px); overflow: hidden; }
+  .impact-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
   .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border); }
   .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
   .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
@@ -836,7 +836,7 @@
   .retry-btn {
     background: color-mix(in srgb, var(--color-focus) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-focus) 30%, transparent);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     color: var(--color-focus);
     cursor: pointer;
     font-family: var(--font-body);
