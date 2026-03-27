@@ -558,6 +558,9 @@
 
   @media (prefers-reduced-motion: reduce) {
     .queue-item.processing { animation: none; }
+    .metric-card,
+    .qa-input,
+    .view-all { transition: none; }
   }
 
   @media (max-width: 900px) {
