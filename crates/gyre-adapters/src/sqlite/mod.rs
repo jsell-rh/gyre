@@ -24,6 +24,7 @@ pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message;
+pub mod meta_spec;
 pub mod meta_spec_set;
 pub mod network_peer;
 pub mod notification;
@@ -222,6 +223,10 @@ mod tests {
             // User profile tables (migration 000036)
             "user_notification_preferences",
             "user_tokens",
+            // Meta-spec registry (migration 000032)
+            "meta_specs",
+            "meta_spec_versions",
+            "meta_spec_bindings",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",

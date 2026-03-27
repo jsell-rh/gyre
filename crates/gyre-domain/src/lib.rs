@@ -26,6 +26,7 @@ pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
+pub mod meta_spec;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
@@ -63,6 +64,9 @@ pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KE
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
 pub use message_type::MessageType;
+pub use meta_spec::{
+    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
+};
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
 pub use policy::{

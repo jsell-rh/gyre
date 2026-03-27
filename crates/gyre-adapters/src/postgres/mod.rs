@@ -23,6 +23,7 @@ pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message;
+pub mod meta_spec;
 pub mod meta_spec_set;
 pub mod network_peer;
 pub mod notification;
