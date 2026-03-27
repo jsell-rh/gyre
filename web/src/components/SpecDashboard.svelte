@@ -315,7 +315,7 @@
           >
             <span class="spec-path" title={spec.path}>{spec.path}</span>
             <span class="spec-status-inline {statusColor(spec.approval_status)}">
-              {statusIcon(spec.approval_status)} {spec.approval_status ?? 'unknown'}
+              <span aria-hidden="true">{statusIcon(spec.approval_status)}</span> {spec.approval_status ?? 'unknown'}
             </span>
             {#if label}
               <span class="progress-label-text">{label}</span>
@@ -367,7 +367,7 @@
               </td>
               <td>
                 <Badge
-                  value="{statusIcon(spec.approval_status)} {spec.approval_status ?? 'unknown'}"
+                  value="{spec.approval_status ?? 'unknown'}"
                   color={statusColor(spec.approval_status)}
                 />
               </td>
@@ -574,7 +574,7 @@
   }
 
   .sort-arrow {
-    font-size: 10px;
+    font-size: var(--text-xs);
     opacity: 0.6;
   }
 
@@ -696,14 +696,14 @@
   .progress-bar {
     height: 6px;
     background: var(--color-border);
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     overflow: hidden;
   }
 
   .progress-fill {
     height: 100%;
     background: var(--color-success);
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     transition: width var(--transition-slow, 0.3s);
   }
 

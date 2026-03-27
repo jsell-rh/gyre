@@ -176,7 +176,7 @@
 
 {:else if scopeType === 'workspace'}
   <!-- Workspace scope: repo list for graph exploration — S4.4b -->
-  <div class="ws-repo-list">
+  <div class="ws-repo-list" aria-busy={wsReposLoading}>
     <div class="ws-repo-header">
       <h2>Workspace Architecture</h2>
       <p class="ws-repo-desc">Select a workspace repository to explore its knowledge graph</p>
@@ -428,7 +428,7 @@
   .ws-repo-info {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
     min-width: 0;
   }
 
@@ -543,7 +543,7 @@
   .stat {
     display: flex;
     align-items: baseline;
-    gap: 3px;
+    gap: var(--space-0, 3px);
   }
 
   .stat-val {
@@ -699,7 +699,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 2px var(--space-2) 2px var(--space-3);
+    padding: var(--space-0, 2px) var(--space-2) var(--space-0, 2px) var(--space-3);
     background: color-mix(in srgb, var(--color-focus, #4db0ff) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
     border-radius: 999px;
@@ -721,7 +721,7 @@
     cursor: pointer;
     font-size: 12px;
     line-height: 1;
-    padding: 0 2px;
+    padding: 0 var(--space-0, 2px);
     opacity: 0.7;
     transition: opacity var(--transition-fast);
   }
