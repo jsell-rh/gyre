@@ -304,8 +304,8 @@
             <div class="dep-add-row">
               <input
                 class="dep-input"
-                placeholder="MR UUID"
-                aria-label="Add dependency MR UUID"
+                placeholder="Merge request ID"
+                aria-label="Add dependency by merge request ID"
                 bind:value={addDepInput}
                 onkeydown={(e) => e.key === 'Enter' && addDep()}
               />

@@ -90,8 +90,8 @@
   {:else}
     {#if summary}
       <div class="summary-card">
-        <div class="summary-label">Total Cost (all time)</div>
-        <div class="summary-amount">{fmtAmount(summary.total)}</div>
+        <div class="summary-label">Total cost (all time)</div>
+        <div class="summary-amount">${fmtAmount(summary.total)}</div>
       </div>
     {/if}
 
@@ -106,7 +106,7 @@
             <thead>
               <tr>
                 <th scope="col">Agent ID</th>
-                <th class="right">Total</th>
+                <th class="right" scope="col">Total ($)</th>
                 <th scope="col">Bar</th>
                 <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>

@@ -220,7 +220,7 @@
             {/if}
           </div>
           {#if !budget.config?.max_tokens_per_day && !budget.config?.max_cost_per_day && !budget.config?.max_concurrent_agents}
-            <EmptyState title="No budget limits configured for this workspace." description="No budget limits set. Click 'Configure Budget' to add limits." />
+            <EmptyState title="No budget limits set" description="Configure token, cost, and agent limits to control workspace spending." />
           {/if}
           {#if !budgetFormOpen}
             <button class="configure-budget-btn" aria-expanded={budgetFormOpen} aria-controls="budget-form" onclick={() => { budgetFormOpen = true; budgetForm = { max_tokens_per_day: budget.config?.max_tokens_per_day ?? '', max_cost_per_day: budget.config?.max_cost_per_day ?? '', max_concurrent_agents: budget.config?.max_concurrent_agents ?? '', max_agent_lifetime_secs: budget.config?.max_agent_lifetime_secs ?? '' }; }}>Configure Budget</button>
@@ -241,8 +241,8 @@
                   <input type="number" min="0" placeholder="e.g. 5" bind:value={budgetForm.max_concurrent_agents} />
                 </label>
                 <label class="budget-field">
-                  <span>Max Agent Lifetime (secs)</span>
-                  <input type="number" min="0" placeholder="e.g. 3600" bind:value={budgetForm.max_agent_lifetime_secs} />
+                  <span>Max Agent Lifetime</span>
+                  <input type="number" min="0" placeholder="e.g. 3600 (1 hour in seconds)" bind:value={budgetForm.max_agent_lifetime_secs} />
                 </label>
               </div>
               <div class="budget-form-actions">

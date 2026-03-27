@@ -98,7 +98,7 @@
     </label>
     <label class="form-label">{$t('tasks.new_task.status_label')}
       <select class="form-input" bind:value={taskStatus}>
-        {#each statuses as s}<option value={s}>{s}</option>{/each}
+        {#each statuses as s}<option value={s}>{s === 'in_progress' ? 'In Progress' : s.charAt(0).toUpperCase() + s.slice(1)}</option>{/each}
       </select>
     </label>
   </div>
