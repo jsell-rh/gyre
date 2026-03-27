@@ -38,7 +38,21 @@ vi.mock('../lib/api.js', () => ({
     createWorkspace: vi.fn().mockResolvedValue({ id: 'ws-2', name: 'New Workspace' }),
     computeCreate: vi.fn().mockResolvedValue(null),
     computeDelete: vi.fn().mockResolvedValue(null),
-    // Repo
+    // Repo (workspace scope)
+    repos: vi.fn().mockResolvedValue([
+      { id: 'repo-1', name: 'my-service', status: 'Active', default_branch: 'main' },
+      { id: 'repo-2', name: 'archived-service', status: 'Archived', default_branch: 'main' },
+    ]),
+    createRepo: vi.fn().mockResolvedValue({ id: 'repo-3', name: 'new-service' }),
+    createMirrorRepo: vi.fn().mockResolvedValue({ id: 'repo-4', name: 'mirror-service' }),
+    updateRepo: vi.fn().mockResolvedValue({ id: 'repo-1', name: 'my-service' }),
+    archiveRepo: vi.fn().mockResolvedValue(null),
+    unarchiveRepo: vi.fn().mockResolvedValue(null),
+    deleteRepo: vi.fn().mockResolvedValue(null),
+    allRepos: vi.fn().mockResolvedValue([
+      { id: 'repo-1', name: 'my-service', status: 'Active', default_branch: 'main', description: '' },
+    ]),
+    // Repo (repo scope)
     repoGates: vi.fn().mockResolvedValue([]),
     repoAbacPolicy: vi.fn().mockResolvedValue([]),
     createRepoGate: vi.fn().mockResolvedValue(null),
