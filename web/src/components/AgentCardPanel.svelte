@@ -206,7 +206,7 @@
     color: var(--color-blocked, #8b6fe0);
     border: 1px solid color-mix(in srgb, var(--color-blocked, #5e40be) 30%, transparent);
     border-radius: var(--radius-sm);
-    padding: 1px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
   }
 
   .edit-btn {
@@ -216,7 +216,7 @@
     color: var(--color-link);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 2px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     font-family: var(--font-body);
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }

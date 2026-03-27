@@ -544,7 +544,7 @@
   .trust-select {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px 8px;
+    padding: var(--space-0, 2px) var(--space-2);
     border-radius: 999px;
     text-transform: capitalize;
     border: 1px solid var(--color-border-strong);
@@ -582,6 +582,7 @@
     cursor: pointer;
   }
   .btn-retry:hover { background: var(--color-surface-hover); }
+  .btn-retry:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) {
     .bar-fill { transition: none; }
