@@ -129,7 +129,7 @@
   let showAllPrivate = $state(false);
 
   let showPublicOnlyBanner = $derived.by(() => nodes.length > THRESHOLD_FILTER && nodes.length <= THRESHOLD_LIST);
-  let showListFallback     = $derived.by(() => nodes.length > THRESHOLD_LIST);
+  let showListFallback     = $derived.by(() => nodes.length > THRESHOLD_LIST && !drillNode);
   let privateNodeCount     = $derived.by(() => nodes.filter(n => n.visibility === 'private').length);
 
   // ── Visible nodes/edges ────────────────────────────────────────────────────
@@ -412,6 +412,12 @@
     setTimeout(resetView, 0);
   }
 
+  function drillInFromList(node) {
+    drillNode = node;
+    highlightedNodeIds = new Set();
+    setTimeout(resetView, 0);
+  }
+
   function panToNode(nodeId) {
     const pos = getPos(nodeId);
     viewBox = { ...viewBox, x: pos.x - viewBox.w / 2, y: pos.y - viewBox.h / 2 };
@@ -528,15 +534,22 @@
     </div>
     <div class="list-fallback-wrap">
       <table class="list-table" aria-label="Node list (graph too large for canvas)">
-        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th>File</th><th>Spec</th></tr></thead>
+        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th>File</th><th>Spec</th><th scope="col">Action</th></tr></thead>
         <tbody>
           {#each nodes.slice(0, 1000) as node}
             <tr class="list-row" role="button" tabindex="0" aria-label="Select node {node.name}"
-              onclick={() => selectNode(node)} onkeydown={(e) => e.key === 'Enter' && selectNode(node)}>
+              onclick={() => selectNode(node)} onkeydown={(e) => e.key === 'Enter' && selectNode(node)}
+              ondblclick={(e) => { e.stopPropagation(); drillInFromList(node); }}>
               <td><Badge variant="default" value={node.node_type ?? '?'} /></td>
               <td class="mono">{node.name}</td>
               <td class="mono muted">{node.file_path ?? ''}</td>
               <td>{node.spec_path ? node.spec_path.split('/').pop() : '—'}</td>
+              <td>
+                <button class="drill-in-btn" onclick={(e) => { e.stopPropagation(); drillInFromList(node); }}
+                  aria-label="Drill into {node.name}">
+                  Drill In &rarr;
+                </button>
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -901,6 +914,14 @@
   .list-row td { padding: var(--space-2) var(--space-3); vertical-align: middle; color: var(--color-text); }
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .muted { color: var(--color-text-muted); }
+  .drill-in-btn {
+    padding: var(--space-1) var(--space-2); background: transparent;
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm);
+    color: var(--color-link); font-size: var(--text-xs); font-family: var(--font-body);
+    cursor: pointer; white-space: nowrap; transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  .drill-in-btn:hover { background: color-mix(in srgb, var(--color-link) 10%, transparent); border-color: var(--color-link); }
+  .drill-in-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .canvas-toolbar {
     display: flex; align-items: center; gap: var(--space-4);
