@@ -470,7 +470,7 @@
     outline: none;
   }
   .lang-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -483,9 +483,10 @@
     color: var(--color-text);
     font-size: var(--text-xs);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
-  .btn-retry:hover { background: var(--color-surface-hover); }
-  .btn-retry:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-retry:hover { background: var(--color-border); }
+  .btn-retry:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 

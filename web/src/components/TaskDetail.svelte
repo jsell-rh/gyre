@@ -260,7 +260,7 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--color-text-muted);
-    padding-top: var(--space-0, 3px);
+    padding-top: 3px;
   }
 
   .info-val {
@@ -293,7 +293,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     font-family: var(--font-mono);
@@ -333,7 +333,7 @@
   .artifact-body {
     display: flex;
     flex-direction: column;
-    gap: var(--space-0, 2px);
+    gap: 2px;
     min-width: 0;
   }
 
@@ -364,6 +364,7 @@
     padding: 0;
     text-decoration: underline;
     text-underline-offset: 2px;
+    transition: opacity var(--transition-fast);
   }
 
   .retry-area {
@@ -373,7 +374,7 @@
   }
 
   .link-btn:hover { opacity: 0.8; }
-  .link-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .link-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
