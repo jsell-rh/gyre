@@ -331,6 +331,10 @@
     glInitialized = true;
   }
 
+  // Persistent WebGL buffers — reused across frames to prevent GPU memory leak
+  let glPosBuf = $state(null);
+  let glColBuf = $state(null);
+
   function drawWebGL(particles) {
     if (!glInitialized) initWebGL();
     if (!glCtx || !glProgram) {
@@ -356,20 +360,37 @@
       return [c.r, c.g, c.b, 1.0];
     }));
 
-    const posBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    // Reuse buffers instead of creating new ones every frame
+    if (!glPosBuf) glPosBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuf);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(posLoc);
     gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
 
-    const colBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    if (!glColBuf) glColBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glColBuf);
     gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(colLoc);
     gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
 
     gl.drawArrays(gl.POINTS, 0, particles.length);
   }
+
+  // Clean up WebGL resources on unmount
+  $effect(() => {
+    return () => {
+      if (glCtx && glProgram) {
+        if (glPosBuf) glCtx.deleteBuffer(glPosBuf);
+        if (glColBuf) glCtx.deleteBuffer(glColBuf);
+        glCtx.deleteProgram(glProgram);
+        glPosBuf = null;
+        glColBuf = null;
+        glProgram = null;
+        glInitialized = false;
+        glCtx = null;
+      }
+    };
+  });
 
   // Parse a CSS color string to RGBA (supports hsl and hex)
   function cssColorToRGBA(color) {
@@ -428,11 +449,13 @@
   {height}
   class="flow-canvas"
   data-testid="flow-canvas"
+  role="img"
   onclick={onCanvasClick}
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}
   tabindex="0"
   aria-label="Particle flow animation — {activeParticles.length} active traces"
+  aria-roledescription="interactive particle animation canvas"
 ></canvas>
 
 <style>
