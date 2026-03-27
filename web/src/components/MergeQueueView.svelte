@@ -93,7 +93,7 @@
       <span class="queue-count">{entries.length} entries</span>
     </div>
     <div class="header-right">
-      <div class="view-toggle">
+      <div class="view-toggle" role="group" aria-label="Queue view mode">
         <button class="toggle-btn" class:active={viewMode === 'lanes'} onclick={() => switchView('lanes')} aria-pressed={viewMode === 'lanes'}>Lanes</button>
         <button class="toggle-btn" class:active={viewMode === 'dag'} onclick={() => switchView('dag')} aria-pressed={viewMode === 'dag'}>DAG</button>
       </div>
@@ -491,7 +491,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
-    padding: 1px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     border-radius: var(--radius-sm);
   }
 
@@ -656,7 +656,7 @@
     color: var(--color-danger);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 2px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     font-family: var(--font-body);
   }
   .cancel-btn-sm:hover:not(:disabled) {
@@ -760,7 +760,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 0.1rem 0.4rem;
+    padding: var(--space-0, 2px) var(--space-1);
   }
   .dag-free {
     font-size: var(--text-xs);

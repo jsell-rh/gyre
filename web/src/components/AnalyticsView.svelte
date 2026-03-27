@@ -115,8 +115,8 @@
                 <span class="ev-name">{ev.event_name}</span>
                 <span class="ev-agent">{ev.agent_id ?? '—'}</span>
                 <span class="ev-time">{fmtTime(ev.timestamp)}</span>
-                <button class="ev-detail" onclick={() => selectedEvent = selectedEvent === ev.id ? '' : ev.id}>
-                  {selectedEvent === ev.id ? '▲' : '▼'}
+                <button class="ev-detail" onclick={() => selectedEvent = selectedEvent === ev.id ? '' : ev.id} aria-expanded={selectedEvent === ev.id} aria-label="{selectedEvent === ev.id ? 'Collapse' : 'Expand'} event details">
+                  <span aria-hidden="true">{selectedEvent === ev.id ? '▲' : '▼'}</span>
                 </button>
                 {#if selectedEvent === ev.id}
                   <pre class="ev-props">{JSON.stringify(ev.properties, null, 2)}</pre>
@@ -148,8 +148,8 @@
     gap: var(--space-2);
   }
 
-  h2 { font-size: 1.1rem; font-weight: 600; color: var(--color-text); }
-  h3 { font-size: 0.95rem; font-weight: 600; color: var(--color-text); margin-bottom: var(--space-3); }
+  h2 { font-size: var(--text-lg); font-weight: 600; color: var(--color-text); }
+  h3 { font-size: var(--text-base); font-weight: 600; color: var(--color-text); margin-bottom: var(--space-3); }
 
   .filters { display: flex; gap: var(--space-2); align-items: center; }
 
@@ -158,7 +158,7 @@
     border: 1px solid var(--color-border);
     color: var(--color-text);
     border-radius: var(--radius-sm, 4px);
-    padding: 0.3rem 0.6rem;
+    padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     cursor: pointer;
   }
@@ -189,8 +189,8 @@
   .events-panel { overflow: auto; }
 
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; padding: 0.4rem var(--space-2); color: var(--color-text-muted); font-size: 0.8rem; border-bottom: 1px solid var(--color-border); }
-  td { padding: 0.4rem var(--space-2); font-size: var(--text-sm); }
+  th { text-align: left; padding: var(--space-1) var(--space-2); color: var(--color-text-muted); font-size: var(--text-xs); border-bottom: 1px solid var(--color-border); }
+  td { padding: var(--space-1) var(--space-2); font-size: var(--text-sm); }
 
   .event-name { font-family: monospace; color: var(--color-primary); }
   .count { text-align: right; color: var(--color-text-muted); width: 50px; }
@@ -198,30 +198,30 @@
   .bar-cell { width: 120px; padding-left: var(--space-2); }
   .bar { height: 10px; background: var(--color-primary); border-radius: 2px; min-width: 2px; transition: width 0.3s; }
 
-  .event-list { display: flex; flex-direction: column; gap: 0.25rem; }
+  .event-list { display: flex; flex-direction: column; gap: var(--space-1); }
 
   .event-row {
     display: grid;
     grid-template-columns: 1fr auto auto auto;
     align-items: center;
     gap: var(--space-2);
-    padding: 0.4rem var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm, 4px);
     background: var(--color-bg, var(--color-surface));
     flex-wrap: wrap;
   }
 
-  .ev-name { font-family: monospace; font-size: 0.82rem; color: var(--color-primary); }
-  .ev-agent { font-size: 0.78rem; color: var(--color-text-muted); }
+  .ev-name { font-family: monospace; font-size: var(--text-xs); color: var(--color-primary); }
+  .ev-agent { font-size: var(--text-xs); color: var(--color-text-muted); }
   .ev-time { font-size: var(--text-xs); color: var(--color-text-secondary); }
-  .ev-detail { font-size: 0.7rem; padding: 0.1rem 0.3rem; }
+  .ev-detail { font-size: var(--text-xs); padding: var(--space-0, 2px) var(--space-1); }
   .ev-props {
     grid-column: 1 / -1;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm, 4px);
     padding: var(--space-2);
-    font-size: 0.78rem;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
     overflow: auto;
     max-height: 200px;
@@ -238,7 +238,7 @@
     cursor: pointer;
     font-size: var(--text-xs);
     font-weight: 500;
-    padding: 0.25rem var(--space-3);
+    padding: var(--space-1) var(--space-3);
     white-space: nowrap;
   }
   .retry-btn:hover {

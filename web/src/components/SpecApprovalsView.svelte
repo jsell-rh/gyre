@@ -139,7 +139,7 @@
             <th>Approver</th>
             <th>Approved At</th>
             <th>Status</th>
-            <th></th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -160,7 +160,7 @@
               </td>
               <td>
                 {#if !a.revoked_at}
-                  <button class="revoke-btn" onclick={() => openRevoke(a)} aria-label="Revoke approval">Revoke</button>
+                  <button class="revoke-btn" onclick={() => openRevoke(a)} aria-label="Revoke approval for {a.path}">Revoke</button>
                 {/if}
               </td>
             </tr>
@@ -330,7 +330,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     background: var(--color-surface-elevated);
-    padding: 2px 4px;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -350,7 +350,7 @@
     border-radius: var(--radius-sm);
     color: var(--color-danger);
     font-size: var(--text-xs);
-    padding: 2px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     cursor: pointer;
     transition: background var(--transition-fast);
   }
@@ -358,6 +358,7 @@
   .revoke-btn:hover {
     background: color-mix(in srgb, var(--color-primary) 8%, transparent);
   }
+  .revoke-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   /* Modal form */
   .modal-form {
@@ -399,4 +400,6 @@
     gap: var(--space-2);
     margin-top: var(--space-2);
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

@@ -107,7 +107,7 @@
                 <th>Agent ID</th>
                 <th class="right">Total</th>
                 <th>Bar</th>
-                <th></th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -165,10 +165,10 @@
 
 <style>
   .cost-view {
-    padding: 1.5rem;
+    padding: var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: var(--space-4);
     height: 100%;
     overflow: auto;
   }
@@ -177,22 +177,23 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
-  h2 { font-size: 1.1rem; font-weight: 600; color: var(--color-text); }
-  h3 { font-size: 0.95rem; font-weight: 600; color: var(--color-text); margin-bottom: 0.75rem; }
+  h2 { font-size: var(--text-lg); font-weight: 600; color: var(--color-text); }
+  h3 { font-size: var(--text-base); font-weight: 600; color: var(--color-text); margin-bottom: var(--space-3); }
 
-  .actions { display: flex; gap: 0.5rem; }
+  .actions { display: flex; gap: var(--space-2); }
 
   button {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     color: var(--color-text);
-    border-radius: 4px;
-    padding: 0.3rem 0.6rem;
-    font-size: 0.85rem;
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
     cursor: pointer;
+    font-family: var(--font-body);
   }
   button:hover { background: var(--color-surface-elevated); }
   button:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
@@ -200,57 +201,57 @@
   .summary-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 1rem 1.5rem;
+    border-radius: var(--radius);
+    padding: var(--space-4) var(--space-6);
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    gap: var(--space-6);
   }
 
-  .summary-label { color: var(--color-text-muted); font-size: 0.85rem; }
-  .summary-amount { font-size: 1.8rem; font-weight: 700; color: var(--color-primary); font-family: monospace; }
+  .summary-label { color: var(--color-text-muted); font-size: var(--text-sm); }
+  .summary-amount { font-size: var(--text-3xl); font-weight: 700; color: var(--color-primary); font-family: var(--font-mono); }
 
   .panel {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 1rem;
+    border-radius: var(--radius);
+    padding: var(--space-4);
     overflow: auto;
   }
 
   table { width: 100%; border-collapse: collapse; }
   th {
     text-align: left;
-    padding: 0.4rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     color: var(--color-text-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-xs);
     border-bottom: 1px solid var(--color-border);
   }
   th.right { text-align: right; }
-  td { padding: 0.4rem 0.5rem; font-size: 0.85rem; }
+  td { padding: var(--space-1) var(--space-2); font-size: var(--text-sm); }
 
-  .agent-id, .cost-type { font-family: monospace; font-size: 0.82rem; color: var(--color-text); }
+  .agent-id, .cost-type { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); }
   .right { text-align: right; }
-  .amount { color: var(--color-primary); font-family: monospace; }
-  .currency, .task-id, .time { color: var(--color-text-muted); font-size: 0.8rem; }
+  .amount { color: var(--color-primary); font-family: var(--font-mono); }
+  .currency, .task-id, .time { color: var(--color-text-muted); font-size: var(--text-xs); }
 
   .bar-cell { width: 120px; }
-  .bar { height: 10px; background: var(--color-primary); border-radius: 2px; min-width: 2px; }
+  .bar { height: 10px; background: var(--color-primary); border-radius: var(--radius-sm); min-width: 2px; }
 
-  .detail-btn { font-size: 0.75rem; padding: 0.15rem 0.4rem; }
+  .detail-btn { font-size: var(--text-xs); padding: var(--space-0, 2px) var(--space-1); }
 
-  .empty { color: var(--color-text-secondary); font-size: 0.85rem; }
-  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: 0.75rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .empty { color: var(--color-text-secondary); font-size: var(--text-sm); }
+  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: var(--radius); padding: var(--space-3); display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
   .error p { margin: 0; }
   .retry-btn {
     background: color-mix(in srgb, var(--color-primary) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
-    border-radius: 4px;
+    border-radius: var(--radius);
     color: var(--color-primary);
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: var(--text-xs);
     font-weight: 500;
-    padding: 0.25rem 0.75rem;
+    padding: var(--space-1) var(--space-3);
     white-space: nowrap;
   }
   .retry-btn:hover {
@@ -258,4 +259,6 @@
     border-color: var(--color-primary);
   }
   .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
