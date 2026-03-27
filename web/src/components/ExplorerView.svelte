@@ -64,7 +64,9 @@
     wsReposLoading = true;
     wsReposError = null;
     try {
-      wsRepos = await api.allRepos();
+      wsRepos = scope.workspaceId
+        ? await api.repos({ workspaceId: scope.workspaceId })
+        : await api.allRepos();
     } catch (e) {
       wsReposError = e.message ?? 'Failed to load repositories';
       wsRepos = [];

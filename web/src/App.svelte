@@ -317,8 +317,12 @@
   // ── Page title ─────────────────────────────────────────────────────
   $effect(() => {
     const navLabel = currentNav ? currentNav.charAt(0).toUpperCase() + currentNav.slice(1).replace('-', ' ') : 'Gyre';
-    const wsName = scope?.type === 'workspace' ? (currentWorkspace?.name ?? '') : '';
-    document.title = wsName ? `${navLabel} — ${wsName} | Gyre` : `${navLabel} | Gyre`;
+    const wsName = scope?.type !== 'tenant' ? (currentWorkspace?.name ?? '') : '';
+    const repoName = scope?.type === 'repo' ? (scope.repoName ?? '') : '';
+    const parts = [navLabel];
+    if (repoName) parts.push(repoName);
+    else if (wsName) parts.push(wsName);
+    document.title = parts.length > 1 ? `${parts.join(' — ')} | Gyre` : `${parts[0]} | Gyre`;
   });
 
   let currentLayout = $derived.by(() => {

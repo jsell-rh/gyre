@@ -19,6 +19,15 @@
   let jsonStatus = $state(null);
   let jsonError = $state('');
 
+  let copiedId = $state(null);
+  async function copyToClipboard(text, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedId = text;
+      setTimeout(() => { copiedId = null; }, 2000);
+    } catch { /* clipboard not available */ }
+  }
+
   $effect(() => {
     if (!yamlInput.trim()) { jsonStatus = null; return; }
     const t = setTimeout(() => {
@@ -146,7 +155,11 @@
           </svg>
           <div>
             <div class="success-title">Compose applied successfully</div>
-            <div class="success-detail">Session ID: <code class="session-id">{applyResult.compose_id}</code></div>
+            <div class="success-detail">Session ID: <code class="session-id">{applyResult.compose_id}</code>
+              <button class="copy-btn" onclick={() => copyToClipboard(applyResult.compose_id)} aria-label="Copy session ID" title="Copy to clipboard">
+                {copiedId === applyResult.compose_id ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
           </div>
         </div>
       {/if}
@@ -213,7 +226,10 @@
                   <div class="node-name">{agent.name}</div>
                   <div class="node-meta">
                     <Badge value={agent.status} />
-                    <code class="node-id">{agent.agent_id.slice(0, 8)}</code>
+                    <button class="copy-btn" onclick={() => copyToClipboard(agent.agent_id)} aria-label="Copy agent ID {agent.agent_id.slice(0, 8)}" title="Copy full agent ID">
+                      <code class="node-id">{agent.agent_id.slice(0, 8)}</code>
+                      {copiedId === agent.agent_id ? ' Copied!' : ''}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -560,6 +576,25 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
   }
+
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    margin-left: var(--space-1);
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+    vertical-align: middle;
+  }
+  .copy-btn:hover { color: var(--color-text); border-color: var(--color-border-strong); }
+  .copy-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .json-hint { font-size: var(--text-xs); margin-top: var(--space-1); margin-bottom: 0; }
   .json-hint.valid { color: var(--color-success); }
