@@ -4,6 +4,7 @@
     onnavigate = undefined,
     inboxBadge = 0,
     wsStatus = 'disconnected',
+    version = 'v0.1.0',
   } = $props();
 
   let collapsed = $state(false);
@@ -88,7 +89,7 @@
             {/if}
             <span class="nav-shortcut" aria-hidden="true">⌘{item.shortcut}</span>
           {:else if item.id === 'inbox' && inboxBadge > 0}
-            <span class="nav-badge-dot" aria-label="{inboxBadge} unresolved"></span>
+            <span class="nav-badge-dot" aria-hidden="true"></span>
           {/if}
         </button>
       </li>
@@ -100,7 +101,7 @@
     <div class="version-indicator" role="status" aria-label="Server version">
       <span class="version-dot" class:connected={wsStatus === 'connected'} class:error={wsStatus === 'error' || wsStatus === 'auth-failed'} aria-hidden="true"></span>
       {#if !collapsed}
-        <span class="version-text">v0.1.0</span>
+        <span class="version-text">{version}</span>
       {/if}
     </div>
   </div>
