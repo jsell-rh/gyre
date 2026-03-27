@@ -137,4 +137,22 @@
   tbody tr.clickable {
     cursor: pointer;
   }
+  th.sortable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  tbody tr.clickable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  th.sortable {
+    transition: color var(--transition-fast);
+  }
+
+  tbody tr.clickable {
+    transition: background var(--transition-fast);
+  }
+
 </style>
