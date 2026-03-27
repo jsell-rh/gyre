@@ -43,31 +43,31 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: var(--space-2, 0.5rem) var(--space-3, 0.75rem);
-    background: color-mix(in srgb, var(--color-primary, #ee0000) 12%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-primary, #ee0000) 25%, transparent);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
   }
 
   .diff-label {
-    font-size: var(--text-xs, 0.75rem);
+    font-size: var(--text-xs);
     font-weight: 600;
-    color: var(--color-primary, #ee0000);
+    color: var(--color-primary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
 
   .diff-hint {
-    font-size: var(--text-xs, 0.75rem);
-    color: var(--color-text-muted, #888);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
   }
 
   .diff-content {
     margin: 0;
-    padding: var(--space-3, 0.75rem);
-    font-family: var(--font-mono, monospace);
-    font-size: var(--text-sm, 0.875rem);
+    padding: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
     line-height: 1.6;
-    color: var(--color-text, #eee);
+    color: var(--color-text);
     overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -75,9 +75,9 @@
 
   .diff-actions {
     display: flex;
-    gap: var(--space-2, 0.5rem);
-    padding: var(--space-2, 0.5rem) var(--space-3, 0.75rem);
-    border-top: 1px solid var(--color-border, #333);
-    background: var(--color-surface-elevated, #1a1a1a);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
   }
 </style>
