@@ -286,6 +286,7 @@
     color: var(--color-text);
     font-family: var(--font-body);
     font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
   }
 
   .filter-input:focus:not(:focus-visible) { outline: none; }
@@ -341,7 +342,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     background: var(--color-surface-elevated);
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -361,7 +362,7 @@
     border-radius: var(--radius-sm);
     color: var(--color-danger);
     font-size: var(--text-xs);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     cursor: pointer;
     transition: background var(--transition-fast);
   }
@@ -414,4 +415,8 @@
   }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .revoke-btn, .filter-input { transition: none; }
+  }
 </style>

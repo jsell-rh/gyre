@@ -206,7 +206,7 @@
     color: var(--color-blocked);
     border: 1px solid color-mix(in srgb, var(--color-blocked) 30%, transparent);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
   }
 
   .edit-btn {
@@ -216,7 +216,7 @@
     color: var(--color-link);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     font-family: var(--font-body);
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
@@ -419,6 +419,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .protocol-tag,
     .edit-btn,
     .field-input,
     .field-textarea,

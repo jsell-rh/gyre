@@ -261,7 +261,7 @@
     flex: 1;
     width: 1px;
     background: var(--color-border);
-    margin: 2px 0;
+    margin: var(--space-1) 0;
     min-height: var(--space-4);
   }
 

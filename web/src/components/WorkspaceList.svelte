@@ -141,6 +141,7 @@
     transition: border-color var(--transition-fast), background var(--transition-fast);
   }
   .ws-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .ws-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .skeleton-card { min-height: 72px; cursor: default; }
   .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
 
@@ -160,7 +161,7 @@
 
   .ws-info { flex: 1; }
   .ws-name { font-weight: 600; color: var(--color-text); font-size: var(--text-base); }
-  .ws-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: 2px; }
+  .ws-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: var(--space-1); }
 
   .chevron { color: var(--color-text-muted); flex-shrink: 0; }
 
@@ -204,9 +205,14 @@
     color: var(--color-text);
     font-family: var(--font-body);
     font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ws-card, .btn-primary, .btn-secondary, .field-input { transition: none; }
+  }
 </style>
