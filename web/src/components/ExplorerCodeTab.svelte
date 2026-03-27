@@ -120,6 +120,7 @@
 </script>
 
 <div class="code-tab">
+  <span class="sr-only" aria-live="polite">{loading ? "" : "code view loaded"}</span>
   <!-- Sub-tab bar -->
   <div class="subtab-bar" role="tablist" aria-label="Code sub-tabs">
     {#each SUB_TABS as st}
@@ -410,4 +411,5 @@
   @media (prefers-reduced-motion: reduce) {
     .subtab-btn, .sort-btn, .table-row { transition: none; }
   }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

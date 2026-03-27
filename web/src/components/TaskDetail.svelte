@@ -64,6 +64,7 @@
 </script>
 
 <div class="task-detail" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "task loaded"}</span>
   <div class="detail-header">
     <Button variant="secondary" onclick={onBack} disabled={!onBack} aria-label="Go back to task list">← Back</Button>
     <div class="header-meta">
