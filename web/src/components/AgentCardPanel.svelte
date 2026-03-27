@@ -49,7 +49,7 @@
   }
 </script>
 
-<div class="card-panel" aria-live="polite">
+<div class="card-panel">
   <div class="card-header">
     <div class="card-title-row">
       <span class="section-label">Agent Card</span>
