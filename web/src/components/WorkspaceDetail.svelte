@@ -528,7 +528,7 @@
   .trust-badge {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-full);
     text-transform: capitalize;
   }
@@ -545,7 +545,7 @@
   .trust-select {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-full);
     text-transform: capitalize;
     border: 1px solid var(--color-border-strong);

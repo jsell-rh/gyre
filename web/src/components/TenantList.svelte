@@ -155,7 +155,7 @@
   .tenant-name { font-weight: 600; font-size: var(--text-base); color: var(--color-text); }
   .tenant-slug { color: var(--color-text-secondary); font-size: var(--text-xs); margin-left: var(--space-1); }
 
-  .tenant-meta { margin: 2px 0 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
+  .tenant-meta { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
   .tenant-id { opacity: 0.5; font-family: var(--font-mono); font-size: var(--text-xs); }
 
   .form-group { margin-bottom: var(--space-4); }

@@ -75,7 +75,7 @@
   }
 </script>
 
-<div class="dep-graph-view">
+<div class="dep-graph-view" aria-busy={loading}>
   <div class="view-header">
     <div>
       <h2>Dependency Graph</h2>
