@@ -6,9 +6,22 @@
   let { agentId } = $props();
 
   let card = $state(null);
+  let loading = $state(false);
   let editing = $state(false);
   let saving = $state(false);
   let saveError = $state(null);
+
+  // Load agent card whenever agentId changes
+  $effect(() => {
+    const id = agentId;
+    if (!id) { card = null; return; }
+    loading = true;
+    editing = false;
+    api.getAgentCard(id)
+      .then((data) => { card = data ?? null; })
+      .catch(() => { card = null; })
+      .finally(() => { loading = false; });
+  });
 
   // Editable fields
   let capInput = $state('');
@@ -155,6 +168,10 @@
       <button class="edit-btn-secondary" onclick={startEdit}>Edit Agent Card</button>
     </div>
 
+  {:else if loading}
+    <div class="empty-card">
+      <p class="empty-text">Loading agent card...</p>
+    </div>
   {:else}
     <div class="empty-card">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24" aria-hidden="true">

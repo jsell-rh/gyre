@@ -1,5 +1,5 @@
 <script>
-  import { getContext, tick } from 'svelte';
+  import { getContext, tick, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -91,9 +91,17 @@
     return `${Math.floor(secs / 86400)}d`;
   }
 
+  // Clean up TTY WebSocket on destroy
+  onDestroy(() => { closeTtyWs(); });
+
   $effect(() => {
     const wsId = workspaceId;
     loading = true;
+    // Clear stale selection from previous scope
+    selected = null;
+    closeTtyWs();
+    containerRecord = null;
+    agentLogLines = [];
     api.agents({ workspaceId: wsId })
       .then((data) => { agents = data; loading = false; })
       .catch((err) => { error = err.message; loading = false; });
