@@ -789,7 +789,8 @@
     .entries-table tbody tr,
     .dag-node,
     .cancel-btn,
-    .toggle-btn {
+    .toggle-btn,
+    .refresh-btn {
       transition: none;
     }
   }

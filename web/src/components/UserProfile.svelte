@@ -361,8 +361,8 @@
     width: 48px;
     height: 48px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
-    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 15%, transparent);
+    color: var(--color-focus, #4db0ff);
     font-weight: 700;
     font-size: var(--text-xl);
     display: flex;
@@ -486,7 +486,7 @@
     flex-shrink: 0;
     white-space: nowrap;
   }
-  .btn-switch:hover { border-color: var(--color-primary); color: var(--color-primary); }
+  .btn-switch:hover { border-color: var(--color-link, var(--color-focus, #4db0ff)); color: var(--color-link, var(--color-focus, #4db0ff)); }
 
   /* Judgment Ledger */
   .ledger-list { display: flex; flex-direction: column; gap: var(--space-2); }

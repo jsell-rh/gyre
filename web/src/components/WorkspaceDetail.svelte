@@ -118,7 +118,7 @@
 <div class="workspace-detail">
   <div class="detail-header">
     <button class="back-btn" onclick={onBack} aria-label="Back to workspaces">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
         <path d="M19 12H5M12 19l-7-7 7-7"/>
       </svg>
       Workspaces
@@ -467,7 +467,7 @@
   .configure-budget-btn {
     margin-top: var(--space-4);
     padding: var(--space-2) var(--space-4);
-    background: var(--color-primary);
+    background: var(--color-link);
     color: var(--color-surface, #fff);
     border: none;
     border-radius: var(--radius);
@@ -495,7 +495,7 @@
     border-color: var(--color-focus, #4db0ff);
   }
   .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
-  .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
+  .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-link); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
   .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-secondary:hover { color: var(--color-text); }

@@ -741,13 +741,13 @@
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-link, var(--color-primary));
+    color: var(--color-link, #4db0ff);
     text-decoration: underline;
     text-underline-offset: 2px;
     transition: color var(--transition-fast);
   }
 
-  .entity-ref:hover { color: var(--color-primary-hover); }
+  .entity-ref:hover { color: var(--color-link-hover, var(--color-link, #4db0ff)); }
   .agent-ref { color: var(--color-text-secondary); }
   .agent-ref:hover { color: var(--color-text); }
   .mr-ref { color: var(--color-danger); }
@@ -808,10 +808,10 @@
   }
 
   .action-btn {
-    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--color-link) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-link) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-primary);
+    color: var(--color-link);
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-xs);
@@ -821,8 +821,8 @@
   }
 
   .action-btn:hover {
-    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
-    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-link) 25%, transparent);
+    border-color: var(--color-link);
   }
 
   .action-btn.secondary {
