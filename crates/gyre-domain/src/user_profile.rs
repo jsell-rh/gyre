@@ -77,7 +77,7 @@ impl JudgmentType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_db_str(s: &str) -> Option<Self> {
         match s {
             "approval" => Some(JudgmentType::SpecApproval),
             "rejection" => Some(JudgmentType::SpecRejection),

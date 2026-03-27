@@ -794,7 +794,7 @@ pub async fn get_judgments(
     let judgment_type = params
         .judgment_type
         .as_deref()
-        .and_then(JudgmentType::from_str);
+        .and_then(JudgmentType::from_db_str);
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
 

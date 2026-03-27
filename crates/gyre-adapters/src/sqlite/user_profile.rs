@@ -274,20 +274,17 @@ impl JudgmentLedgerRepository for SqliteStorage {
 
                 let rows = q
                     .order(spec_approvals::approved_at.desc())
-                    .load::<(
-                        String,
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        i64,
-                        Option<i64>,
-                        Option<String>,
-                        Option<String>,
-                    )>(&mut *conn)
+                    .select((
+                        spec_approvals::id,
+                        spec_approvals::spec_path,
+                        spec_approvals::approved_at,
+                        spec_approvals::revoked_at,
+                        spec_approvals::revocation_reason,
+                    ))
+                    .load::<(String, String, i64, Option<i64>, Option<String>)>(&mut *conn)
                     .context("load spec_approvals for judgment ledger")?;
 
-                for (_, spec_path, _, _, _, approved_at, revoked_at, _, revocation_reason) in rows {
+                for (_, spec_path, approved_at, revoked_at, revocation_reason) in rows {
                     // If revoked, it's a rejection entry; otherwise an approval.
                     let jt = if revoked_at.is_some() {
                         // Only include if filter allows rejections.
@@ -300,16 +297,14 @@ impl JudgmentLedgerRepository for SqliteStorage {
                         } else {
                             continue;
                         }
+                    } else if jtype
+                        .as_ref()
+                        .map(|t| !matches!(t, JudgmentType::SpecRejection))
+                        .unwrap_or(true)
+                    {
+                        JudgmentType::SpecApproval
                     } else {
-                        if jtype
-                            .as_ref()
-                            .map(|t| !matches!(t, JudgmentType::SpecRejection))
-                            .unwrap_or(true)
-                        {
-                            JudgmentType::SpecApproval
-                        } else {
-                            continue;
-                        }
+                        continue;
                     };
                     entries.push(JudgmentEntry::new(
                         jt,

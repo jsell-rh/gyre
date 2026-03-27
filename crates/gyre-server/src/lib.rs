@@ -954,7 +954,7 @@ pub fn build_state(
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,
-            mem::MemJudgmentLedgerRepository::default()
+            mem::MemJudgmentLedgerRepository
         ),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
