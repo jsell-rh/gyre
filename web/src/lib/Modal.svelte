@@ -145,6 +145,7 @@
     .modal {
       animation: none;
     }
+    .modal-close { transition: none; }
   }
 
   .modal-sm { max-width: 400px; }
