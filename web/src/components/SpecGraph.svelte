@@ -89,7 +89,7 @@
   }
 </script>
 
-<div class="spec-graph-view">
+<div class="spec-graph-view" aria-busy={loading}>
   <div class="view-header">
     <div>
       <h2>Spec Link Graph</h2>
