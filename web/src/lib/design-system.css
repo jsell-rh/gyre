@@ -21,6 +21,7 @@
   /* Accent / Actions */
   --color-primary:          #ee0000;
   --color-primary-hover:    #a60000;
+  --color-danger-hover:     color-mix(in srgb, var(--color-danger) 80%, black);
   /* Link blue updated from #0066cc (2.96:1 — WCAG fail) to #4db0ff (7.5:1 on dark surface — WCAG AA pass) */
   --color-link:             #4db0ff;
   --color-link-hover:       #79c8ff;

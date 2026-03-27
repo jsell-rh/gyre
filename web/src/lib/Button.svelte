@@ -35,7 +35,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.375rem;
+    gap: var(--space-1);
     font-family: var(--font-body);
     font-weight: 500;
     border: 1px solid transparent;
@@ -53,14 +53,14 @@
   }
 
   /* Sizes */
-  .btn-sm { padding: 0.25rem 0.625rem; font-size: var(--text-xs); }
-  .btn-md { padding: 0.4375rem 0.875rem; font-size: var(--text-sm); }
-  .btn-lg { padding: 0.625rem 1.25rem; font-size: var(--text-base); }
+  .btn-sm { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); }
+  .btn-md { padding: var(--space-2) var(--space-4); font-size: var(--text-sm); }
+  .btn-lg { padding: var(--space-3) var(--space-5); font-size: var(--text-base); }
 
   /* Primary — Red Hat red */
   .btn-primary {
     background: var(--color-primary);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     border-color: var(--color-primary);
   }
   .btn-primary:hover:not(:disabled) {
@@ -93,16 +93,16 @@
   /* Danger */
   .btn-danger {
     background: var(--color-danger);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     border-color: var(--color-danger);
   }
   .btn-danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-danger) 80%, black);
-    border-color: color-mix(in srgb, var(--color-danger) 80%, black);
+    background: var(--color-danger-hover);
+    border-color: var(--color-danger-hover);
   }
 
   .btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 </style>
