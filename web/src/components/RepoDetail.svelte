@@ -336,7 +336,8 @@
   }
 
   async function deleteGate(gateId) {
-    if (!confirm('Delete this gate? This cannot be undone.')) return;
+    const gate = gates.find(g => g.id === gateId);
+    if (!confirm(`Delete gate "${gate?.name ?? gateId}"? This cannot be undone.`)) return;
     deletingGateId = gateId;
     try {
       await api.deleteRepoGate(repo.id, gateId);
@@ -614,7 +615,7 @@
         <div class="policy-section">
           <h3 class="section-title">Spec Policy</h3>
           <p class="section-desc">Control how spec references are enforced on merge requests for this repository.</p>
-          <div class="policy-toggles">
+          <div class="policy-toggles" role="group" aria-label="Spec policy options">
             <label class="toggle-row">
               <input type="checkbox" bind:checked={specPolicy.require_spec_ref} />
               <span class="toggle-label">Require spec_ref on all MRs</span>
@@ -1307,6 +1308,10 @@
     padding: var(--space-2) var(--space-3);
   }
 
+  .policy-input:hover {
+    border-color: var(--color-border-strong);
+  }
+
   .policy-input:focus:not(:focus-visible) { outline: none; }
   .policy-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
@@ -1355,6 +1360,9 @@
     font-size: var(--text-xs);
     padding: var(--space-1) var(--space-2);
     font-family: var(--font-body);
+  }
+  .gate-del-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
   }
   .gate-del-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .push-gates-list {
@@ -1487,7 +1495,8 @@
   .push-gate-toggle:focus-visible,
   .jj-btn:focus-visible,
   .copy-btn:focus-visible,
-  .abac-remove-btn:focus-visible {
+  .abac-remove-btn:focus-visible,
+  .policy-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }

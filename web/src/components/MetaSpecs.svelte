@@ -547,7 +547,7 @@
               role="button"
               tabindex="0"
               aria-label="View {spec.title || spec.path}"
-              onkeydown={(e) => { if (e.key === 'Enter') { detailSpec = spec; detailTab = 'info'; } }}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); detailSpec = spec; detailTab = 'info'; } }}
             >
               <td class="mono cell-path">{spec.path}</td>
               <td><Badge value={kindLabel(spec.kind)} variant={kindBadgeVariant(spec.kind)} /></td>
@@ -770,7 +770,7 @@
     cursor: pointer;
     font-size: 0.85rem;
     color: var(--color-text, #eee);
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
   }
   .spec-check-item:hover { background: var(--color-surface-elevated, #1a1a1a); }
   .spec-check-path { font-family: var(--font-mono, monospace); font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -871,6 +871,7 @@
     .pill,
     .impact-tab,
     .detail-tab,
-    .link-btn { transition: none; }
+    .link-btn,
+    .persona-textarea { transition: none; }
   }
 </style>

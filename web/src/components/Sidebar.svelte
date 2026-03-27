@@ -249,7 +249,7 @@
     min-width: 18px;
     height: 18px;
     padding: 0 4px;
-    background: var(--color-danger);
+    background: var(--color-focus, #4db0ff);
     color: var(--color-text-inverse, #fff);
     border-radius: 999px;
     font-size: 0.6rem;
@@ -265,7 +265,7 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--color-danger);
+    background: var(--color-focus, #4db0ff);
     flex-shrink: 0;
   }
 
