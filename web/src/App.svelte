@@ -436,7 +436,7 @@
       <ScopeBreadcrumb
         tenant={{ id: 'default', name: 'Gyre' }}
         workspace={scope.type !== 'tenant' ? currentWorkspace : null}
-        repo={null}
+        repo={scope.type === 'repo' && scope.repoId ? { id: scope.repoId, name: scope.repoName ?? scope.repoId } : null}
         {workspaces}
         onnavigate={onBreadcrumbNavigate}
       />

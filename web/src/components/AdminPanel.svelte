@@ -478,7 +478,7 @@
       toastSuccess(`Repo "${newRepo.name ?? newRepoForm.name}" created.`);
       newRepoModal = false;
       newRepoForm = { name: '', description: '', default_branch: 'main', initialize: true };
-      if (newRepo.id) navigate('repo-detail', { repo: newRepo });
+      if (newRepo.id) navigate('admin', { type: 'repo', repoId: newRepo.id, repoName: newRepo.name, workspaceId });
     } catch (e) { toastError(e.message); }
     finally { newRepoLoading = false; }
   }
@@ -1120,8 +1120,8 @@
                 <tr
                   tabindex="0"
                   class="ws-row {isArchived ? 'archived-row' : ''}"
-                  onclick={() => navigate('repo-detail', { repo })}
-                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('repo-detail', { repo }); } }}
+                  onclick={() => navigate('admin', { type: 'repo', repoId: repo.id, repoName: repo.name, workspaceId })}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('admin', { type: 'repo', repoId: repo.id, repoName: repo.name, workspaceId }); } }}
                   aria-label="Open repo {repo.name}"
                 >
                   <td class="agent-name">{repo.name}</td>
