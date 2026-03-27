@@ -84,6 +84,7 @@
           <p class="empty">No events recorded yet.</p>
         {:else}
           <table>
+            <caption class="sr-only">Top events by frequency</caption>
             <thead>
               <tr><th scope="col">Event</th><th scope="col">Count</th><th scope="col">Bar</th></tr>
             </thead>

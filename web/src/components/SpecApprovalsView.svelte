@@ -137,6 +137,7 @@
       />
     {:else}
       <table class="approvals-table">
+        <caption class="sr-only">Spec approval ledger</caption>
         <thead>
           <tr>
             <th scope="col">Spec Path</th>

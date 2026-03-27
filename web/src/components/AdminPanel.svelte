@@ -696,6 +696,7 @@
           <EmptyState title="No workspaces" description="Create a workspace to get started." />
         {:else}
           <table class="data-table">
+            <caption class="sr-only">Workspaces in this tenant</caption>
             <thead>
               <tr><th scope="col">Name</th><th scope="col">Trust Level</th><th scope="col">Description</th></tr>
             </thead>
@@ -728,6 +729,7 @@
           <EmptyState title="No compute targets" description="Register local, Docker, or SSH compute targets." />
         {:else}
           <table class="data-table">
+            <caption class="sr-only">Compute targets</caption>
             <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {#each tenantCompute as ct}
@@ -771,6 +773,7 @@
         {:else}
           <div class="table-scroll">
             <table class="data-table">
+              <caption class="sr-only">Audit log</caption>
               <thead><tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Event</th><th scope="col">Description</th></tr></thead>
               <tbody>
                 {#each tenantAudit as evt}
@@ -930,6 +933,7 @@
           <EmptyState title="No members" description="Add members to grant access to this workspace." />
         {:else}
           <table class="data-table">
+            <caption class="sr-only">Workspace members</caption>
             <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Last Active</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {#each wsMembers as member}
@@ -1108,6 +1112,7 @@
           <EmptyState title="No repositories" description="Create a repository or import one from a remote URL." />
         {:else}
           <table class="data-table">
+            <caption class="sr-only">Repositories in this workspace</caption>
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -1189,6 +1194,7 @@
           <EmptyState title="No gates configured" description="Add gates to require checks before merging." />
         {:else}
           <table class="data-table">
+            <caption class="sr-only">Repository gates</caption>
             <thead><tr><th scope="col">Name</th><th scope="col">Command</th><th scope="col">Timeout</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {#each repoGates as gate}
@@ -2244,6 +2250,18 @@
     font-size: var(--text-sm);
     color: var(--color-text);
     cursor: pointer;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {
