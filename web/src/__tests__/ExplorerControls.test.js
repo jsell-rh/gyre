@@ -169,7 +169,7 @@ describe('ExplorerControls', () => {
     const askBtn = container.querySelector('.ask-btn');
     await fireEvent.click(askBtn);
     await waitFor(() => {
-      expect(api.generateExplorerView).toHaveBeenCalledWith('ws-1', expect.objectContaining({ question: expect.any(String) }));
+      expect(api.generateExplorerView).toHaveBeenCalledWith('ws-1', expect.objectContaining({ question: expect.any(String) }), expect.anything());
     });
   });
 
