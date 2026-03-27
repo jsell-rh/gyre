@@ -432,8 +432,9 @@
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}
   tabindex="0"
+  role="img"
   aria-label="Particle flow animation — {activeParticles.length} active traces"
-></canvas>
+>Particle flow animation showing {activeParticles.length} active traces across {nodes.length} nodes.</canvas>
 
 <style>
   .flow-canvas {
