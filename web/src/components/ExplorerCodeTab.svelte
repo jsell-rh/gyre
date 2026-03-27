@@ -1,5 +1,5 @@
 <script>
-  import { getContext, onMount } from 'svelte';
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -44,10 +44,6 @@
   // Sort state
   let sortField = $state('name');
   let sortDir = $state('asc');
-
-  onMount(() => {
-    if (repoId) loadTab(subTab);
-  });
 
   $effect(() => {
     if (repoId) loadTab(subTab);
