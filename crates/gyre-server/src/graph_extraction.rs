@@ -14,7 +14,9 @@ use gyre_common::{
     graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge, GraphNode},
     Id, Notification, NotificationType,
 };
-use gyre_domain::{LanguageExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor, WorkspaceRole};
+use gyre_domain::{
+    LanguageExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor, WorkspaceRole,
+};
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
