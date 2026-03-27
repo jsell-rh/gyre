@@ -292,6 +292,9 @@ mod tests {
             prompt_templates: base.prompt_templates.clone(),
             compute_targets: base.compute_targets.clone(),
             llm: base.llm.clone(),
+            user_notification_prefs: base.user_notification_prefs.clone(),
+            user_tokens: base.user_tokens.clone(),
+            judgment_ledger: base.judgment_ledger.clone(),
         });
         crate::build_router(state)
     }

@@ -71,9 +71,11 @@ use discover::{discover_agents, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
 use users::{
-    create_team, delete_team, dismiss_notification, get_me, get_my_agents, get_my_mrs,
-    get_my_notifications, get_my_tasks, invite_member, list_members, list_teams, remove_member,
-    resolve_notification, update_me, update_member_role, update_team,
+    create_team, create_token, delete_team, delete_token, dismiss_notification, get_judgments,
+    get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
+    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
+    remove_member, resolve_notification, update_me, update_member_role,
+    update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -645,11 +647,24 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
         )
-        // User profile (M22.8)
+        // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
         .route("/api/v1/users/me/agents", get(get_my_agents))
         .route("/api/v1/users/me/tasks", get(get_my_tasks))
         .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
+        .route(
+            "/api/v1/users/me/tokens",
+            get(list_tokens).post(create_token),
+        )
+        .route("/api/v1/users/me/tokens/:id", delete(delete_token))
+        // Notification Preferences (HSI §12) — per-handler auth, ABAC-exempt
+        .route(
+            "/api/v1/users/me/notification-preferences",
+            get(get_notification_preferences).put(update_notification_preferences),
+        )
+        // Judgment Ledger (HSI §12) — per-handler auth, ABAC-exempt
+        .route("/api/v1/users/me/judgments", get(get_judgments))
         // Notifications (HSI §2) — per-handler auth, ABAC-exempt
         .route("/api/v1/users/me/notifications", get(get_my_notifications))
         .route(

@@ -30,6 +30,9 @@ struct UserRow {
     roles: String,
     created_at: i64,
     updated_at: i64,
+    display_name: Option<String>,
+    timezone: Option<String>,
+    locale: Option<String>,
 }
 
 impl From<UserRow> for User {
@@ -43,6 +46,15 @@ impl From<UserRow> for User {
         u.email = r.email;
         u.roles = json_to_roles(&r.roles);
         u.updated_at = r.updated_at as u64;
+        if let Some(dn) = r.display_name {
+            u.display_name = dn;
+        }
+        if let Some(tz) = r.timezone {
+            u.timezone = tz;
+        }
+        if let Some(loc) = r.locale {
+            u.locale = loc;
+        }
         u
     }
 }
@@ -57,6 +69,9 @@ struct UserRecord<'a> {
     roles: String,
     created_at: i64,
     updated_at: i64,
+    display_name: Option<&'a str>,
+    timezone: Option<&'a str>,
+    locale: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -84,6 +99,9 @@ impl UserRepository for SqliteStorage {
                 roles,
                 created_at: u.created_at as i64,
                 updated_at: u.updated_at as i64,
+                display_name: Some(u.display_name.as_str()),
+                timezone: Some(u.timezone.as_str()),
+                locale: Some(u.locale.as_str()),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -150,6 +168,9 @@ impl UserRepository for SqliteStorage {
                     users::email.eq(u.email.as_deref()),
                     users::roles.eq(&roles),
                     users::updated_at.eq(u.updated_at as i64),
+                    users::display_name.eq(Some(u.display_name.as_str())),
+                    users::timezone.eq(Some(u.timezone.as_str())),
+                    users::locale.eq(Some(u.locale.as_str())),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
