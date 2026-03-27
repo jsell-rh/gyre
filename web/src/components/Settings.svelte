@@ -126,8 +126,8 @@
       <table class="config-table">
         <thead>
           <tr>
-            <th>{$t('settings.config.setting')}</th>
-            <th>{$t('settings.config.value')}</th>
+            <th scope="col">{$t('settings.config.setting')}</th>
+            <th scope="col">{$t('settings.config.value')}</th>
           </tr>
         </thead>
         <tbody>

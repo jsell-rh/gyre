@@ -561,7 +561,7 @@
         {:else}
           <table class="data-table">
             <thead>
-              <tr><th>Name</th><th>Trust Level</th><th>Description</th></tr>
+              <tr><th scope="col">Name</th><th scope="col">Trust Level</th><th scope="col">Description</th></tr>
             </thead>
             <tbody>
               {#each tenantWorkspaces as ws}
@@ -592,7 +592,7 @@
           <EmptyState title="No compute targets" description="Register local, Docker, or SSH compute targets." />
         {:else}
           <table class="data-table">
-            <thead><tr><th>Name</th><th>Type</th><th>Host</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {#each tenantCompute as ct}
                 <tr>
@@ -635,7 +635,7 @@
         {:else}
           <div class="table-scroll">
             <table class="data-table">
-              <thead><tr><th>Time</th><th>Actor</th><th>Event</th><th>Description</th></tr></thead>
+              <thead><tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Event</th><th scope="col">Description</th></tr></thead>
               <tbody>
                 {#each tenantAudit as evt}
                   <tr>
@@ -784,7 +784,7 @@
           <EmptyState title="No members" description="Add members to grant access to this workspace." />
         {:else}
           <table class="data-table">
-            <thead><tr><th>User</th><th>Role</th><th>Last Active</th><th>Actions</th></tr></thead>
+            <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Last Active</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {#each wsMembers as member}
                 <tr>
@@ -964,7 +964,7 @@
           <EmptyState title="No gates configured" description="Add gates to require checks before merging." />
         {:else}
           <table class="data-table">
-            <thead><tr><th>Name</th><th>Command</th><th>Timeout</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th scope="col">Name</th><th scope="col">Command</th><th scope="col">Timeout</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {#each repoGates as gate}
                 <tr>

@@ -104,9 +104,9 @@
           <table>
             <thead>
               <tr>
-                <th>Agent ID</th>
+                <th scope="col">Agent ID</th>
                 <th class="right">Total</th>
-                <th>Bar</th>
+                <th scope="col">Bar</th>
                 <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -138,11 +138,11 @@
           <table>
             <thead>
               <tr>
-                <th>Type</th>
+                <th scope="col">Type</th>
                 <th class="right">Amount</th>
-                <th>Currency</th>
-                <th>Task</th>
-                <th>Time</th>
+                <th scope="col">Currency</th>
+                <th scope="col">Task</th>
+                <th scope="col">Time</th>
               </tr>
             </thead>
             <tbody>

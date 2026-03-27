@@ -134,11 +134,11 @@
       <table class="approvals-table">
         <thead>
           <tr>
-            <th>Spec Path</th>
-            <th>SHA</th>
-            <th>Approver</th>
-            <th>Approved At</th>
-            <th>Status</th>
+            <th scope="col">Spec Path</th>
+            <th scope="col">SHA</th>
+            <th scope="col">Approver</th>
+            <th scope="col">Approved At</th>
+            <th scope="col">Status</th>
             <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>

@@ -85,7 +85,7 @@
         {:else}
           <table>
             <thead>
-              <tr><th>Event</th><th>Count</th><th>Bar</th></tr>
+              <tr><th scope="col">Event</th><th scope="col">Count</th><th scope="col">Bar</th></tr>
             </thead>
             <tbody>
               {#each topEvents as [name, count]}
