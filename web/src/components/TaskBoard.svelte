@@ -111,6 +111,7 @@
 </Modal>
 
 <div class="page">
+  <span class="sr-only" aria-live="polite">{loading ? "" : "task board loaded"}</span>
   <div class="page-hdr">
     <div>
       <h1 class="page-title">{$t('tasks.title')}</h1>
