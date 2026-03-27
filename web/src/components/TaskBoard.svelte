@@ -132,7 +132,7 @@
   </div>
 
   {#if loading}
-    <div class="board">
+    <div class="board" aria-busy={loading}>
       {#each columns as col}
         <div class="column">
           <div class="col-header {col.colorClass}">
@@ -151,7 +151,10 @@
       {/each}
     </div>
   {:else if error}
-    <div class="error-msg">Error: {error}</div>
+    <div class="error-msg">
+      <p>Error: {error}</p>
+      <button class="btn-retry" onclick={() => { error = null; loadTasks(); }}>Retry</button>
+    </div>
   {:else}
     <div class="board">
       {#each columns as col}
@@ -170,6 +173,7 @@
                 onclick={() => onSelectTask?.(task)}
                 onkeydown={(e) => e.key === 'Enter' && onSelectTask?.(task)}
                 role={onSelectTask ? 'button' : undefined}
+                aria-label={onSelectTask ? `Task: ${task.title}` : undefined}
                 tabindex={onSelectTask ? 0 : undefined}
               >
                 <p class="card-title">{task.title}</p>
@@ -421,5 +425,22 @@
     color: var(--color-danger);
     text-align: center;
     font-size: var(--text-sm);
+  }
+
+  .btn-retry {
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .btn-retry:hover { background: var(--color-surface-hover); }
+
+  .filter-select:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 </style>
