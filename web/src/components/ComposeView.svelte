@@ -46,7 +46,9 @@
     applyError = null;
     applyResult = null;
     try {
-      const spec = JSON.parse(yamlInput);
+      let spec;
+      try { spec = JSON.parse(yamlInput); }
+      catch { applyError = 'Invalid JSON — please check your compose spec syntax.'; toastError(applyError); return; }
       applyResult = await api.composeApply(spec);
       composeId = applyResult.compose_id;
       await loadStatus();
