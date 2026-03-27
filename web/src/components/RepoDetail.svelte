@@ -1266,7 +1266,6 @@
   .policy-btn.primary:hover { background: var(--color-primary-hover); }
   .policy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .save-msg { font-size: var(--text-sm); color: var(--color-success); }
 
   .abac-list { display: flex; flex-direction: column; gap: var(--space-2); }
 

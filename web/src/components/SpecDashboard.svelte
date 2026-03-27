@@ -297,15 +297,16 @@
 
     {:else if scope === 'repo'}
       <!-- Repo scope: progress bar list -->
-      <ul class="spec-list" role="list" aria-label="Specs">
+      <ul class="spec-list" role="listbox" aria-label="Specs">
         {#each filtered as spec (spec.path)}
           {@const pct = Math.round(progressFraction(spec.path) * 100)}
           {@const label = progressLabel(spec.path)}
           <li
             class="spec-row"
             class:selected={selectedPath === spec.path}
+            role="option"
             tabindex="0"
-            aria-current={selectedPath === spec.path ? 'true' : undefined}
+            aria-selected={selectedPath === spec.path}
             onclick={() => handleRowClick(spec)}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
@@ -371,7 +372,7 @@
               </td>
               <td>
                 <Badge
-                  value="{spec.approval_status ?? 'unknown'}"
+                  value={spec.approval_status ?? 'unknown'}
                   color={statusColor(spec.approval_status)}
                 />
               </td>
