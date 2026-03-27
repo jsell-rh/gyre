@@ -1,11 +1,13 @@
 <script>
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
+  import Skeleton from '../lib/Skeleton.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { agentId } = $props();
 
   let card = $state(null);
+  let cardLoading = $state(true);
   let editing = $state(false);
   let saving = $state(false);
   let saveError = $state(null);
@@ -15,6 +17,16 @@
   let protocols = $state('');
   let endpoint = $state('');
   let description = $state('');
+
+  $effect(() => {
+    if (agentId) {
+      cardLoading = true;
+      api.agentCard(agentId)
+        .then((data) => { card = data; })
+        .catch(() => { card = null; })
+        .finally(() => { cardLoading = false; });
+    }
+  });
 
   function startEdit() {
     capInput = (card?.capabilities ?? []).join(', ');
@@ -155,6 +167,11 @@
       <button class="edit-btn-secondary" onclick={startEdit}>Edit Agent Card</button>
     </div>
 
+  {:else if cardLoading}
+    <div class="empty-card" aria-busy="true">
+      <Skeleton width="60%" height="1rem" />
+      <Skeleton lines={2} height="0.875rem" />
+    </div>
   {:else}
     <div class="empty-card">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24" aria-hidden="true">

@@ -148,6 +148,8 @@ export const api = {
     return json.result?.tools ?? [];
   },
   // Agent card
+  agentCard: (agentId) =>
+    request(`/agents/${agentId}/card`),
   updateAgentCard: (agentId, card) =>
     request(`/agents/${agentId}/card`, { method: 'PUT', body: JSON.stringify(card) }),
   // Compose

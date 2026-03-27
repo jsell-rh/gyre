@@ -6,17 +6,23 @@
 
   let summary = $state(null);
   let loading = $state(true);
+  let refreshing = $state(false);
 
   $effect(() => { load(); });
 
   async function load() {
-    loading = true;
+    if (summary) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
     try {
       summary = await api.budgetSummary();
     } catch (e) {
       showToast('Failed to load budget summary: ' + e.message, { type: 'error' });
     } finally {
       loading = false;
+      refreshing = false;
     }
   }
 
@@ -43,12 +49,12 @@
   <div class="dash-header">
     <h2>Budget Dashboard</h2>
     <p class="subtitle">Tenant-wide token and cost consumption</p>
-    <button class="btn-refresh" onclick={load} title="Refresh" aria-label="Refresh budget data">
+    <button class="btn-refresh" onclick={load} title="Refresh" aria-label="Refresh budget data" disabled={refreshing}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
         <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
       </svg>
-      Refresh
+      {refreshing ? 'Refreshing\u2026' : 'Refresh'}
     </button>
   </div>
 

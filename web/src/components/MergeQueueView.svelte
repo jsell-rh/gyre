@@ -19,7 +19,9 @@
   });
 
   async function load() {
-    loading = true;
+    if (initialLoad) {
+      loading = true;
+    }
     error = null;
     try {
       entries = await api.mergeQueue();
@@ -97,11 +99,11 @@
         <button class="toggle-btn" class:active={viewMode === 'lanes'} onclick={() => switchView('lanes')} aria-pressed={viewMode === 'lanes'}>Lanes</button>
         <button class="toggle-btn" class:active={viewMode === 'dag'} onclick={() => switchView('dag')} aria-pressed={viewMode === 'dag'}>DAG</button>
       </div>
-      <button class="refresh-btn" onclick={load} disabled={loading}>
+      <button class="refresh-btn" onclick={load} disabled={loading || initialLoad}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
           <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
         </svg>
-        {loading ? 'Loading…' : 'Refresh'}
+        Refresh
       </button>
     </div>
   </div>

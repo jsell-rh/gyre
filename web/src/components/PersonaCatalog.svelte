@@ -8,6 +8,7 @@
 
   let personas = $state([]);
   let loading = $state(true);
+  let refreshing = $state(false);
   let createOpen = $state(false);
   let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
@@ -27,13 +28,18 @@
   });
 
   async function load() {
-    loading = true;
+    if (personas.length > 0) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
     try {
       personas = (await api.personas()) ?? [];
     } catch {
       showToast('Failed to load personas', { type: 'error' });
     } finally {
       loading = false;
+      refreshing = false;
     }
   }
 

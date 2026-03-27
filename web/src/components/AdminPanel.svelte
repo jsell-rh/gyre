@@ -86,6 +86,7 @@
 
   // ---- SHARED ----
   let loading = $state(true);
+  let refreshing = $state(false);
   let error = $state(null);
 
   // ---- TRUST LEVEL ----
@@ -223,7 +224,12 @@
   });
 
   async function loadTenant() {
-    loading = true; error = null;
+    if (tenantWorkspaces.length > 0 || tenantCompute.length > 0) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
+    error = null;
     try {
       const [compute, budget, audit, wsList] = await Promise.all([
         api.computeList().catch(() => []),
@@ -236,12 +242,17 @@
       tenantAudit     = audit?.events ?? [];
       tenantWorkspaces = Array.isArray(wsList) ? wsList : [];
     } catch (e) { error = e.message; }
-    finally { loading = false; }
+    finally { loading = false; refreshing = false; }
   }
 
   async function loadWorkspace() {
     if (!workspaceId) return;
-    loading = true; error = null;
+    if (workspace) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
+    error = null;
     try {
       const [ws, budget, members, policies, repos] = await Promise.all([
         api.workspace(workspaceId),
@@ -258,12 +269,17 @@
       wsTrustLevel = ws?.trust_level ?? 'Autonomous';
       wsSettingsForm = { name: ws?.name ?? '', description: ws?.description ?? '' };
     } catch (e) { error = e.message; }
-    finally { loading = false; }
+    finally { loading = false; refreshing = false; }
   }
 
   async function loadRepo() {
     if (!repoId) return;
-    loading = true; error = null;
+    if (repoData) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
+    error = null;
     try {
       const [gates, policies, repo] = await Promise.all([
         api.repoGates(repoId).catch(() => []),
@@ -282,7 +298,7 @@
         };
       }
     } catch (e) { error = e.message; }
-    finally { loading = false; }
+    finally { loading = false; refreshing = false; }
   }
 
   // ---- TRUST LEVEL ----
@@ -654,11 +670,11 @@
       if (effectiveScope === 'tenant') loadTenant();
       else if (effectiveScope === 'workspace') loadWorkspace();
       else loadRepo();
-    }} disabled={loading} aria-busy={loading} aria-label={loading ? 'Loading…' : 'Refresh admin panel'}>
+    }} disabled={loading || refreshing} aria-busy={loading || refreshing} aria-label={loading ? 'Loading…' : refreshing ? 'Refreshing…' : 'Refresh admin panel'}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
       </svg>
-      {loading ? 'Loading…' : 'Refresh'}
+      {loading ? 'Loading…' : refreshing ? 'Refreshing…' : 'Refresh'}
     </button>
   </div>
 
