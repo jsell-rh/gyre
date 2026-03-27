@@ -153,11 +153,22 @@
     clearTimeout(debounceTimer);
   }
 
+  let searchInputEl = $state(null);
+
+  function onWindowKeydown(e) {
+    if (e.key === '/' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT' && !e.target.isContentEditable) {
+      e.preventDefault();
+      searchInputEl?.focus();
+    }
+  }
+
   let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
   let conceptFilterIds = $derived.by(() =>
     conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
   );
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 {#if scopeType === 'tenant'}
   <!-- Tenant scope: workspace cards grid (S4.4a) -->
@@ -270,6 +281,7 @@
             oninput={onSearchInput}
             onkeydown={onSearchKeydown}
             aria-label="Search concepts by name or qualified name"
+            bind:this={searchInputEl}
           />
         </div>
 
@@ -666,6 +678,8 @@
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; display: none; }
+    .ws-repo-card,
+    .go-admin-btn { transition: none; }
   }
 
   .concept-chip {
