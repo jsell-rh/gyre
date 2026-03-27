@@ -4,6 +4,7 @@
    *
    * Spec ref: ui-layout.md §9 (Meta-specs Preview Loop Layout)
    *           human-system-interface.md §1 (meta-specs nav scope table)
+   *           agent-runtime spec §2 (DB-backed meta-spec registry CRUD)
    *
    * Props:
    *   workspaceId — string | null
@@ -45,6 +46,13 @@
   function kindBadgeVariant(kind) { return KIND_COLORS[kind] || 'gray'; }
   function kindLabel(kind) { return KIND_LABELS[kind] || kind; }
 
+  function approvalVariant(status) {
+    if (status === 'Approved') return 'green';
+    if (status === 'Pending') return 'yellow';
+    if (status === 'Rejected') return 'red';
+    return 'gray';
+  }
+
   // ─── Shared state ────────────────────────────────────────────────────────────
 
   let loading = $state(true);
@@ -57,11 +65,27 @@
   let detailSpec = $state(null);
   let detailTab  = $state('info');
 
+  // Version history
+  let versions        = $state([]);
+  let versionsLoading = $state(false);
+
   // Blast radius modal
   let blastOpen    = $state(false);
   let blastPath    = $state('');
   let blastLoading = $state(false);
   let blastResult  = $state(null);
+
+  // Create modal
+  let createOpen    = $state(false);
+  let createSaving  = $state(false);
+  let createForm    = $state({ kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false });
+
+  // Delete confirmation
+  let deleteTarget  = $state(null);
+  let deleteSaving  = $state(false);
+
+  // Inline action saving (approve/reject/required toggle)
+  let actionSaving  = $state(null); // spec id currently saving
 
   const filtered = $derived.by(() => {
     if (kindFilter === 'all') return specs;
@@ -72,25 +96,127 @@
     loading = true;
     error = null;
     try {
-      const all = await api.getSpecs();
-      specs = Array.isArray(all) ? all.filter(s => s.kind && s.kind.startsWith('meta:')) : [];
+      const all = await api.getMetaSpecs();
+      specs = Array.isArray(all) ? all : [];
     } catch (e) {
       error = e.message;
     }
     loading = false;
   }
 
-  async function openBlastRadius(path) {
-    blastPath = path;
+  async function openBlastRadius(id) {
+    blastPath = id;
     blastOpen = true;
     blastLoading = true;
     blastResult = null;
     try {
-      blastResult = await api.getMetaSpecBlastRadius(path);
+      blastResult = await api.getMetaSpecBlastRadius(id);
     } catch (e) {
       blastResult = { error: e.message };
     }
     blastLoading = false;
+  }
+
+  async function loadVersionHistory(specId) {
+    versionsLoading = true;
+    versions = [];
+    try {
+      versions = await api.getMetaSpecVersions(specId);
+    } catch (e) {
+      versions = [];
+    }
+    versionsLoading = false;
+  }
+
+  function openDetail(spec) {
+    detailSpec = spec;
+    detailTab = 'info';
+    versions = [];
+  }
+
+  function onDetailTabChange(tab) {
+    detailTab = tab;
+    if (tab === 'history' && detailSpec) {
+      loadVersionHistory(detailSpec.id);
+    }
+  }
+
+  async function handleCreate() {
+    if (!createForm.name.trim()) { toastError('Name is required'); return; }
+    createSaving = true;
+    try {
+      const payload = {
+        kind: createForm.kind,
+        name: createForm.name.trim(),
+        scope: createForm.scope,
+        prompt: createForm.prompt,
+        required: createForm.required,
+      };
+      if (createForm.scope === 'Workspace' && createForm.scope_id.trim()) {
+        payload.scope_id = createForm.scope_id.trim();
+      }
+      const created = await api.createMetaSpec(payload);
+      specs = [created, ...specs];
+      createOpen = false;
+      createForm = { kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false };
+      toastSuccess('Meta-spec created');
+    } catch (e) {
+      toastError('Create failed: ' + (e?.message ?? 'unknown error'));
+    }
+    createSaving = false;
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    deleteSaving = true;
+    try {
+      await api.deleteMetaSpec(deleteTarget.id);
+      specs = specs.filter(s => s.id !== deleteTarget.id);
+      if (detailSpec?.id === deleteTarget.id) detailSpec = null;
+      deleteTarget = null;
+      toastSuccess('Meta-spec deleted');
+    } catch (e) {
+      toastError('Delete failed: ' + (e?.message ?? 'unknown error'));
+    }
+    deleteSaving = false;
+  }
+
+  async function handleApprove(spec) {
+    actionSaving = spec.id;
+    try {
+      const updated = await api.updateMetaSpec(spec.id, { approval_status: 'Approved' });
+      specs = specs.map(s => s.id === spec.id ? updated : s);
+      if (detailSpec?.id === spec.id) detailSpec = updated;
+      toastSuccess('Approved');
+    } catch (e) {
+      toastError('Approve failed: ' + (e?.message ?? 'unknown error'));
+    }
+    actionSaving = null;
+  }
+
+  async function handleReject(spec) {
+    actionSaving = spec.id;
+    try {
+      const updated = await api.updateMetaSpec(spec.id, { approval_status: 'Rejected' });
+      specs = specs.map(s => s.id === spec.id ? updated : s);
+      if (detailSpec?.id === spec.id) detailSpec = updated;
+      toastSuccess('Rejected');
+    } catch (e) {
+      toastError('Reject failed: ' + (e?.message ?? 'unknown error'));
+    }
+    actionSaving = null;
+  }
+
+  async function handleRequiredToggle(spec) {
+    actionSaving = spec.id;
+    try {
+      const updated = await api.updateMetaSpec(spec.id, { required: !spec.required });
+      specs = specs.map(s => s.id === spec.id ? updated : s);
+      if (detailSpec?.id === spec.id) detailSpec = updated;
+    } catch (e) {
+      toastError('Update failed: ' + (e?.message ?? 'unknown error'));
+    }
+    actionSaving = null;
   }
 
   // ─── Workspace scope — editor + preview loop ─────────────────────────────────
@@ -122,13 +248,13 @@
     error = null;
     try {
       const [ps, sp] = await Promise.all([
-        api.personas().catch(() => []),
+        api.getMetaSpecs({ kind: 'meta:persona' }).catch(() => []),
         api.getSpecs().catch(() => []),
       ]);
       personas = Array.isArray(ps) ? ps : [];
       if (personas.length > 0 && !selectedPersonaId) {
         selectedPersonaId = personas[0].id;
-        personaContent = personas[0].system_prompt || '';
+        personaContent = personas[0].prompt || '';
       }
       targetSpecs = Array.isArray(sp)
         ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:'))
@@ -142,7 +268,7 @@
   function onPersonaChange(id) {
     selectedPersonaId = id;
     const p = personas.find(p => p.id === id);
-    personaContent = p?.system_prompt || '';
+    personaContent = p?.prompt || '';
     suggestions = [];
     previewState = 'editing';
     stopPreview();
@@ -521,8 +647,13 @@
 {:else}
   <div class="meta-specs-view" aria-busy={loading}>
     <div class="view-header">
-      <h2>Meta-Specs</h2>
-      <p class="subtitle">Versioned specs that govern agent behavior — personas, principles, standards, and process norms.</p>
+      <div class="view-header-row">
+        <div>
+          <h2>Meta-Specs</h2>
+          <p class="subtitle">Versioned specs that govern agent behavior — personas, principles, standards, and process norms.</p>
+        </div>
+        <Button variant="primary" onclick={() => createOpen = true}>+ New Meta-spec</Button>
+      </div>
     </div>
 
     <div class="filter-pills" role="group" aria-label="Filter by kind">
@@ -542,43 +673,77 @@
     {:else if filtered.length === 0}
       <EmptyState
         title="No meta-specs found"
-        description="Add meta-spec entries with kind: meta:persona (or principle/standard/process)."
+        description="Create your first meta-spec using the button above."
       />
     {:else}
       <table class="catalog-table" data-testid="catalog-table">
         <thead>
           <tr>
-            <th scope="col">Path</th>
-            <th scope="col">Kind</th>
             <th scope="col">Name</th>
+            <th scope="col">Kind</th>
+            <th scope="col">Scope</th>
             <th scope="col">Status</th>
-            <th scope="col">SHA</th>
+            <th scope="col">Version</th>
+            <th scope="col">Required</th>
             <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
-          {#each filtered as spec (spec.path)}
+          {#each filtered as spec (spec.id)}
             <tr
               class="catalog-row"
-              onclick={() => { detailSpec = spec; detailTab = 'info'; }}
+              onclick={() => openDetail(spec)}
               tabindex="0"
-              aria-label="View {spec.title || spec.path}"
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); detailSpec = spec; detailTab = 'info'; } }}
+              aria-label="View {spec.name}"
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(spec); } }}
             >
-              <td class="mono cell-path">{spec.path}</td>
+              <td class="cell-name">{spec.name}</td>
               <td><Badge value={kindLabel(spec.kind)} variant={kindBadgeVariant(spec.kind)} /></td>
-              <td>{spec.title || '—'}</td>
+              <td><span class="scope-badge">{spec.scope}</span></td>
               <td>
                 <Badge
                   value={spec.approval_status || 'unknown'}
-                  variant={spec.approval_status === 'approved' ? 'green' : spec.approval_status === 'pending' ? 'yellow' : 'gray'}
+                  variant={approvalVariant(spec.approval_status)}
                 />
               </td>
-              <td class="mono cell-sha">{spec.current_sha?.slice(0, 8) || '—'}</td>
+              <td class="mono cell-ver">v{spec.version}</td>
               <td>
-                <Button variant="secondary" size="sm" onclick={(e) => { e.stopPropagation(); openBlastRadius(spec.path); }}>
-                  Blast Radius
-                </Button>
+                <button
+                  class="required-toggle"
+                  class:required-on={spec.required}
+                  onclick={(e) => { e.stopPropagation(); handleRequiredToggle(spec); }}
+                  disabled={actionSaving === spec.id}
+                  aria-label={spec.required ? 'Required (click to make optional)' : 'Optional (click to make required)'}
+                  title={spec.required ? 'Required' : 'Optional'}
+                >
+                  {spec.required ? 'Required' : 'Optional'}
+                </button>
+              </td>
+              <td class="actions-cell" onclick={(e) => e.stopPropagation()}>
+                {#if spec.approval_status === 'Pending'}
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onclick={() => handleApprove(spec)}
+                    disabled={actionSaving === spec.id}
+                  >Approve</Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onclick={() => handleReject(spec)}
+                    disabled={actionSaving === spec.id}
+                  >Reject</Button>
+                {/if}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onclick={() => openBlastRadius(spec.id)}
+                >Blast Radius</Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onclick={() => deleteTarget = spec}
+                >Delete</Button>
               </td>
             </tr>
           {/each}
@@ -589,22 +754,66 @@
 
   <!-- Detail panel modal -->
   {#if detailSpec}
-    <Modal title={detailSpec.title || detailSpec.path} onclose={() => detailSpec = null}>
-      <div class="detail-tabs" role="tablist">
-        <button class="detail-tab" role="tab" id="detail-tab-info" aria-controls="detail-panel-info" aria-selected={detailTab === 'info'} class:active={detailTab === 'info'} onclick={() => detailTab = 'info'}>Info</button>
-        <button class="detail-tab" role="tab" id="detail-tab-content" aria-controls="detail-panel-content" aria-selected={detailTab === 'content'} class:active={detailTab === 'content'} onclick={() => detailTab = 'content'}>Content</button>
+    <Modal open={true} title={detailSpec.name} onclose={() => detailSpec = null}>
+      <div
+        class="detail-tabs"
+        role="tablist"
+        onkeydown={(e) => {
+          const tabs = ['info', 'content', 'history'];
+          const idx = tabs.indexOf(detailTab);
+          if (e.key === 'ArrowRight') { e.preventDefault(); onDetailTabChange(tabs[(idx + 1) % tabs.length]); }
+          if (e.key === 'ArrowLeft')  { e.preventDefault(); onDetailTabChange(tabs[(idx + tabs.length - 1) % tabs.length]); }
+        }}
+      >
+        <button class="detail-tab" role="tab" id="detail-tab-info" aria-controls="detail-panel-info" aria-selected={detailTab === 'info'} class:active={detailTab === 'info'} tabindex={detailTab === 'info' ? 0 : -1} onclick={() => onDetailTabChange('info')}>Info</button>
+        <button class="detail-tab" role="tab" id="detail-tab-content" aria-controls="detail-panel-content" aria-selected={detailTab === 'content'} class:active={detailTab === 'content'} tabindex={detailTab === 'content' ? 0 : -1} onclick={() => onDetailTabChange('content')}>Content</button>
+        <button class="detail-tab" role="tab" id="detail-tab-history" aria-controls="detail-panel-history" aria-selected={detailTab === 'history'} class:active={detailTab === 'history'} tabindex={detailTab === 'history' ? 0 : -1} onclick={() => onDetailTabChange('history')}>History</button>
       </div>
       {#if detailTab === 'info'}
         <div class="detail-info" role="tabpanel" id="detail-panel-info" aria-labelledby="detail-tab-info">
-          <div class="detail-row"><span class="detail-key">Path</span><span class="mono">{detailSpec.path}</span></div>
+          <div class="detail-row"><span class="detail-key">Name</span><span>{detailSpec.name}</span></div>
           <div class="detail-row"><span class="detail-key">Kind</span><Badge value={kindLabel(detailSpec.kind)} variant={kindBadgeVariant(detailSpec.kind)} /></div>
-          <div class="detail-row"><span class="detail-key">Status</span><span>{detailSpec.approval_status || '—'}</span></div>
-          <div class="detail-row"><span class="detail-key">Owner</span><span>{detailSpec.owner || '—'}</span></div>
-          <div class="detail-row"><span class="detail-key">SHA</span><span class="mono">{detailSpec.current_sha || '—'}</span></div>
+          <div class="detail-row"><span class="detail-key">Scope</span><span>{detailSpec.scope}{detailSpec.scope_id ? ` (${detailSpec.scope_id})` : ''}</span></div>
+          <div class="detail-row"><span class="detail-key">Status</span><Badge value={detailSpec.approval_status || '—'} variant={approvalVariant(detailSpec.approval_status)} /></div>
+          <div class="detail-row"><span class="detail-key">Version</span><span class="mono">v{detailSpec.version}</span></div>
+          <div class="detail-row"><span class="detail-key">Required</span><span>{detailSpec.required ? 'Yes' : 'No'}</span></div>
+          {#if detailSpec.approved_by}
+            <div class="detail-row"><span class="detail-key">Approved by</span><span class="mono">{detailSpec.approved_by}</span></div>
+          {/if}
+          <div class="detail-row"><span class="detail-key">Created by</span><span class="mono">{detailSpec.created_by}</span></div>
+          <div class="detail-actions">
+            {#if detailSpec.approval_status === 'Pending'}
+              <Button variant="primary" onclick={() => handleApprove(detailSpec)} disabled={actionSaving === detailSpec.id}>Approve</Button>
+              <Button variant="danger" onclick={() => handleReject(detailSpec)} disabled={actionSaving === detailSpec.id}>Reject</Button>
+            {/if}
+            <Button variant="secondary" onclick={() => handleRequiredToggle(detailSpec)} disabled={actionSaving === detailSpec.id}>
+              {detailSpec.required ? 'Make Optional' : 'Make Required'}
+            </Button>
+          </div>
+        </div>
+      {:else if detailTab === 'content'}
+        <div role="tabpanel" id="detail-panel-content" aria-labelledby="detail-tab-content">
+          <pre class="detail-content">{detailSpec.prompt || 'No content available.'}</pre>
         </div>
       {:else}
-        <div role="tabpanel" id="detail-panel-content" aria-labelledby="detail-tab-content">
-          <pre class="detail-content">{detailSpec.content || 'No content available.'}</pre>
+        <div role="tabpanel" id="detail-panel-history" aria-labelledby="detail-tab-history">
+          {#if versionsLoading}
+            <Skeleton />
+          {:else if versions.length === 0}
+            <p class="empty">No version history available.</p>
+          {:else}
+            <div class="version-list">
+              {#each versions as ver (ver.version)}
+                <div class="version-item">
+                  <div class="version-header">
+                    <span class="version-num">v{ver.version}</span>
+                    <span class="version-hash mono">{ver.content_hash?.slice(0, 12) || '—'}</span>
+                  </div>
+                  <pre class="version-prompt">{ver.prompt || '(empty)'}</pre>
+                </div>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
     </Modal>
@@ -612,7 +821,7 @@
 
   <!-- Blast radius modal -->
   {#if blastOpen}
-    <Modal title="Blast Radius: {blastPath}" onclose={() => blastOpen = false}>
+    <Modal open={true} title="Blast Radius" onclose={() => blastOpen = false}>
       {#if blastLoading}
         <Skeleton />
       {:else if blastResult?.error}
@@ -645,6 +854,69 @@
       {/if}
     </Modal>
   {/if}
+
+  <!-- Create modal -->
+  {#if createOpen}
+    <Modal open={true} title="New Meta-spec" onclose={() => createOpen = false}>
+      <div class="create-form">
+        <div class="form-field">
+          <label for="cf-kind">Kind</label>
+          <select id="cf-kind" bind:value={createForm.kind}>
+            {#each META_KINDS as k}
+              <option value={k}>{KIND_LABELS[k]}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-field">
+          <label for="cf-name">Name</label>
+          <input id="cf-name" type="text" bind:value={createForm.name} placeholder="e.g. backend-engineer" />
+        </div>
+        <div class="form-field">
+          <label for="cf-scope">Scope</label>
+          <select id="cf-scope" bind:value={createForm.scope}>
+            <option value="Global">Global</option>
+            <option value="Workspace">Workspace</option>
+          </select>
+        </div>
+        {#if createForm.scope === 'Workspace'}
+          <div class="form-field">
+            <label for="cf-scope-id">Workspace ID</label>
+            <input id="cf-scope-id" type="text" bind:value={createForm.scope_id} placeholder="workspace UUID" />
+          </div>
+        {/if}
+        <div class="form-field">
+          <label for="cf-prompt">Content / Prompt</label>
+          <textarea id="cf-prompt" bind:value={createForm.prompt} placeholder="System prompt content…" rows="6"></textarea>
+        </div>
+        <div class="form-field form-field-inline">
+          <input id="cf-required" type="checkbox" bind:checked={createForm.required} />
+          <label for="cf-required">Required (org-wide mandatory)</label>
+        </div>
+        <div class="form-actions">
+          <Button variant="secondary" onclick={() => createOpen = false}>Cancel</Button>
+          <Button variant="primary" onclick={handleCreate} disabled={createSaving}>
+            {createSaving ? 'Creating…' : 'Create'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  {/if}
+
+  <!-- Delete confirmation modal -->
+  {#if deleteTarget}
+    <Modal open={true} title="Delete Meta-spec" onclose={() => deleteTarget = null}>
+      <p class="delete-confirm-text">
+        Are you sure you want to delete <strong>{deleteTarget.name}</strong>?
+        This cannot be undone. If the spec has active bindings, deletion will fail.
+      </p>
+      <div class="form-actions">
+        <Button variant="secondary" onclick={() => deleteTarget = null}>Cancel</Button>
+        <Button variant="danger" onclick={handleDelete} disabled={deleteSaving}>
+          {deleteSaving ? 'Deleting…' : 'Delete'}
+        </Button>
+      </div>
+    </Modal>
+  {/if}
 {/if}
 
 <style>
@@ -655,6 +927,7 @@
 
   .view-header { margin-bottom: var(--space-6); }
   .view-header h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
+  .view-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
   .subtitle { margin: 0; color: var(--color-text-muted); font-size: var(--text-sm); }
 
   .repo-redirect {
@@ -708,8 +981,36 @@
     outline-offset: -2px;
   }
   .catalog-row td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); vertical-align: middle; }
-  .cell-path { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cell-sha { font-size: var(--text-xs); }
+  .cell-name { font-weight: 500; }
+  .cell-ver { font-size: var(--text-xs); }
+  .actions-cell { display: flex; gap: var(--space-1); flex-wrap: wrap; align-items: center; }
+
+  .scope-badge {
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+  }
+
+  .required-toggle {
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: background var(--transition-fast);
+  }
+  .required-toggle.required-on {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
+    color: var(--color-warning);
+  }
+  .required-toggle:disabled { opacity: 0.6; cursor: not-allowed; }
 
   /* ── Split layout (workspace scope) ── */
   .workspace-view { max-width: 1400px; }
@@ -836,14 +1137,49 @@
   .detail-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
   .detail-info { display: flex; flex-direction: column; gap: var(--space-2); }
   .detail-row { display: flex; align-items: center; gap: var(--space-3); }
-  .detail-key { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); min-width: 60px; }
+  .detail-key { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); min-width: 80px; }
   .detail-content { font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.6; color: var(--color-text); white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+
+  /* ── Version history ── */
+  .version-list { display: flex; flex-direction: column; gap: var(--space-3); }
+  .version-item { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
+  .version-header { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); background: var(--color-surface-elevated); border-bottom: 1px solid var(--color-border); }
+  .version-num { font-weight: 600; font-size: var(--text-sm); }
+  .version-hash { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .version-prompt { margin: 0; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto; line-height: 1.5; }
 
   /* ── Blast radius ── */
   .blast-section { margin-bottom: 1.25rem; }
   .blast-section h4 { margin: 0 0 var(--space-2); font-size: var(--text-base); }
   .blast-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
   .blast-list li { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); padding: var(--space-1) var(--space-2); background: var(--color-surface-elevated); border-radius: var(--radius-sm); }
+
+  /* ── Create form ── */
+  .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
+  .form-field { display: flex; flex-direction: column; gap: var(--space-1); }
+  .form-field label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+  .form-field input[type="text"],
+  .form-field select,
+  .form-field textarea {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+  }
+  .form-field textarea { resize: vertical; font-family: var(--font-mono); line-height: 1.5; }
+  .form-field input[type="text"]:focus-visible,
+  .form-field select:focus-visible,
+  .form-field textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .form-field-inline { flex-direction: row; align-items: center; gap: var(--space-2); }
+  .form-field-inline label { font-weight: 400; }
+  .form-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+
+  /* ── Delete confirm ── */
+  .delete-confirm-text { font-size: var(--text-sm); color: var(--color-text); margin: 0 0 var(--space-4); }
 
   .mono { font-family: var(--font-mono); }
   .empty { color: var(--color-text-muted); font-size: var(--text-sm); margin: 0; }
@@ -876,7 +1212,8 @@
   .impact-tab:focus-visible,
   .detail-tab:focus-visible,
   .link-btn:focus-visible,
-  .persona-select:focus-visible {
+  .persona-select:focus-visible,
+  .required-toggle:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
@@ -900,6 +1237,7 @@
     .impact-tab,
     .detail-tab,
     .link-btn,
+    .required-toggle,
     .persona-textarea { transition: none; }
   }
 </style>
