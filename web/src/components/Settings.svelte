@@ -43,6 +43,7 @@
 </script>
 
 <div class="panel" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "settings loaded"}</span>
   <div class="panel-header">
     <h2>{$t('settings.title')}</h2>
   </div>

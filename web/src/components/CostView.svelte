@@ -69,6 +69,7 @@
 </script>
 
 <div class="cost-view" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "cost data loaded"}</span>
   <div class="toolbar">
     <h2>Cost Tracking</h2>
     <div class="actions">
