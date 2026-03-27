@@ -360,7 +360,7 @@
       <div class="main-content">
         <!-- Status Timeline -->
         <div class="timeline-card">
-          <div class="timeline">
+          <div class="timeline" aria-label="MR status timeline">
             {#each TIMELINE_STEPS as step, i}
               <div class="timeline-step" class:done={i <= timelineStep} class:active={i === timelineStep}>
                 <div class="timeline-dot"></div>
@@ -656,7 +656,7 @@
 
   .branch-ref {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
   }
 
@@ -921,7 +921,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
-    padding: 0.1rem var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     border-radius: var(--radius-sm);
   }
 
@@ -977,7 +977,7 @@
     background: var(--color-surface-raised);
     border: 1px solid var(--color-border);
     border-radius: 9999px;
-    font-size: 0.65rem;
+    font-size: var(--text-xs);
     padding: 0 var(--space-1);
     color: var(--color-text-muted);
   }
@@ -1010,13 +1010,13 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
   }
 
   .gate-status {
     font-weight: 600;
     text-transform: capitalize;
-    font-size: 0.65rem;
+    font-size: var(--text-xs);
   }
 
   /* Files tab layout */
@@ -1145,7 +1145,7 @@
   }
 
   .file-diff-status {
-    font-size: 0.65rem;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
     text-transform: lowercase;
   }
@@ -1160,7 +1160,7 @@
     background: color-mix(in srgb, var(--color-info) 6%, transparent);
     padding: var(--space-1) var(--space-4);
     font-family: var(--font-mono);
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-link);
     border-bottom: 1px solid var(--color-border);
   }
@@ -1174,7 +1174,7 @@
     display: flex;
     align-items: flex-start;
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--text-xs);
     line-height: 1.5;
     min-height: 1.5em;
   }
@@ -1236,16 +1236,16 @@
   }
   .spec-ref-sha {
     font-family: var(--font-mono);
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
-    padding: 0.1rem 0.3rem;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: var(--radius-sm);
     flex-shrink: 0;
   }
   .meta-mono {
     font-family: var(--font-mono);
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
   }
 
@@ -1285,7 +1285,7 @@
     border-radius: var(--radius-sm);
     color: var(--color-danger);
     cursor: pointer;
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     padding: 0 var(--space-1);
     line-height: 1.4;
     flex-shrink: 0;

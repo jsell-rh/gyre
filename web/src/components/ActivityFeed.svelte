@@ -125,7 +125,7 @@
       {/each}
     </div>
   {:else if error}
-    <div class="error-msg">
+    <div class="error-msg" role="alert">
       <p>Error: {error}</p>
       <button class="btn-retry" onclick={() => { loadActivity(); }}>Retry</button>
     </div>
@@ -193,7 +193,7 @@
   .pill {
     display: inline-flex;
     align-items: center;
-    padding: 0.2rem 0.75rem;
+    padding: var(--space-1) var(--space-3);
     border-radius: 99px;
     border: 1px solid var(--color-border);
     background: transparent;
@@ -236,7 +236,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     flex-shrink: 0;
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
@@ -261,7 +261,7 @@
     flex: 1;
     width: 1px;
     background: var(--color-border);
-    margin: 2px 0;
+    margin: var(--space-0, 2px) 0;
     min-height: var(--space-4);
   }
 
@@ -333,4 +333,5 @@
     cursor: pointer;
   }
   .btn-retry:hover { background: var(--color-surface-hover); }
+  .btn-retry:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 </style>

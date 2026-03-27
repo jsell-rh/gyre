@@ -42,8 +42,8 @@
   <div class="dash-header">
     <h2>Budget Dashboard</h2>
     <p class="subtitle">Tenant-wide token and cost consumption</p>
-    <button class="btn-refresh" onclick={load} title="Refresh">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+    <button class="btn-refresh" onclick={load} title="Refresh" aria-label="Refresh budget data">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
         <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
       </svg>
@@ -161,6 +161,7 @@
     cursor: pointer;
   }
   .btn-refresh:hover { color: var(--color-text); }
+  .btn-refresh:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .content { flex: 1; overflow-y: auto; padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-8); }
 
