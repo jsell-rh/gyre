@@ -185,6 +185,14 @@ export const api = {
   // CRUD create methods
   createRepo: (data) =>
     request('/repos', { method: 'POST', body: JSON.stringify(data) }),
+  updateRepo: (id, data) =>
+    request(`/repos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  archiveRepo: (id) =>
+    request(`/repos/${id}/archive`, { method: 'POST' }),
+  unarchiveRepo: (id) =>
+    request(`/repos/${id}/unarchive`, { method: 'POST' }),
+  deleteRepo: (id) =>
+    request(`/repos/${id}`, { method: 'DELETE' }),
   createMirrorRepo: (data) =>
     request('/repos/mirror', { method: 'POST', body: JSON.stringify(data) }),
   syncMirror: (id) =>
@@ -323,8 +331,20 @@ export const api = {
   },
   // Spec graph (M22.3)
   specsGraph: () => request('/specs/graph'),
-  // Meta-spec registry (M32)
-  getMetaSpecs: (kind) => request(`/specs${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
+  // Meta-spec registry (M32 / agent-runtime §2)
+  getMetaSpecs: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/meta-specs-registry${qs ? '?' + qs : ''}`);
+  },
+  getMetaSpec: (id) => request(`/meta-specs-registry/${id}`),
+  createMetaSpec: (data) =>
+    request('/meta-specs-registry', { method: 'POST', body: JSON.stringify(data) }),
+  updateMetaSpec: (id, data) =>
+    request(`/meta-specs-registry/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteMetaSpec: (id) =>
+    request(`/meta-specs-registry/${id}`, { method: 'DELETE' }),
+  getMetaSpecVersions: (id) => request(`/meta-specs-registry/${id}/versions`),
+  getMetaSpecVersion: (id, ver) => request(`/meta-specs-registry/${id}/versions/${ver}`),
   getMetaSpecBlastRadius: (path) => request(`/meta-specs/${encodeURIComponent(path)}/blast-radius`),
   getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
   setWorkspaceMetaSpecSet: (id, data) =>
@@ -423,8 +443,8 @@ export const api = {
     request(`/workspaces/${workspaceId}/meta-specs/preview`, { method: 'POST', body: JSON.stringify(data) }),
   previewPersonaStatus: (workspaceId, previewId) =>
     request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
-  publishPersona: (workspaceId, personaId, data) =>
-    request(`/workspaces/${workspaceId}/personas/${personaId}/publish`, { method: 'POST', body: JSON.stringify(data) }),
+  publishPersona: (_workspaceId, personaId, data) =>
+    request(`/meta-specs-registry/${personaId}`, { method: 'PUT', body: JSON.stringify({ prompt: data.content }) }),
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),

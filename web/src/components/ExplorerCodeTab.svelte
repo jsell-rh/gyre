@@ -1,23 +1,40 @@
 <script>
-  import { getContext, onMount } from 'svelte';
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
 
-  let { repoId = null } = $props();
+  let { repoId = null, repo = null } = $props();
 
   const openDetailPanel = getContext('openDetailPanel');
 
   let subTab = $state('branches');
   const SUB_TABS = [
     { id: 'branches', label: 'Branches' },
+    { id: 'commits', label: 'Commits' },
     { id: 'merge-requests', label: 'Merge Requests' },
     { id: 'merge-queue', label: 'Merge Queue' },
   ];
 
+  // Clone URL copy state
+  let cloneCopied = $state(false);
+  let cloneUrl = $derived(repo?.clone_url ?? '');
+
+  async function copyCloneUrl() {
+    if (!cloneUrl) return;
+    try {
+      await navigator.clipboard.writeText(cloneUrl);
+      cloneCopied = true;
+      setTimeout(() => { cloneCopied = false; }, 2000);
+    } catch {
+      // clipboard not available — silently fail
+    }
+  }
+
   // Per-tab data
   let branches = $state([]);
+  let commits = $state([]);
   let mrs = $state([]);
   let queue = $state([]);
   let loading = $state(true);
@@ -27,10 +44,6 @@
   // Sort state
   let sortField = $state('name');
   let sortDir = $state('asc');
-
-  onMount(() => {
-    if (repoId) loadTab(subTab);
-  });
 
   $effect(() => {
     if (repoId) loadTab(subTab);
@@ -44,6 +57,9 @@
     try {
       if (tab === 'branches') {
         branches = await api.repoBranches(repoId);
+      } else if (tab === 'commits') {
+        const branch = repo?.default_branch ?? 'main';
+        commits = await api.repoCommits(repoId, branch, 50);
       } else if (tab === 'merge-requests') {
         mrs = await api.mergeRequests({ repository_id: repoId });
       } else if (tab === 'merge-queue') {
@@ -106,6 +122,8 @@
     return rows;
   });
 
+  let filteredCommits = $derived.by(() => commits.filter(matchesFilter));
+
   let filteredQueue = $derived.by(() => queue.filter(matchesFilter));
 
   function relativeTime(ts) {
@@ -121,6 +139,24 @@
 
 <div class="code-tab">
   <span class="sr-only" aria-live="polite">{loading ? "" : "code view loaded"}</span>
+
+  <!-- Clone URL header -->
+  {#if cloneUrl}
+    <div class="clone-url-bar">
+      <span class="clone-label">Clone</span>
+      <code class="clone-url-text">{cloneUrl}</code>
+      <button class="clone-copy-btn" onclick={copyCloneUrl} aria-label="Copy clone URL" title="Copy clone URL">
+        {#if cloneCopied}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          Copied!
+        {:else}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          Copy
+        {/if}
+      </button>
+    </div>
+  {/if}
+
   <!-- Sub-tab bar -->
   <div class="subtab-bar" role="tablist" aria-label="Code sub-tabs">
     {#each SUB_TABS as st}
@@ -174,6 +210,32 @@
                 <td class="secondary">{branch.last_commit ? branch.last_commit.slice(0, 7) : '—'}</td>
                 <td class="secondary">{branch.author ?? '—'}</td>
                 <td><span class="status-badge">{branch.status ?? 'active'}</span></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    {:else if subTab === 'commits'}
+      {#if filteredCommits.length === 0}
+        <EmptyState title="No commits" message={filterQuery ? 'No commits match your filter.' : 'No commits found for this branch.'} />
+      {:else}
+        <table class="code-table">
+          <thead>
+            <tr>
+              <th scope="col">SHA</th>
+              <th scope="col">Message</th>
+              <th scope="col">Author</th>
+              <th scope="col">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each filteredCommits as commit}
+              <tr class="table-row" tabindex="0" role="button" aria-label="Commit {commit.sha ?? commit.id ?? ''}">
+                <td class="mono">{(commit.sha ?? commit.id ?? '').slice(0, 7)}</td>
+                <td class="commit-msg">{commit.message ?? commit.summary ?? '—'}</td>
+                <td class="secondary">{commit.author ?? commit.author_name ?? '—'}</td>
+                <td class="secondary">{relativeTime(commit.timestamp ?? commit.authored_at ?? commit.date)}</td>
               </tr>
             {/each}
           </tbody>
@@ -239,6 +301,71 @@
     flex-direction: column;
     height: 100%;
     overflow: hidden;
+  }
+
+  /* Clone URL bar */
+  .clone-url-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .clone-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+  }
+
+  .clone-url-text {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  .clone-copy-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .clone-copy-btn:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .clone-copy-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .commit-msg {
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .subtab-bar {

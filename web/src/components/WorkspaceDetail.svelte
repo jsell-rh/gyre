@@ -271,7 +271,7 @@
               <tr>
                 <td class="mono">
                   {#if navigate}
-                    <button class="repo-link-btn" onclick={() => navigate('repo-detail', { repo: r })}>{r.name}</button>
+                    <button class="repo-link-btn" onclick={() => navigate('admin', { type: 'repo', repoId: r.id, repoName: r.name, workspaceId: workspace.id })}>{r.name}</button>
                   {:else}
                     {r.name}
                   {/if}
