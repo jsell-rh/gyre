@@ -438,7 +438,7 @@
   .budget-bar-fill {
     height: 100%;
     border-radius: var(--radius-full);
-    transition: width 0.6s ease, background var(--transition-slow);
+    transition: width var(--transition-slow) ease, background var(--transition-slow);
   }
 
   /* Enter button in card footer */

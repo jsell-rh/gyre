@@ -861,7 +861,7 @@
   .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: #fbbf24; }
   .banner-action {
     margin-left: var(--space-2); background: transparent; border: 1px solid currentColor; color: inherit;
-    border-radius: var(--radius-sm); padding: 2px var(--space-2); font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
+    border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
   }
   .banner-action:hover { opacity: 1; }
   .explanation-banner {
@@ -998,7 +998,7 @@
   .metric-label { font-size: var(--text-xs); color: var(--color-text-muted); }
 
   .risk-panel { width: 260px; flex-shrink: 0; background: var(--color-surface); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; overflow: hidden; }
-  .risk-panel-header { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; }
+  .risk-panel-header { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-1); }
   .risk-panel-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .risk-panel-sub { font-size: var(--text-xs); color: var(--color-text-muted); }
   .risk-empty { flex: 1; display: flex; align-items: center; justify-content: center; font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; padding: var(--space-4); text-align: center; }
@@ -1013,13 +1013,13 @@
   .risk-row.highlighted { background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
   .risk-row td { padding: var(--space-1) var(--space-2); vertical-align: middle; color: var(--color-text); }
   .risk-name { font-family: var(--font-mono); font-size: var(--text-xs); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .risk-score-chip { display: inline-block; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 700; padding: 2px var(--space-1); border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--chip-color) 12%, transparent); color: var(--chip-color); border-color: color-mix(in srgb, var(--chip-color) 25%, transparent); }
+  .risk-score-chip { display: inline-block; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 700; padding: var(--space-1); border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--chip-color) 12%, transparent); color: var(--chip-color); border-color: color-mix(in srgb, var(--chip-color) 25%, transparent); }
   .risk-num { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text-secondary); text-align: right; }
   .risk-panel-footer { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; }
   .risk-panel-hint { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
   .risk-detail-section { background: var(--color-surface-elevated); border-radius: var(--radius); padding: var(--space-2); border: 1px solid var(--color-border); }
   .risk-detail-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-2); margin-top: var(--space-2); }
-  .risk-detail-item { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .risk-detail-item { display: flex; flex-direction: column; align-items: center; gap: var(--space-1); }
   .risk-detail-val { font-size: var(--text-sm); font-weight: 700; font-family: var(--font-mono); color: var(--color-text); line-height: 1; }
   .risk-detail-label { font-size: var(--text-xs); color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
 

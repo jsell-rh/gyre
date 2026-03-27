@@ -549,7 +549,7 @@
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     transition: color var(--transition-fast), border-color var(--transition-fast);
   }
   .mark-read-btn:hover { color: var(--color-success); border-color: var(--color-success); }
