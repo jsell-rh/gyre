@@ -385,13 +385,31 @@ impl MetaSpecRepository for SqliteStorage {
         let ver = version as i32;
         tokio::task::spawn_blocking(move || -> Result<Option<MetaSpecVersion>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Check the archive table first.
             let row = meta_spec_versions::table
                 .filter(meta_spec_versions::meta_spec_id.eq(&ms_id))
                 .filter(meta_spec_versions::version.eq(ver))
                 .first::<MetaSpecVersionRow>(&mut *conn)
                 .optional()
                 .context("get meta_spec_version")?;
-            Ok(row.map(|r| r.into_domain()))
+            if let Some(r) = row {
+                return Ok(Some(r.into_domain()));
+            }
+            // Fall back to the live row when version == current version.
+            let live = meta_specs::table
+                .filter(meta_specs::id.eq(&ms_id))
+                .filter(meta_specs::version.eq(ver))
+                .first::<MetaSpecRow>(&mut *conn)
+                .optional()
+                .context("get live meta_spec for version")?;
+            Ok(live.map(|r| MetaSpecVersion {
+                id: Id::new(r.id.clone()),
+                meta_spec_id: Id::new(r.id),
+                version: r.version as u32,
+                prompt: r.prompt,
+                content_hash: r.content_hash,
+                created_at: r.updated_at as u64,
+            }))
         })
         .await?
     }

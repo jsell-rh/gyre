@@ -182,6 +182,7 @@ pub struct PreviewStatusResponse {
 
 pub async fn get_meta_spec_set(
     State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<MetaSpecSet>, ApiError> {
     // Verify workspace exists.
@@ -253,6 +254,7 @@ pub async fn put_meta_spec_set(
 
 pub async fn get_meta_spec_blast_radius(
     State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
     Path(spec_path): Path<String>,
 ) -> Json<BlastRadiusResponse> {
     let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
@@ -1075,6 +1077,10 @@ pub async fn update_meta_spec_registry(
     if let Some(prompt) = req.prompt {
         ms.content_hash = sha256_hex(&prompt);
         ms.prompt = prompt;
+        // Spec §2: editing content resets approval to Pending until re-reviewed.
+        ms.approval_status = MetaSpecApprovalStatus::Pending;
+        ms.approved_by = None;
+        ms.approved_at = None;
     }
     if let Some(required) = req.required {
         ms.required = required;
@@ -1108,14 +1114,22 @@ pub async fn delete_meta_spec_registry(
     _auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state.meta_specs.delete(&Id::new(&id)).await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("binding") {
-            ApiError::Conflict(msg)
-        } else {
-            ApiError::Internal(e)
-        }
-    })?;
+    let rid = Id::new(&id);
+    let has_bindings = state
+        .meta_spec_bindings
+        .has_bindings_for(&rid)
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
+    if has_bindings {
+        return Err(ApiError::Conflict(format!(
+            "cannot delete meta-spec '{id}': active bindings reference it"
+        )));
+    }
+    state
+        .meta_specs
+        .delete(&rid)
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
