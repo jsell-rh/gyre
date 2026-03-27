@@ -264,7 +264,7 @@
   }
 
   .form-input:focus:not(:focus-visible) { outline: none; }
-  .form-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .form-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .form-textarea { resize: vertical; min-height: 5rem; }
 
@@ -320,8 +320,8 @@
   .col-count {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: var(--space-0, 2px) var(--space-1);
-    border-radius: 99px;
+    padding: 2px var(--space-1);
+    border-radius: var(--radius-full);
     background: var(--color-surface-elevated);
     color: var(--color-text-secondary);
   }
@@ -390,7 +390,7 @@
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -406,10 +406,10 @@
     display: inline-block;
     font-size: var(--text-xs);
     background: var(--color-primary-bg, #1a1a2e);
-    border: 1px solid var(--color-primary, #58a6ff);
-    color: var(--color-primary, #58a6ff);
+    border: 1px solid var(--color-link);
+    color: var(--color-link);
     border-radius: var(--radius-full);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     cursor: default;
   }
 
@@ -440,12 +440,12 @@
   .btn-retry:hover { background: var(--color-surface-hover); }
 
   .filter-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
   .btn-retry:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
