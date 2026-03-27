@@ -327,6 +327,7 @@
     font: inherit;
     padding: 0;
     white-space: nowrap;
+    transition: color var(--transition-fast);
   }
 
   .sort-btn:hover { color: var(--color-text); }

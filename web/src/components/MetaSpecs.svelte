@@ -632,7 +632,7 @@
 
 <style>
   .meta-specs-view {
-    padding: var(--space-6, 1.5rem);
+    padding: var(--space-6);
     max-width: 1400px;
   }
 
@@ -665,7 +665,7 @@
     font-size: var(--text-sm);
     transition: background var(--transition-fast);
   }
-  .pill:hover { background: var(--color-surface-elevated, #222); }
+  .pill:hover { background: var(--color-surface-elevated); }
   .pill.active {
     background: color-mix(in srgb, var(--color-link) 15%, transparent);
     border-color: var(--color-link);
@@ -717,7 +717,7 @@
     width: 100%;
     min-height: 280px;
     padding: var(--space-3);
-    background: var(--color-surface-elevated, #141414);
+    background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
     color: var(--color-text);
@@ -733,7 +733,7 @@
   .persona-diff {
     min-height: 280px;
     padding: var(--space-3);
-    background: var(--color-surface-elevated, #141414);
+    background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     font-family: var(--font-mono);
@@ -842,7 +842,7 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     font-weight: 500;
-    padding: var(--space-2, 0.5rem) var(--space-4, 1rem);
+    padding: var(--space-2) var(--space-4);
     margin-top: var(--space-3);
   }
   .retry-btn:hover {

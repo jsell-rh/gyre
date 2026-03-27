@@ -254,7 +254,7 @@
 
   .panel-header { display: flex; justify-content: space-between; align-items: center; }
   .panel-title { font-weight: 600; color: var(--color-text); font-size: var(--text-sm); }
-  .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; }
+  .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; transition: color var(--transition-fast); }
   .close-btn:hover { color: var(--color-text); }
   .close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 

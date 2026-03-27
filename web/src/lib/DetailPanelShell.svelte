@@ -67,7 +67,7 @@
   .main-area {
     flex: 1;
     overflow: auto;
-    transition: width 200ms ease-out;
+    transition: width var(--transition-normal) ease-out;
     min-width: 0;
   }
 

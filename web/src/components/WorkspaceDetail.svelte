@@ -418,7 +418,7 @@
     height: 100%;
     background: var(--color-success);
     border-radius: var(--radius-full);
-    transition: width var(--transition-normal, 0.4s ease);
+    transition: width var(--transition-normal);
   }
 
   .bar-fill.bar-warn { background: var(--color-warning); }
