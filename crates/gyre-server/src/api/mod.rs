@@ -12,6 +12,7 @@ pub mod budget;
 pub mod code_awareness;
 pub mod compose;
 pub mod compute;
+pub mod compute_targets;
 pub mod container;
 pub mod conversations;
 pub mod dependencies;
@@ -446,6 +447,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/admin/compute-targets/:id/tunnel/:tunnel_id",
             delete(close_tunnel),
+        )
+        // Compute targets — tenant-scoped (agent-runtime spec §3)
+        .route(
+            "/api/v1/compute-targets",
+            post(compute_targets::create_compute_target).get(compute_targets::list_compute_targets),
+        )
+        .route(
+            "/api/v1/compute-targets/:id",
+            get(compute_targets::get_compute_target)
+                .put(compute_targets::update_compute_target)
+                .delete(compute_targets::delete_compute_target),
         )
         // Network peers (WireGuard mesh)
         .route(
