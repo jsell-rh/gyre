@@ -322,4 +322,8 @@
   .edge-row { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); }
   .edge-type { font-weight: 500; white-space: nowrap; }
   .mono-sm { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); word-break: break-all; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .close-btn { transition: none; }
+  }
 </style>

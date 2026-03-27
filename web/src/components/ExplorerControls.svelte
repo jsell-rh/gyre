@@ -618,6 +618,7 @@
   }
 
   .search-clear:hover { color: var(--color-text); }
+  .search-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 
   .search-hint {
     font-size: var(--text-xs);
@@ -732,5 +733,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; opacity: 0.6; }
+    .tab-btn, .ctrl-btn, .search-clear { transition: none; }
   }
 </style>
