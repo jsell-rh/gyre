@@ -121,7 +121,7 @@
   </div>
 
   {#if loading}
-    <div class="grid">
+    <div class="grid" aria-busy="true" aria-label="Loading personas">
       {#each Array(6) as _}
         <div class="persona-card skeleton-card"><Skeleton lines={3} /></div>
       {/each}
@@ -162,9 +162,9 @@
           {/if}
           <div class="card-actions">
             {#if persona.approval_status !== 'Approved'}
-              <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)}>Approve</button>
+              <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)} aria-label="Approve persona {persona.name}">Approve</button>
             {/if}
-            <button class="btn-danger-sm" onclick={() => { if (confirm('Delete this persona? This cannot be undone.')) deletePersona(persona.id); }}>Delete</button>
+            <button class="btn-danger-sm" onclick={() => { if (confirm('Delete this persona? This cannot be undone.')) deletePersona(persona.id); }} aria-label="Delete persona {persona.name}">Delete</button>
           </div>
         </div>
       {/each}
@@ -362,7 +362,9 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
+  .btn-secondary:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
   .btn-secondary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .btn-danger-sm {
@@ -408,4 +410,12 @@
 
   .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 2px; display: block; }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .persona-card,
+    .btn-primary,
+    .btn-secondary,
+    .btn-danger-sm,
+    .btn-approve-sm { transition: none; }
+  }
 </style>
