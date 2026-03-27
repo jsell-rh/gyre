@@ -109,7 +109,9 @@
   const NAV_ITEMS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin', 'profile'];
 
   export function parseUrl(pathname) {
-    const parts = pathname.split('/').filter(Boolean);
+    const parts = pathname.split('/').filter(Boolean).map(p => {
+      try { return decodeURIComponent(p); } catch { return p; }
+    });
     if (parts.length === 0) return null;
 
     if (parts.length === 1) {
@@ -117,10 +119,9 @@
       if (NAV_ITEMS.includes(nav)) return { nav, scope: { type: 'tenant' } };
     }
 
-    if (parts.length >= 3) {
+    if (parts.length >= 2 && (parts[0] === 'workspaces' || parts[0] === 'repos')) {
       const [seg, id, navRaw] = parts;
-      const nav = navRaw || 'inbox';
-      if (!NAV_ITEMS.includes(nav)) return null;
+      const nav = navRaw && NAV_ITEMS.includes(navRaw) ? navRaw : 'explorer';
 
       if (seg === 'workspaces') {
         return { nav, scope: { type: 'workspace', workspaceId: id } };
@@ -134,10 +135,12 @@
   }
 
   export function urlFor(nav, s) {
-    if (!s || s.type === 'tenant') return `/${nav}`;
-    if (s.type === 'workspace') return `/workspaces/${s.workspaceId}/${nav}`;
-    if (s.type === 'repo') return `/repos/${s.repoId}/${nav}`;
-    return `/${nav}`;
+    // Clamp nav to valid items so sub-view names don't leak into URLs
+    const safeNav = NAV_ITEMS.includes(nav) ? nav : 'explorer';
+    if (!s || s.type === 'tenant') return `/${safeNav}`;
+    if (s.type === 'workspace') return `/workspaces/${encodeURIComponent(s.workspaceId)}/${safeNav}`;
+    if (s.type === 'repo') return `/repos/${encodeURIComponent(s.repoId)}/${safeNav}`;
+    return `/${safeNav}`;
   }
 
   function pushUrl(nav, s) {
@@ -352,10 +355,16 @@
 
       if (fromUrl.scope.type === 'workspace') {
         const ws = workspaces.find(w => w.id === fromUrl.scope.workspaceId) ?? null;
-        currentWorkspace = ws;
         if (ws) {
+          currentWorkspace = ws;
           localStorage.setItem('gyre_workspace_id', ws.id);
           loadWorkspaceData(ws.id);
+        } else {
+          // Stale workspace URL — fall back to tenant scope
+          showToast('Workspace not found — redirecting to home', { type: 'info' });
+          currentWorkspace = null;
+          scope = { type: 'tenant' };
+          currentNav = 'explorer';
         }
       }
     } else {
@@ -392,14 +401,28 @@
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
       if (e.state?.nav) {
-        currentNav = e.state.nav;
+        // Clamp restored nav to valid items (guards stale history entries)
+        currentNav = NAV_ITEMS.includes(e.state.nav) ? e.state.nav : 'explorer';
         scope = e.state.scope ?? { type: 'tenant' };
         fadeContent();
         if (scope.type === 'workspace') {
           currentWorkspace = workspaces.find(w => w.id === scope.workspaceId) ?? null;
           if (currentWorkspace) loadWorkspaceData(scope.workspaceId);
+        } else if (scope.type === 'repo') {
+          // Recover workspace context when returning to repo scope
+          if (scope.workspaceId) {
+            currentWorkspace = workspaces.find(w => w.id === scope.workspaceId) ?? null;
+          }
         } else if (scope.type === 'tenant') {
           currentWorkspace = null;
+        }
+      } else {
+        // No state (e.g. initial entry or external link) — re-parse URL
+        const parsed = parseUrl(window.location.pathname);
+        if (parsed) {
+          currentNav = parsed.nav;
+          scope = parsed.scope;
+          fadeContent();
         }
       }
     }
