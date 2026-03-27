@@ -78,6 +78,7 @@
   }
 
   async function submitReview(decision) {
+    if (submitting) return; // guard against rapid double-click
     submitting = true;
     try {
       const review = await api.submitReview(mr.id, {
@@ -95,6 +96,7 @@
   }
 
   async function addToQueue() {
+    if (enqueueing) return; // guard against rapid double-click
     enqueueing = true;
     try {
       await api.enqueue(mr.id);

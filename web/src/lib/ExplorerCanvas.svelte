@@ -248,6 +248,8 @@
   }
 
   // ── Layout computation ─────────────────────────────────────────────────────
+  let layoutGeneration = 0;
+
   $effect(() => {
     const ns  = visibleNodes;
     const es  = visibleEdges;
@@ -256,18 +258,23 @@
     if (!ns.length) { nodePositionsMap = {}; return; }
 
     if (eng === 'column') {
+      layoutGeneration++;
       nodePositionsMap = columnLayout(ns);
       return;
     }
 
     layoutPending = true;
+    const gen = ++layoutGeneration;
     const w = svgEl?.clientWidth  ?? 900;
     const h = svgEl?.clientHeight ?? 600;
 
     computeLayout(eng, ns, es, w, h).then(pos => {
+      // Discard result if a newer layout was requested (prevents race on rapid switches)
+      if (gen !== layoutGeneration) return;
       nodePositionsMap = pos;
       layoutPending = false;
     }).catch(() => {
+      if (gen !== layoutGeneration) return;
       nodePositionsMap = columnLayout(ns);
       layoutPending = false;
     });

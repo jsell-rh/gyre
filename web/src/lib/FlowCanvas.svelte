@@ -331,6 +331,10 @@
     glInitialized = true;
   }
 
+  // Reusable GL buffers to avoid per-frame allocation/leak
+  let glPosBuf = $state(null);
+  let glColBuf = $state(null);
+
   function drawWebGL(particles) {
     if (!glInitialized) initWebGL();
     if (!glCtx || !glProgram) {
@@ -356,14 +360,15 @@
       return [c.r, c.g, c.b, 1.0];
     }));
 
-    const posBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    // Reuse buffers instead of creating new ones every frame (prevents GPU memory leak)
+    if (!glPosBuf) glPosBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuf);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(posLoc);
     gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
 
-    const colBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    if (!glColBuf) glColBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glColBuf);
     gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(colLoc);
     gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
