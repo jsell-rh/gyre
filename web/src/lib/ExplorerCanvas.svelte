@@ -635,9 +635,27 @@
         {#each visibleEdges as edge}
           {@const from = getPos(edge.source_id ?? edge.from_node_id ?? edge.from)}
           {@const to   = getPos(edge.target_id ?? edge.to_node_id ?? edge.to)}
-          <line class="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y}
-            stroke={encodedEdgeColor(edge)} stroke-dasharray={encodedEdgeDash(edge)}
-            marker-end="url(#arrow)" />
+          {@const mx = (from.x + to.x) / 2}
+          {@const my = (from.y + to.y) / 2}
+          {@const rawAngle = Math.atan2(to.y - from.y, to.x - from.x) * 180 / Math.PI}
+          {@const labelAngle = rawAngle > 90 || rawAngle < -90 ? rawAngle + 180 : rawAngle}
+          {@const label = edge.edge_type ?? ''}
+          <g class="edge-group">
+            <!-- Wide transparent hit area for hover -->
+            <line class="edge-hit" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+            <line class="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y}
+              stroke={encodedEdgeColor(edge)} stroke-dasharray={encodedEdgeDash(edge)}
+              marker-end="url(#arrow)" />
+            {#if label}
+              <text class="edge-label" x={mx} y={my - 5}
+                text-anchor="middle" dominant-baseline="middle"
+                transform="rotate({labelAngle}, {mx}, {my})"
+                font-size="9" pointer-events="none"
+                style="font-family: var(--font-mono); user-select:none">
+                {label}
+              </text>
+            {/if}
+          </g>
         {/each}
 
         <!-- Nodes -->
@@ -934,6 +952,10 @@
   .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
   .graph-svg.panning { cursor: grabbing; }
   .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
+  .edge-hit { stroke: transparent; stroke-width: 12; fill: none; }
+  .edge-label { fill: #94a3b8; opacity: 0; transition: opacity 0.15s; }
+  .edge-group:hover .edge-label { opacity: 1; }
+  .edge-group:hover .graph-edge { stroke-opacity: 1; }
   .graph-node { cursor: pointer; }
   .graph-node:hover path, .graph-node:hover ellipse { filter: brightness(1.3); }
   .graph-node.selected path, .graph-node.selected ellipse { filter: brightness(1.4); }
