@@ -30,6 +30,9 @@ diesel::table! {
         tenant_id -> Text,
         spawned_by -> Nullable<Text>,
         workspace_id -> Text,
+        usage_tokens_input -> Nullable<BigInt>,
+        usage_tokens_output -> Nullable<BigInt>,
+        usage_cost_usd -> Nullable<Double>,
     }
 }
 

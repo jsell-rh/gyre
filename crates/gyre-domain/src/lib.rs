@@ -44,7 +44,7 @@ pub mod workspace;
 pub mod workspace_membership;
 
 pub use activity::ActivityEvent;
-pub use agent::{Agent, AgentError, AgentStatus, DisconnectedBehavior};
+pub use agent::{Agent, AgentError, AgentStatus, AgentUsage, DisconnectedBehavior, MetaSpecUsed};
 pub use agent_card::AgentCard;
 pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
