@@ -203,7 +203,8 @@
       "dashboard_build": "Dashboard Build"
     },
     "about": {
-      "tagline": "Autonomous Development Platform"
+      "tagline": "Autonomous Development Platform",
+      "description": "Gyre is an autonomous software development platform. Agents collaborate to write, review, and deploy code — all coordinated through the Gyre server."
     },
     "language": {
       "title": "Language",
