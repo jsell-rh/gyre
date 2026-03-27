@@ -753,7 +753,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     text-decoration: underline;
-    text-underline-offset: 2px;
+    text-underline-offset: var(--space-1);
     transition: color var(--transition-fast);
   }
 

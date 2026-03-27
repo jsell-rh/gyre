@@ -40,7 +40,7 @@
 
   <div class="scroll">
     {#if loading}
-      <div class="tool-grid">
+      <div class="tool-grid" aria-busy="true" aria-label="Loading MCP tools">
         {#each Array(6) as _}
           <div class="skeleton-card">
             <Skeleton height="1rem" width="60%" />
@@ -390,6 +390,13 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
     border-radius: var(--radius-sm);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tool-card,
+    .tool-header,
+    .expand-icon,
+    .raw-schema-toggle { transition: none; }
   }
 
 </style>

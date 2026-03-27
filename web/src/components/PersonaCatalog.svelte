@@ -272,6 +272,7 @@
   }
 
   .persona-card:hover { border-color: var(--color-border-strong); }
+  .persona-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .skeleton-card { min-height: 140px; }
 
   .card-top {
@@ -327,7 +328,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     width: fit-content;
   }
 
@@ -408,7 +409,7 @@
   .field-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .field-textarea { min-height: 80px; resize: vertical; font-family: var(--font-mono); }
 
-  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 2px; display: block; }
+  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-1); display: block; }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 
   @media (prefers-reduced-motion: reduce) {

@@ -155,4 +155,9 @@
     transition: background var(--transition-fast);
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    th.sortable,
+    tbody tr.clickable { transition: none; }
+  }
+
 </style>
