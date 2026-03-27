@@ -80,6 +80,7 @@
   let repoSettingsSaving = $state(false);
 
   // Repo danger zone
+  let repoArchiveConfirm = $state(false);
   let repoArchiving = $state(false);
   let repoDeleteConfirm = $state('');
   let repoDeleting = $state(false);
@@ -1249,9 +1250,16 @@
                 <button class="secondary-btn" onclick={doUnarchiveRepo} disabled={repoArchiving}>
                   {repoArchiving ? 'Unarchiving…' : 'Unarchive'}
                 </button>
+              {:else if repoArchiveConfirm}
+                <div class="form-actions">
+                  <button class="secondary-btn" onclick={() => repoArchiveConfirm = false}>Cancel</button>
+                  <button class="kill-btn" onclick={() => { repoArchiveConfirm = false; doArchiveRepo(); }} disabled={repoArchiving}>
+                    {repoArchiving ? 'Archiving…' : 'Confirm Archive'}
+                  </button>
+                </div>
               {:else}
-                <button class="kill-btn" onclick={doArchiveRepo} disabled={repoArchiving}>
-                  {repoArchiving ? 'Archiving…' : 'Archive'}
+                <button class="kill-btn" onclick={() => repoArchiveConfirm = true} disabled={repoArchiving}>
+                  Archive
                 </button>
               {/if}
             </div>
@@ -1487,7 +1495,7 @@
     <h3 class="modal-title">New Workspace</h3>
     <div class="form-field">
       <label class="form-label" for="wsf-name">Name</label>
-      <input id="wsf-name" class="filter-input full-width" bind:value={wsForm.name} placeholder="e.g. payments-team" />
+      <input id="wsf-name" class="filter-input full-width" bind:value={wsForm.name} placeholder="e.g. payments-team" aria-required="true" />
     </div>
     <div class="form-field">
       <label class="form-label" for="wsf-desc">Description</label>
@@ -1495,7 +1503,7 @@
     </div>
     <div class="modal-actions">
       <button class="secondary-btn" onclick={() => newWorkspaceModal = false}>Cancel</button>
-      <button class="primary-btn" onclick={createWorkspace} disabled={wsFormLoading || !wsForm.name}>
+      <button class="primary-btn" onclick={createWorkspace} disabled={wsFormLoading || !wsForm.name?.trim()}>
         {wsFormLoading ? 'Creating…' : 'Create Workspace'}
       </button>
     </div>

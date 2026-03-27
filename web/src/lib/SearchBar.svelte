@@ -101,7 +101,7 @@
 
   function navigate(item) {
     open = false;
-    onnavigate?.(item.view);
+    onnavigate?.(item.view, { entityType: item.entityType, entityId: item.entityId });
   }
 
   function onkeydown(e) {
@@ -262,6 +262,7 @@
     max-height: 340px;
     overflow-y: auto;
     padding: var(--space-1);
+    margin: 0;
   }
 
   .search-result {
