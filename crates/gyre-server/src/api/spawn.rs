@@ -6,8 +6,8 @@ use axum::{
 use gyre_common::Id;
 use gyre_domain::{
     policy::{Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope},
-    Agent, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, DisconnectedBehavior,
-    LoopConfig, MergeRequest, TaskStatus,
+    Agent, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, ComputeTargetEntity,
+    ComputeTargetType, DisconnectedBehavior, LoopConfig, MergeRequest, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -282,21 +282,52 @@ pub async fn spawn_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {} not found", req.task_id)))?;
 
-    // Validate compute target if provided
-    if let Some(ref ct_id) = req.compute_target_id {
-        if state
-            .kv_store
-            .kv_get("compute_targets", ct_id.as_str())
-            .await
-            .ok()
-            .flatten()
-            .is_none()
+    // Fetch workspace for compute target resolution and clone URL.
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten();
+
+    // Resolve compute target via DB: request ID → workspace assignment → tenant default.
+    // If req.compute_target_id is set it must exist; return 404 immediately if not found.
+    let resolved_ct_entity: Option<ComputeTargetEntity> =
+        if let Some(ref ct_id) = req.compute_target_id {
+            let entity = state
+                .compute_targets
+                .get_by_id(&Id::new(ct_id))
+                .await
+                .ok()
+                .flatten();
+            if entity.is_none() {
+                return Err(ApiError::NotFound(format!(
+                    "compute target {ct_id} not found"
+                )));
+            }
+            entity
+        } else if let Some(ws_ct_id) = workspace
+            .as_ref()
+            .and_then(|ws| ws.compute_target_id.clone())
         {
-            return Err(ApiError::NotFound(format!(
-                "compute target {ct_id} not found"
-            )));
-        }
-    }
+            // Workspace-assigned compute target.
+            state
+                .compute_targets
+                .get_by_id(&ws_ct_id)
+                .await
+                .ok()
+                .flatten()
+        } else if let Some(ref ws) = workspace {
+            // Tenant default compute target.
+            state
+                .compute_targets
+                .get_default_for_tenant(&ws.tenant_id)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
 
     let now = now_secs();
 
@@ -460,58 +491,35 @@ pub async fn spawn_agent(
     state.tasks.update(&task).await?;
 
     // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
-    // Resolve workspace slug for the new URL format; fall back to workspace_id if not found.
-    let ws_slug = state
-        .workspaces
-        .find_by_id(&repo.workspace_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|ws| ws.slug)
+    // Reuse the already-fetched workspace; fall back to workspace_id if not found.
+    let ws_slug = workspace
+        .as_ref()
+        .map(|ws| ws.slug.clone())
         .unwrap_or_else(|| repo.workspace_id.to_string());
     let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
 
     // M19.1: Resolve the effective compute target.
-    // Priority: compute_target_id from request → GYRE_DEFAULT_COMPUTE_TARGET env → local.
+    // Priority: request compute_target_id → workspace assignment → tenant default → local.
     //
-    // When compute_target_id points to a "container" type target, the agent process is
-    // launched inside Docker/Podman with security defaults (G8-A/B/C).
-    // When it points to an "ssh" type target with container_mode enabled (M19.5), the
-    // docker command is executed on the remote SSH host.
-    let compute_target_label = req.compute_target_id.as_deref().unwrap_or("local");
+    // resolved_ct_entity was computed earlier from the DB; convert it to ComputeTargetConfig
+    // for the existing spawn dispatch logic below.
+    let compute_target_label = resolved_ct_entity
+        .as_ref()
+        .map(|e| e.id.to_string())
+        .unwrap_or_else(|| "local".to_string());
 
-    // Resolve which target config to use.
-    let resolved_target_config: Option<super::compute::ComputeTargetConfig> = {
-        if let Some(ref ct_id) = req.compute_target_id {
-            state
-                .kv_store
-                .kv_get("compute_targets", ct_id.as_str())
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| serde_json::from_str(&s).ok())
-        } else {
-            // Check GYRE_DEFAULT_COMPUTE_TARGET env var.
-            let default_mode = std::env::var("GYRE_DEFAULT_COMPUTE_TARGET")
-                .unwrap_or_else(|_| "local".to_string());
-            if default_mode == "container" {
-                // Find first container-type target (if any).
-                state
-                    .kv_store
-                    .kv_list("compute_targets")
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find_map(|(_, v)| {
-                        serde_json::from_str::<super::compute::ComputeTargetConfig>(&v)
-                            .ok()
-                            .filter(|t| t.target_type == "container")
-                    })
-            } else {
-                None
-            }
-        }
-    };
+    let resolved_target_config: Option<super::compute::ComputeTargetConfig> = resolved_ct_entity
+        .as_ref()
+        .map(|e| super::compute::ComputeTargetConfig {
+            id: e.id.to_string(),
+            name: e.name.clone(),
+            target_type: match e.target_type {
+                ComputeTargetType::Container => "container".to_string(),
+                ComputeTargetType::Ssh => "ssh".to_string(),
+                ComputeTargetType::Kubernetes => "kubernetes".to_string(),
+            },
+            config: e.config.clone(),
+        });
 
     // Launch a real process and monitor its lifecycle.
     // Capture the PID (local) or container ID (container) for workload attestation.
@@ -935,7 +943,7 @@ pub async fn spawn_agent(
         workload_attestation::attest_agent_with_container(
             &agent.id.to_string(),
             spawned_pid,
-            compute_target_label,
+            &compute_target_label,
             &stack_hash,
             spawned_container_id.clone(),
             spawned_container_image.clone(),
@@ -978,7 +986,7 @@ pub async fn spawn_agent(
             worktree_path,
             clone_url,
             branch: req.branch,
-            compute_target_id: req.compute_target_id,
+            compute_target_id: resolved_ct_entity.as_ref().map(|e| e.id.to_string()),
             jj_change_id,
             container_id: spawned_container_id,
             meta_spec_set_sha,
@@ -1974,5 +1982,192 @@ mod tests {
         let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
 
         assert_eq!(json["agent"]["status"], "active");
+    }
+
+    // ── Compute target resolution tests ────────────────────────────────────────
+
+    /// Helper: create a workspace via the API and return its ID.
+    async fn create_workspace(app: Router, name: &str) -> (Router, String) {
+        let body = serde_json::json!({"name": name});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "workspace create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: create a compute target via the API and return its ID.
+    async fn create_compute_target(app: Router, name: &str, is_default: bool) -> (Router, String) {
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Container",
+            "config": {"image": "gyre-agent:latest", "network": "bridge"},
+            "is_default": is_default,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: assign a compute target to a workspace via PUT /api/v1/workspaces/:id.
+    async fn assign_compute_target_to_workspace(
+        app: Router,
+        workspace_id: &str,
+        compute_target_id: &str,
+    ) -> Router {
+        let body = serde_json::json!({"compute_target_id": compute_target_id});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{workspace_id}"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "workspace update should succeed"
+        );
+        app
+    }
+
+    /// Helper: create a repo in a specific workspace.
+    async fn create_repo_in_workspace(app: Router, workspace_id: &str) -> (Router, String) {
+        let body = serde_json::json!({"workspace_id": workspace_id, "name": "wt-repo"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn spawn_uses_workspace_assigned_compute_target() {
+        // When a workspace has a compute_target_id set and the spawn request
+        // does not specify one, the workspace target is resolved automatically.
+        let app = app();
+        let (app, ws_id) = create_workspace(app, "workspace-ct-test").await;
+        let (app, ct_id) = create_compute_target(app, "ws-container", false).await;
+        let app = assign_compute_target_to_workspace(app, &ws_id, &ct_id).await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "workspace ct task").await;
+
+        // Spawn without explicit compute_target_id.
+        let body = serde_json::json!({
+            "name": "ws-ct-agent",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/ws-ct-test",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+
+        // Response must include the workspace's assigned compute target.
+        assert_eq!(
+            json["compute_target_id"].as_str().unwrap_or(""),
+            &ct_id,
+            "spawn should resolve workspace-assigned compute target: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_falls_back_to_tenant_default_compute_target() {
+        // When no explicit compute_target_id is requested and the workspace has
+        // no assignment, the tenant's default compute target is used.
+        let app = app();
+        let (app, ws_id) = create_workspace(app, "workspace-default-ct").await;
+        // Create a default compute target for the tenant (is_default = true).
+        let (app, ct_id) = create_compute_target(app, "tenant-default", true).await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "tenant default ct task").await;
+
+        // Spawn without explicit compute_target_id, workspace has no assignment.
+        let body = serde_json::json!({
+            "name": "tenant-default-agent",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/tenant-default-ct",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+
+        // Response must include the tenant's default compute target.
+        assert_eq!(
+            json["compute_target_id"].as_str().unwrap_or(""),
+            &ct_id,
+            "spawn should fall back to tenant-default compute target: {json}"
+        );
     }
 }
