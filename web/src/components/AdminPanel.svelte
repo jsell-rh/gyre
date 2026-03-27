@@ -641,6 +641,11 @@
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
   }
+
+  function absoluteTime(ts) {
+    if (!ts) return '';
+    try { return new Date(ts * 1000).toLocaleString(); } catch { return ''; }
+  }
 </script>
 
 <div class="panel">
@@ -775,7 +780,7 @@
               <tbody>
                 {#each tenantAudit as evt}
                   <tr>
-                    <td class="dim">{relativeTime(evt.timestamp)}</td>
+                    <td class="dim" title={absoluteTime(evt.timestamp)}>{relativeTime(evt.timestamp)}</td>
                     <td class="mono dim">{evt.actor_id ?? evt.agent_id ?? '—'}</td>
                     <td><Badge value={evt.event_type ?? 'info'} /></td>
                     <td class="dim">{evt.description ?? evt.message ?? '—'}</td>
@@ -944,7 +949,7 @@
                     </div>
                   </td>
                   <td><Badge value={member.role ?? 'member'} /></td>
-                  <td class="dim">{relativeTime(member.last_active ?? member.last_seen_at)}</td>
+                  <td class="dim" title={absoluteTime(member.last_active ?? member.last_seen_at)}>{relativeTime(member.last_active ?? member.last_seen_at)}</td>
                   <td>
                     <button class="kill-btn" onclick={() => removeMember(member.id ?? member.user_id, member.name ?? member.email)}>
                       Remove
@@ -1135,7 +1140,7 @@
                     {/if}
                   </td>
                   <td class="mono dim">{repo.default_branch ?? 'main'}</td>
-                  <td class="dim">{relativeTime(repo.updated_at ?? repo.created_at)}</td>
+                  <td class="dim" title={absoluteTime(repo.updated_at ?? repo.created_at)}>{relativeTime(repo.updated_at ?? repo.created_at)}</td>
                 </tr>
               {/each}
             </tbody>

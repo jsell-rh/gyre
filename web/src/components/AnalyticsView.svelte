@@ -85,7 +85,7 @@
         {:else}
           <table>
             <thead>
-              <tr><th scope="col">Event</th><th scope="col">Count</th><th scope="col">Bar</th></tr>
+              <tr><th scope="col">Event</th><th scope="col">Count</th><th scope="col"><span class="sr-only">Proportion</span></th></tr>
             </thead>
             <tbody>
               {#each topEvents as [name, count]}
@@ -94,7 +94,15 @@
                   <td class="event-name">{name}</td>
                   <td class="count">{count}</td>
                   <td class="bar-cell">
-                    <div class="bar" style="width: {Math.round((count / max) * 100)}%"></div>
+                    <div
+                      class="bar"
+                      style="width: {Math.round((count / max) * 100)}%"
+                      role="meter"
+                      aria-valuenow={count}
+                      aria-valuemin={0}
+                      aria-valuemax={max}
+                      aria-label="{name}: {count} events"
+                    ></div>
                   </td>
                 </tr>
               {/each}
@@ -259,6 +267,10 @@
     clip: rect(0,0,0,0);
     white-space: nowrap;
     border: 0;
+  }
+
+  th .sr-only {
+    position: absolute;
   }
 
   @media (prefers-reduced-motion: reduce) {

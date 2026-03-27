@@ -10,6 +10,7 @@
   let activeFilters = $state(new Set());
   let loading = $state(true);
   let error = $state(null);
+  let now = $state(Date.now());
 
   const eventTypes = $derived([...new Set(events.map((e) => e.event_type))].sort());
 
@@ -26,15 +27,25 @@
     activeFilters = next;
   }
 
+  $effect(() => {
+    const id = setInterval(() => { now = Date.now(); }, 30_000);
+    return () => clearInterval(id);
+  });
+
   function relativeTime(ts) {
-    const diff = Date.now() - new Date(ts).getTime();
+    const diff = now - new Date(ts).getTime();
     const secs = Math.floor(diff / 1000);
+    if (secs < 0) return 'just now';
     if (secs < 60) return `${secs}s ago`;
     const mins = Math.floor(secs / 60);
     if (mins < 60) return `${mins}m ago`;
     const hrs = Math.floor(mins / 60);
     if (hrs < 24) return `${hrs}h ago`;
     return `${Math.floor(hrs / 24)}d ago`;
+  }
+
+  function absoluteTime(ts) {
+    try { return new Date(ts).toLocaleString(); } catch { return ''; }
   }
 
   function eventIcon(type) {
@@ -148,7 +159,7 @@
             <div class="event-header">
               <Badge value={e.event_type} variant={eventVariant(e.event_type)} />
               <span class="agent-name">{e.agent_id ?? 'system'}</span>
-              <time class="timestamp" datetime={e.timestamp}>{relativeTime(e.timestamp)}</time>
+              <time class="timestamp" datetime={e.timestamp} title={absoluteTime(e.timestamp)}>{relativeTime(e.timestamp)}</time>
             </div>
             <p class="event-desc">{e.description}</p>
           </div>

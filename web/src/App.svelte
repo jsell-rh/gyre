@@ -58,6 +58,7 @@
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(true);
   let tokenInfo = $state(null);
+  let tokenVisible = $state(false);
 
   $effect(() => {
     if (shortcutsOpen && shortcutsModalEl) {
@@ -288,6 +289,7 @@
   async function openTokenModal() {
     tokenInput = localStorage.getItem('gyre_auth_token') || 'gyre-dev-token';
     tokenModalOpen = true;
+    tokenVisible = false;
     tokenInfo = null;
     try { tokenInfo = await api.tokenInfo(); } catch { /* ignore */ }
   }
@@ -675,14 +677,35 @@
       </div>
     {/if}
     <label class="token-label" for="token-input">Token</label>
-    <input
-      id="token-input"
-      class="token-input"
-      type="text"
-      bind:value={tokenInput}
-      placeholder="gyre-dev-token"
-      onkeydown={(e) => e.key === 'Enter' && saveToken()}
-    />
+    <div class="token-input-wrap">
+      <input
+        id="token-input"
+        class="token-input"
+        type={tokenVisible ? 'text' : 'password'}
+        bind:value={tokenInput}
+        placeholder="gyre-dev-token"
+        autocomplete="off"
+        onkeydown={(e) => e.key === 'Enter' && saveToken()}
+      />
+      <button
+        class="token-toggle"
+        type="button"
+        onclick={() => tokenVisible = !tokenVisible}
+        aria-label={tokenVisible ? 'Hide token' : 'Show token'}
+      >
+        {#if tokenVisible}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+            <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/>
+            <line x1="1" y1="1" x2="23" y2="23"/>
+          </svg>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        {/if}
+      </button>
+    </div>
     <div class="token-actions">
       <button class="btn-secondary" onclick={() => (tokenModalOpen = false)}>Cancel</button>
       <button class="btn-primary" onclick={saveToken}>Save</button>
@@ -1165,9 +1188,16 @@
     color: var(--color-text);
   }
 
+  .token-input-wrap {
+    display: flex;
+    align-items: center;
+    position: relative;
+  }
+
   .token-input {
     width: 100%;
     padding: var(--space-2) var(--space-3);
+    padding-right: 36px;
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
@@ -1185,6 +1215,31 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
     border-color: var(--color-focus);
+  }
+
+  .token-toggle {
+    position: absolute;
+    right: var(--space-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 0;
+  }
+
+  .token-toggle:hover {
+    color: var(--color-text);
+  }
+
+  .token-toggle:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .token-actions {
