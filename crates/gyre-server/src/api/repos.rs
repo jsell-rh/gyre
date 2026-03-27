@@ -44,7 +44,6 @@ pub struct UpdateRepoRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub default_branch: Option<String>,
-    pub max_agents: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -298,7 +297,7 @@ pub async fn commit_log(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
-    let branch = params.branch.unwrap_or_else(|| repo.default_branch.clone());
+    let branch = params.branch.unwrap_or(repo.default_branch);
     let limit = params.limit.unwrap_or(50);
     let commits = state.git_ops.commit_log(&repo.path, &branch, limit).await?;
     Ok(Json(commits))
@@ -342,6 +341,7 @@ pub async fn create_mirror_repo(
     let repo_path = format!("{}/{}/{}.git", state.repos_root, req.workspace_id, req.name);
 
     let now = now_secs();
+    let url = req.url;
     let repo = Repository {
         id: new_id(),
         workspace_id: Id::new(req.workspace_id),
@@ -350,7 +350,7 @@ pub async fn create_mirror_repo(
         default_branch: "main".to_string(),
         created_at: now,
         is_mirror: true,
-        mirror_url: Some(req.url.clone()),
+        mirror_url: Some(url.clone()),
         mirror_interval_secs: req.interval_secs,
         last_mirror_sync: None,
         description: None,
@@ -360,7 +360,7 @@ pub async fn create_mirror_repo(
     state.repos.create(&repo).await?;
 
     // Clone the remote as a bare mirror; log on failure but don't block the response.
-    if let Err(e) = state.git_ops.clone_mirror(&req.url, &repo_path).await {
+    if let Err(e) = state.git_ops.clone_mirror(&url, &repo_path).await {
         tracing::warn!("clone_mirror failed for {repo_path}: {e}");
     }
 
@@ -382,8 +382,9 @@ pub async fn sync_mirror(
     }
 
     state.git_ops.fetch_mirror(&repo.path).await?;
-    repo.last_mirror_sync = Some(now_secs());
-    repo.updated_at = now_secs();
+    let now = now_secs();
+    repo.last_mirror_sync = Some(now);
+    repo.updated_at = now;
     state.repos.update(&repo).await?;
 
     Ok(Json(RepoResponse::from(repo)))

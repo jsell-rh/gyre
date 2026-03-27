@@ -4,6 +4,7 @@ use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::{RepoStatus, Repository};
 use gyre_ports::RepoRepository;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use super::SqliteStorage;
@@ -32,7 +33,6 @@ struct RepositoryRow {
 
 impl From<RepositoryRow> for Repository {
     fn from(r: RepositoryRow) -> Self {
-        use std::str::FromStr;
         Repository {
             id: Id::new(r.id),
             name: r.name,
@@ -45,7 +45,10 @@ impl From<RepositoryRow> for Repository {
             last_mirror_sync: r.last_mirror_sync.map(|v| v as u64),
             workspace_id: Id::new(r.workspace_id),
             description: r.description,
-            status: RepoStatus::from_str(&r.status).unwrap_or(RepoStatus::Active),
+            status: RepoStatus::from_str(&r.status).unwrap_or_else(|_| {
+                tracing::warn!("unknown repo status {:?}, defaulting to Active", r.status);
+                RepoStatus::Active
+            }),
             updated_at: r.updated_at as u64,
         }
     }

@@ -1,16 +1,11 @@
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoStatus {
+    #[default]
     Active,
     Archived,
-}
-
-impl Default for RepoStatus {
-    fn default() -> Self {
-        RepoStatus::Active
-    }
 }
 
 impl std::fmt::Display for RepoStatus {
