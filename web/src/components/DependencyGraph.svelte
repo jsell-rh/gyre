@@ -211,7 +211,7 @@
   .subtitle { margin: 0; font-size: var(--text-sm); color: var(--color-text-secondary); }
 
   .legend { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
-  .legend-item { display: flex; align-items: center; gap: 4px; font-size: var(--text-xs); color: var(--color-text-muted); }
+  .legend-item { display: flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs); color: var(--color-text-muted); }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
 
   .graph-area { flex: 1; overflow: hidden; position: relative; }
@@ -254,8 +254,9 @@
 
   .panel-header { display: flex; justify-content: space-between; align-items: center; }
   .panel-title { font-weight: 600; color: var(--color-text); font-size: var(--text-sm); }
-  .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: 18px; line-height: 1; }
+  .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; }
   .close-btn:hover { color: var(--color-text); }
+  .close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 
   .panel-section { display: flex; flex-direction: column; gap: var(--space-2); }
   .panel-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-muted); }
