@@ -292,6 +292,8 @@
   });
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && previewState === 'running') cancelPreview(); }} />
+
 <!-- ─── Repo scope redirect ──────────────────────────────────────────────────── -->
 {#if scope === 'repo'}
   <div class="meta-specs-view">
@@ -322,6 +324,7 @@
       <div class="split-layout"><div class="split-left"><Skeleton /></div><div class="split-right"><Skeleton /></div></div>
     {:else if error}
       <EmptyState title="Failed to load" description={error} />
+      <button class="retry-btn" onclick={loadWorkspaceData}>Retry</button>
     {:else}
       <div class="split-layout" data-testid="preview-loop">
         <!-- LEFT: Persona editor / diff view -->
@@ -413,7 +416,7 @@
 
           {:else if previewState === 'running'}
             <div class="preview-progress" data-testid="preview-running" aria-live="polite">
-              <div class="progress-header">Preview: Running</div>
+              <div class="progress-header" role="status">Preview: Running</div>
               <div class="progress-list">
                 {#each previewProgress as item (item.path)}
                   <div class="progress-item">
@@ -426,7 +429,7 @@
               <div class="progress-summary">
                 Progress: {previewProgress.filter(p => p.status === 'complete').length}/{previewProgress.length} specs
               </div>
-              <Button variant="secondary" onclick={cancelPreview}>Cancel Preview</Button>
+              <Button variant="secondary" onclick={cancelPreview}>Cancel Preview <kbd>Esc</kbd></Button>
             </div>
 
           {:else}
@@ -518,6 +521,7 @@
       <Skeleton />
     {:else if error}
       <EmptyState title="Failed to load meta-specs" description={error} />
+      <button class="retry-btn" onclick={loadTenantSpecs}>Retry</button>
     {:else if filtered.length === 0}
       <EmptyState
         title="No meta-specs found"
@@ -661,7 +665,11 @@
     transition: background 0.15s;
   }
   .pill:hover { background: var(--color-surface-elevated, #222); }
-  .pill.active { background: var(--color-primary, #ee0000); border-color: var(--color-primary, #ee0000); color: #fff; }
+  .pill.active {
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 15%, transparent);
+    border-color: var(--color-focus, #4db0ff);
+    color: var(--color-focus, #4db0ff);
+  }
 
   /* ── Catalog table ── */
   .catalog-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
@@ -823,6 +831,28 @@
   .empty { color: var(--color-text-muted, #888); font-size: 0.88rem; margin: 0; }
   .error { color: var(--color-danger, #f55); font-size: 0.88rem; }
 
+  /* ── Retry button ── */
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
+    border-radius: var(--radius, 6px);
+    color: var(--color-focus, #4db0ff);
+    cursor: pointer;
+    font-family: var(--font-body, sans-serif);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    padding: var(--space-2, 0.5rem) var(--space-4, 1rem);
+    margin-top: var(--space-3, 0.75rem);
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 25%, transparent);
+    border-color: var(--color-focus, #4db0ff);
+  }
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   /* Focus-visible for interactive elements */
   .pill:focus-visible,
   .impact-tab:focus-visible,
@@ -835,6 +865,10 @@
 
   @media (prefers-reduced-motion: reduce) {
     .catalog-row,
-    .spec-check-item { transition: none; }
+    .spec-check-item,
+    .pill,
+    .impact-tab,
+    .detail-tab,
+    .link-btn { transition: none; }
   }
 </style>

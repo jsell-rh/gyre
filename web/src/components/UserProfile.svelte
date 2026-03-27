@@ -222,7 +222,7 @@
 
   <Tabs {tabs} bind:active={activeTab} />
 
-  <div class="tab-body" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
+  <div class="tab-body" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}" aria-busy={loading}>
     {#if loading}
       <Skeleton lines={5} />
     {:else if activeTab === 'info'}
@@ -518,7 +518,7 @@
     font-size: var(--text-sm);
     color: var(--color-text);
   }
-  .pref-checkbox { accent-color: var(--color-primary); width: 16px; height: 16px; cursor: pointer; }
+  .pref-checkbox { accent-color: var(--color-focus, #4db0ff); width: 16px; height: 16px; cursor: pointer; }
   .pref-label { flex: 1; }
   .prefs-actions { display: flex; }
 
@@ -533,7 +533,7 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .notif-item.unread { border-left: 3px solid var(--color-primary); }
+  .notif-item.unread { border-left: 3px solid var(--color-focus, #4db0ff); }
   .notif-top { display: flex; align-items: center; gap: var(--space-2); }
   .notif-time { margin-left: auto; font-size: var(--text-xs); }
   .notif-msg { margin: 0; font-size: var(--text-sm); color: var(--color-text-secondary); }

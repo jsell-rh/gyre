@@ -680,7 +680,7 @@
               <p class="danger-desc">Are you sure? This permanently deletes the workspace and all its data.</p>
               <div class="form-actions">
                 <button class="secondary-btn" onclick={() => wsDeleteConfirm = false}>Cancel</button>
-                <button class="kill-btn" onclick={() => { toastInfo('Workspace deletion not yet implemented.'); wsDeleteConfirm = false; }}>
+                <button class="kill-btn" onclick={() => { toastInfo('Workspace deletion must be performed by a tenant administrator.'); wsDeleteConfirm = false; }}>
                   Confirm Delete
                 </button>
               </div>
@@ -1048,7 +1048,7 @@
     <h3 class="modal-title">Adjust Budget Limit</h3>
     <div class="form-field">
       <label class="form-label" for="budget-limit">Limit ({wsBudget?.currency ?? 'USD'})</label>
-      <input id="budget-limit" type="number" class="filter-input full-width" bind:value={budgetLimit} min="0" />
+      <input id="budget-limit" type="number" class="filter-input full-width" bind:value={budgetLimit} min="0" placeholder="e.g. 100.00" step="0.01" />
     </div>
     <div class="modal-actions">
       <button class="secondary-btn" onclick={() => budgetModal = false}>Cancel</button>

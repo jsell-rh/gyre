@@ -409,7 +409,7 @@
     </div>
     <!-- Right: preview -->
     <div class="preview-pane">
-      <span class="preview-label">Source preview</span>
+      <span class="preview-label">Markdown source</span>
       <pre class="preview-pre">{newSpecContent}</pre>
     </div>
   </div>
