@@ -11,19 +11,17 @@
 //! inbox notifications for all Admin and Developer workspace members.
 
 use gyre_common::{
-    graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphNode},
+    graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge, GraphNode},
     Id, Notification, NotificationType,
 };
-use gyre_domain::WorkspaceRole;
+use gyre_domain::{LanguageExtractor, RustExtractor, WorkspaceRole};
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-use gyre_domain::LanguageExtractor;
-use gyre_domain::RustExtractor;
 
 /// Optional agent context attached to a push-triggered extraction.
 ///
@@ -143,37 +141,9 @@ async fn do_extract(
     let sha_str = new_sha.to_string();
     let repo_id_str = repo_id.to_string();
 
-    let (nodes, edges) = tokio::task::spawn_blocking(move || {
-        let extractor = RustExtractor;
-        if !extractor.detect(&tmp_path) {
-            // Not a Rust repository — nothing to extract.
-            return (vec![], vec![]);
-        }
-
-        let result = extractor.extract(&tmp_path, &sha_str);
-        for err in &result.errors {
-            tracing::warn!(
-                file = %err.file_path,
-                "extraction warning: {}",
-                err.message
-            );
-        }
-
-        let repo_id = Id::new(repo_id_str);
-        let mut nodes = result.nodes;
-        let mut edges = result.edges;
-
-        // Fix the placeholder repo_id on every emitted node and edge.
-        for n in &mut nodes {
-            n.repo_id = repo_id.clone();
-        }
-        for e in &mut edges {
-            e.repo_id = repo_id.clone();
-        }
-
-        (nodes, edges)
-    })
-    .await?;
+    let (nodes, edges) =
+        tokio::task::spawn_blocking(move || run_all_extractors(&tmp_path, &sha_str, &repo_id_str))
+            .await?;
 
     if nodes.is_empty() && edges.is_empty() {
         info!(
@@ -687,6 +657,63 @@ fn diff_nodes(old: &GraphNode, new: &GraphNode) -> Vec<FieldChange> {
     }
 
     changes
+}
+
+/// Run all registered language extractors on `repo_root` and merge results.
+///
+/// Extractors are tested with `detect()` first; only matching extractors run.
+/// Results from all matching extractors are merged into a single node+edge list,
+/// with every node and edge's `repo_id` fixed to the real repository ID.
+///
+/// To add a new language extractor (S2/S3/S4), import it and push it onto the
+/// `extractors` vec — no other changes required.
+fn run_all_extractors(
+    repo_root: &Path,
+    commit_sha: &str,
+    repo_id_str: &str,
+) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    let extractors: Vec<Box<dyn LanguageExtractor>> = vec![
+        Box::new(RustExtractor),
+        // GoExtractor added in S2
+        // PythonExtractor added in S3
+        // TypeScriptExtractor added in S4
+    ];
+
+    let repo_id = Id::new(repo_id_str.to_string());
+    let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
+
+    for extractor in &extractors {
+        if !extractor.detect(repo_root) {
+            continue;
+        }
+
+        let result = extractor.extract(repo_root, commit_sha);
+
+        for err in &result.errors {
+            tracing::warn!(
+                extractor = extractor.name(),
+                file = %err.file_path,
+                "extraction warning: {}",
+                err.message
+            );
+        }
+
+        let mut nodes = result.nodes;
+        let mut edges = result.edges;
+
+        for n in &mut nodes {
+            n.repo_id = repo_id.clone();
+        }
+        for e in &mut edges {
+            e.repo_id = repo_id.clone();
+        }
+
+        all_nodes.extend(nodes);
+        all_edges.extend(edges);
+    }
+
+    (all_nodes, all_edges)
 }
 
 /// Parse `nodes_added` from a delta_json string.

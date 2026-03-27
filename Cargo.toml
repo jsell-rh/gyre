@@ -97,6 +97,8 @@ syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 toml = "0.8"
 # Directory walking
 walkdir = "2"
+# Tree-sitter AST parsing for multi-language graph extraction (polyglot dispatch)
+tree-sitter = "0.25"
 
 # Concurrent hash map for in-memory stores (TelemetryBuffer)
 dashmap = "6"
