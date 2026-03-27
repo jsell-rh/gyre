@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
 
   let events = $state([]);
@@ -29,11 +30,9 @@
     loading = true;
     error = null;
     try {
-      const params = new URLSearchParams({ limit: '200' });
-      if (eventFilter) params.set('event_name', eventFilter);
-      const res = await fetch(`/api/v1/analytics/events?${params}`, { headers: authHeaders() });
-      if (!res.ok) throw new Error(await res.text());
-      events = await res.json();
+      const params = { limit: '200' };
+      if (eventFilter) params.event_name = eventFilter;
+      events = await api.analyticsEvents(params);
       computeTopEvents();
     } catch (e) {
       error = e.message;
