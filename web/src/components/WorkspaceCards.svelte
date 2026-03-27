@@ -150,6 +150,7 @@
   {:else}
     <div class="ws-filter-wrap">
       <input type="text" bind:value={wsFilter} placeholder="Filter workspaces…" class="ws-filter" aria-label="Filter workspaces" />
+      <span class="sr-only" aria-live="polite" role="status">{visibleWs.length} workspace{visibleWs.length === 1 ? '' : 's'} shown</span>
     </div>
     <div class="cards-grid" role="list" aria-label="Workspaces">
       {#each visibleWs as ws (ws.id)}
@@ -214,13 +215,13 @@
                     <span
                       class="budget-pct"
                       style="color: {budgetBarColor(info.budgetPct)}"
-                      aria-label="Budget usage: {info.budgetPct}%"
+                      aria-label="Budget usage: {info.budgetPct}%{info.budgetPct >= 95 ? ' (critical)' : info.budgetPct >= 80 ? ' (warning)' : ''}"
                     >{info.budgetPct}%</span>
                   {:else}
                     <span class="budget-pct budget-unknown">—</span>
                   {/if}
                 </div>
-                <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-busy={info == null} aria-valuenow={info?.budgetPct ?? undefined} aria-valuemin="0" aria-valuemax="100">
+                <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-busy={info == null} aria-valuenow={info?.budgetPct ?? 0} aria-valuemin="0" aria-valuemax="100" aria-valuetext="{info?.budgetPct ?? 0}%{(info?.budgetPct ?? 0) >= 95 ? ' critical' : (info?.budgetPct ?? 0) >= 80 ? ' warning' : ''}">
                   <div
                     class="budget-bar-fill"
                     style="width: {info?.budgetPct ?? 0}%; background: {budgetBarColor(info?.budgetPct ?? null)}"
@@ -517,6 +518,8 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
     .budget-bar-fill { transition: none; }

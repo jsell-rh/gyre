@@ -243,6 +243,9 @@
 </script>
 
 <div class="inbox" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite" role="status">
+    {#if !loading}{visibleNotifications.length} notification{visibleNotifications.length === 1 ? '' : 's'}{/if}
+  </span>
   <div class="inbox-header">
       <div class="inbox-title-row">
         <h1 class="inbox-title">Inbox</h1>
@@ -303,10 +306,11 @@
                 <span
                   class="priority-badge"
                   data-priority={n.priority}
-                  title="Priority {n.priority}"
+                  aria-label="Priority {n.priority}"
                 >
                   P{n.priority}
                 </span>
+                {#if isDismissed}<span class="sr-only">(Dismissed)</span>{/if}
                 <div class="card-header-text">
                   <span class="card-title">{n.title}</span>
                   {#if body.agent_id || body.mr_title}
@@ -878,6 +882,8 @@
     color: var(--color-text-muted);
     font-style: italic;
   }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
     .inbox-card { transition: none; }

@@ -312,7 +312,7 @@
 
 <!-- ─── Workspace scope — editor + preview loop ──────────────────────────────── -->
 {#if scope === 'workspace' || scope === 'repo'}
-  <div class="meta-specs-view workspace-view">
+  <div class="meta-specs-view workspace-view" aria-busy={loading}>
     {#if scope !== 'repo'}
       <div class="view-header">
         <h2>Meta-Specs</h2>
@@ -504,7 +504,7 @@
 
 <!-- ─── Tenant scope — catalog table ────────────────────────────────────────── -->
 {:else}
-  <div class="meta-specs-view">
+  <div class="meta-specs-view" aria-busy={loading}>
     <div class="view-header">
       <h2>Meta-Specs</h2>
       <p class="subtitle">Versioned specs that govern agent behavior — personas, principles, standards, and process norms.</p>
@@ -544,7 +544,6 @@
             <tr
               class="catalog-row"
               onclick={() => { detailSpec = spec; detailTab = 'info'; }}
-              role="button"
               tabindex="0"
               aria-label="View {spec.title || spec.path}"
               onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); detailSpec = spec; detailTab = 'info'; } }}
@@ -657,13 +656,13 @@
   /* ── Filter pills ── */
   .filter-pills { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-6); }
   .pill {
-    padding: 0.3rem 0.8rem;
+    padding: var(--space-1) var(--space-3);
     border-radius: 999px;
     border: 1px solid var(--color-border, #333);
     background: transparent;
     color: var(--color-text, #eee);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--text-sm);
     transition: background var(--transition-fast);
   }
   .pill:hover { background: var(--color-surface-elevated, #222); }
@@ -677,7 +676,7 @@
   .catalog-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
   .catalog-table th {
     text-align: left;
-    padding: var(--space-2) 0.75rem;
+    padding: var(--space-2) var(--space-3);
     border-bottom: 2px solid var(--color-border, #333);
     color: var(--color-text-muted, #888);
     font-weight: 600;
@@ -691,7 +690,7 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
   }
-  .catalog-row td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--color-border, #333); vertical-align: middle; }
+  .catalog-row td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border, #333); vertical-align: middle; }
   .cell-path { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-sha { font-size: 0.78rem; }
 
@@ -702,11 +701,11 @@
   .split-right { display: flex; flex-direction: column; gap: var(--space-4); position: sticky; top: var(--space-4); }
 
   /* ── Editor ── */
-  .editor-header { display: flex; align-items: center; gap: 0.75rem; }
-  .persona-label { font-size: 0.85rem; font-weight: 600; color: var(--color-text-muted, #888); white-space: nowrap; }
+  .editor-header { display: flex; align-items: center; gap: var(--space-3); }
+  .persona-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-muted, #888); white-space: nowrap; }
   .persona-select {
     flex: 1;
-    padding: 0.4rem 0.75rem;
+    padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated, #1a1a1a);
     border: 1px solid var(--color-border-strong, #444);
     border-radius: var(--radius, 6px);
@@ -717,18 +716,18 @@
   .persona-textarea {
     width: 100%;
     min-height: 280px;
-    padding: 0.75rem;
+    padding: var(--space-3);
     background: var(--color-surface-elevated, #141414);
     border: 1px solid var(--color-border-strong, #444);
     border-radius: var(--radius, 6px);
     color: var(--color-text, #eee);
     font-family: var(--font-mono, monospace);
-    font-size: 0.85rem;
+    font-size: var(--text-sm);
     line-height: 1.6;
     resize: vertical;
     box-sizing: border-box;
   }
-  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-focus, #4db0ff); }
+  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong, #444); }
   .persona-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
   .persona-diff {

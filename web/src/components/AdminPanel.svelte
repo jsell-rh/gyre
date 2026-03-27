@@ -1009,7 +1009,7 @@
 
 <!-- TRUST CONFIRM MODAL -->
 {#if trustConfirmModal}
-  <div class="modal-backdrop" role="presentation" onclick={cancelTrustChange}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={cancelTrustChange}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Change Trust Level"
     bind:this={trustModalEl}
     onkeydown={(e) => {
@@ -1034,7 +1034,7 @@
 
 <!-- BUDGET MODAL -->
 {#if budgetModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => budgetModal = false}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => budgetModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Adjust Budget Limit"
     bind:this={budgetModalEl}
     onkeydown={(e) => {
@@ -1064,7 +1064,7 @@
 
 <!-- ADD MEMBER MODAL -->
 {#if newMemberModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => newMemberModal = false}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => newMemberModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Member"
     bind:this={memberModalEl}
     onkeydown={(e) => {
@@ -1094,7 +1094,7 @@
 
 <!-- POLICY EDITOR MODAL -->
 {#if policyModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => policyModal = null}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => policyModal = null}></div>
   <div class="modal modal-lg" role="dialog" aria-modal="true" tabindex="-1" aria-label="Policy Editor"
     bind:this={policyModalEl}
     onkeydown={(e) => {
@@ -1156,7 +1156,7 @@
 
 <!-- DESTRUCTIVE ACTION CONFIRM -->
 {#if deleteConfirmModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => deleteConfirmModal = null}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => deleteConfirmModal = null}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
     aria-label={deleteConfirmModal.kind === 'member' ? 'Remove Member' : deleteConfirmModal.kind === 'gate' ? 'Remove Gate' : deleteConfirmModal.kind === 'compute' ? 'Delete Compute Target' : 'Delete Policy'}
     bind:this={deleteConfirmModalEl}
@@ -1191,7 +1191,7 @@
 
 <!-- NEW WORKSPACE MODAL -->
 {#if newWorkspaceModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => newWorkspaceModal = false}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => newWorkspaceModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="New Workspace"
     bind:this={newWorkspaceModalEl}
     onkeydown={(e) => {
@@ -1223,7 +1223,7 @@
 
 <!-- GATE MODAL -->
 {#if gateModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => gateModal = false}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => gateModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Gate"
     bind:this={gateModalEl}
     onkeydown={(e) => {
@@ -1261,7 +1261,7 @@
 
 <!-- COMPUTE MODAL -->
 {#if computeModal}
-  <div class="modal-backdrop" role="presentation" onclick={() => computeModal = false}></div>
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => computeModal = false}></div>
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="Add Compute Target"
     bind:this={computeModalEl}
     onkeydown={(e) => {
@@ -1570,8 +1570,8 @@
   .budget-header { display: flex; justify-content: space-between; align-items: baseline; }
   .budget-label { font-size: var(--text-sm); color: var(--color-text-muted); }
   .budget-amount { font-size: var(--text-lg); font-weight: 600; font-family: var(--font-display); color: var(--color-text); }
-  .budget-bar-track { height: 8px; background: var(--color-surface-elevated); border-radius: 4px; overflow: hidden; }
-  .budget-bar-fill { height: 100%; background: var(--color-success); border-radius: 4px; transition: width var(--transition-normal); }
+  .budget-bar-track { height: 8px; background: var(--color-surface-elevated); border-radius: var(--radius-sm, 4px); overflow: hidden; }
+  .budget-bar-fill { height: 100%; background: var(--color-success); border-radius: var(--radius-sm, 4px); transition: width var(--transition-normal); }
   .budget-bar-fill.warning { background: var(--color-warning); }
   .budget-bar-fill.danger  { background: var(--color-danger); }
   .budget-pct { font-size: var(--text-xs); color: var(--color-text-muted); margin: 0; }
@@ -1618,7 +1618,7 @@
     transition: background var(--transition-fast);
   }
   .trust-radio-dot.active { background: var(--color-focus, #4db0ff); }
-  .trust-option-body { display: flex; flex-direction: column; gap: 2px; }
+  .trust-option-body { display: flex; flex-direction: column; gap: var(--space-0, 2px); }
   .trust-option-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .trust-option-desc { font-size: var(--text-xs); color: var(--color-text-muted); }
   .trust-current {
@@ -1635,7 +1635,7 @@
   .trust-badge {
     font-size: var(--text-xs);
     font-weight: 500;
-    padding: 2px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     border-radius: var(--radius-sm);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
@@ -1674,7 +1674,7 @@
     font-size: var(--text-xs);
     font-weight: 600;
     font-family: var(--font-mono);
-    padding: 1px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     border-radius: var(--radius-sm);
   }
   .policy-prefix-badge.builtin { background: var(--color-bg); color: var(--color-text-muted); border: 1px solid var(--color-border); }
