@@ -322,12 +322,12 @@
 
   .hash-chip {
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: 1px 6px;
+    padding: var(--space-0, 2px) var(--space-2);
     width: fit-content;
   }
 
@@ -404,6 +404,6 @@
   .field-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
   .field-textarea { min-height: 80px; resize: vertical; font-family: var(--font-mono); }
 
-  .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; display: block; }
+  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-0, 2px); display: block; }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>
