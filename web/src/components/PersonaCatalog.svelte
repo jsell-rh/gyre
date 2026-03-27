@@ -373,6 +373,7 @@
     color: var(--color-danger);
     font-size: var(--text-xs);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
   .btn-danger-sm:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
   .btn-danger-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
@@ -385,6 +386,7 @@
     color: var(--color-success);
     font-size: var(--text-xs);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
   .btn-approve-sm:hover { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .btn-approve-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
