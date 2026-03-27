@@ -295,7 +295,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     font-family: var(--font-mono);
@@ -335,7 +335,7 @@
   .artifact-body {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     min-width: 0;
   }
 
@@ -356,6 +356,7 @@
   }
 
   .artifact-link:hover { text-decoration: underline; color: var(--color-link-hover); }
+  .artifact-link:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .link-btn {
     background: none;
@@ -366,7 +367,7 @@
     font-size: inherit;
     padding: 0;
     text-decoration: underline;
-    text-underline-offset: 2px;
+    text-underline-offset: var(--space-1);
     transition: opacity var(--transition-fast);
   }
 
@@ -378,6 +379,11 @@
 
   .link-btn:hover { opacity: 0.8; }
   .link-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .artifact-link,
+    .link-btn { transition: none; }
+  }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
