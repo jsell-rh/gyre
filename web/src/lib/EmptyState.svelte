@@ -14,9 +14,8 @@
       {@html icon}
     {:else}
       <svg viewBox="0 0 48 48" fill="none" width="48" height="48">
-        <rect x="8" y="12" width="32" height="28" rx="3" stroke="currentColor" stroke-width="2"/>
-        <path d="M16 12V10a2 2 0 012-2h12a2 2 0 012 2v2" stroke="currentColor" stroke-width="2"/>
-        <path d="M20 24h8M20 30h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="24" cy="24" r="18" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <path d="M18 24h12M24 18v12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
       </svg>
     {/if}
   </div>

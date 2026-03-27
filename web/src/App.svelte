@@ -596,17 +596,17 @@
         </span>
       {/if}
 
-      <!-- WebSocket status -->
+      <!-- Connection status -->
       <span
         class="status-item status-ws"
         class:connected={wsStatus === 'connected'}
         class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
         role="status"
-        aria-label="WebSocket: {wsStatus}"
-        title="WebSocket: {wsStatus}"
+        aria-label={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
+        title={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
       >
         <span class="ws-dot" aria-hidden="true"></span>
-        WS: {wsStatus}
+        {wsStatus === 'connected' ? 'Live' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline' : 'Connecting'}
       </span>
     </footer>
   </div>

@@ -568,6 +568,8 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+    overflow-y: auto;
+    height: 100%;
   }
 
   .inbox-header {

@@ -10,12 +10,12 @@
   let collapsed = $state(false);
 
   const NAV_ITEMS = [
-    { id: 'inbox',      label: 'Inbox',      shortcut: '1' },
-    { id: 'briefing',   label: 'Briefing',   shortcut: '2' },
-    { id: 'explorer',   label: 'Explorer',   shortcut: '3' },
-    { id: 'specs',      label: 'Specs',      shortcut: '4' },
-    { id: 'meta-specs', label: 'Meta-specs', shortcut: '5' },
-    { id: 'admin',      label: 'Admin',      shortcut: '6' },
+    { id: 'inbox',      label: 'Inbox',      shortcut: '1', hint: 'Notifications & approvals' },
+    { id: 'briefing',   label: 'Briefing',   shortcut: '2', hint: 'Activity summary since last visit' },
+    { id: 'explorer',   label: 'Explorer',   shortcut: '3', hint: 'Architecture & code browser' },
+    { id: 'specs',      label: 'Specs',      shortcut: '4', hint: 'Design specifications' },
+    { id: 'meta-specs', label: 'Meta-specs', shortcut: '5', hint: 'Personas, principles & standards' },
+    { id: 'admin',      label: 'Admin',      shortcut: '6', hint: 'Settings, policies & users' },
   ];
 
   function nav(id) {
@@ -81,7 +81,7 @@
           onclick={() => nav(item.id)}
           aria-label={item.id === 'inbox' && inboxBadge > 0 ? `Inbox, ${inboxBadge} unresolved` : item.label}
           aria-current={currentNav === item.id ? 'page' : undefined}
-          title={collapsed ? `${item.label} (⌘${item.shortcut})` : undefined}
+          title={collapsed ? `${item.label} — ${item.hint} (⌘${item.shortcut})` : item.hint}
         >
           <span class="nav-icon" aria-hidden="true">{@html ICONS[item.id]}</span>
           {#if !collapsed}
