@@ -70,7 +70,7 @@
   </div>
 
   <!-- 6 fixed nav items -->
-  <ul class="nav-list" role="list" aria-label="Navigation">
+  <ul class="nav-list" role="list">
     {#each NAV_ITEMS as item}
       <li>
         <button
@@ -249,11 +249,11 @@
     justify-content: center;
     min-width: 18px;
     height: 18px;
-    padding: 0 4px;
+    padding: 0 var(--space-1);
     background: var(--color-focus, #4db0ff);
     color: var(--color-text-inverse, #fff);
-    border-radius: 999px;
-    font-size: 0.6rem;
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
     font-weight: 700;
     flex-shrink: 0;
   }
@@ -271,7 +271,7 @@
   }
 
   .nav-shortcut {
-    font-size: 0.6rem;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-family: var(--font-mono);
     opacity: 0;

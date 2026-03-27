@@ -196,7 +196,7 @@
 </script>
 
 <div class="briefing" data-testid="briefing-view" aria-busy={loading}>
-    <span class="sr-only" aria-live="polite">{loading ? '' : 'Briefing loaded'}</span>
+    <span class="sr-only" aria-live="polite">{loading ? 'Loading briefing…' : 'Briefing loaded'}</span>
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
@@ -619,12 +619,12 @@
     cursor: pointer;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
-    background-position: right 6px center;
-    background-size: 10px;
+    background-position: right var(--space-2) center;
+    background-size: var(--space-3);
   }
 
   .range-select:hover {
-    border-color: var(--color-border-strong);
+    border-color: var(--color-primary);
   }
 
   .range-select:focus:not(:focus-visible) {
@@ -647,7 +647,7 @@
   }
 
   .date-input:hover {
-    border-color: var(--color-border-strong);
+    border-color: var(--color-primary);
   }
 
   .apply-btn {
@@ -778,7 +778,7 @@
   .confidence-badge {
     font-size: var(--text-xs);
     padding: var(--space-0, 1px) var(--space-1);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
   }
