@@ -284,6 +284,7 @@
 
   .spec-node { cursor: pointer; }
   .spec-node:hover rect { stroke: var(--color-primary); }
+  .spec-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 4px; border-radius: var(--radius); }
 
   .node-rect {
     fill: var(--color-surface-elevated);
