@@ -84,7 +84,9 @@
         <Skeleton width="80%" height="1rem" />
       </div>
     {:else if error}
-      <EmptyState title="Failed to load task" description={error} />
+      <div role="alert">
+        <EmptyState title="Failed to load task" description={error} />
+      </div>
       <div class="retry-area">
         <Button variant="secondary" onclick={load}>Retry</Button>
       </div>
@@ -93,8 +95,7 @@
 
       <Tabs {tabs} bind:active={activeTab} />
 
-      <div role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
-      {#if activeTab === 'info'}
+      <div role="tabpanel" id="tabpanel-info" aria-labelledby="tab-info" hidden={activeTab !== 'info'}>
         <div class="info-grid">
           <div class="info-row">
             <span class="info-label">ID</span>
@@ -157,7 +158,9 @@
             </div>
           {/if}
         </div>
-      {:else if activeTab === 'artifacts'}
+      </div>
+
+      <div role="tabpanel" id="tabpanel-artifacts" aria-labelledby="tab-artifacts" hidden={activeTab !== 'artifacts'}>
         <div class="artifacts-section">
           {#if detail.pr_link}
             <div class="artifact-card">
@@ -186,7 +189,6 @@
             <EmptyState title="No artifacts" description="Artifacts appear here when an agent completes this task and opens a merge request." />
           {/if}
         </div>
-      {/if}
       </div>
     {/if}
   </div>
@@ -347,12 +349,13 @@
 
   .artifact-link {
     font-size: var(--text-sm);
-    color: var(--color-primary);
+    color: var(--color-link);
     text-decoration: none;
     word-break: break-all;
+    transition: color var(--transition-fast);
   }
 
-  .artifact-link:hover { text-decoration: underline; }
+  .artifact-link:hover { text-decoration: underline; color: var(--color-link-hover); }
 
   .link-btn {
     background: none;
