@@ -1,5 +1,5 @@
 <script>
-  import { onMount, getContext } from 'svelte';
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -192,7 +192,12 @@
     return api.briefingAsk(workspaceId, { question, history: [] });
   }
 
-  onMount(load);
+  // Reload when scope or workspaceId changes (not just on mount)
+  $effect(() => {
+    void scope;
+    void workspaceId;
+    load();
+  });
 </script>
 
 <span class="sr-only" aria-live="polite">{loading ? 'Loading briefing…' : 'Briefing loaded'}</span>

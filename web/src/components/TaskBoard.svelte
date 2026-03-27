@@ -70,6 +70,7 @@
         description: taskDesc.trim() || undefined,
         priority: taskPriority,
         status: taskStatus,
+        ...(workspaceId ? { workspace_id: workspaceId } : {}),
       });
       toastSuccess('Task created');
       showNewTask = false;

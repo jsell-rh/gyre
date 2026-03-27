@@ -1,5 +1,5 @@
 <script>
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import MoldableView from '../lib/MoldableView.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -64,7 +64,9 @@
     wsReposLoading = true;
     wsReposError = null;
     try {
-      wsRepos = await api.allRepos();
+      wsRepos = scope.workspaceId
+        ? await api.repos({ workspaceId: scope.workspaceId })
+        : await api.allRepos();
     } catch (e) {
       wsReposError = e.message ?? 'Failed to load repositories';
       wsRepos = [];
@@ -156,6 +158,8 @@
     conceptEdges = null;
     clearTimeout(debounceTimer);
   }
+
+  onDestroy(() => { clearTimeout(debounceTimer); });
 
   let searchInputEl = $state(null);
 
