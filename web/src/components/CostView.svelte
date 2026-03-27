@@ -58,10 +58,12 @@
   }
 
   function fmtTime(ts) {
+    if (ts == null) return '—';
     return new Date(ts * 1000).toLocaleString();
   }
 
   function fmtAmount(n) {
+    if (n == null) return '—';
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
 

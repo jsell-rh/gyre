@@ -73,6 +73,7 @@
   }
 
   function relativeTime(ts) {
+    if (ts == null) return '—';
     const diff = Math.floor((Date.now() - ts * 1000) / 1000);
     if (diff < 60) return `${diff}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;

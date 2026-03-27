@@ -26,6 +26,7 @@
   let mirrorCreating = $state(false);
 
   function formatDate(ts) {
+    if (ts == null) return '—';
     return new Date(ts * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
   }
 
