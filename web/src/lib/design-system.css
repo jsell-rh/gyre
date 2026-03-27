@@ -165,10 +165,13 @@ a:hover {
   text-decoration: underline;
 }
 
+/* Webkit (Chrome, Edge, Safari) */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-text-muted); }
+/* Firefox */
+* { scrollbar-width: thin; scrollbar-color: var(--color-border-strong) transparent; }
 
 /* ============================================================
    PAGE LAYOUT UTILITIES
