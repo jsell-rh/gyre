@@ -491,7 +491,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm);
   }
 

@@ -320,7 +320,7 @@
   .col-count {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-full);
     background: var(--color-surface-elevated);
     color: var(--color-text-secondary);

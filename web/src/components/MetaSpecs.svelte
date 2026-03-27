@@ -813,7 +813,7 @@
   .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
   .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
   .arch-diff { display: flex; flex-direction: column; gap: var(--space-1); }
-  .arch-line { padding: 2px var(--space-1); border-radius: var(--radius-sm); font-family: var(--font-mono); }
+  .arch-line { padding: var(--space-1); border-radius: var(--radius-sm); font-family: var(--font-mono); }
   .arch-line.add { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
   .arch-line.mod { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
   .arch-line.ctx { color: var(--color-text-muted); }

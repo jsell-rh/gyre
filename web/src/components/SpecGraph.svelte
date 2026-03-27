@@ -312,7 +312,7 @@
   .close-btn:hover { color: var(--color-text); }
   .close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
-  .panel-field { display: flex; flex-direction: column; gap: 2px; }
+  .panel-field { display: flex; flex-direction: column; gap: var(--space-1); }
   .field-label { font-size: var(--text-xs); color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .text-sm { font-size: var(--text-sm); color: var(--color-text); }
 
