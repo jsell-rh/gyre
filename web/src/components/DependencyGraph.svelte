@@ -230,6 +230,7 @@
 
   .graph-node { cursor: pointer; }
   .graph-node:hover circle { stroke: var(--color-primary); }
+  .graph-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 4px; border-radius: 50%; }
 
   .node-circle {
     fill: var(--color-surface-elevated);
