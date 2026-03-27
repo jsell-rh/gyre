@@ -1093,6 +1093,8 @@
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
 
   .clickable { cursor: pointer; }
+  .clickable:hover { background: var(--color-surface-elevated); }
+  .clickable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
   .agent-ref {
     font-family: var(--font-mono);
@@ -1140,7 +1142,7 @@
   }
 
   .hot-file-row:hover { background: var(--color-surface-elevated); }
-  .hot-file-row.selected { border-color: var(--color-focus, #4db0ff); background: var(--color-surface-elevated); }
+  .hot-file-row.selected { border-color: var(--color-focus); background: var(--color-surface-elevated); }
 
   .hot-file-path {
     font-family: var(--font-mono);
@@ -1176,7 +1178,7 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
-    padding: 0.15rem var(--space-3);
+    padding: var(--space-1) var(--space-3);
     border-bottom: 1px solid var(--color-border);
   }
 
@@ -1258,7 +1260,7 @@
   }
 
   .policy-btn:hover { background: var(--color-surface-elevated); }
-  .policy-btn.primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+  .policy-btn.primary { background: var(--color-primary); color: var(--color-text-inverse); border-color: var(--color-primary); }
   .policy-btn.primary:hover { background: var(--color-primary-hover); }
   .policy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -1291,6 +1293,7 @@
     font-size: var(--text-xs);
     padding: var(--space-0, 2px) var(--space-2);
     cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 
   .abac-remove-btn:hover {
@@ -1352,7 +1355,7 @@
   }
 
   .policy-input:focus:not(:focus-visible) { outline: none; }
-  .policy-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .policy-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .policy-op-label {
     font-size: var(--text-sm);
@@ -1399,6 +1402,7 @@
     font-size: var(--text-xs);
     padding: var(--space-1) var(--space-2);
     font-family: var(--font-body);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
   .gate-del-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--color-danger) 20%, transparent);
@@ -1469,7 +1473,7 @@
   }
 
   .jj-btn:hover { background: var(--color-surface-elevated); }
-  .jj-btn.primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+  .jj-btn.primary { background: var(--color-primary); color: var(--color-text-inverse); border-color: var(--color-primary); }
   .jj-btn.primary:hover { background: var(--color-primary-hover); }
   .jj-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -1502,7 +1506,7 @@
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
-  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* AIBOM tab */
   .aibom-header {
@@ -1560,7 +1564,7 @@
   .commit-bar {
     height: 6px;
     background: var(--color-link);
-    border-radius: var(--radius-sm, 3px);
+    border-radius: var(--radius-sm);
     min-width: 2px;
     flex-shrink: 0;
   }
@@ -1579,12 +1583,12 @@
   .copy-btn:focus-visible,
   .abac-remove-btn:focus-visible,
   .policy-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
   .branch-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
