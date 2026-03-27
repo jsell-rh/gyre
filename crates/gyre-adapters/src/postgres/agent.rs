@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{Agent, AgentStatus};
+use gyre_domain::{Agent, AgentStatus, AgentUsage};
 use gyre_ports::AgentRepository;
 use std::sync::Arc;
 
@@ -17,6 +17,8 @@ fn status_to_str(s: &AgentStatus) -> &'static str {
         AgentStatus::Error => "Error",
         AgentStatus::Dead => "Dead",
         AgentStatus::Paused => "Paused",
+        AgentStatus::Failed => "Failed",
+        AgentStatus::Stopped => "Stopped",
     }
 }
 
@@ -28,6 +30,8 @@ fn str_to_status(s: &str) -> Result<AgentStatus> {
         "Error" => Ok(AgentStatus::Error),
         "Dead" => Ok(AgentStatus::Dead),
         "Paused" => Ok(AgentStatus::Paused),
+        "Failed" => Ok(AgentStatus::Failed),
+        "Stopped" => Ok(AgentStatus::Stopped),
         other => Err(anyhow!("unknown agent status: {}", other)),
     }
 }
@@ -48,6 +52,12 @@ struct AgentRow {
     tenant_id: String,
     spawned_by: Option<String>,
     workspace_id: String,
+    #[allow(dead_code)]
+    usage_tokens_input: Option<i64>,
+    #[allow(dead_code)]
+    usage_tokens_output: Option<i64>,
+    #[allow(dead_code)]
+    usage_cost_usd: Option<f64>,
 }
 
 impl AgentRow {
@@ -250,5 +260,30 @@ impl AgentRepository for PgStorage {
             rows.into_iter().map(|r| r.into_agent()).collect()
         })
         .await?
+    }
+
+    async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let agent_id = agent_id.clone();
+        let status_str = status_to_str(&status).to_string();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(
+                agents::table
+                    .find(agent_id.as_str())
+                    .filter(agents::tenant_id.eq(&tenant)),
+            )
+            .set(agents::status.eq(&status_str))
+            .execute(&mut *conn)
+            .context("update agent status")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn record_usage(&self, _usage: &AgentUsage) -> Result<()> {
+        // Postgres adapter: usage columns not yet added to PG schema; no-op for now.
+        Ok(())
     }
 }

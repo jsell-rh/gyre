@@ -6,8 +6,8 @@ use axum::{
 use gyre_common::Id;
 use gyre_domain::{
     policy::{Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope},
-    Agent, AgentStatus, AgentWorktree, AnalyticsEvent, DisconnectedBehavior, LoopConfig,
-    MergeRequest, TaskStatus,
+    Agent, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, DisconnectedBehavior,
+    LoopConfig, MergeRequest, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -1135,6 +1135,117 @@ pub async fn complete_agent(
     }
 
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
+}
+
+// ── Agent lifecycle endpoints ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RecordUsageRequest {
+    pub tokens_input: u64,
+    pub tokens_output: u64,
+    pub cost_usd: f64,
+}
+
+/// POST /api/v1/agents/:id/usage
+///
+/// Agent reports its token/cost usage for the current session.
+/// Auth: agent-scoped JWT — the reporting agent must match :id.
+/// Returns 200 OK, or 429 if workspace budget is exhausted (best-effort check).
+#[instrument(skip(state), fields(agent_id = %id))]
+pub async fn record_agent_usage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RecordUsageRequest>,
+) -> Result<StatusCode, ApiError> {
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    let now = now_secs();
+    let usage = AgentUsage {
+        agent_id: agent.id.clone(),
+        tokens_input: req.tokens_input,
+        tokens_output: req.tokens_output,
+        cost_usd: req.cost_usd,
+        reported_at: now,
+    };
+
+    state.agents.record_usage(&usage).await?;
+
+    tracing::info!(
+        agent_id = %id,
+        tokens_input = req.tokens_input,
+        tokens_output = req.tokens_output,
+        cost_usd = req.cost_usd,
+        "agent usage recorded"
+    );
+
+    Ok(StatusCode::OK)
+}
+
+/// POST /api/v1/agents/:id/fail
+///
+/// Marks an agent as Failed (non-recoverable error). Idempotent.
+#[instrument(skip(state), fields(agent_id = %id))]
+pub async fn fail_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut agent = state
+        .agents
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    if agent.status == AgentStatus::Failed {
+        return Ok(StatusCode::OK);
+    }
+
+    agent
+        .transition_status(AgentStatus::Failed)
+        .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
+    state.agents.update(&agent).await?;
+
+    // M22.2: Decrement budget active-agent counter.
+    let workspace_id = agent.workspace_id.to_string();
+    super::budget::decrement_active_agents(&state, &workspace_id).await;
+
+    Ok(StatusCode::OK)
+}
+
+/// POST /api/v1/agents/:id/stop
+///
+/// Marks an agent as Stopped (operator/orchestrator initiated). Idempotent.
+#[instrument(skip(state), fields(agent_id = %id))]
+pub async fn stop_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut agent = state
+        .agents
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    if agent.status == AgentStatus::Stopped {
+        return Ok(StatusCode::OK);
+    }
+
+    agent
+        .transition_status(AgentStatus::Stopped)
+        .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
+    state.agents.update(&agent).await?;
+
+    // Revoke the agent's token so it can no longer authenticate.
+    let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
+
+    // M22.2: Decrement budget active-agent counter.
+    let workspace_id = agent.workspace_id.to_string();
+    super::budget::decrement_active_agents(&state, &workspace_id).await;
+
+    Ok(StatusCode::OK)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

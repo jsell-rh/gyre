@@ -190,6 +190,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/agents/:id/heartbeat", put(agents::agent_heartbeat))
         .route("/api/v1/agents/:id/complete", post(spawn::complete_agent))
+        .route("/api/v1/agents/:id/usage", post(spawn::record_agent_usage))
+        .route("/api/v1/agents/:id/fail", post(spawn::fail_agent))
+        .route("/api/v1/agents/:id/stop", post(spawn::stop_agent))
         .route("/api/v1/agents/:id/card", put(update_agent_card))
         .route("/api/v1/agents/:id/messages", get(messages::poll_messages))
         .route(

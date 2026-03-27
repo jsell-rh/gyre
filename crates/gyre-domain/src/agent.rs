@@ -1,6 +1,7 @@
 use crate::agent_tracking::LoopConfig;
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -31,6 +32,48 @@ pub enum AgentStatus {
     Dead,
     /// Agent is alive but paused due to server disconnection.
     Paused,
+    /// Agent terminated with a failure (non-recoverable error).
+    Failed,
+    /// Agent was explicitly stopped by an operator or orchestrator.
+    Stopped,
+}
+
+impl fmt::Display for AgentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            AgentStatus::Idle => "Idle",
+            AgentStatus::Active => "Active",
+            AgentStatus::Blocked => "Blocked",
+            AgentStatus::Error => "Error",
+            AgentStatus::Dead => "Dead",
+            AgentStatus::Paused => "Paused",
+            AgentStatus::Failed => "Failed",
+            AgentStatus::Stopped => "Stopped",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// Token and cost usage reported by an agent for a work session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentUsage {
+    pub agent_id: Id,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
+    pub cost_usd: f64,
+    /// Unix epoch seconds when this usage was reported.
+    pub reported_at: u64,
+}
+
+/// Reference to a meta-spec that was consulted during an agent's work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaSpecUsed {
+    pub id: Id,
+    pub kind: String,
+    pub content_hash: String,
+    pub version: u32,
+    pub required: bool,
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,11 +145,15 @@ impl Agent {
                 | (AgentStatus::Active, AgentStatus::Blocked)
                 | (AgentStatus::Active, AgentStatus::Error)
                 | (AgentStatus::Active, AgentStatus::Paused)
+                | (AgentStatus::Active, AgentStatus::Failed)
+                | (AgentStatus::Active, AgentStatus::Stopped)
                 | (AgentStatus::Blocked, AgentStatus::Active)
                 | (AgentStatus::Error, AgentStatus::Idle)
                 | (AgentStatus::Paused, AgentStatus::Active)
                 | (AgentStatus::Paused, AgentStatus::Dead)
                 | (_, AgentStatus::Dead)
+                | (_, AgentStatus::Failed)
+                | (_, AgentStatus::Stopped)
         );
         if valid {
             self.status = new_status;

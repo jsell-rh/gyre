@@ -467,6 +467,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 // when the agent calls agent.complete with a summary. At merge time, the
                 // processor does not re-fetch the summary — it is stored at agent.complete time.
                 completion_summary: None,
+                meta_specs_used: vec![],
             };
 
             let bundle =
