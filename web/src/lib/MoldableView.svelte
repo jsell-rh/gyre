@@ -544,6 +544,11 @@
     cursor: pointer;
   }
 
+  .filter-select:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   .sort-group {
     display: flex;
     align-items: center;
@@ -629,6 +634,11 @@
 
   .list-row:hover {
     background: var(--color-surface-elevated);
+  }
+
+  .list-row:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
   }
 
   .list-row td {
@@ -717,6 +727,11 @@
     color: var(--color-text-inverse, #fff);
   }
 
+  .now-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   .timeline-empty {
     flex: 1;
     display: flex;
@@ -763,6 +778,11 @@
 
   .tl-node-row:hover {
     background: var(--color-surface-elevated);
+  }
+
+  .tl-node-row:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 
   .tl-node-name {
@@ -848,6 +868,15 @@
     line-height: 1;
   }
 
+  .delta-close:hover {
+    color: var(--color-text);
+  }
+
+  .delta-close:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
   .delta-row {
     display: flex;
     align-items: baseline;
@@ -897,6 +926,11 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+  }
+
+  .delta-marker:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
   }
 
   .marker-pip {

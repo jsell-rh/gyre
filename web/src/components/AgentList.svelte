@@ -253,6 +253,16 @@
       onkeydown={(e) => {
         if (e.key === 'Escape') { closeSpawnModal(); return; }
         if (e.key === 'Enter' && !spawnResult && e.target.tagName !== 'SELECT') doSpawn();
+        if (e.key === 'Tab') {
+          const focusable = spawnModalEl.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])');
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (e.shiftKey) {
+            if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+          } else {
+            if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+          }
+        }
       }}
     >
         <h3>Spawn Agent</h3>
