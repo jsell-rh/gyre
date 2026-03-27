@@ -107,7 +107,7 @@
   {/if}
 
   {#if loading}
-    <div class="timeline">
+    <div class="timeline" aria-busy="true" aria-label="Loading activity feed">
       {#each Array(6) as _}
         <div class="timeline-item">
           <div class="timeline-node">
@@ -147,7 +147,7 @@
           <div class="timeline-content">
             <div class="event-header">
               <Badge value={e.event_type} variant={eventVariant(e.event_type)} />
-              <span class="agent-name">{e.agent_id}</span>
+              <span class="agent-name">{e.agent_id ?? 'system'}</span>
               <time class="timestamp" datetime={e.timestamp}>{relativeTime(e.timestamp)}</time>
             </div>
             <p class="event-desc">{e.description}</p>
@@ -331,7 +331,13 @@
     color: var(--color-text);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
-  .btn-retry:hover { background: var(--color-surface-hover); }
+  .btn-retry:hover { background: color-mix(in srgb, var(--color-border) 30%, var(--color-surface-elevated)); border-color: var(--color-border-strong); }
   .btn-retry:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pill,
+    .btn-retry { transition: none; }
+  }
 </style>

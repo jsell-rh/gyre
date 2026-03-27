@@ -67,7 +67,7 @@
   </div>
 
   {#if loading}
-    <div class="content">
+    <div class="content" aria-busy="true" aria-label="Loading tenants">
       {#each Array(3) as _}
         <div class="tenant-card skeleton-card"><Skeleton lines={2} /></div>
       {/each}

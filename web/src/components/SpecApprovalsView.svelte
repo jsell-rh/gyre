@@ -90,7 +90,7 @@
   }
 </script>
 
-<div class="spec-approvals">
+<div class="spec-approvals" aria-busy={loading}>
   <div class="view-header">
     <div class="header-left">
       <h2>Spec Approvals</h2>
@@ -115,6 +115,9 @@
     />
     <Button variant="secondary" onclick={load}>Search</Button>
   </div>
+  <span class="sr-only" aria-live="polite" role="status">
+    {#if !loading}{approvals.length} approval{approvals.length === 1 ? '' : 's'} found{/if}
+  </span>
 
   <div class="table-wrap">
     {#if loading}
@@ -124,7 +127,9 @@
         {/each}
       </div>
     {:else if error}
-      <EmptyState title="Failed to load approvals" description={error} />
+      <div role="alert">
+        <EmptyState title="Failed to load approvals" description={error} />
+      </div>
     {:else if approvals.length === 0}
       <EmptyState
         title="No spec approvals"
@@ -256,9 +261,15 @@
   }
 
   .inline-link {
-    color: var(--color-primary);
+    color: var(--color-link);
     text-decoration: underline;
     font-size: inherit;
+  }
+
+  .inline-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
   }
 
   .filter-bar {

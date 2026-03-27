@@ -166,7 +166,7 @@
 
   <!-- Metric cards -->
   <section class="metrics" aria-label="Dashboard metrics">
-    <button class="metric-card" onclick={() => onnavigate?.('agents')}>
+    <button class="metric-card" onclick={() => onnavigate?.('agents')} aria-label="View agents — {activeAgents.length} active of {agents.length} total">
       <div class="metric-label">{$t('dashboard.metrics.active_agents')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
@@ -176,7 +176,7 @@
       {/if}
     </button>
 
-    <button class="metric-card" onclick={() => onnavigate?.('tasks')}>
+    <button class="metric-card" onclick={() => onnavigate?.('tasks')} aria-label="View tasks — {openTasks.length} open of {tasks.length} total">
       <div class="metric-label">{$t('dashboard.metrics.open_tasks')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
@@ -186,7 +186,7 @@
       {/if}
     </button>
 
-    <button class="metric-card" onclick={() => onnavigate?.('projects')}>
+    <button class="metric-card" onclick={() => onnavigate?.('projects')} aria-label="View merge requests — {pendingMrs.length} pending">
       <div class="metric-label">{$t('dashboard.metrics.pending_mrs')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
@@ -196,7 +196,7 @@
       {/if}
     </button>
 
-    <button class="metric-card" onclick={() => onnavigate?.('merge-queue')}>
+    <button class="metric-card" onclick={() => onnavigate?.('merge-queue')} aria-label="View merge queue — {queueDepth} queued of {queue.length} total">
       <div class="metric-label">{$t('dashboard.metrics.queue_depth')}</div>
       {#if loading}
         <Skeleton height="2rem" width="3rem" />
@@ -221,7 +221,7 @@
     <Card>
       {#snippet header()}
         <span>{$t('dashboard.sections.agent_health')}</span>
-        <button class="view-all" onclick={() => onnavigate?.('agents')}>{$t('dashboard.view_all')}</button>
+        <button class="view-all" onclick={() => onnavigate?.('agents')} aria-label="{$t('dashboard.view_all')} agents">{$t('dashboard.view_all')}</button>
       {/snippet}
       {#if loading}
         <div class="agent-grid">
@@ -234,14 +234,14 @@
       {:else}
         <div class="agent-grid">
           {#each agents as agent}
-            <div class="agent-chip" aria-label="{agent.name}, status: {agent.status}">
+            <div class="agent-chip">
               <span
                 class="agent-dot"
                 style="background: {agentStatusColor(agent.status)}"
                 aria-hidden="true"
               ></span>
               <span class="agent-name">{agent.name}</span>
-              <span class="sr-only">{agent.status}</span>
+              <span class="sr-only">, status: {agent.status}</span>
             </div>
           {/each}
         </div>
@@ -252,7 +252,7 @@
     <Card>
       {#snippet header()}
         <span>{$t('dashboard.sections.recent_activity')}</span>
-        <button class="view-all" onclick={() => onnavigate?.('activity')}>{$t('dashboard.view_all')}</button>
+        <button class="view-all" onclick={() => onnavigate?.('activity')} aria-label="{$t('dashboard.view_all')} activity">{$t('dashboard.view_all')}</button>
       {/snippet}
       {#if loading}
         <div class="activity-list">
@@ -282,7 +282,7 @@
       <Card>
         {#snippet header()}
           <span>{$t('dashboard.sections.merge_queue')}</span>
-          <button class="view-all" onclick={() => onnavigate?.('merge-queue')}>{$t('dashboard.view_all')}</button>
+          <button class="view-all" onclick={() => onnavigate?.('merge-queue')} aria-label="{$t('dashboard.view_all')} merge queue">{$t('dashboard.view_all')}</button>
         {/snippet}
         <div class="queue-bar">
           {#each queue.slice(0, 8) as item}
