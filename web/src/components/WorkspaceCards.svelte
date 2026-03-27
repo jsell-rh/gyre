@@ -443,7 +443,7 @@
     gap: var(--space-1);
     background: transparent;
     border: none;
-    color: var(--color-primary);
+    color: var(--color-link, var(--color-focus, #4db0ff));
     font-family: var(--font-body);
     font-size: var(--text-sm);
     font-weight: 500;
@@ -512,5 +512,9 @@
   .retry-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .budget-bar-fill { transition: none; }
   }
 </style>

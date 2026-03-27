@@ -499,7 +499,7 @@
 
   .view-tab.active {
     color: var(--color-text);
-    border-bottom-color: var(--color-primary);
+    border-bottom-color: var(--color-focus, #4db0ff);
   }
 
   .view-tab:focus-visible {
@@ -712,8 +712,8 @@
   }
 
   .now-btn:hover {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
+    background: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus, #4db0ff);
     color: var(--color-text-inverse, #fff);
   }
 
@@ -904,7 +904,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--color-primary);
+    background: var(--color-info, var(--color-focus, #4db0ff));
     opacity: 0.6;
     transition: all var(--transition-fast);
     margin-top: 6px;
@@ -918,7 +918,7 @@
 
   .scrubber-input {
     width: 100%;
-    accent-color: var(--color-primary);
+    accent-color: var(--color-focus, #4db0ff);
     cursor: pointer;
     display: block;
   }
@@ -934,5 +934,9 @@
   .scrubber-label-left,
   .scrubber-label-right {
     font-family: var(--font-mono);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .timeline-spinner { animation: none; border-color: var(--color-border); border-top-color: var(--color-text-muted); }
   }
 </style>

@@ -115,7 +115,7 @@
 
   .tab-btn.active {
     color: var(--color-text);
-    border-bottom-color: var(--color-primary);
+    border-bottom-color: var(--color-link, var(--color-focus, #4db0ff));
   }
 
   .tab-btn:disabled {
@@ -136,7 +136,7 @@
     height: 18px;
     padding: 0 var(--space-1);
     background: var(--color-surface-elevated);
-    border-radius: 9px;
+    border-radius: var(--radius-full, 9999px);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     font-weight: 600;

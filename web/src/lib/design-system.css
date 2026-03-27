@@ -78,6 +78,7 @@
   --space-2:  0.5rem;
   --space-3:  0.75rem;
   --space-4:  1rem;
+  --space-5:  1.25rem;
   --space-6:  1.5rem;
   --space-8:  2rem;
   --space-10: 2.5rem;
@@ -91,15 +92,17 @@
   --radius:            4px;
   --radius-sm:         2px;
   --radius-lg:         8px;
+  --radius-full:       9999px;
 
   /* --- Transitions --- */
   --transition-fast:   150ms ease;
   --transition-normal: 200ms ease;
+  --transition-slow:   300ms ease;
 
   /* --- Shadows --- */
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.5);
-  --shadow-lg: 0 8px 24px rgba(0,0,0,0.6);
+  --shadow-sm: 0 1px 3px color-mix(in srgb, #000000 40%, transparent);
+  --shadow-md: 0 4px 12px color-mix(in srgb, #000000 50%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 60%, transparent);
 
   /* Legacy aliases for existing components */
   --bg:            var(--color-bg);
