@@ -244,6 +244,7 @@
   }
 
   .repo-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .repo-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
   .skeleton-card { cursor: default; }
   .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
 
@@ -283,7 +284,7 @@
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-1);
+    padding: var(--space-1) var(--space-1);
     font-weight: 500;
   }
 
@@ -294,7 +295,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-1);
+    padding: var(--space-1) var(--space-1);
   }
 
   .repo-url {

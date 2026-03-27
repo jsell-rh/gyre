@@ -521,7 +521,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
 
   .queue-card:hover { border-color: var(--color-border-strong); }
@@ -656,7 +656,7 @@
     color: var(--color-danger);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     font-family: var(--font-body);
   }
   .cancel-btn-sm:hover:not(:disabled) {
@@ -760,7 +760,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-1);
+    padding: var(--space-1) var(--space-1);
   }
   .dag-free {
     font-size: var(--text-xs);
