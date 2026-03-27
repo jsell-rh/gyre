@@ -441,11 +441,11 @@
                 </div>
               {/if}
               <div class="impact-tabs" role="tablist">
-                <button class="impact-tab" role="tab" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
-                <button class="impact-tab" role="tab" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
+                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
+                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
               </div>
               {#if isSimulatedPreview}
-                <div class="impact-content impact-unavailable">
+                <div class="impact-content impact-unavailable" role="tabpanel" id={impactTab === 'architecture' ? 'impact-panel-arch' : 'impact-panel-diff'} aria-labelledby={impactTab === 'architecture' ? 'impact-tab-arch' : 'impact-tab-diff'}>
                   <span class="impact-unavailable-label">Preview unavailable — showing example layout.</span>
                   {#if impactTab === 'architecture'}
                     <div class="arch-diff">
@@ -467,7 +467,7 @@
                   {/if}
                 </div>
               {:else if impactTab === 'architecture'}
-                <div class="impact-content arch-diff">
+                <div class="impact-content arch-diff" role="tabpanel" id="impact-panel-arch" aria-labelledby="impact-tab-arch">
                   {#if previewApiResult?.architecture_diff?.length}
                     {#each previewApiResult.architecture_diff as line}
                       <div class="arch-line" class:add={line.startsWith('+')} class:mod={line.startsWith('~')} class:ctx={line.startsWith('=')}>{line}</div>
@@ -477,7 +477,7 @@
                   {/if}
                 </div>
               {:else}
-                <div class="impact-content code-diff">
+                <div class="impact-content code-diff" role="tabpanel" id="impact-panel-diff" aria-labelledby="impact-tab-diff">
                   {#if previewApiResult?.specs_diff?.length}
                     {#each previewApiResult.specs_diff as item (item.path)}
                       <div class="code-diff-file">
@@ -510,10 +510,10 @@
       <p class="subtitle">Versioned specs that govern agent behavior — personas, principles, standards, and process norms.</p>
     </div>
 
-    <div class="filter-pills" role="tablist">
-      <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} role="tab" aria-selected={kindFilter === 'all'}>All</button>
+    <div class="filter-pills" role="group" aria-label="Filter by kind">
+      <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} aria-pressed={kindFilter === 'all'}>All</button>
       {#each META_KINDS as k}
-        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} role="tab" aria-selected={kindFilter === k}>{KIND_LABELS[k]}</button>
+        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} aria-pressed={kindFilter === k}>{KIND_LABELS[k]}</button>
       {/each}
     </div>
 
@@ -575,11 +575,11 @@
   {#if detailSpec}
     <Modal title={detailSpec.title || detailSpec.path} onclose={() => detailSpec = null}>
       <div class="detail-tabs" role="tablist">
-        <button class="detail-tab" role="tab" aria-selected={detailTab === 'info'} class:active={detailTab === 'info'} onclick={() => detailTab = 'info'}>Info</button>
-        <button class="detail-tab" role="tab" aria-selected={detailTab === 'content'} class:active={detailTab === 'content'} onclick={() => detailTab = 'content'}>Content</button>
+        <button class="detail-tab" role="tab" id="detail-tab-info" aria-controls="detail-panel-info" aria-selected={detailTab === 'info'} class:active={detailTab === 'info'} onclick={() => detailTab = 'info'}>Info</button>
+        <button class="detail-tab" role="tab" id="detail-tab-content" aria-controls="detail-panel-content" aria-selected={detailTab === 'content'} class:active={detailTab === 'content'} onclick={() => detailTab = 'content'}>Content</button>
       </div>
       {#if detailTab === 'info'}
-        <div class="detail-info">
+        <div class="detail-info" role="tabpanel" id="detail-panel-info" aria-labelledby="detail-tab-info">
           <div class="detail-row"><span class="detail-key">Path</span><span class="mono">{detailSpec.path}</span></div>
           <div class="detail-row"><span class="detail-key">Kind</span><Badge value={kindLabel(detailSpec.kind)} variant={kindBadgeVariant(detailSpec.kind)} /></div>
           <div class="detail-row"><span class="detail-key">Status</span><span>{detailSpec.approval_status || '—'}</span></div>
@@ -587,7 +587,9 @@
           <div class="detail-row"><span class="detail-key">SHA</span><span class="mono">{detailSpec.current_sha || '—'}</span></div>
         </div>
       {:else}
-        <pre class="detail-content">{detailSpec.content || 'No content available.'}</pre>
+        <div role="tabpanel" id="detail-panel-content" aria-labelledby="detail-tab-content">
+          <pre class="detail-content">{detailSpec.content || 'No content available.'}</pre>
+        </div>
       {/if}
     </Modal>
   {/if}
@@ -666,9 +668,9 @@
   }
   .pill:hover { background: var(--color-surface-elevated, #222); }
   .pill.active {
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 15%, transparent);
-    border-color: var(--color-focus, #4db0ff);
-    color: var(--color-focus, #4db0ff);
+    background: color-mix(in srgb, var(--color-link) 15%, transparent);
+    border-color: var(--color-link);
+    color: var(--color-link);
   }
 
   /* ── Catalog table ── */
@@ -683,7 +685,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .catalog-row { cursor: pointer; transition: background 0.12s; }
+  .catalog-row { cursor: pointer; transition: background var(--transition-fast); }
   .catalog-row:hover { background: var(--color-surface-elevated, #1a1a1a); }
   .catalog-row:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
@@ -758,7 +760,7 @@
   }
   .spec-selector-title { font-size: 0.85rem; font-weight: 600; color: var(--color-text, #eee); }
   .spec-selector-shortcuts { display: flex; gap: var(--space-2); }
-  .link-btn { background: none; border: none; color: var(--color-link, var(--color-primary)); font-size: 0.8rem; cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body, sans-serif); }
+  .link-btn { background: none; border: none; color: var(--color-link, #4db0ff); font-size: 0.8rem; cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body, sans-serif); }
   .spec-checklist { max-height: 360px; overflow-y: auto; padding: 0.5rem 0; }
   .spec-check-item {
     display: flex;
