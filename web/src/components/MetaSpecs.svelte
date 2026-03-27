@@ -536,7 +536,7 @@
             <th scope="col">Name</th>
             <th scope="col">Status</th>
             <th scope="col">SHA</th>
-            <th scope="col"></th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -600,7 +600,7 @@
       {#if blastLoading}
         <Skeleton />
       {:else if blastResult?.error}
-        <p class="error">{blastResult.error}</p>
+        <p class="error" role="alert">{blastResult.error}</p>
       {:else if blastResult}
         <div class="blast-section">
           <h4>Affected Workspaces ({blastResult.affected_workspaces?.length ?? 0})</h4>
@@ -797,7 +797,7 @@
   /* ── Impact panel ── */
   .impact-panel { background: var(--color-surface, #111); border: 1px solid var(--color-border, #333); border-radius: var(--radius, 6px); overflow: hidden; }
   .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border, #333); }
-  .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted, #888); cursor: pointer; font-size: var(--text-sm); transition: color 0.15s; font-family: var(--font-body, sans-serif); }
+  .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted, #888); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body, sans-serif); }
   .impact-tab.active { color: var(--color-text, #eee); border-bottom-color: var(--color-link, var(--color-focus, #4db0ff)); }
   .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
   .arch-diff { display: flex; flex-direction: column; gap: 0.3rem; }
@@ -863,6 +863,18 @@
   .persona-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {
