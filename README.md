@@ -70,6 +70,8 @@ All settings are environment variables. The server starts with safe defaults —
 | `GYRE_AGENT_CREDENTIALS` | _(unset)_ | Comma-separated `KEY=value` pairs injected at container spawn. Credentials are held by the `cred-proxy` sidecar — raw values are never exposed in the agent process environment. Anthropic API calls are routed through the proxy via `ANTHROPIC_BASE_URL`. (M25, M27) |
 | `GYRE_AGENT_GCP_SA_JSON` | _(unset)_ | GCP service account JSON for Vertex AI. Held by `cred-proxy`; agent gets `GCE_METADATA_HOST` pointing to the proxy's OAuth2 token emulator. (M27) |
 | `GYRE_CRED_ALLOWED_HOSTS` | `api.anthropic.com,gitlab.com,api.github.com` | Allowlist of hostnames `cred-proxy` will proxy to. Unlisted hosts get 403, preventing SSRF. (M27-A) |
+| `GYRE_VERTEX_PROJECT` | _(unset — LLM disabled)_ | Google Cloud project ID for Vertex AI. When unset, LLM endpoints return 503. Set alongside `GOOGLE_APPLICATION_CREDENTIALS`. |
+| `GYRE_LLM_MODEL` | `gemini-2.0-flash` | Default Vertex AI model. Override per-function via workspace LLM config API. |
 
 See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 
@@ -135,8 +137,12 @@ See [AGENTS.md](AGENTS.md) for the full environment variable and API reference.
 | M34: Hierarchy Enforcement | Done | `Tenant` entity CRUD (`GET/POST/DELETE /api/v1/tenants`); `workspace_id`/`repo_id` non-optional on Task/Agent/MR; ABAC middleware replaces RBAC across all routes; tenant isolation checks in policy engine; git URL restructure to `/git/{workspace_slug}/{repo_name}/...`; persona versioning/approval (`POST /api/v1/personas/{id}/approve`, `/resolve`); cross-workspace spec links; spec approve/reject path-scoped endpoints |
 | M35: Unified Message Bus | Done | Signed message envelope (Ed25519) replacing REST inbox, domain events, and ActivityStore. 3 tiers: Directed (per-agent inbox, acked, persisted), Telemetry (ring buffer, 10k per workspace), Broadcast (fan-out). `POST/GET /api/v1/workspaces/{id}/messages`; `GYRE_AGENT_INBOX_MAX=100`, `GYRE_TELEMETRY_BUFFER_SIZE=10000` |
 | HSI: Human-System Interface | Done | Full HSI spec (trust gradient, presence, LLM rate limiter, notifications, conversation provenance, MR timeline, gate-time traces, interrogation agents, divergence detection, spec editing backend, explorer views, briefing backend + SSE Q&A, divergence threshold `GYRE_DIVERGENCE_THRESHOLD=3`); Svelte UI rewrite to 6-view model (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin); `PresenceAvatars`, `InlineChat`, `FlowCanvas`, `ScopeBreadcrumb`, `ContentArea` components; 50 Playwright E2E tests |
+| LLM Integration | Done | Streaming Vertex AI LLM backend (`GYRE_VERTEX_PROJECT`); prompts as first-class data (PromptTemplate entity, migration 000030); per-function model config (LlmFunctionConfig entity, migration 000031); SSE streaming on briefing/ask, explorer generate, spec assist, graph generate endpoints; workspace + tenant override hierarchy; 10 req/60s rate limiter |
+| Agent Runtime Spec | Done | DB-backed meta-spec registry (entity, migration 000032, CRUD + versioning API); compute target entity + CRUD (migration 000033) wired into agent spawn; `AgentStatus::Cancelled` + `AgentStatus::Paused`; agent usage recording endpoint (`POST /api/v1/agents/{id}/usage`); `attestation.meta_specs_used` field |
+| Repo Lifecycle | Done | Repo entity extended with `status` (`active`/`archived`/`deleting`), `archived_at`; archive/unarchive/delete endpoints; archive side-effects (cancel tasks, stop agents, close MRs with `MRStatus::Reverted`); `TaskStatus::Cancelled`; user profile extended with notification prefs, API tokens, judgment ledger (migration 000036); migrations 000035–000037 |
+| UX Polish | Done | 48 batches (~750+ fixes): design tokens, ARIA, focus-visible, reduced-motion, keyboard nav, color-mix, space tokens, role=alert, aria-live, roving tabindex — WCAG 2.1 AA compliance sweep across all Svelte components |
 
-1080+ Rust + 434 vitest component + 50 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically.
+1257 Rust + 434 vitest component + 50 Playwright E2E tests passing (including E2E Ralph loop integration test). Hexagonal architecture enforced mechanically. Migrations: 000001–000037.
 
 See [`specs/`](specs/index.md) for full specifications and [`AGENTS.md`](AGENTS.md) for the complete API and developer reference.
 

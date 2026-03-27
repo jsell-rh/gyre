@@ -41,9 +41,12 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona -- fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
 | `POST` | `/api/v1/personas/{id}/approve` | Approve a persona version — transitions it to active; **Admin only**; records approver + timestamp (VISION-3) |
 | `GET` | `/api/v1/personas/resolve` | Resolve the effective persona for a scope: `?scope=tenant|workspace|repo&scope_id=<uuid>` — returns the most specific persona applicable (VISION-3) |
-| `POST/GET` | `/api/v1/repos` | Create / list repos (`?project_id=&workspace_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`). `mirror_url` has credentials redacted (`https://***@host`); `path` in create body is ignored — server-computed as `{repos_root}/{project_id}/{name}.git` (M12.2) |
-| `GET` | `/api/v1/repos/{id}` | Get repository (includes mirror fields); `mirror_url` has credentials redacted (H-5); response includes `workspace_id: Option<Id>` when repo belongs to a workspace (M22.1) |
-| `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); URL must use `https://` (M12.2) |
+| `POST/GET` | `/api/v1/repos` | Create / list repos (`?workspace_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`), repo status (`status`: `active`, `archived`, `deleting`). `mirror_url` has credentials redacted (`https://***@host`) (M12.2, M35-lifecycle) |
+| `GET/PUT` | `/api/v1/repos/{id}` | Get / update repository; PUT accepts `{name?, description?, default_branch?, workspace_id?}`; response includes `status`, `archived_at`, `workspace_id` fields (M35-lifecycle) |
+| `DELETE` | `/api/v1/repos/{id}` | Delete repository (**Admin only**); soft-delete sets `status=deleting`; background job removes bare git directory (M35-lifecycle) |
+| `POST` | `/api/v1/repos/{id}/archive` | Archive a repo — sets `status=archived`, cancels open tasks, stops running agents, closes open MRs with `MRStatus::Reverted` (M35-lifecycle) |
+| `POST` | `/api/v1/repos/{id}/unarchive` | Unarchive a repo — restores `status=active` (M35-lifecycle) |
+| `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); body: `{url, name, interval_secs?}`; URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
@@ -99,7 +102,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (M30) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
-| `PUT` | `/api/v1/agents/{id}/status` | Update agent status |
+| `PUT` | `/api/v1/agents/{id}/status` | Update agent status — `AgentStatus` variants: `Spawning`, `Running`, `Paused`, `Completed`, `Failed`, `Dead`, `Cancelled`; `Paused` used during BCP disconnected mode (M23.3, agent-runtime spec) |
+| `POST` | `/api/v1/agents/{id}/usage` | Record LLM usage for an agent — `{model, input_tokens, output_tokens, cost_usd?}`; accumulated in budget tracking; `attestation.meta_specs_used` updated with active workspace meta-spec SHA (agent-runtime spec) |
 | `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat; on Linux, verifies PID liveness via `/proc/{pid}` and logs a warning if the process is no longer running (G10) |
 | `POST/GET` | `/api/v1/agents/{id}/messages` | Send/poll agent messages |
 | `POST` | `/api/v1/agents/{id}/logs` | Append a log line to the agent's log buffer (M11.2) |
@@ -147,6 +151,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
 | `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
 | `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
+| `GET/PUT` | `/api/v1/users/me/notification-preferences` | Get / update notification delivery preferences — per-type channels (email, in-app, webhook), quiet hours, digest frequency (HSI §12) |
+| `POST/GET` | `/api/v1/users/me/tokens` | Create / list personal API tokens — `{name, scopes[], expires_at?}`; response includes `token` value only on creation (store it — not retrievable later) (HSI §12) |
+| `DELETE` | `/api/v1/users/me/tokens/{id}` | Revoke an API token (HSI §12) |
+| `GET` | `/api/v1/users/me/judgments` | Judgment ledger — history of human decisions (approve/reject/trust-adjust) made through the UI; used to personalize future LLM suggestions (HSI §12) |
 | `GET` | `/api/v1/users/me/notifications` | Notifications (16 `NotificationType` variants: `MrNeedsReview`, `GateFailure`, `MrMerged`, etc.; 4 priority levels); auto-created on agent complete, gate failure, and MR merge (M22.8) |
 | `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark notification read (M22.8) |
 | `POST` | `/api/v1/notifications/{id}/dismiss` | Dismiss a notification (removes from inbox view) (HSI §2) |
@@ -167,6 +175,18 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
+| `POST` | `/api/v1/workspaces/{id}/meta-specs/preview` | Trigger async preview of a meta-spec change — returns `{preview_id}`; runs reconciliation in background (M32, HSI §1) |
+| `GET` | `/api/v1/workspaces/{id}/meta-specs/preview/{preview_id}` | Poll preview status — `{status: pending\|running\|complete\|failed, result?: {affected_agents, drift_count, sample_diffs}}` (M32, HSI §1) |
+| `POST/GET` | `/api/v1/meta-specs-registry` | Create / list DB-backed meta-spec registry entries — `{id, name, kind, path, content, version, status: draft\|approved\|deprecated}`; separate from `specs/manifest.yaml`-backed spec ledger (agent-runtime spec) |
+| `GET/PUT/DELETE` | `/api/v1/meta-specs-registry/{id}` | Read / update / delete a meta-spec registry entry (**Admin only** for PUT/DELETE) |
+| `GET` | `/api/v1/meta-specs-registry/{id}/versions` | List all versions of a meta-spec registry entry |
+| `GET` | `/api/v1/meta-specs-registry/{id}/versions/{version}` | Get a specific version snapshot |
+| `POST/GET` | `/api/v1/workspaces/{id}/llm/config` | **Admin only** — Create / list per-workspace LLM function overrides; each entry: `{function_name, model, temperature?, max_tokens?, provider: anthropic\|vertex}` (LLM integration) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/llm/config/{function}` | Get effective config / set override / remove override for a specific LLM function in this workspace (LLM integration) |
+| `POST/GET` | `/api/v1/workspaces/{id}/llm/prompts` | **Admin only** — List / manage per-workspace prompt template overrides for LLM functions (LLM integration) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/llm/prompts/{function}` | Get effective prompt / set override / remove override for a specific LLM function (LLM integration) |
+| `GET/PUT` | `/api/v1/admin/llm/config/{function}` | **Admin only** — Get / set tenant-wide default LLM config for a function (applied when no workspace override exists) (LLM integration) |
+| `GET/PUT` | `/api/v1/admin/llm/prompts/{function}` | **Admin only** — Get / set tenant-wide default prompt template for a function (LLM integration) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
