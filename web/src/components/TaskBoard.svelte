@@ -320,7 +320,7 @@
   .col-count {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-full);
     background: var(--color-surface-elevated);
     color: var(--color-text-secondary);
@@ -467,6 +467,6 @@
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
-    .task-card { transition: none; }
+    .task-card, .form-input, .pr-link { transition: none; }
   }
 </style>

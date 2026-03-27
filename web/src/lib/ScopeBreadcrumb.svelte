@@ -287,4 +287,8 @@
     color: var(--color-text);
     font-weight: 500;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .crumb, .dropdown-caret, .ws-option { transition: none; }
+  }
 </style>

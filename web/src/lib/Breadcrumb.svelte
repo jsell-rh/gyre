@@ -73,4 +73,8 @@
     color: var(--color-text-secondary);
     font-weight: 500;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .crumb-link { transition: none; }
+  }
 </style>

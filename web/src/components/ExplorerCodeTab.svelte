@@ -352,7 +352,7 @@
 
   .status-badge {
     display: inline-block;
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-full);
     font-size: var(--text-xs);
     background: var(--color-surface-elevated);
@@ -406,4 +406,8 @@
     border-color: var(--color-primary);
   }
   .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .subtab-btn, .sort-btn, .table-row { transition: none; }
+  }
 </style>

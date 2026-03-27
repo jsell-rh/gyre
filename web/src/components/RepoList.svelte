@@ -332,6 +332,10 @@
   .form-input:focus:not(:focus-visible) { outline: none; }
   .form-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
+  @media (prefers-reduced-motion: reduce) {
+    .repo-card, .form-input { transition: none; }
+  }
+
   .error-msg {
     padding: var(--space-8);
     color: var(--color-danger);
