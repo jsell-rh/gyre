@@ -358,9 +358,9 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: 1px 4px;
+    padding: var(--space-0, 2px) var(--space-1);
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
   }
 </style>

@@ -190,7 +190,7 @@
     align-items: center;
     justify-content: center;
     font-family: var(--font-body);
-    font-size: 0.6rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     color: var(--color-text-inverse, #fff);
     cursor: default;
@@ -222,7 +222,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.5rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     color: var(--color-text-inverse, #fff);
     line-height: 1;
