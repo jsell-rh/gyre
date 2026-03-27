@@ -5,14 +5,22 @@ import MetaSpecs from '../components/MetaSpecs.svelte';
 const mockPersonas = [
   {
     id: 'persona-1',
+    kind: 'meta:persona',
     name: 'Backend Developer',
-    system_prompt: 'You are a backend developer focused on Rust.',
+    scope: 'Global',
+    prompt: 'You are a backend developer focused on Rust.',
+    version: 1,
+    required: false,
     approval_status: 'Approved',
   },
   {
     id: 'persona-2',
+    kind: 'meta:persona',
     name: 'Security Reviewer',
-    system_prompt: 'You review code for security vulnerabilities.',
+    scope: 'Global',
+    prompt: 'You review code for security vulnerabilities.',
+    version: 1,
+    required: false,
     approval_status: 'Pending',
   },
 ];
@@ -23,14 +31,37 @@ const mockSpecs = [
 ];
 
 const mockMetaSpecs = [
-  { path: 'specs/personas/backend.md', title: 'Backend Persona', kind: 'meta:persona', approval_status: 'approved', current_sha: 'aaa11111' },
-  { path: 'specs/principles/quality.md', title: 'Quality Principle', kind: 'meta:principle', approval_status: 'pending', current_sha: 'bbb22222' },
+  {
+    id: 'ms-1',
+    kind: 'meta:persona',
+    name: 'Backend Persona',
+    scope: 'Global',
+    prompt: 'You are a backend engineer.',
+    version: 2,
+    required: false,
+    approval_status: 'Approved',
+  },
+  {
+    id: 'ms-2',
+    kind: 'meta:principle',
+    name: 'Quality Principle',
+    scope: 'Global',
+    prompt: 'Write high quality code.',
+    version: 1,
+    required: true,
+    approval_status: 'Pending',
+  },
 ];
 
 vi.mock('../lib/api.js', () => ({
   api: {
     getSpecs: vi.fn().mockResolvedValue([]),
-    personas: vi.fn().mockResolvedValue([]),
+    getMetaSpecs: vi.fn().mockResolvedValue([]),
+    getMetaSpec: vi.fn().mockResolvedValue(null),
+    createMetaSpec: vi.fn().mockResolvedValue(null),
+    updateMetaSpec: vi.fn().mockResolvedValue(null),
+    deleteMetaSpec: vi.fn().mockResolvedValue(null),
+    getMetaSpecVersions: vi.fn().mockResolvedValue([]),
     getMetaSpecBlastRadius: vi.fn().mockResolvedValue({ affected_workspaces: [], affected_repos: [] }),
     previewPersona: vi.fn().mockRejectedValue(new Error('Not implemented')),
     previewPersonaStatus: vi.fn().mockRejectedValue(new Error('Not implemented')),
@@ -47,8 +78,8 @@ describe('MetaSpecs — tenant scope (default)', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
-    api.getSpecs.mockResolvedValue([...mockMetaSpecs]);
-    api.personas.mockResolvedValue([]);
+    api.getMetaSpecs.mockResolvedValue([...mockMetaSpecs]);
+    api.getSpecs.mockResolvedValue([]);
   });
 
   it('renders without throwing', () => {
@@ -80,7 +111,7 @@ describe('MetaSpecs — tenant scope (default)', () => {
   });
 
   it('filters by kind when pill is clicked', async () => {
-    api.getSpecs.mockResolvedValue([...mockMetaSpecs]);
+    api.getMetaSpecs.mockResolvedValue([...mockMetaSpecs]);
     const { findByText, container, queryByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
     await findByText('Backend Persona');
 
@@ -96,15 +127,35 @@ describe('MetaSpecs — tenant scope (default)', () => {
   });
 
   it('shows empty state when no meta-specs exist', async () => {
-    api.getSpecs.mockResolvedValue([]);
+    api.getMetaSpecs.mockResolvedValue([]);
     const { findByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
     expect(await findByText('No meta-specs found')).toBeTruthy();
   });
 
   it('shows error state when API fails', async () => {
-    api.getSpecs.mockRejectedValue(new Error('Server error'));
+    api.getMetaSpecs.mockRejectedValue(new Error('Server error'));
     const { findByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
     expect(await findByText('Failed to load meta-specs')).toBeTruthy();
+  });
+
+  it('shows + New Meta-spec button', async () => {
+    const { findByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    expect(await findByText('+ New Meta-spec')).toBeTruthy();
+  });
+
+  it('opens create modal on + New Meta-spec click', async () => {
+    const { findByText, findByLabelText } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const btn = await findByText('+ New Meta-spec');
+    await fireEvent.click(btn);
+    // Modal form should contain Name field
+    expect(await findByLabelText('Name')).toBeTruthy();
+  });
+
+  it('shows Approve and Reject buttons for Pending items', async () => {
+    const { findAllByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    // mockMetaSpecs[1] has approval_status: 'Pending'
+    expect(await findAllByText('Approve')).toBeTruthy();
+    expect(await findAllByText('Reject')).toBeTruthy();
   });
 });
 
@@ -113,7 +164,8 @@ describe('MetaSpecs — workspace scope', () => {
     localStorage.clear();
     vi.clearAllMocks();
     api.getSpecs.mockResolvedValue([...mockSpecs]);
-    api.personas.mockResolvedValue([...mockPersonas]);
+    // Workspace scope loads personas via getMetaSpecs({ kind: 'meta:persona' })
+    api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
   });
 
   afterEach(() => {
@@ -283,7 +335,7 @@ describe('MetaSpecs — repo scope', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.getSpecs.mockResolvedValue([...mockSpecs]);
-    api.personas.mockResolvedValue([...mockPersonas]);
+    api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
   });
 
   it('renders without throwing in repo scope', () => {
@@ -307,7 +359,7 @@ describe('MetaSpecs — DiffSuggestion accept updates textarea', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.getSpecs.mockResolvedValue([...mockSpecs]);
-    api.personas.mockResolvedValue([...mockPersonas]);
+    api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
     global.fetch = vi.fn().mockRejectedValue(new Error('fetch not available'));
   });
 
