@@ -350,4 +350,21 @@ impl TaskRepository for PgStorage {
         })
         .await?
     }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<Task>> {
+        let pool = Arc::clone(&self.pool);
+        let repo_id = repo_id.clone();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Task>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = tasks::table
+                .filter(tasks::tenant_id.eq(&tenant))
+                .filter(tasks::repo_id.eq(repo_id.as_str()))
+                .order(tasks::created_at.asc())
+                .load::<TaskRow>(&mut *conn)
+                .context("list tasks by repo")?;
+            rows.into_iter().map(TaskRow::into_task).collect()
+        })
+        .await?
+    }
 }
