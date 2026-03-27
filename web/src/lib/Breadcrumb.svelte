@@ -35,6 +35,8 @@
     gap: var(--space-1);
     list-style: none;
     flex-wrap: wrap;
+    margin: 0;
+    padding: 0;
   }
 
   li {

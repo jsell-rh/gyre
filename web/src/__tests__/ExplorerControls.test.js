@@ -299,12 +299,12 @@ describe('ExplorerFilterPanel', () => {
     expect(radios.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('calls onFilterChange when category toggled', async () => {
-    const onFilterChange = vi.fn();
-    const { container } = render(ExplorerFilterPanel, { props: { visible: true, onFilterChange } });
+  it('calls onfilterchange when category toggled', async () => {
+    const onfilterchange = vi.fn();
+    const { container } = render(ExplorerFilterPanel, { props: { visible: true, onfilterchange } });
     const firstCheckbox = container.querySelector('input[type="checkbox"]');
     await fireEvent.change(firstCheckbox);
-    expect(onFilterChange).toHaveBeenCalled();
+    expect(onfilterchange).toHaveBeenCalled();
   });
 
   it('renders churn slider', () => {
