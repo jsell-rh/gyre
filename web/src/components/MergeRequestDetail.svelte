@@ -163,7 +163,7 @@
   <div class="panel-header">
     <div class="breadcrumb">
       <button class="back-btn" onclick={onBack} aria-label="Go back">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
         {repo?.name ?? 'Repo'}
       </button>
       <span class="sep">/</span>
@@ -263,7 +263,7 @@
             <div class="gates-list">
               {#each gates as gate (gate.id)}
                 <div class="gate-row">
-                  <span class="gate-dot" style:background={gateStatusColor(gate.status)}></span>
+                  <span class="gate-dot" style:background={gateStatusColor(gate.status)} aria-hidden="true"></span>
                   <span class="gate-label">{gate.gate_id}</span>
                   <span class="gate-status" style:color={gateStatusColor(gate.status)}>{gate.status}</span>
                 </div>
@@ -304,7 +304,7 @@
                 bind:value={addDepInput}
                 onkeydown={(e) => e.key === 'Enter' && addDep()}
               />
-              <button class="dep-add-btn" onclick={addDep} disabled={addingDep || !addDepInput.trim()}>
+              <button class="dep-add-btn" onclick={addDep} disabled={addingDep || !addDepInput.trim()} aria-label="Add dependency">
                 {addingDep ? '…' : 'Add'}
               </button>
             </div>
@@ -329,7 +329,7 @@
               onclick={() => submitReview('approved')}
               disabled={mr.status === 'merged' || mr.status === 'closed'}
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 6L9 17l-5-5"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
               Approve
             </button>
             <button
@@ -337,12 +337,12 @@
               onclick={() => submitReview('changes_requested')}
               disabled={mr.status === 'merged' || mr.status === 'closed'}
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
               Request Changes
             </button>
             {#if mr.status === 'approved'}
               <button class="action-btn enqueue" onclick={addToQueue} disabled={enqueueing}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 12h18M3 6h18M3 18h12"/></svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M3 12h18M3 6h18M3 18h12"/></svg>
                 {enqueueing ? 'Adding…' : 'Add to Queue'}
               </button>
             {/if}
@@ -462,6 +462,7 @@
               class:selected={selectedFile === file.path}
               onclick={() => selectedFile = file.path}
               aria-label="View diff for {file.path}"
+              aria-current={selectedFile === file.path ? true : undefined}
             >
               <span class="file-status-dot" class:modified={file.status === 'Modified'} class:added={file.status === 'Added'} class:deleted={file.status === 'Deleted'}></span>
               <span class="file-path-text">{file.path}</span>

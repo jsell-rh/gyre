@@ -849,10 +849,10 @@
   }
 
   .retry-btn {
-    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--color-link) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-link) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-primary);
+    color: var(--color-link);
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-xs);
@@ -862,8 +862,8 @@
   }
 
   .retry-btn:hover {
-    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
-    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-link) 25%, transparent);
+    border-color: var(--color-link);
   }
 
   .retry-btn:focus-visible {

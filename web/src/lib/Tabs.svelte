@@ -143,12 +143,18 @@
   }
 
   .tab-btn.active .tab-count {
-    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
-    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent);
+    color: var(--color-focus, #4db0ff);
   }
 
   .tab-icon {
     display: flex;
     align-items: center;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tab-btn {
+      transition: none;
+    }
   }
 </style>

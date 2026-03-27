@@ -575,7 +575,7 @@
   }
 
   .go-admin-btn {
-    background: var(--color-primary);
+    background: var(--color-link);
     color: var(--color-surface, #fff);
     border: none;
     border-radius: var(--radius);
@@ -679,7 +679,9 @@
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; display: none; }
     .ws-repo-card,
-    .go-admin-btn { transition: none; }
+    .go-admin-btn,
+    .chip-clear,
+    .graph-error button { transition: none; }
   }
 
   .concept-chip {
@@ -731,10 +733,10 @@
   }
 
   .retry-btn {
-    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--color-link) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-link) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-primary);
+    color: var(--color-link);
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-xs);
@@ -744,8 +746,8 @@
   }
 
   .retry-btn:hover {
-    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
-    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-link) 25%, transparent);
+    border-color: var(--color-link);
   }
 
   .retry-btn:focus-visible {

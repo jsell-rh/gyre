@@ -610,7 +610,7 @@
 
 <!-- Keyboard shortcut overlay -->
 {#if shortcutsOpen}
-  <div class="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" aria-modal="true" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => {
+  <div class="shortcuts-overlay" tabindex="-1" onclick={() => (shortcutsOpen = false)} onkeydown={(e) => {
     if (e.key === 'Escape') { shortcutsOpen = false; return; }
     if (e.key === 'Tab' && shortcutsModalEl) {
       const focusable = Array.from(shortcutsModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'));
@@ -624,7 +624,7 @@
       }
     }
   }}>
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="presentation">
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
@@ -798,7 +798,7 @@
     min-width: 14px;
     height: 14px;
     padding: 0 3px;
-    background: var(--color-primary);
+    background: var(--color-danger);
     color: var(--color-surface, #fff);
     border-radius: 999px;
     font-size: 0.55rem;
