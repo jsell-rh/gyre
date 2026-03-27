@@ -76,6 +76,8 @@ pub struct RepoResponse {
     pub mirror_url: Option<String>,
     pub mirror_interval_secs: Option<u64>,
     pub last_mirror_sync: Option<u64>,
+    /// Git Smart HTTP clone URL: {base_url}/git/{workspace_slug}/{repo_name}
+    pub clone_url: String,
 }
 
 impl From<Repository> for RepoResponse {
@@ -93,8 +95,29 @@ impl From<Repository> for RepoResponse {
             mirror_url: r.mirror_url.map(redact_url_credentials),
             mirror_interval_secs: r.mirror_interval_secs,
             last_mirror_sync: r.last_mirror_sync,
+            clone_url: String::new(),
         }
     }
+}
+
+fn build_clone_url(base_url: &str, ws_slug: &str, repo_name: &str) -> String {
+    format!("{}/git/{}/{}", base_url, ws_slug, repo_name)
+}
+
+/// Build a RepoResponse with clone_url populated by resolving the workspace slug.
+async fn repo_response_with_clone_url(state: &Arc<AppState>, repo: Repository) -> RepoResponse {
+    let ws_slug = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.slug)
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    let clone_url = build_clone_url(&state.base_url, &ws_slug, &repo.name);
+    let mut r = RepoResponse::from(repo);
+    r.clone_url = clone_url;
+    r
 }
 
 #[derive(Deserialize)]
@@ -156,7 +179,10 @@ pub async fn create_repo(
         }
     }
 
-    Ok((StatusCode::CREATED, Json(RepoResponse::from(repo))))
+    Ok((
+        StatusCode::CREATED,
+        Json(repo_response_with_clone_url(&state, repo).await),
+    ))
 }
 
 pub async fn list_repos(
@@ -168,7 +194,11 @@ pub async fn list_repos(
     } else {
         state.repos.list().await?
     };
-    Ok(Json(repos.into_iter().map(RepoResponse::from).collect()))
+    let mut responses = Vec::with_capacity(repos.len());
+    for repo in repos {
+        responses.push(repo_response_with_clone_url(&state, repo).await);
+    }
+    Ok(Json(responses))
 }
 
 pub async fn get_repo(
@@ -180,7 +210,7 @@ pub async fn get_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
-    Ok(Json(RepoResponse::from(repo)))
+    Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
 pub async fn update_repo(
@@ -211,7 +241,7 @@ pub async fn update_repo(
     repo.updated_at = now_secs();
 
     state.repos.update(&repo).await?;
-    Ok(Json(RepoResponse::from(repo)))
+    Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
 pub async fn archive_repo(
@@ -287,7 +317,7 @@ pub async fn archive_repo(
     repo.updated_at = now;
     state.repos.update(&repo).await?;
 
-    Ok(Json(RepoResponse::from(repo)))
+    Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
 pub async fn unarchive_repo(
@@ -307,7 +337,7 @@ pub async fn unarchive_repo(
     repo.unarchive();
     repo.updated_at = now_secs();
     state.repos.update(&repo).await?;
-    Ok(Json(RepoResponse::from(repo)))
+    Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
 pub async fn delete_repo(
@@ -420,7 +450,10 @@ pub async fn create_mirror_repo(
         tracing::warn!("clone_mirror failed for {repo_path}: {e}");
     }
 
-    Ok((StatusCode::CREATED, Json(RepoResponse::from(repo))))
+    Ok((
+        StatusCode::CREATED,
+        Json(repo_response_with_clone_url(&state, repo).await),
+    ))
 }
 
 pub async fn sync_mirror(
@@ -443,7 +476,7 @@ pub async fn sync_mirror(
     repo.updated_at = now;
     state.repos.update(&repo).await?;
 
-    Ok(Json(RepoResponse::from(repo)))
+    Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
 #[cfg(test)]

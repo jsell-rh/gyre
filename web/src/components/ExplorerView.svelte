@@ -7,6 +7,7 @@
   import Badge from '../lib/Badge.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
   import WorkspaceCards from './WorkspaceCards.svelte';
+  import ExplorerCodeTab from './ExplorerCodeTab.svelte';
 
   const navigate = getContext('navigate');
 
@@ -29,6 +30,9 @@
   let reposLoading = $state(true);
   let selectedNode = $state(null);
   let graphError = $state(null);
+
+  // Repo-scope tab: 'architecture' | 'code'
+  let explorerTab = $state('architecture');
 
   // Concept search state
   let conceptQuery = $state('');
@@ -249,7 +253,7 @@
           </div>
         {/if}
 
-        {#if graph}
+        {#if graph && explorerTab === 'architecture'}
           <div class="graph-stats">
             <span class="stat">
               <span class="stat-val">{graph.nodes?.length ?? 0}</span>
@@ -265,8 +269,28 @@
       </div>
     </div>
 
-    <!-- Concept search bar — shown when a repo + graph is loaded -->
+    <!-- Architecture / Code tab switcher — only shown when a repo is selected -->
     {#if selectedRepoId}
+      <div class="explorer-tabs" role="tablist" aria-label="Explorer view">
+        <button
+          class="explorer-tab-btn {explorerTab === 'architecture' ? 'active' : ''}"
+          role="tab"
+          aria-selected={explorerTab === 'architecture'}
+          onclick={() => { explorerTab = 'architecture'; }}
+          type="button"
+        >Architecture</button>
+        <button
+          class="explorer-tab-btn {explorerTab === 'code' ? 'active' : ''}"
+          role="tab"
+          aria-selected={explorerTab === 'code'}
+          onclick={() => { explorerTab = 'code'; }}
+          type="button"
+        >Code</button>
+      </div>
+    {/if}
+
+    <!-- Concept search bar — shown when architecture tab is active + repo loaded -->
+    {#if selectedRepoId && explorerTab === 'architecture'}
       <div class="concept-search-bar">
         <div class="search-input-wrap">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="search-icon" aria-hidden="true">
@@ -330,6 +354,9 @@
             <button class="go-admin-btn" onclick={() => navigate?.('admin')}>Go to Admin</button>
           {/if}
         </div>
+
+      {:else if explorerTab === 'code'}
+        <ExplorerCodeTab repoId={selectedRepoId} repo={selectedRepo} />
 
       {:else if loading}
         <div class="loading-wrap">
@@ -611,6 +638,43 @@
     text-align: center;
     margin: 0;
     font-style: italic;
+  }
+
+  /* Architecture / Code tab switcher */
+  .explorer-tabs {
+    display: flex;
+    gap: 0;
+    padding: 0 var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+    flex-shrink: 0;
+  }
+
+  .explorer-tab-btn {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+    margin-bottom: -1px;
+  }
+
+  .explorer-tab-btn.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+  }
+
+  .explorer-tab-btn:not(.active):hover {
+    color: var(--color-text);
+  }
+
+  .explorer-tab-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* Concept search bar */
