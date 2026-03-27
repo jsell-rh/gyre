@@ -338,7 +338,7 @@
   .ws-status-text {
     display: flex;
     flex-direction: column;
-    gap: var(--space-0, 2px);
+    gap: 2px;
   }
 
   .ws-label {

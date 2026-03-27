@@ -92,7 +92,7 @@
   }
 
   .toast-dismiss:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 </style>

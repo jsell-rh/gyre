@@ -159,7 +159,7 @@
 
   .ws-info { flex: 1; }
   .ws-name { font-weight: 600; color: var(--color-text); font-size: var(--text-base); }
-  .ws-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: var(--space-0, 2px); }
+  .ws-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: 2px; }
 
   .chevron { color: var(--color-text-muted); flex-shrink: 0; }
 

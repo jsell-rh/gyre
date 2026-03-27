@@ -431,13 +431,13 @@
   .budget-bar-track {
     height: 5px;
     background: var(--color-surface-elevated);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     overflow: hidden;
   }
 
   .budget-bar-fill {
     height: 100%;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     transition: width 0.6s ease, background 0.3s ease;
   }
 

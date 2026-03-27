@@ -190,18 +190,18 @@
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-xs);
-    transition: color 150ms ease-out, opacity 150ms ease-out;
+    transition: color var(--transition-fast) ease-out, opacity var(--transition-fast) ease-out;
     white-space: nowrap;
     border-radius: var(--radius-sm);
   }
 
   .crumb:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
   .ws-option:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
@@ -232,7 +232,7 @@
   .repo-crumb:hover { color: var(--color-text); }
 
   .dropdown-caret {
-    transition: transform 150ms ease-out;
+    transition: transform var(--transition-fast) ease-out;
   }
   .dropdown-caret.open {
     transform: rotate(180deg);

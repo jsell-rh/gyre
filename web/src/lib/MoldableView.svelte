@@ -499,11 +499,11 @@
 
   .view-tab.active {
     color: var(--color-text);
-    border-bottom-color: var(--color-focus, #4db0ff);
+    border-bottom-color: var(--color-focus);
   }
 
   .view-tab:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -545,7 +545,7 @@
   }
 
   .filter-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -561,7 +561,7 @@
   }
 
   .sort-btn {
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     background: transparent;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -575,7 +575,7 @@
   .sort-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
 
   .sort-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -637,7 +637,7 @@
   }
 
   .list-row:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
 
@@ -661,7 +661,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-link) 8%, transparent);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -722,13 +722,13 @@
   }
 
   .now-btn:hover {
-    background: var(--color-focus, #4db0ff);
-    border-color: var(--color-focus, #4db0ff);
-    color: var(--color-text-inverse, #fff);
+    background: var(--color-focus);
+    border-color: var(--color-focus);
+    color: var(--color-text-inverse);
   }
 
   .now-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -781,7 +781,7 @@
   }
 
   .tl-node-row:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -807,7 +807,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-link) 8%, transparent);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
     flex-shrink: 0;
   }
@@ -848,7 +848,7 @@
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     color: var(--color-text);
   }
 
@@ -873,7 +873,7 @@
   }
 
   .delta-close:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -929,7 +929,7 @@
   }
 
   .delta-marker:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -938,7 +938,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--color-info, var(--color-focus, #4db0ff));
+    background: var(--color-info, var(--color-focus));
     opacity: 0.6;
     transition: all var(--transition-fast);
     margin-top: var(--space-1);
@@ -952,7 +952,7 @@
 
   .scrubber-input {
     width: 100%;
-    accent-color: var(--color-focus, #4db0ff);
+    accent-color: var(--color-focus);
     cursor: pointer;
     display: block;
   }

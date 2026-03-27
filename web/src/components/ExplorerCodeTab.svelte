@@ -287,8 +287,8 @@
     outline: none;
   }
 
-  .filter-input:focus:not(:focus-visible) { outline: none; border-color: var(--color-focus, #4db0ff); }
-  .filter-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .filter-input:focus:not(:focus-visible) { outline: none; border-color: var(--color-focus); }
+  .filter-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .filter-input::-webkit-search-cancel-button { display: none; }
 
   .table-wrap {
@@ -351,8 +351,8 @@
 
   .status-badge {
     display: inline-block;
-    padding: var(--space-0, 2px) var(--space-2);
-    border-radius: 999px;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
@@ -366,7 +366,7 @@
   .sort-btn:focus-visible,
   .subtab-btn:focus-visible,
   .filter-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -399,5 +399,5 @@
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
-  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 </style>

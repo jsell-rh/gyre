@@ -202,8 +202,8 @@
   .protocol-tag {
     font-size: var(--text-xs);
     font-weight: 600;
-    background: color-mix(in srgb, var(--color-blocked, #5e40be) 15%, transparent);
-    color: var(--color-blocked, #8b6fe0);
+    background: color-mix(in srgb, var(--color-blocked) 15%, transparent);
+    color: var(--color-blocked);
     border: 1px solid color-mix(in srgb, var(--color-blocked) 30%, transparent);
     border-radius: var(--radius-sm);
     padding: 2px var(--space-2);

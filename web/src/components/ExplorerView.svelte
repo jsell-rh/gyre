@@ -731,10 +731,10 @@
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {
-    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 30%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
     border-radius: var(--radius);
-    color: var(--color-danger, #ef4444);
+    color: var(--color-danger);
     font-size: var(--text-sm);
     padding: var(--space-3) var(--space-4);
     display: flex;
