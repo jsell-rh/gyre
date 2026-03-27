@@ -101,7 +101,7 @@
     <div class="section-card">
       <div class="section-header">
         <h3 class="section-title">Apply Compose Spec</h3>
-        <p class="section-hint">Paste a JSON agent-compose spec. YAML not supported in browser.</p>
+        <p class="section-hint" id="compose-spec-hint">Paste a JSON agent-compose spec. YAML not supported in browser.</p>
       </div>
 
       <textarea
@@ -111,6 +111,7 @@
         rows="10"
         spellcheck="false"
         aria-label="Spec content editor"
+        aria-describedby="compose-spec-hint"
       ></textarea>
 
       {#if jsonStatus === 'valid'}
@@ -129,7 +130,7 @@
       {/if}
 
       <div class="btn-row">
-        <button class="primary-btn" onclick={applyCompose} disabled={applyLoading || !yamlInput.trim()}>
+        <button class="primary-btn" onclick={applyCompose} disabled={applyLoading || !yamlInput.trim()} aria-busy={applyLoading}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <path d="M5 12h14M12 5l7 7-7 7"/>
           </svg>
@@ -138,7 +139,7 @@
       </div>
 
       {#if applyResult}
-        <div class="success-banner">
+        <div class="success-banner" role="status" aria-live="polite">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
             <path d="M20 6L9 17l-5-5"/>
           </svg>
@@ -151,21 +152,23 @@
     </div>
 
     <!-- Status section -->
-    <div class="section-card">
+    <div class="section-card" aria-busy={statusLoading}>
       <div class="section-header">
         <h3 class="section-title">Compose Status</h3>
       </div>
 
       <div class="status-controls">
+        <label for="compose-session-id" class="sr-only">Compose session ID</label>
         <input
+          id="compose-session-id"
           class="id-input"
           bind:value={composeId}
           placeholder="Compose session ID…"
         />
-        <button class="secondary-btn" onclick={loadStatus} disabled={statusLoading || !composeId.trim()}>
+        <button class="secondary-btn" onclick={loadStatus} disabled={statusLoading || !composeId.trim()} aria-busy={statusLoading}>
           {statusLoading ? 'Loading…' : 'Refresh'}
         </button>
-        <button class="danger-btn" onclick={doTeardown} disabled={teardownLoading || !composeId.trim()}>
+        <button class="danger-btn" onclick={doTeardown} disabled={teardownLoading || !composeId.trim()} aria-busy={teardownLoading}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <path d="M18 6L6 18M6 6l12 12"/>
           </svg>
@@ -552,6 +555,8 @@
   .json-hint { font-size: var(--text-xs); margin-top: var(--space-1); margin-bottom: 0; }
   .json-hint.valid { color: var(--color-success); }
   .json-hint.invalid { color: var(--color-danger); }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; }

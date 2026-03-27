@@ -235,7 +235,7 @@ a:hover {
 
 /* Global focus-visible indicator — WCAG 2.4.7 */
 :focus-visible {
-  outline: 2px solid var(--color-focus, #4db0ff);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 

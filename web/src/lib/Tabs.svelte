@@ -78,7 +78,7 @@
       {/if}
       {tab.label}
       {#if tab.count !== undefined}
-        <span class="tab-count" aria-label="{tab.count} items">{tab.count}</span>
+        <span class="tab-count" aria-hidden="true">{tab.count}</span>
       {/if}
     </button>
   {/each}
