@@ -204,7 +204,9 @@
         {#if !loading}
           <span class="briefing-since" data-testid="since-label">Since {sinceLabel}</span>
         {/if}
-        <span class="briefing-scope-hint">{scope === 'tenant' ? 'All workspaces' : scope === 'repo' ? 'Repository' : ''}{scope === 'workspace' && workspaceName ? workspaceName : ''}</span>
+        {#if scope === 'tenant' || scope === 'repo' || workspaceName}
+          <span class="briefing-scope-hint">{scope === 'tenant' ? 'All workspaces' : scope === 'repo' ? 'Repository' : workspaceName}</span>
+        {/if}
         {#if trustLevel}
           <span class="briefing-trust">Trust: {trustLevel}</span>
         {/if}

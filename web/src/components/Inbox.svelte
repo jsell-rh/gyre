@@ -670,7 +670,12 @@
   }
 
   .inbox-card.dismissed {
-    opacity: 0.45;
+    opacity: 0.6;
+  }
+
+  .inbox-card.dismissed .card-header {
+    text-decoration: line-through;
+    text-decoration-color: var(--color-text-muted);
   }
 
   .card-header {

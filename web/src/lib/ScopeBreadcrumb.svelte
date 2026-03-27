@@ -106,7 +106,7 @@
       <span class="sep" aria-hidden="true">›</span>
     {/if}
   {:else if !workspace}
-    <span class="crumb home-crumb">Gyre</span>
+    <button class="crumb home-crumb" onclick={clickTenant} aria-label="Return to tenant overview">Gyre</button>
   {/if}
 
   {#if workspace}
@@ -216,8 +216,9 @@
 
   .home-crumb {
     color: var(--color-text-muted);
-    cursor: default;
+    cursor: pointer;
   }
+  .home-crumb:hover { color: var(--color-text-secondary); }
 
   .workspace-crumb {
     color: var(--color-text-secondary);
