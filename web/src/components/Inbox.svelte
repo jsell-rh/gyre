@@ -5,6 +5,7 @@
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
+  import { toastError } from '../lib/toast.svelte.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -126,7 +127,7 @@
     try {
       await api.markNotificationRead(n.id);
     } catch {
-      // dismiss optimistically even on failure
+      toastError('Dismiss failed — change may not be saved.');
     }
     notifications = notifications.map(item =>
       item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
@@ -276,7 +277,7 @@
     {:else if visibleNotifications.length === 0}
       <EmptyState title="All caught up!" description="No pending notifications." />
     {:else}
-      <div class="inbox-list" role="list">
+      <div class="inbox-list" role="list" aria-live="polite" aria-label="Notifications">
         {#each visibleNotifications as n (n.id)}
           {@const body = getBody(n)}
           {@const isExpanded = expandedId === n.id}
