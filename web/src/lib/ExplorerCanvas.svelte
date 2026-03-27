@@ -861,7 +861,7 @@
   .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: #fbbf24; }
   .banner-action {
     margin-left: var(--space-2); background: transparent; border: 1px solid currentColor; color: inherit;
-    border-radius: var(--radius-sm); padding: 1px 6px; font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
+    border-radius: var(--radius-sm); padding: var(--space-0, 2px) var(--space-2); font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
   }
   .banner-action:hover { opacity: 1; }
   .explanation-banner {
@@ -901,12 +901,12 @@
   .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: #eab308; color: #eab308; }
 
   .layout-switcher {
-    display: flex; align-items: center; gap: 2px;
+    display: flex; align-items: center; gap: var(--space-0, 2px);
     background: var(--color-surface-elevated); border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius); padding: 2px;
+    border-radius: var(--radius); padding: var(--space-0, 2px);
   }
   .layout-btn {
-    padding: 2px var(--space-2); background: transparent; border: none;
+    padding: var(--space-0, 2px) var(--space-2); background: transparent; border: none;
     border-radius: calc(var(--radius) - 2px); color: var(--color-text-muted);
     font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer;
     transition: all var(--transition-fast); white-space: nowrap;
@@ -946,20 +946,20 @@
   .graph-node.dimmed { opacity: 0.3; }
 
   .ctx-menu {
-    position: fixed; z-index: 1000; background: var(--color-surface-elevated, #1e293b);
-    border: 1px solid var(--color-border-strong, #334155); border-radius: var(--radius, 4px);
-    box-shadow: 0 8px 24px color-mix(in srgb, black 40%, transparent); min-width: 160px; padding: 4px 0;
-    font-size: var(--text-sm, 13px); font-family: var(--font-body);
+    position: fixed; z-index: 1000; background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius);
+    box-shadow: 0 8px 24px color-mix(in srgb, black 40%, transparent); min-width: 160px; padding: var(--space-1) 0;
+    font-size: var(--text-sm); font-family: var(--font-body);
   }
   .ctx-item {
-    display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 14px;
-    background: transparent; border: none; color: var(--color-text, #f1f5f9);
-    cursor: pointer; text-align: left; font-size: var(--text-sm, 13px); font-family: var(--font-body);
-    transition: background var(--transition-fast, 0.1s);
+    display: flex; align-items: center; gap: var(--space-2); width: 100%; padding: var(--space-2) var(--space-3);
+    background: transparent; border: none; color: var(--color-text);
+    cursor: pointer; text-align: left; font-size: var(--text-sm); font-family: var(--font-body);
+    transition: background var(--transition-fast);
   }
   .ctx-item:hover:not(.disabled) { background: var(--color-surface, #0f172a); color: var(--color-link); }
   .ctx-item.disabled, .ctx-item:disabled { opacity: 0.4; cursor: default; }
-  .ctx-separator { height: 1px; background: var(--color-border, #1e293b); margin: 4px 0; }
+  .ctx-separator { height: 1px; background: var(--color-border); margin: var(--space-1) 0; }
 
   .spec-legend {
     position: absolute; bottom: var(--space-4); left: var(--space-4);
@@ -998,7 +998,7 @@
   .metric-label { font-size: var(--text-xs); color: var(--color-text-muted); }
 
   .risk-panel { width: 260px; flex-shrink: 0; background: var(--color-surface); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; overflow: hidden; }
-  .risk-panel-header { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; }
+  .risk-panel-header { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-0, 2px); }
   .risk-panel-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .risk-panel-sub { font-size: var(--text-xs); color: var(--color-text-muted); }
   .risk-empty { flex: 1; display: flex; align-items: center; justify-content: center; font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; padding: var(--space-4); text-align: center; }

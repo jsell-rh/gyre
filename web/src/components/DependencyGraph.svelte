@@ -165,7 +165,7 @@
           <div class="detail-panel">
             <div class="panel-header">
               <span class="panel-title">{selected.name ?? selected.id}</span>
-              <button class="close-btn" onclick={() => { selected = null; blastRadius = null; }} aria-label="Close">×</button>
+              <button class="close-btn" onclick={() => { selected = null; blastRadius = null; }} aria-label="Close"><span aria-hidden="true">×</span></button>
             </div>
             {#if blastLoading}
               <Skeleton lines={3} />

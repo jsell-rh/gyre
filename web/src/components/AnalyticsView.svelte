@@ -192,11 +192,11 @@
   th { text-align: left; padding: var(--space-1) var(--space-2); color: var(--color-text-muted); font-size: var(--text-xs); border-bottom: 1px solid var(--color-border); }
   td { padding: var(--space-1) var(--space-2); font-size: var(--text-sm); }
 
-  .event-name { font-family: monospace; color: var(--color-primary); }
+  .event-name { font-family: var(--font-mono); color: var(--color-primary); }
   .count { text-align: right; color: var(--color-text-muted); width: 50px; }
 
   .bar-cell { width: 120px; padding-left: var(--space-2); }
-  .bar { height: 10px; background: var(--color-primary); border-radius: 2px; min-width: 2px; transition: width 0.3s; }
+  .bar { height: 10px; background: var(--color-primary); border-radius: var(--radius-sm); min-width: 2px; transition: width 0.3s; }
 
   .event-list { display: flex; flex-direction: column; gap: var(--space-1); }
 
@@ -211,7 +211,7 @@
     flex-wrap: wrap;
   }
 
-  .ev-name { font-family: monospace; font-size: var(--text-xs); color: var(--color-primary); }
+  .ev-name { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-primary); }
   .ev-agent { font-size: var(--text-xs); color: var(--color-text-muted); }
   .ev-time { font-size: var(--text-xs); color: var(--color-text-secondary); }
   .ev-detail { font-size: var(--text-xs); padding: var(--space-0, 2px) var(--space-1); }
@@ -228,7 +228,7 @@
   }
 
   .empty { color: var(--color-text-secondary); font-size: var(--text-sm); }
-  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: 6px; padding: var(--space-3); display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: var(--radius); padding: var(--space-3); display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
   .error p { margin: 0; }
   .retry-btn {
     background: color-mix(in srgb, var(--color-primary) 15%, transparent);

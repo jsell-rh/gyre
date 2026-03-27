@@ -266,7 +266,7 @@
   .subtitle { margin: 0; font-size: var(--text-sm); color: var(--color-text-secondary); }
 
   .legend { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
-  .legend-item { display: flex; align-items: center; gap: 4px; font-size: var(--text-xs); color: var(--color-text-muted); white-space: nowrap; }
+  .legend-item { display: flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs); color: var(--color-text-muted); white-space: nowrap; }
 
   .graph-area { flex: 1; overflow: hidden; }
   .loading-box { padding: var(--space-6); }

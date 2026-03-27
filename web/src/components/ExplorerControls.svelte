@@ -461,7 +461,7 @@
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
-    padding: 2px;
+    padding: var(--space-0, 2px);
   }
 
   .tab-btn {
@@ -548,7 +548,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 4px var(--space-3);
+    padding: var(--space-1) var(--space-3);
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
@@ -570,7 +570,7 @@
   }
 
   .icon-btn {
-    padding: 4px var(--space-2);
+    padding: var(--space-1) var(--space-2);
   }
 
   /* Search */
@@ -651,7 +651,7 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     outline: none;
-    padding: 4px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     width: 200px;
   }
 
@@ -664,7 +664,7 @@
     border-radius: 0;
     background: var(--color-surface-elevated);
     font-size: var(--text-xs);
-    padding: 4px var(--space-3);
+    padding: var(--space-1) var(--space-3);
   }
 
   /* Save view button */
