@@ -645,6 +645,7 @@
   .muted { color: var(--color-text-secondary); font-size: var(--text-xs); }
 
   :global(tr.row-selected td) { background: color-mix(in srgb, var(--color-focus) 4%, transparent); }
+  :global(tr[tabindex]:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
   .detail-panel {
     background: var(--color-surface);
