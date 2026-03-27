@@ -192,14 +192,14 @@
     font-family: var(--font-body);
     font-size: var(--text-xs);
     font-weight: 700;
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     cursor: default;
     position: relative;
     transition: transform var(--transition-fast);
   }
 
   .avatar-wrap:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
     border-radius: 50%;
   }
@@ -224,7 +224,7 @@
     justify-content: center;
     font-size: var(--text-xs);
     font-weight: 700;
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     line-height: 1;
   }
 
@@ -242,10 +242,10 @@
     white-space: nowrap;
     display: flex;
     flex-direction: column;
-    gap: var(--space-0, 2px);
+    gap: 2px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 150ms;
+    transition: opacity var(--transition-fast);
   }
 
   .avatar-tooltip.visible {

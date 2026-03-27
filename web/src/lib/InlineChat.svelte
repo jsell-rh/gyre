@@ -295,7 +295,7 @@
   }
 
   .streaming .msg-content {
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   /* Blinking cursor for streaming */
@@ -303,8 +303,8 @@
     display: inline-block;
     width: 2px;
     height: 1em;
-    background: var(--color-focus, #4db0ff);
-    margin-left: var(--space-0, 2px);
+    background: var(--color-focus);
+    margin-left: 2px;
     vertical-align: text-bottom;
     animation: blink 1s step-end infinite;
   }
@@ -378,13 +378,13 @@
   }
 
   .chat-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -1px;
   }
 
   .send-btn:focus-visible,
   .clear-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -403,7 +403,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     cursor: pointer;
     flex-shrink: 0;
     transition: background var(--transition-fast);

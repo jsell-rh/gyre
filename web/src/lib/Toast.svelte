@@ -80,7 +80,7 @@
     border: none;
     color: var(--color-text-muted);
     cursor: pointer;
-    padding: var(--space-0, 2px);
+    padding: 2px;
     border-radius: var(--radius-sm);
     display: flex;
     align-items: center;
