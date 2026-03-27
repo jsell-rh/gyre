@@ -136,8 +136,11 @@
   }
 
   function relativeTime(ts) {
+    if (!ts) return '';
+    const msTs = typeof ts === 'string' ? new Date(ts).getTime() : (ts < 1e12 ? ts * 1000 : ts);
     const now = Date.now();
-    const diff = Math.floor((now - ts * 1000) / 1000);
+    const diff = Math.floor((now - msTs) / 1000);
+    if (diff < 0) return 'just now';
     if (diff < 60) return `${diff}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;

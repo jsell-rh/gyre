@@ -67,8 +67,13 @@
     { id: 'policies', label: 'Policies' },
   ];
 
+  let lastLoadedId = $state(null);
   $effect(() => {
-    if (workspace?.id) loadAll();
+    const id = workspace?.id;
+    if (id && id !== lastLoadedId) {
+      lastLoadedId = id;
+      loadAll();
+    }
   });
 
   async function loadAll() {
