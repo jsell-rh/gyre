@@ -851,7 +851,7 @@
   .form input:focus-visible,
   .form select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
-  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 2px; }
+  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-1); }
 
   .form-error { color: var(--color-danger); font-size: var(--text-xs); margin: 0; }
 
@@ -900,7 +900,7 @@
     border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
     cursor: pointer;
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     display: flex;
     align-items: center;
     flex-shrink: 0;
