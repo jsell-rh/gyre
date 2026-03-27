@@ -36,6 +36,7 @@
   let wsBudget = $state(null);
   let wsMembers = $state([]);
   let wsPolicies = $state([]);
+  let wsRepos = $state([]);
   let wsTrustLevel = $state('Autonomous');
   let wsTab = $state('settings');
   const WS_TABS = [
@@ -44,6 +45,7 @@
     { id: 'trust',    label: 'Trust Level' },
     { id: 'teams',    label: 'Teams' },
     { id: 'policies', label: 'Policies' },
+    { id: 'repos',    label: 'Repos' },
   ];
 
   // Workspace settings form
@@ -51,15 +53,36 @@
   let wsSettingsSaving = $state(false);
   let wsDeleteConfirm = $state(false);
 
+  // ---- NEW REPO MODALS (workspace scope) ----
+  let newRepoModal = $state(false);
+  let newRepoForm = $state({ name: '', description: '', default_branch: 'main', initialize: true });
+  let newRepoLoading = $state(false);
+  let importRepoModal = $state(false);
+  let importRepoForm = $state({ clone_url: '', name: '', auth: 'none', sync_interval: 3600, default_branch: 'main' });
+  let importRepoLoading = $state(false);
+  let newRepoModalEl = $state(null);
+  let importRepoModalEl = $state(null);
+
   // ---- REPO STATE ----
+  let repoData = $state(null);
   let repoGates = $state([]);
   let repoPolicies = $state([]);
   let repoTab = $state('settings');
   const REPO_TABS = [
-    { id: 'settings', label: 'Settings' },
-    { id: 'gates',    label: 'Gates' },
-    { id: 'policies', label: 'Policies' },
+    { id: 'settings',    label: 'Settings' },
+    { id: 'gates',       label: 'Gates' },
+    { id: 'policies',    label: 'Policies' },
+    { id: 'danger-zone', label: 'Danger Zone' },
   ];
+
+  // Repo settings form
+  let repoSettingsForm = $state({ name: '', description: '', default_branch: 'main', max_concurrent_agents: 3 });
+  let repoSettingsSaving = $state(false);
+
+  // Repo danger zone
+  let repoArchiving = $state(false);
+  let repoDeleteConfirm = $state('');
+  let repoDeleting = $state(false);
 
   // ---- SHARED ----
   let loading = $state(true);
@@ -175,6 +198,18 @@
     }
   });
 
+  $effect(() => {
+    if (newRepoModal) {
+      tick().then(() => newRepoModalEl?.focus());
+    }
+  });
+
+  $effect(() => {
+    if (importRepoModal) {
+      tick().then(() => importRepoModalEl?.focus());
+    }
+  });
+
   // ---- COMPUTE MODAL (tenant) ----
   let computeModal = $state(false);
   let computeForm = $state({ name: '', target_type: 'local', host: '' });
@@ -208,16 +243,18 @@
     if (!workspaceId) return;
     loading = true; error = null;
     try {
-      const [ws, budget, members, policies] = await Promise.all([
+      const [ws, budget, members, policies, repos] = await Promise.all([
         api.workspace(workspaceId),
         api.workspaceBudget(workspaceId).catch(() => null),
         api.workspaceMembers(workspaceId).catch(() => []),
         api.workspaceAbacPolicies(workspaceId).catch(() => []),
+        api.repos({ workspaceId }).catch(() => []),
       ]);
       workspace   = ws;
       wsBudget    = budget;
       wsMembers   = Array.isArray(members) ? members : (members?.members ?? []);
       wsPolicies  = Array.isArray(policies) ? policies : (policies?.policies ?? []);
+      wsRepos     = Array.isArray(repos) ? repos : (repos?.repos ?? []);
       wsTrustLevel = ws?.trust_level ?? 'Autonomous';
       wsSettingsForm = { name: ws?.name ?? '', description: ws?.description ?? '' };
     } catch (e) { error = e.message; }
@@ -228,12 +265,22 @@
     if (!repoId) return;
     loading = true; error = null;
     try {
-      const [gates, policies] = await Promise.all([
+      const [gates, policies, repo] = await Promise.all([
         api.repoGates(repoId).catch(() => []),
         api.repoAbacPolicy(repoId).catch(() => []),
+        api.allRepos().then(list => (Array.isArray(list) ? list : []).find(r => r.id === repoId) ?? null).catch(() => null),
       ]);
       repoGates    = Array.isArray(gates) ? gates : (gates?.gates ?? []);
       repoPolicies = Array.isArray(policies) ? policies : [];
+      repoData     = repo;
+      if (repo) {
+        repoSettingsForm = {
+          name: repo.name ?? '',
+          description: repo.description ?? '',
+          default_branch: repo.default_branch ?? 'main',
+          max_concurrent_agents: repo.max_concurrent_agents ?? 3,
+        };
+      }
     } catch (e) { error = e.message; }
     finally { loading = false; }
   }
@@ -413,6 +460,93 @@
       if (newWs.id) navigate('workspace-detail', { workspace: newWs });
     } catch (e) { toastError(e.message); }
     finally { wsFormLoading = false; }
+  }
+
+  // ---- WORKSPACE REPO CRUD ----
+  async function createNewRepo() {
+    newRepoLoading = true;
+    try {
+      const body = {
+        name: newRepoForm.name,
+        workspace_id: workspaceId,
+      };
+      if (newRepoForm.description) body.description = newRepoForm.description;
+      if (newRepoForm.default_branch) body.default_branch = newRepoForm.default_branch;
+      body.initialize = newRepoForm.initialize;
+      const newRepo = await api.createRepo(body);
+      wsRepos = [...wsRepos, newRepo];
+      toastSuccess(`Repo "${newRepo.name ?? newRepoForm.name}" created.`);
+      newRepoModal = false;
+      newRepoForm = { name: '', description: '', default_branch: 'main', initialize: true };
+      if (newRepo.id) navigate('repo-detail', { repo: newRepo });
+    } catch (e) { toastError(e.message); }
+    finally { newRepoLoading = false; }
+  }
+
+  async function importRepo() {
+    importRepoLoading = true;
+    try {
+      const body = {
+        clone_url: importRepoForm.clone_url,
+        workspace_id: workspaceId,
+      };
+      if (importRepoForm.name) body.name = importRepoForm.name;
+      if (importRepoForm.default_branch) body.default_branch = importRepoForm.default_branch;
+      if (importRepoForm.sync_interval) body.sync_interval = Number(importRepoForm.sync_interval);
+      if (importRepoForm.auth && importRepoForm.auth !== 'none') body.auth_type = importRepoForm.auth;
+      const newRepo = await api.createMirrorRepo(body);
+      wsRepos = [...wsRepos, newRepo];
+      toastSuccess(`Mirror repo "${newRepo.name ?? importRepoForm.name}" created.`);
+      importRepoModal = false;
+      importRepoForm = { clone_url: '', name: '', auth: 'none', sync_interval: 3600, default_branch: 'main' };
+    } catch (e) { toastError(e.message); }
+    finally { importRepoLoading = false; }
+  }
+
+  // ---- REPO SETTINGS ----
+  async function saveRepoSettings() {
+    repoSettingsSaving = true;
+    try {
+      const updated = await api.updateRepo(repoId, {
+        name: repoSettingsForm.name,
+        description: repoSettingsForm.description,
+        default_branch: repoSettingsForm.default_branch,
+        max_concurrent_agents: Number(repoSettingsForm.max_concurrent_agents),
+      });
+      repoData = updated;
+      toastSuccess('Repo settings saved.');
+    } catch (e) { toastError(e.message); }
+    finally { repoSettingsSaving = false; }
+  }
+
+  async function doArchiveRepo() {
+    repoArchiving = true;
+    try {
+      await api.archiveRepo(repoId);
+      repoData = { ...repoData, status: 'Archived' };
+      toastSuccess('Repo archived.');
+    } catch (e) { toastError(e.message); }
+    finally { repoArchiving = false; }
+  }
+
+  async function doUnarchiveRepo() {
+    repoArchiving = true;
+    try {
+      await api.unarchiveRepo(repoId);
+      repoData = { ...repoData, status: 'Active' };
+      toastSuccess('Repo unarchived.');
+    } catch (e) { toastError(e.message); }
+    finally { repoArchiving = false; }
+  }
+
+  async function doDeleteRepo() {
+    repoDeleting = true;
+    try {
+      await api.deleteRepo(repoId);
+      toastSuccess('Repo deleted.');
+      navigate('workspace-detail', {});
+    } catch (e) { toastError(e.message); }
+    finally { repoDeleting = false; }
   }
 
   // ---- REPO GATES ----
@@ -768,6 +902,16 @@
                 — policies configured manually in the Policies tab.
               {/if}
             </div>
+
+            {#if wsTrustLevel !== 'Custom'}
+              <div class="trust-preset-note">
+                <span class="trust-preset-label">Preset policies for <strong>{wsTrustLevel}</strong>:</span>
+                {#each policyGroups.trust as p}
+                  <span class="trust-preset-item mono">{p.name}</span>
+                {/each}
+                <button class="link-btn" onclick={() => wsTab = 'policies'}>View all policies →</button>
+              </div>
+            {/if}
           </div>
         {/if}
 
@@ -811,6 +955,12 @@
         {/if}
 
       {:else if wsTab === 'policies'}
+        {#if wsTrustLevel !== 'Custom'}
+          <div class="trust-policy-banner" role="note">
+            Trust level: <strong>{wsTrustLevel}</strong> — policies are preset-managed. Switch to Custom to edit.
+            <button class="link-btn" onclick={() => wsTab = 'trust'}>Go to Trust Level →</button>
+          </div>
+        {/if}
         <div class="section-actions">
           <p class="section-desc">
             ABAC policies for this workspace.
@@ -939,6 +1089,56 @@
             </div>
           {/if}
         {/if}
+
+      {:else if wsTab === 'repos'}
+        <div class="section-actions">
+          <p class="section-desc">Repositories in this workspace.</p>
+          <button class="primary-btn" onclick={() => { newRepoForm = { name: '', description: '', default_branch: 'main', initialize: true }; newRepoModal = true; }}>
+            + New Repo
+          </button>
+          <button class="secondary-btn" onclick={() => { importRepoForm = { clone_url: '', name: '', auth: 'none', sync_interval: 3600, default_branch: 'main' }; importRepoModal = true; }}>
+            Import Repo
+          </button>
+        </div>
+        {#if loading}
+          <Skeleton height="200px" />
+        {:else if wsRepos.length === 0}
+          <EmptyState title="No repositories" description="Create a repository or import one from a remote URL." />
+        {:else}
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Status</th>
+                <th scope="col">Default Branch</th>
+                <th scope="col">Last Activity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each wsRepos as repo}
+                {@const isArchived = (repo.status ?? '').toLowerCase() === 'archived'}
+                <tr
+                  tabindex="0"
+                  class="ws-row {isArchived ? 'archived-row' : ''}"
+                  onclick={() => navigate('repo-detail', { repo })}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('repo-detail', { repo }); } }}
+                  aria-label="Open repo {repo.name}"
+                >
+                  <td class="agent-name">{repo.name}</td>
+                  <td>
+                    {#if isArchived}
+                      <Badge value="Archived" />
+                    {:else}
+                      <Badge value={repo.status ?? 'Active'} />
+                    {/if}
+                  </td>
+                  <td class="mono dim">{repo.default_branch ?? 'main'}</td>
+                  <td class="dim">{relativeTime(repo.updated_at ?? repo.created_at)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
       {/if}
 
     <!-- ==================== REPO SCOPE ==================== -->
@@ -948,7 +1148,30 @@
         {#if loading}
           <Skeleton height="150px" />
         {:else}
-          <EmptyState title="Repo settings" description="Edit repo name and description — coming soon." />
+          <div class="form-section" aria-busy={repoSettingsSaving}>
+            <h3 class="section-title">General</h3>
+            <div class="form-field">
+              <label class="form-label" for="repo-name">Name</label>
+              <input id="repo-name" class="filter-input full-width" bind:value={repoSettingsForm.name} aria-required="true" pattern="[a-zA-Z0-9._-]+" />
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="repo-desc">Description</label>
+              <textarea id="repo-desc" class="filter-input full-width textarea" bind:value={repoSettingsForm.description} rows="3"></textarea>
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="repo-branch">Default Branch</label>
+              <input id="repo-branch" class="filter-input" style="width: 200px;" bind:value={repoSettingsForm.default_branch} />
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="repo-agents">Max Concurrent Agents</label>
+              <input id="repo-agents" type="number" class="filter-input" style="width: 100px;" bind:value={repoSettingsForm.max_concurrent_agents} min="1" max="50" />
+            </div>
+            <div class="form-actions">
+              <button class="primary-btn" onclick={saveRepoSettings} disabled={repoSettingsSaving || !repoSettingsForm?.name?.trim()}>
+                {repoSettingsSaving ? 'Saving…' : 'Save Settings'}
+              </button>
+            </div>
+          </div>
         {/if}
 
       {:else if repoTab === 'gates'}
@@ -1000,6 +1223,62 @@
                 <span class="policy-detail dim">{(policy.actions ?? []).join(', ')} on {(policy.resource_types ?? []).join(', ')}</span>
               </div>
             {/each}
+          </div>
+        {/if}
+
+      {:else if repoTab === 'danger-zone'}
+        {#if loading}
+          <Skeleton height="200px" />
+        {:else}
+          {@const isArchived = (repoData?.status ?? '').toLowerCase() === 'archived'}
+          <div class="danger-zone">
+            <h3 class="danger-title">Danger Zone</h3>
+
+            <div class="danger-row">
+              <div>
+                <strong class="danger-item-title">{isArchived ? 'Unarchive Repository' : 'Archive Repository'}</strong>
+                <p class="danger-desc">
+                  {isArchived
+                    ? 'Restore this repository to active status.'
+                    : 'Mark this repository as archived. Agents will no longer be able to open new MRs. Existing data is preserved.'}
+                </p>
+              </div>
+              {#if isArchived}
+                <button class="secondary-btn" onclick={doUnarchiveRepo} disabled={repoArchiving}>
+                  {repoArchiving ? 'Unarchiving…' : 'Unarchive'}
+                </button>
+              {:else}
+                <button class="kill-btn" onclick={doArchiveRepo} disabled={repoArchiving}>
+                  {repoArchiving ? 'Archiving…' : 'Archive'}
+                </button>
+              {/if}
+            </div>
+
+            <div class="danger-row">
+              <div>
+                <strong class="danger-item-title">Delete Repository</strong>
+                <p class="danger-desc">
+                  Permanently delete this repository and all associated data. The repo must be archived first.
+                  Type the repo name to confirm.
+                </p>
+                <input
+                  class="filter-input"
+                  style="width: 240px; margin-top: var(--space-2);"
+                  placeholder="Type repo name to confirm"
+                  bind:value={repoDeleteConfirm}
+                  disabled={!isArchived}
+                  aria-label="Confirm repo name for deletion"
+                />
+              </div>
+              <button
+                class="kill-btn"
+                onclick={doDeleteRepo}
+                disabled={repoDeleting || !isArchived || repoDeleteConfirm !== (repoData?.name ?? '')}
+                aria-label="Permanently delete repository"
+              >
+                {repoDeleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
           </div>
         {/if}
       {/if}
@@ -1298,6 +1577,102 @@
       <button class="secondary-btn" onclick={() => computeModal = false}>Cancel</button>
       <button class="primary-btn" onclick={saveCompute} disabled={computeLoading || !computeForm.name}>
         {computeLoading ? 'Creating…' : 'Create'}
+      </button>
+    </div>
+  </div>
+{/if}
+
+<!-- NEW REPO MODAL -->
+{#if newRepoModal}
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => newRepoModal = false}></div>
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" aria-label="New Repository"
+    bind:this={newRepoModalEl}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { newRepoModal = false; return; }
+      if (e.key === 'Tab') {
+        const focusable = newRepoModalEl?.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable ?? []);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus(); } }
+        else { if (document.activeElement === last) { e.preventDefault(); first.focus(); } }
+      }
+    }}>
+    <h3 class="modal-title">New Repository</h3>
+    <div class="form-field">
+      <label class="form-label" for="nr-name">Name <span class="form-hint">([a-zA-Z0-9._-])</span></label>
+      <input id="nr-name" class="filter-input full-width" bind:value={newRepoForm.name}
+        placeholder="e.g. my-service" pattern="[a-zA-Z0-9._-]+" required />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="nr-desc">Description</label>
+      <input id="nr-desc" class="filter-input full-width" bind:value={newRepoForm.description} placeholder="Optional" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="nr-branch">Default Branch</label>
+      <input id="nr-branch" class="filter-input" style="width: 180px;" bind:value={newRepoForm.default_branch} placeholder="main" />
+    </div>
+    <div class="form-field">
+      <label class="toggle-check">
+        <input type="checkbox" bind:checked={newRepoForm.initialize} />
+        <span>Initialize with README</span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="secondary-btn" onclick={() => newRepoModal = false}>Cancel</button>
+      <button class="primary-btn" onclick={createNewRepo} disabled={newRepoLoading || !newRepoForm.name.trim()}>
+        {newRepoLoading ? 'Creating…' : 'Create Repository'}
+      </button>
+    </div>
+  </div>
+{/if}
+
+<!-- IMPORT REPO MODAL -->
+{#if importRepoModal}
+  <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={() => importRepoModal = false}></div>
+  <div class="modal modal-lg" role="dialog" aria-modal="true" tabindex="-1" aria-label="Import Repository"
+    bind:this={importRepoModalEl}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') { importRepoModal = false; return; }
+      if (e.key === 'Tab') {
+        const focusable = importRepoModalEl?.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable ?? []);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last.focus(); } }
+        else { if (document.activeElement === last) { e.preventDefault(); first.focus(); } }
+      }
+    }}>
+    <h3 class="modal-title">Import Repository</h3>
+    <div class="form-field">
+      <label class="form-label" for="ir-url">Clone URL</label>
+      <input id="ir-url" class="filter-input full-width" bind:value={importRepoForm.clone_url}
+        placeholder="https://github.com/org/repo.git" required />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="ir-name">Name <span class="form-hint">(optional — inferred from URL)</span></label>
+      <input id="ir-name" class="filter-input full-width" bind:value={importRepoForm.name} placeholder="Leave blank to infer" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="ir-auth">Authentication</label>
+      <select id="ir-auth" class="target-select" bind:value={importRepoForm.auth}>
+        <option value="none">None (public repo)</option>
+        <option value="pat">PAT (Personal Access Token)</option>
+        <option value="ssh">SSH Key</option>
+      </select>
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="ir-branch">Default Branch</label>
+      <input id="ir-branch" class="filter-input" style="width: 180px;" bind:value={importRepoForm.default_branch} placeholder="main" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="ir-sync">Sync Interval (seconds)</label>
+      <input id="ir-sync" type="number" class="filter-input" style="width: 120px;" bind:value={importRepoForm.sync_interval} min="60" />
+    </div>
+    <div class="modal-actions">
+      <button class="secondary-btn" onclick={() => importRepoModal = false}>Cancel</button>
+      <button class="primary-btn" onclick={importRepo} disabled={importRepoLoading || !importRepoForm.clone_url.trim()}>
+        {importRepoLoading ? 'Importing…' : 'Import Repository'}
       </button>
     </div>
   </div>
@@ -1790,6 +2165,84 @@
   }
   .target-select.narrow { width: auto; min-width: 120px; }
   .target-select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* Trust ↔ Policies cross-links */
+  .trust-preset-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+  .trust-preset-label { font-weight: 500; color: var(--color-text-secondary); }
+  .trust-preset-label strong { color: var(--color-text); }
+  .trust-preset-item {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    color: var(--color-text-secondary);
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--color-link);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    padding: 0;
+    text-decoration: underline;
+    margin-left: auto;
+  }
+  .link-btn:hover { color: var(--color-link-hover); }
+  .link-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: 2px; }
+
+  .trust-policy-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    background: color-mix(in srgb, var(--color-info) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 25%, transparent);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+  .trust-policy-banner strong { color: var(--color-text); }
+
+  /* Repo list (workspace scope) */
+  .archived-row { opacity: 0.6; }
+
+  /* Danger zone row */
+  .danger-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-6);
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-danger) 15%, transparent);
+  }
+  .danger-row:last-child { border-bottom: none; }
+  .danger-item-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-danger); display: block; margin-bottom: var(--space-1); }
+
+  /* Form helpers */
+  .form-hint { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 400; }
+  .toggle-check {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    cursor: pointer;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .budget-bar-fill,

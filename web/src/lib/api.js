@@ -185,6 +185,14 @@ export const api = {
   // CRUD create methods
   createRepo: (data) =>
     request('/repos', { method: 'POST', body: JSON.stringify(data) }),
+  updateRepo: (id, data) =>
+    request(`/repos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  archiveRepo: (id) =>
+    request(`/repos/${id}/archive`, { method: 'POST' }),
+  unarchiveRepo: (id) =>
+    request(`/repos/${id}/unarchive`, { method: 'POST' }),
+  deleteRepo: (id) =>
+    request(`/repos/${id}`, { method: 'DELETE' }),
   createMirrorRepo: (data) =>
     request('/repos/mirror', { method: 'POST', body: JSON.stringify(data) }),
   syncMirror: (id) =>
