@@ -269,7 +269,7 @@
     >
         <h3>Spawn Agent</h3>
         {#if spawnResult}
-          <div class="spawn-success">
+          <div class="spawn-success" role="status" aria-live="polite">
             <p class="success-msg">Agent spawned successfully.</p>
             <dl>
               <dt>Agent ID</dt><dd>{spawnResult.agent.id}</dd>
@@ -334,7 +334,7 @@
   <div class="content">
     {#if loading}
       {#if viewMode === 'grid'}
-        <div class="agent-grid">
+        <div class="agent-grid" aria-busy="true" aria-label="Loading agents">
           {#each Array(6) as _}
             <div class="agent-card skeleton-card">
               <div class="card-top">
@@ -360,7 +360,7 @@
     {:else if viewMode === 'grid'}
       <div class="agent-grid">
         {#each filtered as a}
-          <button class="agent-card" class:selected={selected?.id === a.id} onclick={() => selectAgent(a)}>
+          <button class="agent-card" class:selected={selected?.id === a.id} onclick={() => selectAgent(a)} aria-pressed={selected?.id === a.id}>
             <div class="card-top">
               <span class="agent-name" title={a.name}>{a.name}</span>
               <Badge value={a.status} />
@@ -404,10 +404,20 @@
           <h3>Agent: {selected.name}</h3>
           <button class="close-btn" aria-label="Close agent detail" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
         </div>
-        <div class="detail-tabs" role="tablist" aria-label="Agent details tabs">
-          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')} role="tab" aria-selected={detailTab === 'info'} id="dtab-info" aria-controls="dtabpanel-info">Info</button>
-          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')} role="tab" aria-selected={detailTab === 'logs'} id="dtab-logs" aria-controls="dtabpanel-logs">Logs</button>
-          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')} role="tab" aria-selected={detailTab === 'terminal'} id="dtab-terminal" aria-controls="dtabpanel-terminal">Terminal</button>
+        <div
+          class="detail-tabs"
+          role="tablist"
+          aria-label="Agent details tabs"
+          onkeydown={(e) => {
+            const tabs = ['info', 'logs', 'terminal'];
+            const idx = tabs.indexOf(detailTab);
+            if (e.key === 'ArrowRight') { e.preventDefault(); switchDetailTab(tabs[(idx + 1) % tabs.length]); document.getElementById(`dtab-${tabs[(idx + 1) % tabs.length]}`)?.focus(); }
+            if (e.key === 'ArrowLeft')  { e.preventDefault(); switchDetailTab(tabs[(idx - 1 + tabs.length) % tabs.length]); document.getElementById(`dtab-${tabs[(idx - 1 + tabs.length) % tabs.length]}`)?.focus(); }
+          }}
+        >
+          <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')} role="tab" aria-selected={detailTab === 'info'} id="dtab-info" aria-controls="dtabpanel-info" tabindex={detailTab === 'info' ? 0 : -1}>Info</button>
+          <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')} role="tab" aria-selected={detailTab === 'logs'} id="dtab-logs" aria-controls="dtabpanel-logs" tabindex={detailTab === 'logs' ? 0 : -1}>Logs</button>
+          <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')} role="tab" aria-selected={detailTab === 'terminal'} id="dtab-terminal" aria-controls="dtabpanel-terminal" tabindex={detailTab === 'terminal' ? 0 : -1}>Terminal</button>
         </div>
         {#if detailTab === 'info'}
           <div class="detail-body" role="tabpanel" id="dtabpanel-info" aria-labelledby="dtab-info">

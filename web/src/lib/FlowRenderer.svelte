@@ -162,7 +162,7 @@
       />
     </label>
 
-    <span class="time-label" aria-live="polite">
+    <span class="time-label" aria-live={playing ? 'off' : 'polite'}>
       {(currentTime / 1000).toFixed(1)}ms
     </span>
 
@@ -346,5 +346,10 @@
   .scrubber-input:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ctrl-btn,
+    .speed-btn { transition: none; }
   }
 </style>

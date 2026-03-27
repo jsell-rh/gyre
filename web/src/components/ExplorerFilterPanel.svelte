@@ -55,7 +55,6 @@
             type="checkbox"
             checked={activeCategories.has(cat.id)}
             onchange={() => toggleCategory(cat.id)}
-            aria-label={cat.label}
           />
           {cat.label}
         </label>

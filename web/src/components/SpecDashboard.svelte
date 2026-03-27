@@ -357,7 +357,11 @@
               class:selected={selectedPath === spec.path}
               onclick={() => handleRowClick(spec)}
               tabindex="0"
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
+                if (e.key === 'ArrowDown') { e.preventDefault(); const next = e.currentTarget.nextElementSibling; if (next) next.focus(); }
+                if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
+              }}
               aria-selected={selectedPath === spec.path}
               aria-label="Spec: {spec.path}"
             >
@@ -406,7 +410,6 @@
         id="new-spec-content"
         class="spec-editor"
         bind:value={newSpecContent}
-        aria-label="New spec content"
         spellcheck="false"
       ></textarea>
     </div>
@@ -422,6 +425,7 @@
       variant="primary"
       onclick={saveNewSpec}
       disabled={newSpecSaving || !newSpecPath.trim()}
+      aria-busy={newSpecSaving}
     >
       {newSpecSaving ? 'Saving…' : 'Save & Create MR'}
     </Button>
@@ -562,7 +566,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    transition: color var(--transition-fast);
     transition: color var(--transition-fast);
   }
 
@@ -873,6 +876,7 @@
     font-weight: 500;
     padding: var(--space-1) var(--space-3);
     white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 
   .retry-btn:hover {
@@ -893,7 +897,8 @@
     .progress-fill,
     .spec-editor,
     .field-input,
-    .clear-filters-btn {
+    .clear-filters-btn,
+    .retry-btn {
       transition: none;
       animation: none;
     }

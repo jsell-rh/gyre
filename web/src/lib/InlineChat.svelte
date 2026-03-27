@@ -185,7 +185,7 @@
 
   <div class="chat-input-area" aria-busy={streaming}>
     {#if recipientLabel}
-      <div class="recipient-line" aria-label="Sending to: {recipient}">
+      <div class="recipient-line" id="inline-chat-recipient" aria-label="Sending to: {recipient}">
         {recipientLabel}
       </div>
     {/if}
@@ -199,6 +199,7 @@
         rows="1"
         disabled={streaming}
         aria-label="Message input"
+        aria-describedby={recipientLabel ? 'inline-chat-recipient' : undefined}
         onkeydown={onkeydown}
       ></textarea>
 
@@ -448,6 +449,8 @@
   @media (prefers-reduced-motion: reduce) {
     .cursor { animation: none; }
     .spin { animation: none; }
-    .chat-input { transition: none; }
+    .chat-input,
+    .clear-btn,
+    .send-btn { transition: none; }
   }
 </style>
