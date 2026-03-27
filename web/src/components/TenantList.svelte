@@ -106,7 +106,7 @@
   {/if}
 </div>
 
-<Modal bind:open={createOpen} title="New Tenant">
+<Modal bind:open={createOpen} title="New Tenant" onsubmit={create}>
   <div class="form-group">
     <label for="tenant-name">Name</label>
     <input id="tenant-name" class="input" bind:value={form.name} placeholder="Acme Corp" />
