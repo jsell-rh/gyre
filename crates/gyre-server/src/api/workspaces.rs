@@ -40,6 +40,8 @@ pub struct UpdateWorkspaceRequest {
     pub max_agents_per_repo: Option<u32>,
     pub trust_level: Option<String>,
     pub llm_model: Option<String>,
+    /// Set to a compute target ID to bind agent spawning, or null to clear.
+    pub compute_target_id: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +64,7 @@ pub struct WorkspaceResponse {
     pub trust_level: String,
     pub llm_model: Option<String>,
     pub created_at: u64,
+    pub compute_target_id: Option<String>,
 }
 
 impl From<Workspace> for WorkspaceResponse {
@@ -78,6 +81,7 @@ impl From<Workspace> for WorkspaceResponse {
             trust_level: ws.trust_level.to_string(),
             llm_model: ws.llm_model,
             created_at: ws.created_at,
+            compute_target_id: ws.compute_target_id.map(|id| id.to_string()),
         }
     }
 }
@@ -220,6 +224,13 @@ pub async fn update_workspace(
     };
     if let Some(model) = req.llm_model {
         ws.llm_model = Some(model);
+    }
+    if let Some(ct_id_value) = req.compute_target_id {
+        ws.compute_target_id = match ct_id_value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(Id::new(s)),
+            _ => ws.compute_target_id,
+        };
     }
     state.workspaces.update(&ws).await?;
 

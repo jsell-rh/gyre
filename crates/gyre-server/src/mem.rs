@@ -14,11 +14,12 @@ use gyre_domain::{
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
-    NetworkPeerRepository, PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, CostRepository,
+    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
+    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
+    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2826,6 +2827,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         // NoopGitOps does not create files; commits_since() on a missing path returns 0.
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
         prompt_templates: Arc::new(MemPromptRepository::default()),
+        compute_targets: Arc::new(MemComputeTargetRepository::default()),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
     })
 }
@@ -2985,5 +2987,82 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
             !(t.workspace_id.as_ref() == Some(workspace_id) && t.function_key == function_key)
         });
         Ok(())
+    }
+}
+
+// ── In-memory ComputeTargetRepository ────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemComputeTargetRepository {
+    store: Arc<tokio::sync::RwLock<Vec<gyre_domain::ComputeTargetEntity>>>,
+    workspaces: Arc<tokio::sync::RwLock<Vec<Workspace>>>,
+}
+
+#[async_trait]
+impl gyre_ports::ComputeTargetRepository for MemComputeTargetRepository {
+    async fn create(&self, target: &gyre_domain::ComputeTargetEntity) -> Result<()> {
+        self.store.write().await.push(target.clone());
+        Ok(())
+    }
+
+    async fn get_by_id(&self, id: &Id) -> Result<Option<gyre_domain::ComputeTargetEntity>> {
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .find(|t| &t.id == id)
+            .cloned())
+    }
+
+    async fn list_by_tenant(
+        &self,
+        tenant_id: &Id,
+    ) -> Result<Vec<gyre_domain::ComputeTargetEntity>> {
+        let mut result: Vec<_> = self
+            .store
+            .read()
+            .await
+            .iter()
+            .filter(|t| &t.tenant_id == tenant_id)
+            .cloned()
+            .collect();
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(result)
+    }
+
+    async fn update(&self, target: &gyre_domain::ComputeTargetEntity) -> Result<()> {
+        let mut guard = self.store.write().await;
+        if let Some(existing) = guard.iter_mut().find(|t| t.id == target.id) {
+            *existing = target.clone();
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.write().await.retain(|t| &t.id != id);
+        Ok(())
+    }
+
+    async fn get_default_for_tenant(
+        &self,
+        tenant_id: &Id,
+    ) -> Result<Option<gyre_domain::ComputeTargetEntity>> {
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .find(|t| &t.tenant_id == tenant_id && t.is_default)
+            .cloned())
+    }
+
+    async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
+        Ok(self
+            .workspaces
+            .read()
+            .await
+            .iter()
+            .any(|w| w.compute_target_id.as_ref() == Some(id)))
     }
 }

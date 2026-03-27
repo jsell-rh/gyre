@@ -1638,6 +1638,7 @@ mod tests {
             trust_level: gyre_domain::TrustLevel::Guided,
             llm_model: None,
             created_at: 0,
+            compute_target_id: None,
         };
         state.workspaces.create(&ws).await.unwrap();
 

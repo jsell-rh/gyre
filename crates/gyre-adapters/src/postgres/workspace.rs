@@ -30,6 +30,7 @@ struct WorkspaceRow {
     trust_level: String,
     llm_model: Option<String>,
     created_at: i64,
+    compute_target_id: Option<String>,
 }
 
 impl WorkspaceRow {
@@ -51,6 +52,7 @@ impl WorkspaceRow {
             trust_level: TrustLevel::from_db_str(&self.trust_level),
             llm_model: self.llm_model,
             created_at: self.created_at as u64,
+            compute_target_id: self.compute_target_id.map(Id::new),
         })
     }
 }
@@ -69,6 +71,7 @@ struct NewWorkspaceRow<'a> {
     trust_level: String,
     llm_model: Option<String>,
     created_at: i64,
+    compute_target_id: Option<String>,
 }
 
 #[async_trait]
@@ -80,6 +83,10 @@ impl WorkspaceRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let budget_json = w.budget.as_ref().map(serde_json::to_string).transpose()?;
             let trust_level = w.trust_level.to_string();
+            let compute_target_id = w
+                .compute_target_id
+                .as_ref()
+                .map(|id| id.as_str().to_string());
             let row = NewWorkspaceRow {
                 id: w.id.as_str(),
                 tenant_id: w.tenant_id.as_str(),
@@ -92,6 +99,7 @@ impl WorkspaceRepository for PgStorage {
                 trust_level: trust_level.clone(),
                 llm_model: w.llm_model.clone(),
                 created_at: w.created_at as i64,
+                compute_target_id: compute_target_id.clone(),
             };
             diesel::insert_into(workspaces::table)
                 .values(&row)
@@ -106,6 +114,7 @@ impl WorkspaceRepository for PgStorage {
                     workspaces::max_agents_per_repo.eq(row.max_agents_per_repo),
                     workspaces::trust_level.eq(&trust_level),
                     workspaces::llm_model.eq(w.llm_model.as_deref()),
+                    workspaces::compute_target_id.eq(compute_target_id.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("insert workspace")?;
@@ -181,6 +190,10 @@ impl WorkspaceRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let budget_json = w.budget.as_ref().map(serde_json::to_string).transpose()?;
             let trust_level = w.trust_level.to_string();
+            let compute_target_id = w
+                .compute_target_id
+                .as_ref()
+                .map(|id| id.as_str().to_string());
             diesel::update(workspaces::table.find(w.id.as_str()))
                 .set((
                     workspaces::name.eq(&w.name),
@@ -191,6 +204,7 @@ impl WorkspaceRepository for PgStorage {
                     workspaces::max_agents_per_repo.eq(w.max_agents_per_repo.map(|v| v as i32)),
                     workspaces::trust_level.eq(&trust_level),
                     workspaces::llm_model.eq(w.llm_model.as_deref()),
+                    workspaces::compute_target_id.eq(compute_target_id.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("update workspace")?;

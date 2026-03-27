@@ -254,6 +254,7 @@ diesel::table! {
         trust_level -> Text,
         llm_model -> Nullable<Text>,
         created_at -> BigInt,
+        compute_target_id -> Nullable<Text>,
     }
 }
 
@@ -662,6 +663,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     graph_nodes,
     graph_edges,
     graph_deltas,
+    compute_targets,
 );
 
 diesel::table! {
@@ -765,6 +767,19 @@ diesel::table! {
         model_name -> Text,
         max_tokens -> Nullable<Integer>,
         updated_by -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    compute_targets (id) {
+        id -> Text,
+        tenant_id -> Text,
+        name -> Text,
+        target_type -> Text,
+        config -> Text,
+        is_default -> Integer,
+        created_at -> BigInt,
         updated_at -> BigInt,
     }
 }

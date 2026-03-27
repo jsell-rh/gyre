@@ -10,6 +10,7 @@ pub enum ApiError {
     InvalidInput(String),
     BadRequest(String),
     Forbidden(String),
+    Conflict(String),
     TooManyRequests(String),
     /// Rate limit exceeded; carries `retry_after` seconds for the `Retry-After` header.
     RateLimited(u64),
@@ -54,6 +55,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_REQUEST, msg)
             }
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
             ApiError::Internal(err) => {
                 tracing::error!("internal error: {err:#}");
