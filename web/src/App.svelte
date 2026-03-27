@@ -95,13 +95,7 @@
 
   async function loadInboxBadge() {
     try {
-      const [mrs, specs] = await Promise.allSettled([
-        api.mergeRequests({ status: 'review' }),
-        api.getPendingSpecs(),
-      ]);
-      const mrCount = mrs.status === 'fulfilled' ? (mrs.value || []).length : 0;
-      const specCount = specs.status === 'fulfilled' ? (specs.value || []).length : 0;
-      inboxBadge = mrCount + specCount;
+      inboxBadge = await api.notificationCount(scope?.type === 'workspace' ? scope.workspaceId : undefined);
     } catch { /* ignore */ }
   }
 

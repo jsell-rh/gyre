@@ -1,7 +1,7 @@
 //! Stale agent detection: marks agents Dead when heartbeat times out.
 //! Honors each agent's `disconnected_behavior` setting (BCP graceful degradation).
 
-use gyre_common::message::MessageKind;
+use gyre_common::{message::MessageKind, Id};
 use gyre_domain::{AgentStatus, DisconnectedBehavior};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -70,7 +70,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
-                    ws_id,
+                    ws_id.clone(),
                     MessageKind::AgentStatusChanged,
                     Some(serde_json::json!({
                         "agent_id": agent.id.to_string(),
@@ -78,6 +78,19 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "reason": format!("Agent {} aborted (no heartbeat, abort behavior)", agent.name),
                     })),
                 );
+
+                // Notify the spawning user that the agent was abandoned (HSI §2).
+                if let Some(ref spawned_by) = agent.spawned_by {
+                    crate::notifications::notify(
+                        state,
+                        ws_id,
+                        Id::new(spawned_by.clone()),
+                        gyre_common::NotificationType::AbandonedBranch,
+                        format!("Agent '{}' was abandoned (heartbeat timeout)", agent.name),
+                        "default",
+                    )
+                    .await;
+                }
             }
 
             DisconnectedBehavior::Pause => {

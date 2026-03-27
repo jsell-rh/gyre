@@ -1129,14 +1129,17 @@ pub async fn complete_agent(
         super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
 
-    // Notify the spawning user that an MR needs review (HSI §2).
+    // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
         crate::notifications::notify(
             state.as_ref(),
             mr.workspace_id.clone(),
             Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::GateFailure,
-            format!("MR {} is ready for review", mr.id),
+            gyre_common::NotificationType::AgentCompleted,
+            format!(
+                "Agent '{}' completed — MR {} is ready for review",
+                agent.name, mr.id
+            ),
             "default",
         )
         .await;
@@ -1219,6 +1222,19 @@ pub async fn fail_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+
+    // Notify the spawning user that the agent failed (HSI §2).
+    if let Some(ref spawned_by) = agent.spawned_by {
+        crate::notifications::notify(
+            state.as_ref(),
+            agent.workspace_id.clone(),
+            Id::new(spawned_by.clone()),
+            gyre_common::NotificationType::AgentEscalation,
+            format!("Agent '{}' failed and needs attention", agent.name),
+            "default",
+        )
+        .await;
+    }
 
     Ok(StatusCode::OK)
 }
