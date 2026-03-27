@@ -3107,6 +3107,31 @@ impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPre
         Ok(guard
             .iter()
             .filter(|p| &p.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert(&self, pref: &gyre_domain::UserNotificationPreference) -> Result<()> {
+        let mut guard = self.prefs.write().await;
+        if let Some(existing) = guard
+            .iter_mut()
+            .find(|p| p.user_id == pref.user_id && p.notification_type == pref.notification_type)
+        {
+            existing.enabled = pref.enabled;
+        } else {
+            guard.push(pref.clone());
+        }
+        Ok(())
+    }
+
+    async fn upsert_batch(&self, prefs: &[gyre_domain::UserNotificationPreference]) -> Result<()> {
+        for pref in prefs {
+            self.upsert(pref).await?;
+        }
+        Ok(())
+    }
+}
+
 // ── In-memory MetaSpecRepository ─────────────────────────────────────────────
 
 #[derive(Default)]
@@ -3166,46 +3191,6 @@ impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
             .collect())
     }
 
-    async fn upsert(&self, pref: &gyre_domain::UserNotificationPreference) -> Result<()> {
-        let mut guard = self.prefs.write().await;
-        if let Some(existing) = guard
-            .iter_mut()
-            .find(|p| p.user_id == pref.user_id && p.notification_type == pref.notification_type)
-        {
-            existing.enabled = pref.enabled;
-        } else {
-            guard.push(pref.clone());
-        }
-        Ok(())
-    }
-
-    async fn upsert_batch(&self, prefs: &[gyre_domain::UserNotificationPreference]) -> Result<()> {
-        for pref in prefs {
-            self.upsert(pref).await?;
-        }
-        Ok(())
-    }
-}
-
-// ─── MemUserTokenRepository ──────────────────────────────────────────────────
-
-#[derive(Default)]
-pub struct MemUserTokenRepository {
-    tokens: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserToken>>>,
-}
-
-#[async_trait]
-impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
-    async fn create(&self, token: &gyre_domain::UserToken) -> Result<()> {
-        self.tokens.write().await.push(token.clone());
-        Ok(())
-    }
-
-    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<gyre_domain::UserToken>> {
-        let guard = self.tokens.read().await;
-        Ok(guard
-            .iter()
-            .filter(|t| &t.user_id == user_id)
     async fn update(&self, meta_spec: &gyre_domain::MetaSpec) -> Result<()> {
         let mut store = self.store.write().await;
         let mut versions = self.versions.write().await;
@@ -3238,6 +3223,63 @@ impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
             .await
             .iter()
             .filter(|v| &v.meta_spec_id == meta_spec_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_version(
+        &self,
+        meta_spec_id: &Id,
+        version: u32,
+    ) -> Result<Option<gyre_domain::MetaSpecVersion>> {
+        // Check archive first.
+        let archived = self
+            .versions
+            .read()
+            .await
+            .iter()
+            .find(|v| &v.meta_spec_id == meta_spec_id && v.version == version)
+            .cloned();
+        if archived.is_some() {
+            return Ok(archived);
+        }
+        // Fall back to live row for current version.
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .find(|m| &m.id == meta_spec_id && m.version == version)
+            .map(|m| gyre_domain::MetaSpecVersion {
+                id: m.id.clone(),
+                meta_spec_id: m.id.clone(),
+                version: m.version,
+                prompt: m.prompt.clone(),
+                content_hash: m.content_hash.clone(),
+                created_at: m.updated_at,
+            }))
+    }
+}
+
+// ─── MemUserTokenRepository ──────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemUserTokenRepository {
+    tokens: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserToken>>>,
+}
+
+#[async_trait]
+impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
+    async fn create(&self, token: &gyre_domain::UserToken) -> Result<()> {
+        self.tokens.write().await.push(token.clone());
+        Ok(())
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<gyre_domain::UserToken>> {
+        let guard = self.tokens.read().await;
+        Ok(guard
+            .iter()
+            .filter(|t| &t.user_id == user_id)
             .cloned()
             .collect())
     }
@@ -3294,37 +3336,6 @@ impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
         _offset: u32,
     ) -> Result<Vec<gyre_domain::JudgmentEntry>> {
         Ok(vec![])
-    async fn get_version(
-        &self,
-        meta_spec_id: &Id,
-        version: u32,
-    ) -> Result<Option<gyre_domain::MetaSpecVersion>> {
-        // Check archive first.
-        let archived = self
-            .versions
-            .read()
-            .await
-            .iter()
-            .find(|v| &v.meta_spec_id == meta_spec_id && v.version == version)
-            .cloned();
-        if archived.is_some() {
-            return Ok(archived);
-        }
-        // Fall back to live row for current version.
-        Ok(self
-            .store
-            .read()
-            .await
-            .iter()
-            .find(|m| &m.id == meta_spec_id && m.version == version)
-            .map(|m| gyre_domain::MetaSpecVersion {
-                id: m.id.clone(),
-                meta_spec_id: m.id.clone(),
-                version: m.version,
-                prompt: m.prompt.clone(),
-                content_hash: m.content_hash.clone(),
-                created_at: m.updated_at,
-            }))
     }
 }
 
