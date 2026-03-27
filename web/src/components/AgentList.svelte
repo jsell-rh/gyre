@@ -229,7 +229,7 @@
     </div>
   </div>
 
-  <div class="filter-bar">
+  <div class="filter-bar" role="group" aria-label="Filter agents by status">
     <button class="pill" class:active={statusFilter === ''} aria-pressed={statusFilter === ''} onclick={() => (statusFilter = '')}>All</button>
     {#each statuses as s}
       <button
@@ -244,7 +244,7 @@
   </div>
 
   {#if showSpawnModal}
-    <div class="modal-backdrop" role="presentation" onclick={closeSpawnModal}></div>
+    <div class="modal-backdrop" role="presentation" aria-hidden="true" onclick={closeSpawnModal}></div>
     <div
       class="modal"
       role="dialog"
@@ -404,7 +404,7 @@
           <h3>Agent: {selected.name}</h3>
           <button class="close-btn" aria-label="Close agent detail" onclick={() => { selected = null; closeTtyWs(); }}>✕</button>
         </div>
-        <div class="detail-tabs" role="tablist">
+        <div class="detail-tabs" role="tablist" aria-label="Agent details tabs">
           <button class="dtab" class:active={detailTab === 'info'} onclick={() => switchDetailTab('info')} role="tab" aria-selected={detailTab === 'info'} id="dtab-info" aria-controls="dtabpanel-info">Info</button>
           <button class="dtab" class:active={detailTab === 'logs'} onclick={() => switchDetailTab('logs')} role="tab" aria-selected={detailTab === 'logs'} id="dtab-logs" aria-controls="dtabpanel-logs">Logs</button>
           <button class="dtab" class:active={detailTab === 'terminal'} onclick={() => switchDetailTab('terminal')} role="tab" aria-selected={detailTab === 'terminal'} id="dtab-terminal" aria-controls="dtabpanel-terminal">Terminal</button>
@@ -559,7 +559,7 @@
   .pill {
     display: inline-flex;
     align-items: center;
-    padding: 0.2rem 0.75rem;
+    padding: var(--space-1) var(--space-3);
     border-radius: 99px;
     border: 1px solid var(--color-border);
     background: transparent;
@@ -840,7 +840,7 @@
   .form input:focus-visible,
   .form select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
 
-  .field-hint { font-size: 0.7rem; color: var(--color-text-muted); margin-top: 2px; }
+  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-0, 2px); }
 
   .form-error { color: var(--color-danger); font-size: var(--text-xs); margin: 0; }
 
@@ -889,7 +889,7 @@
     border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
     cursor: pointer;
-    padding: 2px var(--space-1);
+    padding: var(--space-0, 2px) var(--space-1);
     display: flex;
     align-items: center;
     flex-shrink: 0;
