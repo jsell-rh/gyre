@@ -112,6 +112,7 @@
 </script>
 
 <div class="audit-view" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "audit view loaded"}</span>
   <div class="view-header">
     <div class="header-left">
       <h2>Audit Events</h2>
@@ -480,4 +481,5 @@
     .clear-btn,
     .search-btn { transition: none; }
   }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

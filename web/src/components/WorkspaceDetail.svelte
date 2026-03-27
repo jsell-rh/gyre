@@ -162,7 +162,7 @@
   <Tabs {tabs} bind:active={activeTab} />
 
   {#if error}
-    <div class="error-banner">
+    <div class="error-banner" role="alert">
       <p>{error}</p>
       <button class="btn-retry" onclick={() => { error = null; loadAll(); }}>Retry</button>
     </div>

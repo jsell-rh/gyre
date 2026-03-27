@@ -45,6 +45,7 @@
 </script>
 
 <div class="workspace-list" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "workspaces loaded"}</span>
   <div class="list-header">
     <div>
       <h2>Workspaces</h2>
@@ -207,4 +208,5 @@
   .field-input:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
