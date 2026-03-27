@@ -98,15 +98,11 @@
 </script>
 
 <nav class="scope-breadcrumb {extraClass}" aria-label="Scope">
-  {#if tenant}
-    <button class="crumb tenant-crumb" class:current-scope={!workspace && !repo} onclick={clickTenant} aria-current={!workspace && !repo ? 'page' : undefined}>
-      {tenant.name}
-    </button>
-    {#if workspace || repo}
-      <span class="sep" aria-hidden="true">›</span>
-    {/if}
-  {:else if !workspace}
-    <button class="crumb home-crumb" onclick={clickTenant} aria-label="Return to tenant overview">Gyre</button>
+  <button class="crumb tenant-crumb" onclick={clickTenant}>
+    {tenant?.name ?? 'Gyre'}
+  </button>
+  {#if workspace || repo}
+    <span class="sep" aria-hidden="true">›</span>
   {/if}
 
   {#if workspace}
@@ -114,11 +110,9 @@
       <button
         class="crumb workspace-crumb"
         class:has-dropdown={workspaces.length > 1}
-        class:current-scope={!repo}
         onclick={clickWorkspace}
         aria-haspopup={workspaces.length > 1 ? 'listbox' : undefined}
         aria-expanded={workspaces.length > 1 ? dropdownOpen : undefined}
-        aria-current={!repo ? 'page' : undefined}
       >
         {workspace.name}
         {#if workspaces.length > 1}
@@ -163,7 +157,7 @@
   {/if}
 
   {#if repo}
-    <button class="crumb repo-crumb current-scope" onclick={clickRepo} aria-current="page">
+    <button class="crumb repo-crumb" onclick={clickRepo}>
       {repo.name}
     </button>
   {/if}
@@ -214,12 +208,6 @@
   }
   .tenant-crumb:hover { color: var(--color-text-secondary); }
 
-  .home-crumb {
-    color: var(--color-text-muted);
-    cursor: pointer;
-  }
-  .home-crumb:hover { color: var(--color-text-secondary); }
-
   .workspace-crumb {
     color: var(--color-text-secondary);
     font-weight: 500;
@@ -235,11 +223,6 @@
     font-weight: 500;
   }
   .repo-crumb:hover { color: var(--color-text); }
-
-  .current-scope {
-    color: var(--color-text);
-    font-weight: 600;
-  }
 
   .dropdown-caret {
     transition: transform var(--transition-fast) ease-out;

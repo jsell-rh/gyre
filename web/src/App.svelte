@@ -528,7 +528,7 @@
           {:else if currentNav === 'briefing'}
             <Briefing workspaceId={scope.workspaceId} workspaceName={currentWorkspace?.name} {trustLevel} scope={scope.type} />
           {:else if currentNav === 'explorer'}
-            <ExplorerView {scope} />
+            <ExplorerView {scope} workspaceName={currentWorkspace?.name ?? null} />
           {:else if currentNav === 'specs'}
             <SpecDashboard workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
           {:else if currentNav === 'meta-specs'}
