@@ -7,6 +7,7 @@
 
   let graph = $state(null);
   let loading = $state(true);
+  let error = $state(null);
   let selected = $state(null);
 
   let selectedOutEdges = $derived(selected && graph ? (graph.edges ?? []).filter(e => e.from === nodeId(selected)) : []);
@@ -32,10 +33,12 @@
 
   async function load() {
     loading = true;
+    error = null;
     try {
       graph = await api.specsGraph();
       layoutGraph();
     } catch (e) {
+      error = e.message;
       showToast('Failed to load spec graph: ' + e.message, { type: 'error' });
     } finally {
       loading = false;
@@ -112,6 +115,11 @@
   <div class="graph-area">
     {#if loading}
       <div class="loading-box"><Skeleton lines={8} /></div>
+    {:else if error}
+      <div class="error-banner" role="alert">
+        <p>Failed to load spec graph: {error}</p>
+        <button class="retry-btn" onclick={() => { error = null; load(); }}>Retry</button>
+      </div>
     {:else if !graph?.nodes?.length}
       <EmptyState
         title="No spec links"
@@ -325,8 +333,34 @@
   .edge-type { font-weight: 500; white-space: nowrap; }
   .mono-sm { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); word-break: break-all; }
 
+  .error-banner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    text-align: center;
+    color: var(--color-danger);
+  }
+  .error-banner p { margin: 0; font-size: var(--text-sm); }
+
+  .retry-btn {
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    font-weight: 500;
+    transition: background var(--transition-fast);
+  }
+  .retry-btn:hover { background: color-mix(in srgb, var(--color-primary) 25%, transparent); }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
   @media (prefers-reduced-motion: reduce) {
-    .close-btn { transition: none; }
+    .close-btn, .retry-btn { transition: none; }
   }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
