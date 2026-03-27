@@ -415,7 +415,7 @@
   }
 
   .send-btn:disabled {
-    opacity: 0.4;
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
