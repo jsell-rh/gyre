@@ -413,6 +413,7 @@ impl ExtractionContext {
     // Function node creation
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_function_node(
         &mut self,
         fn_node: tree_sitter::Node,
@@ -448,6 +449,7 @@ impl ExtractionContext {
     // Endpoint node creation
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_endpoint_node(
         &mut self,
         fn_node: tree_sitter::Node,
@@ -499,10 +501,7 @@ impl ExtractionContext {
 /// Derive Python dotted module name from a relative file path.
 /// e.g. `src/api/handlers.py` → `src.api.handlers`
 fn path_to_module_qname(rel_path: &str) -> String {
-    rel_path
-        .trim_end_matches(".py")
-        .replace('/', ".")
-        .replace('\\', ".")
+    rel_path.trim_end_matches(".py").replace(['/', '\\'], ".")
 }
 
 /// Get the `name` field identifier text from a `class_definition` or `function_definition`.
