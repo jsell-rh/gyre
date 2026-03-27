@@ -597,6 +597,7 @@
                   onclick={sendLlmInstruction}
                   disabled={!llmInstruction.trim() || llmStreaming || !entity.data?.repo_id}
                   aria-label="Send to LLM"
+                  aria-busy={llmStreaming}
                 >
                   {#if llmStreaming}
                     <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -978,6 +979,7 @@
     text-decoration: underline;
     text-underline-offset: 2px;
     margin-top: var(--space-2);
+    transition: opacity var(--transition-fast);
   }
 
   .view-spawned-link:hover {
