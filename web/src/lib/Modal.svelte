@@ -133,7 +133,7 @@
     flex-direction: column;
     max-height: 85vh;
     width: 100%;
-    animation: modal-in 150ms ease;
+    animation: modal-in var(--transition-fast) ease;
   }
 
   @keyframes modal-in {

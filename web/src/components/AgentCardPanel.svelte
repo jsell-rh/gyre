@@ -204,9 +204,9 @@
     font-weight: 600;
     background: color-mix(in srgb, var(--color-blocked, #5e40be) 15%, transparent);
     color: var(--color-blocked, #8b6fe0);
-    border: 1px solid color-mix(in srgb, var(--color-blocked, #5e40be) 30%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-blocked) 30%, transparent);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
   }
 
   .edit-btn {
@@ -216,7 +216,7 @@
     color: var(--color-link);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     font-family: var(--font-body);
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
@@ -267,7 +267,7 @@
   .field-input:focus:not(:focus-visible),
   .field-textarea:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible,
-  .field-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .field-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .field-hint {
     font-size: var(--text-xs);
@@ -306,15 +306,15 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     cursor: pointer;
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-4);
     font-family: var(--font-body);
     font-weight: 500;
-    transition: opacity var(--transition-fast);
+    transition: background var(--transition-fast);
   }
-  .save-btn:hover { opacity: 0.88; }
+  .save-btn:hover { background: var(--color-primary-hover); }
   .save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* Card body (view mode) */
@@ -414,7 +414,7 @@
   .save-btn:focus-visible,
   .edit-btn-secondary:focus-visible,
   .publish-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

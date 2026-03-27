@@ -77,7 +77,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    transition: opacity 150ms ease;
+    transition: opacity var(--transition-fast);
   }
 
   .content-main.faded {
@@ -102,7 +102,7 @@
     flex: 0 0 40%;
     max-width: 40%;
     overflow: hidden;
-    animation: slideInRight 150ms ease-out;
+    animation: slideInRight var(--transition-fast) ease-out;
   }
 
   @keyframes slideInRight {
