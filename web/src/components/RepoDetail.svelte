@@ -411,7 +411,7 @@
   }
 </script>
 
-<div class="page">
+<div class="page" aria-busy={loading}>
   <div class="page-hdr">
     <div class="breadcrumb">
       <button class="back-btn" onclick={onBack} aria-label="Back to projects list">← Projects</button>

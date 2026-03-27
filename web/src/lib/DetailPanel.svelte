@@ -1034,7 +1034,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--color-text-muted);
-    padding-top: 2px;
+    padding-top: var(--space-1);
   }
 
   .spec-meta-list dd {
@@ -1206,7 +1206,7 @@
     color: var(--color-text-muted);
     font-weight: 500;
     display: block;
-    margin-bottom: 2px;
+    margin-bottom: var(--space-1);
   }
 
   .streaming-txt {

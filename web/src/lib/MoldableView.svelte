@@ -561,7 +561,7 @@
   }
 
   .sort-btn {
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     background: transparent;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -661,7 +661,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-link) 8%, transparent);
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -807,7 +807,7 @@
     font-size: var(--text-xs);
     color: var(--color-link);
     background: color-mix(in srgb, var(--color-link) 8%, transparent);
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
     flex-shrink: 0;
   }
@@ -848,7 +848,7 @@
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     color: var(--color-text);
   }
 
