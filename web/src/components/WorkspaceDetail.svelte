@@ -555,8 +555,8 @@
   }
   .trust-select:disabled { opacity: 0.5; cursor: not-allowed; }
   .trust-select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-  .trust-select.trust-supervised { background: color-mix(in srgb, var(--color-info, #4db0ff) 15%, transparent); color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-info, #4db0ff) 30%, transparent); }
-  .trust-select.trust-guided     { background: color-mix(in srgb, var(--color-info, #4db0ff) 15%, transparent); color: var(--color-link); border-color: color-mix(in srgb, var(--color-info, #4db0ff) 30%, transparent); }
+  .trust-select.trust-supervised { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-info) 30%, transparent); }
+  .trust-select.trust-guided     { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-link); border-color: color-mix(in srgb, var(--color-info) 30%, transparent); }
   .trust-select.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }
   .trust-select.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, transparent); }
   .trust-saving { font-size: var(--text-xs); color: var(--color-text-muted); }

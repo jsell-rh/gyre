@@ -1640,8 +1640,8 @@
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
   }
-  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info, #8b5cf6) 15%, transparent); color: var(--color-blocked); }
-  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .trust-badge.trust-supervised { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-blocked); }
+  .trust-badge.trust-guided     { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-link); }
   .trust-badge.trust-autonomous { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
   .trust-badge.trust-custom     { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 
@@ -1678,7 +1678,7 @@
     border-radius: var(--radius-sm);
   }
   .policy-prefix-badge.builtin { background: var(--color-bg); color: var(--color-text-muted); border: 1px solid var(--color-border); }
-  .policy-prefix-badge.trust   { background: color-mix(in srgb, var(--color-info, #60a5fa) 15%, transparent); color: var(--color-link); }
+  .policy-prefix-badge.trust   { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-link); }
   .policy-prefix-badge.custom  { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); }
   .policy-row {
     display: flex;

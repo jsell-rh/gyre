@@ -352,7 +352,7 @@
   .status-badge {
     display: inline-block;
     padding: 2px var(--space-2);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);

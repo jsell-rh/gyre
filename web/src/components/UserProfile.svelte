@@ -395,7 +395,7 @@
     top: -4px;
     right: -6px;
     background: var(--color-danger);
-    color: #fff;
+    color: var(--color-text-inverse);
     border-radius: var(--radius-full);
     font-size: var(--text-xs);
     padding: 0 var(--space-1);
@@ -438,7 +438,7 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-text-inverse);
     font-size: var(--text-sm);
     cursor: pointer;
   }

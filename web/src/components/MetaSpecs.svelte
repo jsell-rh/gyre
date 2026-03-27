@@ -657,7 +657,7 @@
   .filter-pills { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-6); }
   .pill {
     padding: var(--space-1) var(--space-3);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     border: 1px solid var(--color-border);
     background: transparent;
     color: var(--color-text);
@@ -707,7 +707,7 @@
     flex: 1;
     padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong, #444);
+    border: 1px solid var(--color-border-strong);
     border-radius: var(--radius, 6px);
     color: var(--color-text);
     font-size: var(--text-sm);
@@ -718,7 +718,7 @@
     min-height: 280px;
     padding: var(--space-3);
     background: var(--color-surface-elevated, #141414);
-    border: 1px solid var(--color-border-strong, #444);
+    border: 1px solid var(--color-border-strong);
     border-radius: var(--radius, 6px);
     color: var(--color-text);
     font-family: var(--font-mono);
@@ -727,7 +727,7 @@
     resize: vertical;
     box-sizing: border-box;
   }
-  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong, #444); }
+  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong); }
   .persona-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .persona-diff {
@@ -830,7 +830,7 @@
 
   .mono { font-family: var(--font-mono); }
   .empty { color: var(--color-text-muted); font-size: var(--text-sm); margin: 0; }
-  .error { color: var(--color-danger, #f55); font-size: var(--text-sm); }
+  .error { color: var(--color-danger); font-size: var(--text-sm); }
 
   /* ── Retry button ── */
   .retry-btn {

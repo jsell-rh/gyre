@@ -809,7 +809,7 @@
     padding: 0 3px;
     background: var(--color-danger);
     color: var(--color-text-inverse);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     font-weight: 700;
     display: flex;
