@@ -87,7 +87,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(repos::create_repo).get(repos::list_repos),
         )
         .route("/api/v1/repos/mirror", post(repos::create_mirror_repo))
-        .route("/api/v1/repos/:id", get(repos::get_repo))
+        .route(
+            "/api/v1/repos/:id",
+            get(repos::get_repo)
+                .put(repos::update_repo)
+                .delete(repos::delete_repo),
+        )
+        .route("/api/v1/repos/:id/archive", post(repos::archive_repo))
+        .route("/api/v1/repos/:id/unarchive", post(repos::unarchive_repo))
         .route("/api/v1/repos/:id/branches", get(repos::list_branches))
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))

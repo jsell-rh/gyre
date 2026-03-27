@@ -68,7 +68,7 @@ pub use policy::{
 };
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
-pub use repository::Repository;
+pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
 pub use spec_approval::SpecApproval;
