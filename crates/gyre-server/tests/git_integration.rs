@@ -1577,3 +1577,36 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         "revoked_by should be system:spec-lifecycle"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: mirror endpoint returns 201 with full middleware stack
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mirror_endpoint_with_full_middleware_returns_201() {
+    let token = "mirror-middleware-test-token";
+    let (_port, base_url) = start_server(token).await;
+    let api = format!("{base_url}/api/v1");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{api}/repos/mirror"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "workspace_id": "ws-mirror-mw-test",
+            "name": "my-mirror-mw",
+            "url": "https://github.com/org/repo.git",
+            "interval_secs": 300
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CREATED,
+        "Expected 201 CREATED from POST /repos/mirror with full middleware stack, got {status}: {body}"
+    );
+}

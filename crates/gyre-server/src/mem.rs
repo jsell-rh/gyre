@@ -492,6 +492,17 @@ impl TaskRepository for MemTaskRepository {
             .cloned()
             .collect())
     }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<Task>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|t| &t.repo_id == repo_id)
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Default)]

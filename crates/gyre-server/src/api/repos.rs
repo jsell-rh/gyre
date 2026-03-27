@@ -4,7 +4,9 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{BranchInfo, CommitInfo, DiffResult, RepoStatus, Repository};
+use gyre_domain::{
+    AgentStatus, BranchInfo, CommitInfo, DiffResult, MrStatus, RepoStatus, Repository, TaskStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -231,6 +233,60 @@ pub async fn archive_repo(
     repo.archive();
     repo.updated_at = now_secs();
     state.repos.update(&repo).await?;
+    let now = now_secs();
+
+    // 1. Cancel active tasks in this repo.
+    let tasks = state.tasks.list_by_repo(&repo.id).await?;
+    let mut repo_task_ids = std::collections::HashSet::new();
+    for mut task in tasks {
+        repo_task_ids.insert(task.id.to_string());
+        let cancellable = matches!(
+            task.status,
+            TaskStatus::Backlog | TaskStatus::InProgress | TaskStatus::Review | TaskStatus::Blocked
+        );
+        if cancellable {
+            task.status = TaskStatus::Cancelled;
+            task.cancelled_at = Some(now);
+            task.cancelled_reason = Some("Repository archived".to_string());
+            task.updated_at = now;
+            state.tasks.update(&task).await?;
+        }
+    }
+
+    // 2. Stop agents whose current task is in this repo.
+    let agents = state.agents.list().await?;
+    for mut agent in agents {
+        let is_repo_task = agent
+            .current_task_id
+            .as_ref()
+            .map(|tid| repo_task_ids.contains(tid.as_str()))
+            .unwrap_or(false);
+        let stoppable = matches!(
+            agent.status,
+            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Paused
+        );
+        if is_repo_task && stoppable {
+            agent.status = AgentStatus::Dead;
+            state.agents.update(&agent).await?;
+        }
+    }
+
+    // 3. Close open MRs in this repo.
+    let mrs = state.merge_requests.list_by_repo(&repo.id).await?;
+    for mut mr in mrs {
+        let closeable = matches!(mr.status, MrStatus::Open | MrStatus::Approved);
+        if closeable {
+            mr.status = MrStatus::Closed;
+            mr.updated_at = now;
+            state.merge_requests.update(&mr).await?;
+        }
+    }
+
+    // Finally archive the repo itself.
+    repo.archive();
+    repo.updated_at = now;
+    state.repos.update(&repo).await?;
+
     Ok(Json(RepoResponse::from(repo)))
 }
 
@@ -724,6 +780,235 @@ mod tests {
         assert_eq!(unarchived["status"], "Active");
     }
 
+    // ── Archive side-effect tests ──────────────────────────────────────────
+
+    /// Helper: create a repo via the API and return its id.
+    async fn create_repo_via_api(app: &Router, name: &str) -> String {
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": name});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let j = body_json(resp).await;
+        j["id"].as_str().unwrap().to_string()
+    }
+
+    /// Helper: POST archive and return the JSON body.
+    async fn archive_via_api(app: &Router, id: &str) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{id}/archive"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    #[tokio::test]
+    async fn archive_cancels_active_tasks() {
+        use gyre_common::Id;
+        use gyre_domain::{Task, TaskStatus};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a repo via API
+        let repo_id = create_repo_via_api(&app, "repo-cancel-tasks").await;
+
+        // Seed two tasks for this repo directly through the repository
+        let now = 1_000_000u64;
+        let mut t1 = Task::new(Id::new("task-cancel-1"), "Backlog task", now);
+        t1.repo_id = Id::new(&repo_id);
+        t1.status = TaskStatus::Backlog;
+        state.tasks.create(&t1).await.unwrap();
+
+        let mut t2 = Task::new(Id::new("task-cancel-2"), "InProgress task", now);
+        t2.repo_id = Id::new(&repo_id);
+        t2.status = TaskStatus::InProgress;
+        state.tasks.create(&t2).await.unwrap();
+
+        // Also a Done task — should not be cancelled
+        let mut t3 = Task::new(Id::new("task-done-3"), "Done task", now);
+        t3.repo_id = Id::new(&repo_id);
+        t3.status = TaskStatus::Done;
+        state.tasks.create(&t3).await.unwrap();
+
+        // Archive the repo
+        let archived = archive_via_api(&app, &repo_id).await;
+        assert_eq!(archived["status"], "Archived");
+
+        // Verify side effects
+        let t1_after = state
+            .tasks
+            .find_by_id(&Id::new("task-cancel-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t1_after.status, TaskStatus::Cancelled);
+        assert!(t1_after.cancelled_at.is_some());
+        assert_eq!(
+            t1_after.cancelled_reason.as_deref(),
+            Some("Repository archived")
+        );
+
+        let t2_after = state
+            .tasks
+            .find_by_id(&Id::new("task-cancel-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t2_after.status, TaskStatus::Cancelled);
+
+        // Done task left untouched
+        let t3_after = state
+            .tasks
+            .find_by_id(&Id::new("task-done-3"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t3_after.status, TaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn archive_stops_active_agents() {
+        use gyre_common::Id;
+        use gyre_domain::{Agent, AgentStatus, Task, TaskStatus};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let repo_id = create_repo_via_api(&app, "repo-stop-agents").await;
+
+        // Seed a task for this repo
+        let now = 1_000_000u64;
+        let mut task = Task::new(Id::new("task-agent-1"), "Agent task", now);
+        task.repo_id = Id::new(&repo_id);
+        task.status = TaskStatus::InProgress;
+        state.tasks.create(&task).await.unwrap();
+
+        // Seed an Active agent assigned to that task
+        let mut agent = Agent::new(Id::new("agent-1"), "worker", now);
+        agent.status = AgentStatus::Active;
+        agent.current_task_id = Some(Id::new("task-agent-1"));
+        state.agents.create(&agent).await.unwrap();
+
+        // Seed an agent not associated with this repo — should remain unchanged
+        let agent2 = Agent::new(Id::new("agent-2"), "unrelated", now);
+        state.agents.create(&agent2).await.unwrap();
+
+        // Archive
+        archive_via_api(&app, &repo_id).await;
+
+        // Agent 1 should be Dead
+        let a1 = state
+            .agents
+            .find_by_id(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a1.status, AgentStatus::Dead);
+
+        // Agent 2 still Idle
+        let a2 = state
+            .agents
+            .find_by_id(&Id::new("agent-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a2.status, AgentStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn archive_closes_open_mrs() {
+        use gyre_common::Id;
+        use gyre_domain::{MergeRequest, MrStatus};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let repo_id = create_repo_via_api(&app, "repo-close-mrs").await;
+
+        let now = 1_000_000u64;
+        // Open MR
+        let mr1 = MergeRequest::new(
+            Id::new("mr-open-1"),
+            Id::new(&repo_id),
+            "Open MR",
+            "feat/x",
+            "main",
+            now,
+        );
+        state.merge_requests.create(&mr1).await.unwrap();
+
+        // Approved MR
+        let mut mr2 = MergeRequest::new(
+            Id::new("mr-approved-2"),
+            Id::new(&repo_id),
+            "Approved MR",
+            "feat/y",
+            "main",
+            now,
+        );
+        mr2.status = MrStatus::Approved;
+        state.merge_requests.create(&mr2).await.unwrap();
+
+        // Already-merged MR — should not change
+        let mut mr3 = MergeRequest::new(
+            Id::new("mr-merged-3"),
+            Id::new(&repo_id),
+            "Merged MR",
+            "feat/z",
+            "main",
+            now,
+        );
+        mr3.status = MrStatus::Merged;
+        state.merge_requests.create(&mr3).await.unwrap();
+
+        // Archive
+        archive_via_api(&app, &repo_id).await;
+
+        // mr1 and mr2 should be Closed
+        let m1 = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-open-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m1.status, MrStatus::Closed);
+
+        let m2 = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-approved-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m2.status, MrStatus::Closed);
+
+        // mr3 remains Merged
+        let m3 = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-merged-3"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m3.status, MrStatus::Merged);
+    }
+
     #[tokio::test]
     async fn delete_repo_requires_archived() {
         let app = app();
@@ -783,5 +1068,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp2.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn create_mirror_repo_returns_201() {
+        let body = serde_json::json!({
+            "workspace_id": "ws-mirror-test",
+            "name": "my-mirror",
+            "url": "https://github.com/org/repo.git",
+            "interval_secs": 300
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/mirror")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "my-mirror");
+        assert_eq!(json["is_mirror"], true);
     }
 }
