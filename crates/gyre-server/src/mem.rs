@@ -14,12 +14,11 @@ use gyre_domain::{
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, CostRepository,
-    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
-    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
-    WorktreeRepository,
+    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
+    NetworkPeerRepository, PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2995,7 +2994,6 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
 #[derive(Default)]
 pub struct MemComputeTargetRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::ComputeTargetEntity>>>,
-    workspaces: Arc<tokio::sync::RwLock<Vec<Workspace>>>,
 }
 
 #[async_trait]
@@ -3057,12 +3055,10 @@ impl gyre_ports::ComputeTargetRepository for MemComputeTargetRepository {
             .cloned())
     }
 
-    async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
-        Ok(self
-            .workspaces
-            .read()
-            .await
-            .iter()
-            .any(|w| w.compute_target_id.as_ref() == Some(id)))
+    async fn has_workspace_references(&self, _id: &Id) -> Result<bool> {
+        // The in-memory adapter does not share state with MemWorkspaceRepository,
+        // so this always returns false in tests. The 409 Conflict path is covered
+        // by the SQLite adapter integration tests.
+        Ok(false)
     }
 }

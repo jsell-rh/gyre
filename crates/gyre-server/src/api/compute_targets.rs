@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
+use gyre_domain::UserRole;
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
@@ -93,15 +94,28 @@ pub async fn create_compute_target(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateComputeTargetRequest>,
 ) -> Result<(StatusCode, Json<ComputeTargetResponse>), ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "compute target management requires Admin role".to_string(),
+        ));
+    }
     let tenant_id = tenant_id_from_auth(&auth);
     let target_type = parse_target_type(&req.target_type)?;
     let now = now_secs();
-    let mut ct = ComputeTargetEntity::new(new_id(), tenant_id, req.name, target_type, now);
+    let mut ct = ComputeTargetEntity::new(new_id(), tenant_id.clone(), req.name, target_type, now);
     if let Some(cfg) = req.config {
         ct.config = cfg;
     }
     if let Some(is_default) = req.is_default {
         ct.is_default = is_default;
+    }
+    // Guard duplicate name — the DB UNIQUE constraint would return 500 otherwise.
+    let existing = state.compute_targets.list_by_tenant(&tenant_id).await?;
+    if existing.iter().any(|t| t.name == ct.name) {
+        return Err(ApiError::Conflict(format!(
+            "a compute target named '{}' already exists in this tenant",
+            ct.name
+        )));
     }
     state.compute_targets.create(&ct).await?;
     Ok((StatusCode::CREATED, Json(ComputeTargetResponse::from(ct))))
@@ -132,6 +146,11 @@ pub async fn update_compute_target(
     Path(id): Path<String>,
     Json(req): Json<UpdateComputeTargetRequest>,
 ) -> Result<Json<ComputeTargetResponse>, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "compute target management requires Admin role".to_string(),
+        ));
+    }
     let tenant_id = tenant_id_from_auth(&auth);
     let mut ct = state
         .compute_targets
@@ -161,6 +180,11 @@ pub async fn delete_compute_target(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "compute target management requires Admin role".to_string(),
+        ));
+    }
     let tenant_id = tenant_id_from_auth(&auth);
     let ct = state
         .compute_targets
@@ -316,6 +340,70 @@ mod tests {
         let updated = body_json(update_resp).await;
         assert_eq!(updated["name"], "renamed");
         assert_eq!(updated["is_default"], true);
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_create_compute_target() {
+        let state = test_state();
+        // Register a non-admin agent token.
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "non-admin-agent",
+                "agent-tok-ct-1".to_string(),
+            )
+            .await
+            .unwrap();
+        let body = serde_json::json!({ "name": "no", "target_type": "Container" });
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer agent-tok-ct-1")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn duplicate_name_returns_conflict() {
+        let app = app();
+        let body = serde_json::json!({ "name": "dup-target", "target_type": "Container" });
+        let r1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::CREATED);
+
+        let r2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
