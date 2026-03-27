@@ -161,6 +161,7 @@
     padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: background var(--transition-fast);
   }
 
   button:hover { background: var(--color-surface-elevated); }
@@ -196,7 +197,7 @@
   .count { text-align: right; color: var(--color-text-muted); width: 50px; }
 
   .bar-cell { width: 120px; padding-left: var(--space-2); }
-  .bar { height: 10px; background: var(--color-primary); border-radius: var(--radius-sm); min-width: 2px; transition: width 0.3s; }
+  .bar { height: 10px; background: var(--color-primary); border-radius: var(--radius-sm); min-width: 2px; transition: width var(--transition-normal); }
 
   .event-list { display: flex; flex-direction: column; gap: var(--space-1); }
 
@@ -214,7 +215,7 @@
   .ev-name { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-primary); }
   .ev-agent { font-size: var(--text-xs); color: var(--color-text-muted); }
   .ev-time { font-size: var(--text-xs); color: var(--color-text-secondary); }
-  .ev-detail { font-size: var(--text-xs); padding: 2px var(--space-1); }
+  .ev-detail { font-size: var(--text-xs); padding: var(--space-1); }
   .ev-props {
     grid-column: 1 / -1;
     background: var(--color-surface);
@@ -240,6 +241,7 @@
     font-weight: 500;
     padding: var(--space-1) var(--space-3);
     white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
   .retry-btn:hover {
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
@@ -260,6 +262,9 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .bar { transition: none; }
+    .bar,
+    select,
+    button,
+    .retry-btn { transition: none; }
   }
 </style>

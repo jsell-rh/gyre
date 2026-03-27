@@ -338,7 +338,7 @@
   .ws-status-text {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
   }
 
   .ws-label {
@@ -464,6 +464,7 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: border-color var(--transition-fast);
   }
 
   .lang-select:focus:not(:focus-visible) {
@@ -492,6 +493,10 @@
 
   @media (prefers-reduced-motion: reduce) {
     .ws-dot.pulse { animation: none; }
-    .config-table tbody tr { transition: none; }
+    .ws-dot,
+    .info-card,
+    .config-table tbody tr,
+    .lang-select,
+    .btn-retry { transition: none; }
   }
 </style>

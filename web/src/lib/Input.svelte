@@ -94,4 +94,8 @@
     font-size: var(--text-xs);
     color: var(--color-danger);
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .field-input { transition: none; }
+  }
 </style>

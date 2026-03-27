@@ -130,12 +130,20 @@
     {/if}
   </div>
 
-  <div class="tab-bar" role="tablist" aria-label="Audit view tabs">
-    <button class="tab-btn" role="tab" id="tab-live" aria-selected={activeTab === 'live'} aria-controls="panel-live" class:active={activeTab === 'live'} onclick={() => (activeTab = 'live')}>
+  <div class="tab-bar" role="tablist" aria-label="Audit view tabs"
+    onkeydown={(e) => {
+      const tabs = ['live', 'history'];
+      const ids = ['tab-live', 'tab-history'];
+      const idx = tabs.indexOf(activeTab);
+      if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; activeTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx + 1) % 2; activeTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
+    }}
+  >
+    <button class="tab-btn" role="tab" id="tab-live" aria-selected={activeTab === 'live'} aria-controls="panel-live" tabindex={activeTab === 'live' ? 0 : -1} class:active={activeTab === 'live'} onclick={() => (activeTab = 'live')}>
       <span class="live-dot" class:connected={sseConnected} aria-hidden="true"></span>
       Live Stream
     </button>
-    <button class="tab-btn" role="tab" id="tab-history" aria-selected={activeTab === 'history'} aria-controls="panel-history" class:active={activeTab === 'history'} onclick={() => (activeTab = 'history')}>
+    <button class="tab-btn" role="tab" id="tab-history" aria-selected={activeTab === 'history'} aria-controls="panel-history" tabindex={activeTab === 'history' ? 0 : -1} class:active={activeTab === 'history'} onclick={() => (activeTab = 'history')}>
       History
     </button>
   </div>
@@ -270,7 +278,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
+    gap: var(--space-1);
   }
 
   .stat-val {
@@ -386,6 +394,7 @@
     color: var(--color-text);
     font-family: var(--font-body);
     font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
   }
 
   .filter-select { width: 180px; }
@@ -479,7 +488,9 @@
     .live-dot { animation: none; }
     .tab-btn,
     .clear-btn,
-    .search-btn { transition: none; }
+    .search-btn,
+    .filter-select,
+    .filter-input { transition: none; }
   }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

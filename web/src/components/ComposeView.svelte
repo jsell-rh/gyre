@@ -335,6 +335,7 @@
   }
   .primary-btn:hover { background: var(--color-primary-hover); }
   .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .primary-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .secondary-btn {
     display: flex;
@@ -352,6 +353,7 @@
   }
   .secondary-btn:hover:not(:disabled) { border-color: var(--color-border-strong); color: var(--color-text); }
   .secondary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .secondary-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .danger-btn {
     display: flex;
@@ -369,6 +371,7 @@
   }
   .danger-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
   .danger-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .danger-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* Status controls */
   .status-controls {
@@ -560,5 +563,10 @@
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; }
+    .primary-btn,
+    .secondary-btn,
+    .danger-btn,
+    .spec-editor,
+    .id-input { transition: none; }
   }
 </style>
