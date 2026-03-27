@@ -362,6 +362,8 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--color-border);
   }
 
   .stat-row {
@@ -429,7 +431,7 @@
   }
 
   .budget-bar-track {
-    height: 5px;
+    height: 6px;
     background: var(--color-surface-elevated);
     border-radius: var(--radius-full);
     overflow: hidden;
