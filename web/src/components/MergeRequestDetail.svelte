@@ -960,6 +960,7 @@
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: var(--text-sm);
+    transition: color var(--transition-fast), border-color var(--transition-fast);
     font-family: var(--font-body);
     font-weight: 500;
     margin-bottom: -1px;

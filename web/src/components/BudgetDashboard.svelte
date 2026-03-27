@@ -159,6 +159,7 @@
     color: var(--color-text-secondary);
     font-size: var(--text-xs);
     cursor: pointer;
+    transition: color var(--transition-fast);
   }
   .btn-refresh:hover { color: var(--color-text); }
   .btn-refresh:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }

@@ -453,6 +453,7 @@
     color: var(--color-text-secondary);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast);
   }
   .btn-secondary:hover { border-color: var(--color-text-muted); color: var(--color-text); }
 
