@@ -92,6 +92,7 @@ impl ExtractionContext {
         Id::new(String::new())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_node(
         &self,
         node_type: NodeType,
