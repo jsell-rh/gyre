@@ -248,10 +248,12 @@
   }
 
   // ── Layout computation ─────────────────────────────────────────────────────
+  let layoutGeneration = 0;
   $effect(() => {
     const ns  = visibleNodes;
     const es  = visibleEdges;
     const eng = layoutEngine;
+    const gen = ++layoutGeneration;
 
     if (!ns.length) { nodePositionsMap = {}; return; }
 
@@ -265,9 +267,11 @@
     const h = svgEl?.clientHeight ?? 600;
 
     computeLayout(eng, ns, es, w, h).then(pos => {
+      if (gen !== layoutGeneration) return; // stale result
       nodePositionsMap = pos;
       layoutPending = false;
     }).catch(() => {
+      if (gen !== layoutGeneration) return; // stale result
       nodePositionsMap = columnLayout(ns);
       layoutPending = false;
     });

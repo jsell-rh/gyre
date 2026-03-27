@@ -812,23 +812,23 @@
       {:else}
         <div class="aibom-header">
           <div class="aibom-stat">
-            <span class="aibom-stat-value">{aibom.total_commits}</span>
+            <span class="aibom-stat-value">{aibom.total_commits ?? 0}</span>
             <span class="aibom-stat-label">AI Commits</span>
           </div>
           <div class="aibom-stat">
-            <span class="aibom-stat-value">{aibom.agents.length}</span>
+            <span class="aibom-stat-value">{(aibom.agents ?? []).length}</span>
             <span class="aibom-stat-label">Agents</span>
           </div>
           <div class="aibom-stat">
-            <span class="aibom-stat-value">{aibom.attested_percentage.toFixed(1)}%</span>
+            <span class="aibom-stat-value">{(aibom.attested_percentage ?? 0).toFixed(1)}%</span>
             <span class="aibom-stat-label">Attested</span>
           </div>
           <div class="aibom-stat aibom-version">
-            <span class="aibom-stat-label">AIBOM {aibom.aibom_version}</span>
+            <span class="aibom-stat-label">AIBOM {aibom.aibom_version ?? '?'}</span>
           </div>
         </div>
 
-        {#if aibom.agents.length === 0}
+        {#if (aibom.agents ?? []).length === 0}
           <EmptyState title="No AI commits" description="No agent-authored commits recorded for this repository." />
         {:else}
           <h3 class="aibom-section-title">Agent Contributions</h3>
@@ -841,8 +841,8 @@
             ]}
           >
             {#snippet children()}
-              {#each aibom.agents as agent (agent.id)}
-                {@const barPct = aibom.total_commits > 0 ? (agent.commit_count / aibom.total_commits * 100) : 0}
+              {#each (aibom.agents ?? []) as agent (agent.id)}
+                {@const barPct = (aibom.total_commits ?? 0) > 0 ? (agent.commit_count / aibom.total_commits * 100) : 0}
                 <tr>
                   <td class="agent-name-cell">
                     <div class="agent-name">{agent.name}</div>
@@ -861,7 +861,7 @@
             {/snippet}
           </Table>
 
-          {#if aibom.commits.length > 0}
+          {#if (aibom.commits ?? []).length > 0}
             <h3 class="aibom-section-title">Commit Attribution</h3>
             <Table
               columns={[
@@ -874,7 +874,7 @@
               ]}
             >
               {#snippet children()}
-                {#each aibom.commits as c (c.sha)}
+                {#each (aibom.commits ?? []) as c (c.sha)}
                   <tr>
                     <td><code class="sha">{shortSha(c.sha)}</code></td>
                     <td class="secondary-cell">{c.agent_id}</td>
@@ -923,7 +923,7 @@
                 <td><code class="sha">{c.change_id.slice(0, 8)}</code></td>
                 <td class="commit-msg-cell">{c.description || '(no description)'}</td>
                 <td class="secondary-cell">{c.author}</td>
-                <td class="secondary-cell">{c.bookmarks.join(', ') || '—'}</td>
+                <td class="secondary-cell">{(c.bookmarks ?? []).join(', ') || '—'}</td>
               </tr>
             {/each}
           {/snippet}
