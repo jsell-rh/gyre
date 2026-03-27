@@ -695,24 +695,26 @@
         {:else if tenantWorkspaces.length === 0}
           <EmptyState title="No workspaces" description="Create a workspace to get started." />
         {:else}
-          <table class="data-table">
-            <thead>
-              <tr><th scope="col">Name</th><th scope="col">Trust Level</th><th scope="col">Description</th></tr>
-            </thead>
-            <tbody>
-              {#each tenantWorkspaces as ws}
-                <tr tabindex="0" class="ws-row" onclick={() => navigate('workspace-detail', { workspace: ws })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('workspace-detail', { workspace: ws }); } }}>
-                  <td class="agent-name">{ws.name}</td>
-                  <td>
-                    <span class="trust-badge trust-{(ws.trust_level ?? 'autonomous').toLowerCase()}">
-                      {ws.trust_level ?? 'Autonomous'}
-                    </span>
-                  </td>
-                  <td class="dim">{ws.description ?? '—'}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr><th scope="col">Name</th><th scope="col">Trust Level</th><th scope="col">Description</th></tr>
+              </thead>
+              <tbody>
+                {#each tenantWorkspaces as ws}
+                  <tr tabindex="0" class="ws-row" onclick={() => navigate('workspace-detail', { workspace: ws })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('workspace-detail', { workspace: ws }); } }}>
+                    <td class="agent-name">{ws.name}</td>
+                    <td>
+                      <span class="trust-badge trust-{(ws.trust_level ?? 'autonomous').toLowerCase()}">
+                        {ws.trust_level ?? 'Autonomous'}
+                      </span>
+                    </td>
+                    <td class="dim">{ws.description ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
 
       {:else if tenantTab === 'compute'}
@@ -727,22 +729,24 @@
         {:else if tenantCompute.length === 0}
           <EmptyState title="No compute targets" description="Register local, Docker, or SSH compute targets." />
         {:else}
-          <table class="data-table">
-            <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
-            <tbody>
-              {#each tenantCompute as ct}
-                <tr>
-                  <td class="agent-name">{ct.name ?? ct.id}</td>
-                  <td><Badge value={ct.target_type ?? ct.type ?? 'local'} /></td>
-                  <td class="mono dim">{ct.host ?? ct.config?.host ?? '—'}</td>
-                  <td><Badge value={ct.status ?? 'active'} /></td>
-                  <td>
-                    <button class="kill-btn" onclick={() => deleteCompute(ct.id)}>Delete</button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+              <tbody>
+                {#each tenantCompute as ct}
+                  <tr>
+                    <td class="agent-name">{ct.name ?? ct.id}</td>
+                    <td><Badge value={ct.target_type ?? ct.type ?? 'local'} /></td>
+                    <td class="mono dim">{ct.host ?? ct.config?.host ?? '—'}</td>
+                    <td><Badge value={ct.status ?? 'active'} /></td>
+                    <td>
+                      <button class="kill-btn" onclick={() => deleteCompute(ct.id)}>Delete</button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
 
       {:else if tenantTab === 'budget'}
@@ -929,31 +933,33 @@
         {:else if wsMembers.length === 0}
           <EmptyState title="No members" description="Add members to grant access to this workspace." />
         {:else}
-          <table class="data-table">
-            <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Last Active</th><th scope="col">Actions</th></tr></thead>
-            <tbody>
-              {#each wsMembers as member}
-                <tr>
-                  <td>
-                    <div class="member-row">
-                      <div class="member-avatar">{(member.name ?? member.email ?? 'U')[0].toUpperCase()}</div>
-                      <div>
-                        <div class="agent-name">{member.name ?? member.email ?? member.user_id ?? '—'}</div>
-                        {#if member.email && member.name}<div class="dim">{member.email}</div>{/if}
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Last Active</th><th scope="col">Actions</th></tr></thead>
+              <tbody>
+                {#each wsMembers as member}
+                  <tr>
+                    <td>
+                      <div class="member-row">
+                        <div class="member-avatar">{(member.name ?? member.email ?? 'U')[0].toUpperCase()}</div>
+                        <div>
+                          <div class="agent-name">{member.name ?? member.email ?? member.user_id ?? '—'}</div>
+                          {#if member.email && member.name}<div class="dim">{member.email}</div>{/if}
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  <td><Badge value={member.role ?? 'member'} /></td>
-                  <td class="dim">{relativeTime(member.last_active ?? member.last_seen_at)}</td>
-                  <td>
-                    <button class="kill-btn" onclick={() => removeMember(member.id ?? member.user_id, member.name ?? member.email)}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+                    </td>
+                    <td><Badge value={member.role ?? 'member'} /></td>
+                    <td class="dim">{relativeTime(member.last_active ?? member.last_seen_at)}</td>
+                    <td>
+                      <button class="kill-btn" onclick={() => removeMember(member.id ?? member.user_id, member.name ?? member.email)}>
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
 
       {:else if wsTab === 'policies'}
@@ -1107,39 +1113,41 @@
         {:else if wsRepos.length === 0}
           <EmptyState title="No repositories" description="Create a repository or import one from a remote URL." />
         {:else}
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Status</th>
-                <th scope="col">Default Branch</th>
-                <th scope="col">Last Activity</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each wsRepos as repo}
-                {@const isArchived = (repo.status ?? '').toLowerCase() === 'archived'}
-                <tr
-                  tabindex="0"
-                  class="ws-row {isArchived ? 'archived-row' : ''}"
-                  onclick={() => navigate('admin', { type: 'repo', repoId: repo.id, repoName: repo.name, workspaceId })}
-                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('admin', { type: 'repo', repoId: repo.id, repoName: repo.name, workspaceId }); } }}
-                  aria-label="Open repo {repo.name}"
-                >
-                  <td class="agent-name">{repo.name}</td>
-                  <td>
-                    {#if isArchived}
-                      <Badge value="Archived" />
-                    {:else}
-                      <Badge value={repo.status ?? 'Active'} />
-                    {/if}
-                  </td>
-                  <td class="mono dim">{repo.default_branch ?? 'main'}</td>
-                  <td class="dim">{relativeTime(repo.updated_at ?? repo.created_at)}</td>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Default Branch</th>
+                  <th scope="col">Last Activity</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {#each wsRepos as repo}
+                  {@const isArchived = (repo.status ?? '').toLowerCase() === 'archived'}
+                  <tr
+                    tabindex="0"
+                    class="ws-row {isArchived ? 'archived-row' : ''}"
+                    onclick={() => navigate('admin', { type: 'repo', repoId: repo.id, repoName: repo.name, workspaceId })}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('admin', { type: 'repo', repoId: repo.id, repoName: repo.name, workspaceId }); } }}
+                    aria-label="Open repo {repo.name}"
+                  >
+                    <td class="agent-name">{repo.name}</td>
+                    <td>
+                      {#if isArchived}
+                        <Badge value="Archived" />
+                      {:else}
+                        <Badge value={repo.status ?? 'Active'} />
+                      {/if}
+                    </td>
+                    <td class="mono dim">{repo.default_branch ?? 'main'}</td>
+                    <td class="dim">{relativeTime(repo.updated_at ?? repo.created_at)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
       {/if}
 
@@ -1188,24 +1196,26 @@
         {:else if repoGates.length === 0}
           <EmptyState title="No gates configured" description="Add gates to require checks before merging." />
         {:else}
-          <table class="data-table">
-            <thead><tr><th scope="col">Name</th><th scope="col">Command</th><th scope="col">Timeout</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
-            <tbody>
-              {#each repoGates as gate}
-                <tr>
-                  <td class="agent-name">{gate.name}</td>
-                  <td class="mono dim">{gate.command ?? '—'}</td>
-                  <td class="dim">{gate.timeout_secs ?? gate.timeout ?? '—'}s</td>
-                  <td><Badge value={gate.enabled === false ? 'idle' : 'active'} /></td>
-                  <td>
-                    <button class="kill-btn" onclick={() => deleteGate(gate.id)} disabled={gateDeleting[gate.id]}>
-                      {gateDeleting[gate.id] ? 'Removing…' : 'Remove'}
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th scope="col">Name</th><th scope="col">Command</th><th scope="col">Timeout</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+              <tbody>
+                {#each repoGates as gate}
+                  <tr>
+                    <td class="agent-name">{gate.name}</td>
+                    <td class="mono dim">{gate.command ?? '—'}</td>
+                    <td class="dim">{gate.timeout_secs ?? gate.timeout ?? '—'}s</td>
+                    <td><Badge value={gate.enabled === false ? 'idle' : 'active'} /></td>
+                    <td>
+                      <button class="kill-btn" onclick={() => deleteGate(gate.id)} disabled={gateDeleting[gate.id]}>
+                        {gateDeleting[gate.id] ? 'Removing…' : 'Remove'}
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
 
       {:else if repoTab === 'policies'}
@@ -2140,7 +2150,7 @@
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-lg);
     padding: var(--space-6);
-    min-width: 360px;
+    min-width: min(360px, calc(100vw - 2rem));
     max-width: 480px;
     width: 100%;
     max-height: 90vh;

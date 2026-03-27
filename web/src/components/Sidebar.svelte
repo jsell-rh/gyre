@@ -350,4 +350,29 @@
       transition: none;
     }
   }
+
+  @media (max-width: 768px) {
+    .sidebar {
+      width: var(--sidebar-collapsed);
+      min-width: var(--sidebar-collapsed);
+    }
+
+    .sidebar .logo {
+      padding: 0 var(--space-1);
+      justify-content: center;
+    }
+
+    .sidebar .collapse-btn {
+      margin-left: 0;
+    }
+
+    .nav-label,
+    .nav-shortcut,
+    .nav-badge,
+    .logo-text,
+    .logo-mark,
+    .version-text {
+      display: none;
+    }
+  }
 </style>
