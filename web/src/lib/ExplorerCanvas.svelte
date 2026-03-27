@@ -982,7 +982,7 @@
   .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; padding: 0; transition: color var(--transition-fast); }
   .close-btn:hover { color: var(--color-text); }
   .panel-name { display: block; font-size: var(--text-base); font-weight: 600; color: var(--color-text); font-family: var(--font-mono); word-break: break-all; }
-  .panel-qualified { display: block; font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); margin-top: 2px; word-break: break-all; }
+  .panel-qualified { display: block; font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); margin-top: var(--space-1); word-break: break-all; }
   .panel-body { flex: 1; overflow-y: auto; padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
   .panel-row { display: flex; align-items: flex-start; gap: var(--space-2); }
   .panel-section { display: flex; flex-direction: column; gap: var(--space-1); }

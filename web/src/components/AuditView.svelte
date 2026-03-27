@@ -209,7 +209,9 @@
             {/each}
           </div>
         {:else if error}
-          <EmptyState title="Failed to load audit events" description={error} />
+          <div role="alert">
+            <EmptyState title="Failed to load audit events" description={error} />
+          </div>
         {:else if events.length === 0}
           <EmptyState
             title="No audit events"
