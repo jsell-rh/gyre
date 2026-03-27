@@ -242,7 +242,7 @@
   </div>
 
   {#if showSpawnModal}
-    <div class="modal-backdrop" aria-hidden="true" onclick={closeSpawnModal}></div>
+    <div class="modal-backdrop" role="presentation" onclick={closeSpawnModal}></div>
     <div
       class="modal"
       role="dialog"
@@ -557,7 +557,7 @@
   }
 
   .pill:hover { border-color: var(--color-border-strong); color: var(--color-text); }
-  .pill.active { background: color-mix(in srgb, var(--color-primary) 12%, transparent); border-color: var(--color-primary); color: var(--color-primary); }
+  .pill.active { background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent); border-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
 
   .content {
     flex: 1;
@@ -589,7 +589,7 @@
   }
 
   .agent-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .agent-card.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
+  .agent-card.selected { border-color: var(--color-focus, #4db0ff); background: color-mix(in srgb, var(--color-focus, #4db0ff) 4%, transparent); }
   .skeleton-card { cursor: default; }
   .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
 
@@ -629,7 +629,7 @@
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .muted { color: var(--color-text-secondary); font-size: var(--text-xs); }
 
-  :global(tr.row-selected td) { background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
+  :global(tr.row-selected td) { background: color-mix(in srgb, var(--color-focus, #4db0ff) 4%, transparent); }
 
   .detail-panel {
     background: var(--color-surface);
@@ -675,7 +675,7 @@
   }
 
   .dtab:hover { color: var(--color-text); }
-  .dtab.active { border-bottom-color: var(--color-primary); color: var(--color-primary); }
+  .dtab.active { border-bottom-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
 
   .logs-panel {
     display: flex;
@@ -886,7 +886,7 @@
   .link-btn {
     background: none;
     border: none;
-    color: var(--color-primary);
+    color: var(--color-link);
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);

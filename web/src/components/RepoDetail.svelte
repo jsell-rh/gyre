@@ -1100,7 +1100,7 @@
   }
 
   .hot-file-row:hover { background: var(--color-surface-elevated); }
-  .hot-file-row.selected { border-color: var(--color-primary); background: var(--color-surface-elevated); }
+  .hot-file-row.selected { border-color: var(--color-focus, #4db0ff); background: var(--color-surface-elevated); }
 
   .hot-file-path {
     font-family: var(--font-mono);
@@ -1469,7 +1469,7 @@
 
   .commit-bar {
     height: 6px;
-    background: var(--color-primary);
+    background: var(--color-link);
     border-radius: 3px;
     min-width: 2px;
     flex-shrink: 0;
@@ -1501,6 +1501,9 @@
     .back-btn,
     .copy-btn,
     .hot-file-row,
+    .gate-del-btn,
+    .abac-remove-btn,
+    .branch-select,
     .policy-btn,
     .jj-btn { transition: none; }
   }
