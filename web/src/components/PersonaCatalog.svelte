@@ -129,7 +129,7 @@
   {:else if personas.length === 0}
     <EmptyState
       title="No personas yet"
-      message="Create a persona to define reusable agent configurations with scoped capabilities."
+      description="Create a persona to define reusable agent configurations with scoped capabilities."
     />
   {:else}
     <div class="grid">
