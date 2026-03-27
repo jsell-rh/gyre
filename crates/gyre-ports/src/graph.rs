@@ -27,6 +27,12 @@ pub trait GraphPort: Send + Sync {
     async fn list_edges(&self, repo_id: &Id, edge_type: Option<EdgeType>)
         -> Result<Vec<GraphEdge>>;
 
+    /// Delete a single node by ID (used during incremental graph updates).
+    async fn delete_node(&self, id: &Id) -> Result<()>;
+
+    /// Delete a single edge by ID (used during incremental graph updates).
+    async fn delete_edge(&self, id: &Id) -> Result<()>;
+
     /// Delete all nodes for a repo (e.g. before a full re-index).
     async fn delete_nodes_by_repo(&self, repo_id: &Id) -> Result<u64>;
 

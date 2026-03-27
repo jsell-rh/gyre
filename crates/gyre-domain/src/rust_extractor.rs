@@ -127,6 +127,11 @@ impl ExtractionContext {
             complexity: None,
             churn_count_30d: 0,
             test_coverage: None,
+            // Time-travel fields are initialised to 0 / None here;
+            // graph_extraction.rs fills in real timestamps after extraction.
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
         }
     }
 
@@ -148,6 +153,9 @@ impl ExtractionContext {
             target_id,
             edge_type,
             metadata,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
         }
     }
 

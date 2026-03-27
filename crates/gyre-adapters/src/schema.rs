@@ -762,6 +762,9 @@ diesel::table! {
         complexity -> Nullable<Integer>,
         churn_count_30d -> Integer,
         test_coverage -> Nullable<Double>,
+        first_seen_at -> BigInt,
+        last_seen_at -> BigInt,
+        deleted_at -> Nullable<BigInt>,
     }
 }
 
@@ -773,6 +776,9 @@ diesel::table! {
         target_id -> Text,
         edge_type -> Text,
         metadata -> Nullable<Text>,
+        first_seen_at -> BigInt,
+        last_seen_at -> BigInt,
+        deleted_at -> Nullable<BigInt>,
     }
 }
 

@@ -11,11 +11,12 @@
 //! inbox notifications for all Admin and Developer workspace members.
 
 use gyre_common::{
-    graph::{ArchitecturalDelta, DeltaNodeEntry},
+    graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphNode},
     Id, Notification, NotificationType,
 };
 use gyre_domain::WorkspaceRole;
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -183,73 +184,162 @@ async fn do_extract(
         return Ok(());
     }
 
-    let node_count = nodes.len();
-    let edge_count = edges.len();
     let repo_id_parsed = Id::new(repo_id.to_string());
 
-    // --- Step 3: clear stale data, then persist the new snapshot --------------
+    // --- Step 3: load existing graph state for incremental diff ---------------
 
-    graph_store.delete_nodes_by_repo(&repo_id_parsed).await?;
-    graph_store.delete_edges_by_repo(&repo_id_parsed).await?;
+    let old_nodes = graph_store.list_nodes(&repo_id_parsed, None).await?;
+    let old_edges = graph_store.list_edges(&repo_id_parsed, None).await?;
 
-    for node in &nodes {
-        graph_store.create_node(node.clone()).await?;
-    }
-    for edge in edges {
-        graph_store.create_edge(edge).await?;
-    }
+    // Build lookup map: qualified_name → existing GraphNode
+    let old_node_map: HashMap<String, GraphNode> = old_nodes
+        .into_iter()
+        .map(|n| (n.qualified_name.clone(), n))
+        .collect();
 
-    // --- Step 4: record an architectural delta --------------------------------
+    // Build lookup map: edge key → existing GraphEdge
+    let old_edge_map: HashMap<(String, String, String), gyre_common::graph::GraphEdge> = old_edges
+        .into_iter()
+        .map(|e| {
+            let key = (
+                e.source_id.as_str().to_string(),
+                e.target_id.as_str().to_string(),
+                edge_type_key(&e.edge_type).to_string(),
+            );
+            (key, e)
+        })
+        .collect();
 
+    // Timestamp used for all time-travel fields in this extraction pass.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    // When agent context is present, build a richer delta_json with nodes_added
-    // (filtered to spec_path-matching nodes when possible) for the divergence detector.
-    let (delta_json, delta_agent_id, delta_spec_ref) = if let Some(ref ctx) = agent_ctx {
-        let spec_ref_str = ctx.spec_ref.as_str();
+    // --- Step 4: compute node diff + stabilise IDs ----------------------------
 
-        // Collect compact node entries for divergence comparison.
-        // Prefer nodes whose spec_path matches the agent's spec_ref;
-        // fall back to ALL nodes if none match (entire extraction may implement the spec).
-        let spec_matched: Vec<DeltaNodeEntry> = nodes
-            .iter()
-            .filter(|n| n.spec_path.as_deref() == Some(spec_ref_str))
-            .map(|n| DeltaNodeEntry {
-                name: n.name.clone(),
-                node_type: format!("{:?}", n.node_type).to_lowercase(),
-                qualified_name: n.qualified_name.clone(),
-            })
-            .collect();
+    // Maps newly-generated extractor UUID → existing stable UUID (for edge remapping).
+    let mut id_remap: HashMap<String, String> = HashMap::new();
 
-        let nodes_added = if spec_matched.is_empty() {
-            nodes
-                .iter()
-                .map(|n| DeltaNodeEntry {
-                    name: n.name.clone(),
-                    node_type: format!("{:?}", n.node_type).to_lowercase(),
-                    qualified_name: n.qualified_name.clone(),
-                })
-                .collect::<Vec<_>>()
+    // Delta tracking
+    let mut delta_nodes_added: Vec<DeltaNodeEntry> = Vec::new();
+    let mut delta_nodes_modified: Vec<serde_json::Value> = Vec::new();
+    let mut new_qn_set: HashSet<String> = HashSet::new();
+
+    let mut final_nodes: Vec<GraphNode> = nodes;
+
+    for node in &mut final_nodes {
+        new_qn_set.insert(node.qualified_name.clone());
+
+        // Always stamp last_seen_at and clear any prior soft-delete.
+        node.last_seen_at = now;
+        node.deleted_at = None;
+
+        if let Some(old) = old_node_map.get(&node.qualified_name) {
+            // Existing node: remap ID, preserve immutable creation/first-seen metadata.
+            id_remap.insert(node.id.as_str().to_string(), old.id.as_str().to_string());
+            node.id = old.id.clone();
+            node.created_sha = old.created_sha.clone();
+            node.created_at = old.created_at;
+            node.first_seen_at = old.first_seen_at;
+
+            let changes = diff_nodes(old, node);
+            if !changes.is_empty() {
+                delta_nodes_modified.push(serde_json::json!({
+                    "qualified_name": node.qualified_name,
+                    "field_changes": changes.iter().map(|fc| serde_json::json!({
+                        "field": fc.field,
+                        "old_value": fc.old_value,
+                        "new_value": fc.new_value,
+                    })).collect::<Vec<_>>(),
+                }));
+            }
         } else {
-            spec_matched
-        };
+            // New node: set first_seen_at.
+            node.first_seen_at = now;
+            delta_nodes_added.push(DeltaNodeEntry {
+                name: node.name.clone(),
+                node_type: format!("{:?}", node.node_type).to_lowercase(),
+                qualified_name: node.qualified_name.clone(),
+            });
+        }
+    }
 
-        // TODO(TASK-264-followup): nodes_modified field-level change detection is deferred.
-        // Implementing it requires diffing the current extraction against the previous delta's
-        // nodes_added, which means retaining the prior state between pushes.  The FieldChange
-        // struct in gyre-common/src/graph.rs is wired for this when that work lands.
-        // For now we store an empty array so the divergence checker can focus on nodes_added.
+    // Nodes in old but not in new → soft-delete.
+    let mut delta_nodes_removed: Vec<String> = Vec::new();
+    for (qn, old_node) in &old_node_map {
+        if !new_qn_set.contains(qn) {
+            delta_nodes_removed.push(qn.clone());
+            graph_store.delete_node(&old_node.id).await?;
+        }
+    }
+
+    // Upsert ALL nodes that appear in the new extraction (updates last_seen_at for unchanged ones).
+    for node in &final_nodes {
+        graph_store.create_node(node.clone()).await?;
+    }
+
+    // --- Step 5: compute and apply edge diff ----------------------------------
+
+    // Remap edge source/target IDs to stable existing IDs where applicable.
+    let mut new_edge_map: HashMap<(String, String, String), gyre_common::graph::GraphEdge> =
+        HashMap::new();
+    for mut edge in edges {
+        if let Some(stable) = id_remap.get(edge.source_id.as_str()) {
+            edge.source_id = Id::new(stable.clone());
+        }
+        if let Some(stable) = id_remap.get(edge.target_id.as_str()) {
+            edge.target_id = Id::new(stable.clone());
+        }
+        edge.last_seen_at = now;
+        edge.deleted_at = None;
+        let key = (
+            edge.source_id.as_str().to_string(),
+            edge.target_id.as_str().to_string(),
+            edge_type_key(&edge.edge_type).to_string(),
+        );
+        new_edge_map.insert(key, edge);
+    }
+
+    let mut edges_added_count: usize = 0;
+    let mut edges_removed_count: usize = 0;
+
+    for (key, edge) in new_edge_map.iter_mut() {
+        if let Some(old) = old_edge_map.get(key) {
+            // Existing edge: preserve stable ID and first_seen_at, update last_seen_at.
+            edge.id = old.id.clone();
+            edge.first_seen_at = old.first_seen_at;
+            graph_store.create_edge(edge.clone()).await?;
+        } else {
+            // New edge.
+            edge.first_seen_at = now;
+            graph_store.create_edge(edge.clone()).await?;
+            edges_added_count += 1;
+        }
+    }
+    for (key, edge) in &old_edge_map {
+        if !new_edge_map.contains_key(key) {
+            graph_store.delete_edge(&edge.id).await?;
+            edges_removed_count += 1;
+        }
+    }
+
+    let node_count = final_nodes.len();
+    let edge_count = new_edge_map.len();
+
+    // --- Step 6: record an architectural delta --------------------------------
+
+    let (delta_json, delta_agent_id, delta_spec_ref) = if let Some(ref ctx) = agent_ctx {
         let json = serde_json::json!({
             "nodes_extracted": node_count,
             "edges_extracted": edge_count,
-            "nodes_added": nodes_added,
-            "nodes_modified": serde_json::Value::Array(vec![]),
+            "nodes_added": delta_nodes_added,
+            "nodes_removed": delta_nodes_removed,
+            "nodes_modified": delta_nodes_modified,
+            "edges_added": edges_added_count,
+            "edges_removed": edges_removed_count,
         })
         .to_string();
-
         (
             json,
             Some(Id::new(ctx.agent_id.clone())),
@@ -259,6 +349,11 @@ async fn do_extract(
         let json = serde_json::json!({
             "nodes_extracted": node_count,
             "edges_extracted": edge_count,
+            "nodes_added": delta_nodes_added,
+            "nodes_removed": delta_nodes_removed,
+            "nodes_modified": delta_nodes_modified.len(),
+            "edges_added": edges_added_count,
+            "edges_removed": edges_removed_count,
         })
         .to_string();
         (json, None, None)
@@ -488,6 +583,112 @@ pub async fn check_divergence(
     Ok(())
 }
 
+/// Return a stable string key for an edge type (used as HashMap key in edge diff).
+fn edge_type_key(et: &EdgeType) -> &'static str {
+    match et {
+        EdgeType::Contains => "contains",
+        EdgeType::Implements => "implements",
+        EdgeType::DependsOn => "depends_on",
+        EdgeType::Calls => "calls",
+        EdgeType::FieldOf => "field_of",
+        EdgeType::Returns => "returns",
+        EdgeType::RoutesTo => "routes_to",
+        EdgeType::Renders => "renders",
+        EdgeType::PersistsTo => "persists_to",
+        EdgeType::GovernedBy => "governed_by",
+        EdgeType::ProducedBy => "produced_by",
+    }
+}
+
+/// Compute field-level differences between an old and new version of the same node.
+///
+/// Compares the mutable fields that extraction can produce — skips ID, repo_id,
+/// creation metadata (preserved from old), and metrics not extracted by the
+/// RustExtractor (complexity, churn, coverage).
+fn diff_nodes(old: &GraphNode, new: &GraphNode) -> Vec<FieldChange> {
+    let mut changes: Vec<FieldChange> = Vec::new();
+
+    let old_nt = format!("{:?}", old.node_type).to_lowercase();
+    let new_nt = format!("{:?}", new.node_type).to_lowercase();
+    if old_nt != new_nt {
+        changes.push(FieldChange {
+            field: "node_type".to_string(),
+            old_value: Some(old_nt),
+            new_value: Some(new_nt),
+        });
+    }
+
+    if old.name != new.name {
+        changes.push(FieldChange {
+            field: "name".to_string(),
+            old_value: Some(old.name.clone()),
+            new_value: Some(new.name.clone()),
+        });
+    }
+
+    if old.file_path != new.file_path {
+        changes.push(FieldChange {
+            field: "file_path".to_string(),
+            old_value: Some(old.file_path.clone()),
+            new_value: Some(new.file_path.clone()),
+        });
+    }
+
+    if old.line_start != new.line_start {
+        changes.push(FieldChange {
+            field: "line_start".to_string(),
+            old_value: Some(old.line_start.to_string()),
+            new_value: Some(new.line_start.to_string()),
+        });
+    }
+
+    if old.line_end != new.line_end {
+        changes.push(FieldChange {
+            field: "line_end".to_string(),
+            old_value: Some(old.line_end.to_string()),
+            new_value: Some(new.line_end.to_string()),
+        });
+    }
+
+    let old_vis = format!("{:?}", old.visibility).to_lowercase();
+    let new_vis = format!("{:?}", new.visibility).to_lowercase();
+    if old_vis != new_vis {
+        changes.push(FieldChange {
+            field: "visibility".to_string(),
+            old_value: Some(old_vis),
+            new_value: Some(new_vis),
+        });
+    }
+
+    if old.doc_comment != new.doc_comment {
+        changes.push(FieldChange {
+            field: "doc_comment".to_string(),
+            old_value: old.doc_comment.clone(),
+            new_value: new.doc_comment.clone(),
+        });
+    }
+
+    if old.spec_path != new.spec_path {
+        changes.push(FieldChange {
+            field: "spec_path".to_string(),
+            old_value: old.spec_path.clone(),
+            new_value: new.spec_path.clone(),
+        });
+    }
+
+    let old_conf = format!("{:?}", old.spec_confidence).to_lowercase();
+    let new_conf = format!("{:?}", new.spec_confidence).to_lowercase();
+    if old_conf != new_conf {
+        changes.push(FieldChange {
+            field: "spec_confidence".to_string(),
+            old_value: Some(old_conf),
+            new_value: Some(new_conf),
+        });
+    }
+
+    changes
+}
+
 /// Parse `nodes_added` from a delta_json string.
 ///
 /// Returns an empty vec if the field is absent or malformed (backward-compatible
@@ -616,5 +817,114 @@ mod tests {
     #[test]
     fn extract_nodes_added_from_malformed_json_returns_empty() {
         assert!(extract_nodes_added("not json at all").is_empty());
+    }
+
+    // ── Incremental diff helpers ───────────────────────────────────────────────
+
+    use gyre_common::{
+        graph::{GraphNode, NodeType, SpecConfidence, Visibility},
+        Id,
+    };
+
+    fn make_graph_node(id: &str, qname: &str) -> GraphNode {
+        GraphNode {
+            id: Id::new(id),
+            repo_id: Id::new("repo1"),
+            node_type: NodeType::Function,
+            name: id.to_string(),
+            qualified_name: qname.to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line_start: 10,
+            line_end: 20,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "sha1".to_string(),
+            last_modified_by: None,
+            last_modified_at: 1000,
+            created_sha: "sha1".to_string(),
+            created_at: 1000,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 1000,
+            last_seen_at: 1000,
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn diff_nodes_no_changes_returns_empty() {
+        let node = make_graph_node("foo", "crate::foo");
+        let changes = diff_nodes(&node, &node);
+        assert!(
+            changes.is_empty(),
+            "identical nodes should produce no diffs"
+        );
+    }
+
+    #[test]
+    fn diff_nodes_file_path_change_detected() {
+        let old = make_graph_node("foo", "crate::foo");
+        let mut new = make_graph_node("foo", "crate::foo");
+        new.file_path = "src/other.rs".to_string();
+
+        let changes = diff_nodes(&old, &new);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "file_path");
+        assert_eq!(changes[0].old_value.as_deref(), Some("src/lib.rs"));
+        assert_eq!(changes[0].new_value.as_deref(), Some("src/other.rs"));
+    }
+
+    #[test]
+    fn diff_nodes_line_range_change_detected() {
+        let old = make_graph_node("bar", "crate::bar");
+        let mut new = make_graph_node("bar", "crate::bar");
+        new.line_start = 50;
+        new.line_end = 80;
+
+        let changes = diff_nodes(&old, &new);
+        let fields: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(fields.contains(&"line_start"), "expected line_start diff");
+        assert!(fields.contains(&"line_end"), "expected line_end diff");
+    }
+
+    #[test]
+    fn diff_nodes_node_type_change_detected() {
+        let old = make_graph_node("MyTrait", "crate::MyTrait");
+        let mut new = make_graph_node("MyTrait", "crate::MyTrait");
+        new.node_type = NodeType::Interface;
+
+        let changes = diff_nodes(&old, &new);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "node_type");
+        assert_eq!(changes[0].old_value.as_deref(), Some("function"));
+        assert_eq!(changes[0].new_value.as_deref(), Some("interface"));
+    }
+
+    #[test]
+    fn diff_nodes_doc_comment_added() {
+        let old = make_graph_node("baz", "crate::baz");
+        let mut new = make_graph_node("baz", "crate::baz");
+        new.doc_comment = Some("Now documented.".to_string());
+
+        let changes = diff_nodes(&old, &new);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "doc_comment");
+        assert!(changes[0].old_value.is_none());
+        assert_eq!(changes[0].new_value.as_deref(), Some("Now documented."));
+    }
+
+    #[test]
+    fn diff_nodes_multiple_fields_changed() {
+        let old = make_graph_node("qux", "crate::qux");
+        let mut new = make_graph_node("qux", "crate::qux");
+        new.file_path = "src/new.rs".to_string();
+        new.line_start = 1;
+        new.doc_comment = Some("doc".to_string());
+
+        let changes = diff_nodes(&old, &new);
+        assert_eq!(changes.len(), 3);
     }
 }
