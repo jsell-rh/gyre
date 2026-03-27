@@ -167,8 +167,9 @@
 
     <!-- About -->
     <section class="info-card about-card" aria-labelledby="settings-about">
+      <h3 id="settings-about" class="sr-only">{$t('settings.about.title', { default: 'About' })}</h3>
       <div class="gyre-logo">
-        <span class="logo-text" id="settings-about">Gyre</span>
+        <span class="logo-text" aria-hidden="true">Gyre</span>
         <span class="logo-sub">{$t('settings.about.tagline')}</span>
       </div>
       <p class="about-desc">
@@ -227,9 +228,7 @@
     transition: border-color var(--transition-fast);
   }
 
-  .info-card:hover {
-    border-color: var(--color-border-strong);
-  }
+
 
   .card-header {
     display: flex;
@@ -339,7 +338,7 @@
   .ws-status-text {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
   }
 
   .ws-label {
@@ -469,7 +468,6 @@
 
   .lang-select:focus:not(:focus-visible) {
     outline: none;
-    border-color: var(--color-primary);
   }
   .lang-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
@@ -487,6 +485,9 @@
     cursor: pointer;
   }
   .btn-retry:hover { background: var(--color-surface-hover); }
+  .btn-retry:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
     .ws-dot.pulse { animation: none; }
