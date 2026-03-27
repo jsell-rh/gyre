@@ -486,13 +486,15 @@
   async function importRepo() {
     importRepoLoading = true;
     try {
+      // Server expects: url (not clone_url), name (required), interval_secs (not sync_interval)
+      const inferredName = importRepoForm.name || importRepoForm.clone_url.split('/').pop()?.replace(/\.git$/, '') || 'mirror';
       const body = {
-        clone_url: importRepoForm.clone_url,
+        url: importRepoForm.clone_url,
+        name: inferredName,
         workspace_id: workspaceId,
       };
-      if (importRepoForm.name) body.name = importRepoForm.name;
       if (importRepoForm.default_branch) body.default_branch = importRepoForm.default_branch;
-      if (importRepoForm.sync_interval) body.sync_interval = Number(importRepoForm.sync_interval);
+      if (importRepoForm.sync_interval) body.interval_secs = Number(importRepoForm.sync_interval);
       if (importRepoForm.auth && importRepoForm.auth !== 'none') body.auth_type = importRepoForm.auth;
       const newRepo = await api.createMirrorRepo(body);
       wsRepos = [...wsRepos, newRepo];
