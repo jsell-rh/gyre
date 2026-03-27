@@ -52,8 +52,11 @@ struct AgentRow {
     tenant_id: String,
     spawned_by: Option<String>,
     workspace_id: String,
+    #[allow(dead_code)]
     usage_tokens_input: Option<i64>,
+    #[allow(dead_code)]
     usage_tokens_output: Option<i64>,
+    #[allow(dead_code)]
     usage_cost_usd: Option<f64>,
 }
 
