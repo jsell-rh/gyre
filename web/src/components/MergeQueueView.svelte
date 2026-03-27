@@ -12,6 +12,7 @@
   let graph = $state(null);
   let graphLoading = $state(false);
   let viewMode = $state('lanes'); // 'lanes' | 'dag'
+  let initialLoad = $state(true);
 
   $effect(() => {
     load();
@@ -26,6 +27,7 @@
       error = e.message;
     } finally {
       loading = false;
+      initialLoad = false;
     }
   }
 
@@ -104,7 +106,7 @@
     </div>
   </div>
 
-  <span class="sr-only" aria-live="polite">{loading ? '' : 'Merge queue loaded'}</span>
+  <span class="sr-only" aria-live="polite">{!initialLoad && !loading ? 'Merge queue loaded' : ''}</span>
   <div class="scroll" aria-busy={loading}>
     {#if loading}
       <div class="skeleton-panel">
@@ -116,6 +118,7 @@
       <div class="error-msg" role="alert">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
         {error}
+        <button class="retry-btn" onclick={load}>Retry</button>
       </div>
     {:else if entries.length === 0}
       <EmptyState
@@ -416,6 +419,25 @@
     font-size: var(--text-sm);
     padding: var(--space-4);
   }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-body);
+    white-space: nowrap;
+    margin-left: auto;
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   /* Flow lanes */
   .flow-lanes {
