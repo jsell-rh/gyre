@@ -288,11 +288,11 @@
 
   .speed-controls {
     display: flex;
-    gap: 2px;
+    gap: var(--space-0, 2px);
   }
 
   .speed-btn {
-    padding: 2px 6px;
+    padding: var(--space-0, 2px) var(--space-2);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);

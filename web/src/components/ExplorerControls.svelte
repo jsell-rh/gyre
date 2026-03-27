@@ -457,11 +457,11 @@
   /* Tab switcher (Architecture / Code) */
   .tab-switcher {
     display: flex;
-    gap: 2px;
+    gap: var(--space-0, 2px);
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
-    padding: 2px;
+    padding: var(--space-0, 2px);
   }
 
   .tab-btn {
@@ -539,7 +539,7 @@
     position: absolute;
     right: var(--space-2);
     pointer-events: none;
-    font-size: 10px;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
   }
 
@@ -548,7 +548,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 4px var(--space-3);
+    padding: var(--space-1) var(--space-3);
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
@@ -570,7 +570,7 @@
   }
 
   .icon-btn {
-    padding: 4px var(--space-2);
+    padding: var(--space-1) var(--space-2);
   }
 
   /* Search */
@@ -611,8 +611,8 @@
     border: none;
     color: var(--color-text-muted);
     cursor: pointer;
-    font-size: 11px;
-    padding: 0 2px;
+    font-size: var(--text-xs);
+    padding: 0 var(--space-0, 2px);
     line-height: 1;
   }
 
@@ -622,8 +622,8 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 1px 4px;
+    border-radius: var(--radius-sm, 3px);
+    padding: var(--space-0, 2px) var(--space-1);
     font-family: var(--font-mono);
     flex-shrink: 0;
   }
@@ -651,7 +651,7 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     outline: none;
-    padding: 4px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     width: 200px;
   }
 
@@ -664,7 +664,7 @@
     border-radius: 0;
     background: var(--color-surface-elevated);
     font-size: var(--text-xs);
-    padding: 4px var(--space-3);
+    padding: var(--space-1) var(--space-3);
   }
 
   /* Save view button */

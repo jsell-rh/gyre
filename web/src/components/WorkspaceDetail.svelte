@@ -527,7 +527,7 @@
   .trust-badge {
     font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px 8px;
+    padding: var(--space-0, 2px) var(--space-2);
     border-radius: 999px;
     text-transform: capitalize;
   }
