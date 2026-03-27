@@ -128,10 +128,17 @@ fn make_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         complexity: None,
         churn_count_30d: 0,
         test_coverage: None,
+        first_seen_at: now,
+        last_seen_at: now,
+        deleted_at: None,
     }
 }
 
 fn make_edge(repo_id: &str, src: &Id, tgt: &Id, edge_type: EdgeType) -> GraphEdge {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     GraphEdge {
         id: Id::new(uuid::Uuid::new_v4().to_string()),
         repo_id: Id::new(repo_id),
@@ -139,6 +146,9 @@ fn make_edge(repo_id: &str, src: &Id, tgt: &Id, edge_type: EdgeType) -> GraphEdg
         target_id: tgt.clone(),
         edge_type,
         metadata: None,
+        first_seen_at: now,
+        last_seen_at: now,
+        deleted_at: None,
     }
 }
 

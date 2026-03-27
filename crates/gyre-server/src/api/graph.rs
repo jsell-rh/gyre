@@ -1175,10 +1175,14 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         complexity: None,
         churn_count_30d: 0,
         test_coverage: None,
+        first_seen_at: now,
+        last_seen_at: now,
+        deleted_at: None,
     }
 }
 
 fn _new_edge(repo_id: &str, source_id: &Id, target_id: &Id, edge_type: EdgeType) -> GraphEdge {
+    let now = now_secs();
     GraphEdge {
         id: Id::new(uuid::Uuid::new_v4().to_string()),
         repo_id: Id::new(repo_id),
@@ -1186,6 +1190,9 @@ fn _new_edge(repo_id: &str, source_id: &Id, target_id: &Id, edge_type: EdgeType)
         target_id: target_id.clone(),
         edge_type,
         metadata: None,
+        first_seen_at: now,
+        last_seen_at: now,
+        deleted_at: None,
     }
 }
 

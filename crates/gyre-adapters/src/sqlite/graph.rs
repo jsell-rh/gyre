@@ -144,6 +144,9 @@ struct GraphNodeRow {
     complexity: Option<i32>,
     churn_count_30d: i32,
     test_coverage: Option<f64>,
+    first_seen_at: i64,
+    last_seen_at: i64,
+    deleted_at: Option<i64>,
 }
 
 impl GraphNodeRow {
@@ -169,6 +172,9 @@ impl GraphNodeRow {
             complexity: self.complexity.map(|c| c as u32),
             churn_count_30d: self.churn_count_30d as u32,
             test_coverage: self.test_coverage,
+            first_seen_at: self.first_seen_at as u64,
+            last_seen_at: self.last_seen_at as u64,
+            deleted_at: self.deleted_at.map(|t| t as u64),
         })
     }
 }
@@ -196,6 +202,9 @@ struct NewGraphNodeRow<'a> {
     complexity: Option<i32>,
     churn_count_30d: i32,
     test_coverage: Option<f64>,
+    first_seen_at: i64,
+    last_seen_at: i64,
+    deleted_at: Option<i64>,
 }
 
 #[derive(Queryable, Selectable)]
@@ -208,6 +217,9 @@ struct GraphEdgeRow {
     target_id: String,
     edge_type: String,
     metadata: Option<String>,
+    first_seen_at: i64,
+    last_seen_at: i64,
+    deleted_at: Option<i64>,
 }
 
 impl GraphEdgeRow {
@@ -219,6 +231,9 @@ impl GraphEdgeRow {
             target_id: Id::new(self.target_id),
             edge_type: str_to_edge_type(&self.edge_type)?,
             metadata: self.metadata,
+            first_seen_at: self.first_seen_at as u64,
+            last_seen_at: self.last_seen_at as u64,
+            deleted_at: self.deleted_at.map(|t| t as u64),
         })
     }
 }
@@ -232,6 +247,9 @@ struct NewGraphEdgeRow<'a> {
     target_id: &'a str,
     edge_type: &'a str,
     metadata: Option<&'a str>,
+    first_seen_at: i64,
+    last_seen_at: i64,
+    deleted_at: Option<i64>,
 }
 
 #[derive(Queryable, Selectable)]
@@ -302,6 +320,9 @@ impl GraphPort for SqliteStorage {
                 complexity: node.complexity.map(|c| c as i32),
                 churn_count_30d: node.churn_count_30d as i32,
                 test_coverage: node.test_coverage,
+                first_seen_at: node.first_seen_at as i64,
+                last_seen_at: node.last_seen_at as i64,
+                deleted_at: node.deleted_at.map(|t| t as i64),
             };
             diesel::insert_into(graph_nodes::table)
                 .values(&row)
@@ -324,6 +345,10 @@ impl GraphPort for SqliteStorage {
                     graph_nodes::complexity.eq(row.complexity),
                     graph_nodes::churn_count_30d.eq(row.churn_count_30d),
                     graph_nodes::test_coverage.eq(row.test_coverage),
+                    // first_seen_at is immutable — never updated on conflict.
+                    graph_nodes::last_seen_at.eq(row.last_seen_at),
+                    // Clear deleted_at when a node reappears after removal.
+                    graph_nodes::deleted_at.eq(row.deleted_at),
                 ))
                 .execute(&mut *conn)
                 .context("insert graph node")?;
@@ -357,15 +382,18 @@ impl GraphPort for SqliteStorage {
         let nt_str = node_type.as_ref().map(node_type_to_str).map(str::to_owned);
         tokio::task::spawn_blocking(move || -> Result<Vec<GraphNode>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Always filter out soft-deleted nodes (deleted_at IS NULL = active).
             let rows = if let Some(nt) = nt_str {
                 graph_nodes::table
                     .filter(graph_nodes::repo_id.eq(repo_id.as_str()))
                     .filter(graph_nodes::node_type.eq(&nt))
+                    .filter(graph_nodes::deleted_at.is_null())
                     .load::<GraphNodeRow>(&mut *conn)
                     .context("list graph nodes by type")?
             } else {
                 graph_nodes::table
                     .filter(graph_nodes::repo_id.eq(repo_id.as_str()))
+                    .filter(graph_nodes::deleted_at.is_null())
                     .load::<GraphNodeRow>(&mut *conn)
                     .context("list graph nodes")?
             };
@@ -385,6 +413,9 @@ impl GraphPort for SqliteStorage {
                 target_id: edge.target_id.as_str(),
                 edge_type: edge_type_to_str(&edge.edge_type),
                 metadata: edge.metadata.as_deref(),
+                first_seen_at: edge.first_seen_at as i64,
+                last_seen_at: edge.last_seen_at as i64,
+                deleted_at: edge.deleted_at.map(|t| t as i64),
             };
             diesel::insert_into(graph_edges::table)
                 .values(&row)
@@ -393,6 +424,9 @@ impl GraphPort for SqliteStorage {
                 .set((
                     graph_edges::edge_type.eq(row.edge_type),
                     graph_edges::metadata.eq(row.metadata),
+                    // first_seen_at is immutable — never updated on conflict.
+                    graph_edges::last_seen_at.eq(row.last_seen_at),
+                    graph_edges::deleted_at.eq(row.deleted_at),
                 ))
                 .execute(&mut *conn)
                 .context("insert graph edge")?;
@@ -411,19 +445,58 @@ impl GraphPort for SqliteStorage {
         let et_str = edge_type.as_ref().map(edge_type_to_str).map(str::to_owned);
         tokio::task::spawn_blocking(move || -> Result<Vec<GraphEdge>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Always filter out soft-deleted edges.
             let rows = if let Some(et) = et_str {
                 graph_edges::table
                     .filter(graph_edges::repo_id.eq(repo_id.as_str()))
                     .filter(graph_edges::edge_type.eq(&et))
+                    .filter(graph_edges::deleted_at.is_null())
                     .load::<GraphEdgeRow>(&mut *conn)
                     .context("list graph edges by type")?
             } else {
                 graph_edges::table
                     .filter(graph_edges::repo_id.eq(repo_id.as_str()))
+                    .filter(graph_edges::deleted_at.is_null())
                     .load::<GraphEdgeRow>(&mut *conn)
                     .context("list graph edges")?
             };
             rows.into_iter().map(GraphEdgeRow::into_edge).collect()
+        })
+        .await?
+    }
+
+    async fn delete_node(&self, id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            diesel::update(graph_nodes::table.find(id.as_str()))
+                .set(graph_nodes::deleted_at.eq(now))
+                .execute(&mut *conn)
+                .context("soft-delete graph node")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn delete_edge(&self, id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            diesel::update(graph_edges::table.find(id.as_str()))
+                .set(graph_edges::deleted_at.eq(now))
+                .execute(&mut *conn)
+                .context("soft-delete graph edge")?;
+            Ok(())
         })
         .await?
     }
@@ -560,6 +633,7 @@ impl GraphPort for SqliteStorage {
                         .eq(node_id.as_str())
                         .or(graph_edges::target_id.eq(node_id.as_str())),
                 )
+                .filter(graph_edges::deleted_at.is_null())
                 .load::<GraphEdgeRow>(&mut *conn)
                 .context("list edges for node")?;
             rows.into_iter().map(GraphEdgeRow::into_edge).collect()
@@ -604,6 +678,9 @@ mod tests {
             complexity: None,
             churn_count_30d: 0,
             test_coverage: None,
+            first_seen_at: 1000,
+            last_seen_at: 1000,
+            deleted_at: None,
         }
     }
 
@@ -615,6 +692,9 @@ mod tests {
             target_id: Id::new(target),
             edge_type: EdgeType::Calls,
             metadata: None,
+            first_seen_at: 1000,
+            last_seen_at: 1000,
+            deleted_at: None,
         }
     }
 
@@ -832,6 +912,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_single_node() {
+        let (_tmp, s) = setup();
+        let repo = "repo1";
+        GraphPort::create_node(&s, make_node("n1", repo))
+            .await
+            .unwrap();
+        GraphPort::create_node(&s, make_node("n2", repo))
+            .await
+            .unwrap();
+
+        GraphPort::delete_node(&s, &Id::new("n1")).await.unwrap();
+
+        let remaining = GraphPort::list_nodes(&s, &Id::new(repo), None)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, Id::new("n2"));
+    }
+
+    #[tokio::test]
+    async fn delete_single_edge() {
+        let (_tmp, s) = setup();
+        let repo = "repo1";
+        GraphPort::create_node(&s, make_node("n1", repo))
+            .await
+            .unwrap();
+        GraphPort::create_node(&s, make_node("n2", repo))
+            .await
+            .unwrap();
+        GraphPort::create_edge(&s, make_edge("e1", repo, "n1", "n2"))
+            .await
+            .unwrap();
+        GraphPort::create_edge(&s, make_edge("e2", repo, "n2", "n1"))
+            .await
+            .unwrap();
+
+        GraphPort::delete_edge(&s, &Id::new("e1")).await.unwrap();
+
+        let remaining = GraphPort::list_edges(&s, &Id::new(repo), None)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, Id::new("e2"));
+    }
+
+    #[tokio::test]
     async fn delta_time_range_filter() {
         let (_tmp, s) = setup();
         let repo = "repo1";
@@ -886,6 +1012,9 @@ mod tests {
             complexity: Some(7),
             churn_count_30d: 3,
             test_coverage: Some(0.85),
+            first_seen_at: 100,
+            last_seen_at: 9999,
+            deleted_at: None,
         };
         GraphPort::create_node(&s, node.clone()).await.unwrap();
         let found = GraphPort::get_node(&s, &node.id).await.unwrap().unwrap();
