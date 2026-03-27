@@ -637,6 +637,10 @@
     padding: 2px var(--space-2);
     font-family: var(--font-body);
   }
+  .cancel-btn-sm:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    border-color: var(--color-danger);
+  }
   .cancel-btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* View toggle */

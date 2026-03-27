@@ -677,7 +677,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .spinner { animation: none; display: none; }
+    .spinner { animation: none; }
     .ws-repo-card,
     .go-admin-btn,
     .chip-clear,
@@ -787,7 +787,7 @@
 
   .graph-error button:hover {
     background: var(--color-surface);
-    border-color: var(--color-primary);
+    border-color: var(--color-focus, #4db0ff);
   }
 
   .graph-error button:focus-visible {

@@ -307,7 +307,11 @@
             tabindex="0"
             aria-selected={selectedPath === spec.path}
             onclick={() => handleRowClick(spec)}
-            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); } }}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
+              if (e.key === 'ArrowDown') { e.preventDefault(); const next = e.currentTarget.nextElementSibling; if (next) next.focus(); }
+              if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
+            }}
           >
             <span class="spec-path" title={spec.path}>{spec.path}</span>
             <span class="spec-status-inline {statusColor(spec.approval_status)}">

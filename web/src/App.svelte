@@ -1058,6 +1058,11 @@
     padding: 0;
   }
 
+  .shortcuts-header button:hover {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 8%, transparent);
+  }
+
   .shortcuts-header button:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;

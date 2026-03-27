@@ -463,7 +463,7 @@
               <div class="item-actions">
                 {#if item.mr_id}
                   <button
-                    class="action-btn danger"
+                    class="action-btn"
                     onclick={() => handleViewDiff(item)}
                     data-testid="view-diff-btn"
                   >
@@ -646,6 +646,10 @@
     padding: var(--space-1) var(--space-2);
   }
 
+  .date-input:hover {
+    border-color: var(--color-border-strong);
+  }
+
   .apply-btn {
     background: var(--color-primary);
     border: none;
@@ -750,7 +754,7 @@
   .entity-ref:hover { color: var(--color-link-hover, var(--color-link, #4db0ff)); }
   .agent-ref { color: var(--color-text-secondary); }
   .agent-ref:hover { color: var(--color-text); }
-  .mr-ref { color: var(--color-danger); }
+  .mr-ref { color: var(--color-link, #4db0ff); }
 
   .item-detail {
     display: flex;

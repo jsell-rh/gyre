@@ -398,7 +398,7 @@
     height: 100%;
     background: var(--color-success);
     border-radius: 999px;
-    transition: width 0.4s ease;
+    transition: width var(--transition-normal, 0.4s ease);
   }
 
   .bar-fill.bar-warn { background: var(--color-warning); }
@@ -498,7 +498,7 @@
   .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-link); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
   .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
   .btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
-  .btn-secondary:hover { color: var(--color-text); }
+  .btn-secondary:hover { color: var(--color-text); background: var(--color-surface-elevated); }
   .btn-primary:focus-visible,
   .btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
