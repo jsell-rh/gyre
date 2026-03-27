@@ -327,7 +327,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     width: fit-content;
   }
 
@@ -343,15 +343,15 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-text-inverse);
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
-    transition: opacity var(--transition-fast);
+    transition: background var(--transition-fast);
   }
-  .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-primary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -363,7 +363,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
   }
-  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .btn-danger-sm {
     padding: var(--space-1) var(--space-2);
@@ -375,19 +375,19 @@
     cursor: pointer;
   }
   .btn-danger-sm:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
-  .btn-danger-sm:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-danger-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .btn-approve-sm {
     padding: var(--space-1) var(--space-2);
     background: transparent;
-    border: 1px solid var(--color-success, #3fb950);
+    border: 1px solid var(--color-success);
     border-radius: var(--radius);
-    color: var(--color-success, #3fb950);
+    color: var(--color-success);
     font-size: var(--text-xs);
     cursor: pointer;
   }
   .btn-approve-sm:hover { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
-  .btn-approve-sm:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-approve-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
@@ -401,9 +401,9 @@
     font-size: var(--text-sm);
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
-  .field-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .field-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .field-textarea { min-height: 80px; resize: vertical; font-family: var(--font-mono); }
 
-  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-0, 2px); display: block; }
+  .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 2px; display: block; }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>
