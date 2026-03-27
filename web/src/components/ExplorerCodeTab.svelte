@@ -144,7 +144,7 @@
   {#if cloneUrl}
     <div class="clone-url-bar">
       <span class="clone-label">Clone</span>
-      <code class="clone-url-text">{cloneUrl}</code>
+      <code class="clone-url-text" title={cloneUrl}>{cloneUrl}</code>
       <button class="clone-copy-btn" onclick={copyCloneUrl} aria-label="Copy clone URL" title="Copy clone URL">
         {#if cloneCopied}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -233,7 +233,7 @@
             {#each filteredCommits as commit}
               <tr class="table-row" tabindex="0" role="button" aria-label="Commit {commit.sha ?? commit.id ?? ''}">
                 <td class="mono">{(commit.sha ?? commit.id ?? '').slice(0, 7)}</td>
-                <td class="commit-msg">{commit.message ?? commit.summary ?? '—'}</td>
+                <td class="commit-msg" title={commit.message ?? commit.summary ?? ''}>{commit.message ?? commit.summary ?? '—'}</td>
                 <td class="secondary">{commit.author ?? commit.author_name ?? '—'}</td>
                 <td class="secondary">{relativeTime(commit.timestamp ?? commit.authored_at ?? commit.date)}</td>
               </tr>
@@ -258,7 +258,7 @@
           <tbody>
             {#each filteredMrs as mr}
               <tr class="table-row" onclick={() => onRowClick(mr, 'mr')} tabindex="0" role="button" aria-label="View MR {mr.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(mr, 'mr'); } }}>
-                <td>{mr.title}</td>
+                <td title={mr.title}>{mr.title}</td>
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
                 <td class="secondary">{mr.author_id ?? '—'}</td>
                 <td class="secondary">{relativeTime(mr.updated_at)}</td>

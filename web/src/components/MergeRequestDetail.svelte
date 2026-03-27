@@ -172,7 +172,7 @@
         {repo?.name ?? 'Repo'}
       </button>
       <span class="sep">/</span>
-      <span class="mr-title-header">{mr.title}</span>
+      <span class="mr-title-header" title={mr.title}>{mr.title}</span>
     </div>
     <Badge value={mr.status} />
   </div>
@@ -204,16 +204,16 @@
             <div class="meta-row">
               <span class="meta-label">Author</span>
               {#if navigate}
-                <button class="meta-link-btn" onclick={() => navigate('agents')} aria-label="View agent {mr.author_agent_id}">{mr.author_agent_id}</button>
+                <button class="meta-link-btn" onclick={() => navigate('agents')} aria-label="View agent {mr.author_agent_id}" title={mr.author_agent_id}>{mr.author_agent_id}</button>
               {:else}
-                <span class="meta-value">{mr.author_agent_id}</span>
+                <span class="meta-value" title={mr.author_agent_id}>{mr.author_agent_id}</span>
               {/if}
             </div>
           {/if}
 
           <div class="meta-row">
             <span class="meta-label">Branches</span>
-            <span class="meta-value branch-ref">{mr.source_branch} → {mr.target_branch}</span>
+            <span class="meta-value branch-ref" title={`${mr.source_branch} → ${mr.target_branch}`}>{mr.source_branch} → {mr.target_branch}</span>
           </div>
 
           <div class="meta-row">
@@ -269,7 +269,7 @@
               {#each gates as gate (gate.id)}
                 <div class="gate-row">
                   <span class="gate-dot" style:background={gateStatusColor(gate.status)} aria-hidden="true"></span>
-                  <span class="gate-label">{gate.gate_id}</span>
+                  <span class="gate-label" title={gate.gate_id}>{gate.gate_id}</span>
                   <span class="gate-status" style:color={gateStatusColor(gate.status)}>{gate.status}</span>
                 </div>
               {/each}

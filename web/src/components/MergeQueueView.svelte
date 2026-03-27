@@ -142,7 +142,7 @@
             <div class="dag-node" class:dag-blocked={isBlocked}>
               <div class="dag-node-top">
                 <div class="dag-node-info">
-                  <code class="mr-id">{node.mr_id.slice(0, 12)}…</code>
+                  <code class="mr-id" title={node.mr_id}>{node.mr_id.slice(0, 12)}…</code>
                   {#if node.title}
                     <span class="dag-node-title">{node.title}</span>
                   {/if}
@@ -191,7 +191,7 @@
               {#each queued as entry (entry.id)}
                 <div class="queue-card queued">
                   <div class="card-top">
-                    <code class="mr-id">{entry.merge_request_id.slice(0, 10)}…</code>
+                    <code class="mr-id" title={entry.merge_request_id}>{entry.merge_request_id.slice(0, 10)}…</code>
                     <Badge value={entry.priority} />
                   </div>
                   <div class="card-meta">
@@ -233,7 +233,7 @@
               {#each processing as entry (entry.id)}
                 <div class="queue-card processing">
                   <div class="card-top">
-                    <code class="mr-id">{entry.merge_request_id.slice(0, 10)}…</code>
+                    <code class="mr-id" title={entry.merge_request_id}>{entry.merge_request_id.slice(0, 10)}…</code>
                     <Badge value={entry.priority} />
                   </div>
                   <div class="card-meta">
@@ -275,7 +275,7 @@
               {#each done.slice(0, 5) as entry (entry.id)}
                 <div class="queue-card done" class:failed={entry.status === 'failed'}>
                   <div class="card-top">
-                    <code class="mr-id">{entry.merge_request_id.slice(0, 10)}…</code>
+                    <code class="mr-id" title={entry.merge_request_id}>{entry.merge_request_id.slice(0, 10)}…</code>
                     <Badge value={entry.status} />
                   </div>
                   <div class="card-meta">

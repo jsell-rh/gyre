@@ -172,8 +172,8 @@
           {#each liveEvents as evt (evt.id ?? Math.random())}
             <div class="event-row">
               <Badge value={evt.event_type ?? evt.type ?? 'Unknown'} color={typeColor(evt.event_type ?? evt.type)} />
-              <span class="event-agent">{evt.agent_id ?? '—'}</span>
-              <span class="event-detail">{evt.details ?? evt.message ?? JSON.stringify(evt)}</span>
+              <span class="event-agent" title={evt.agent_id ?? ''}>{evt.agent_id ?? '—'}</span>
+              <span class="event-detail" title={evt.details ?? evt.message ?? ''}>{evt.details ?? evt.message ?? JSON.stringify(evt)}</span>
               <span class="event-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
             </div>
           {/each}
@@ -221,8 +221,8 @@
           {#each events as evt (evt.id)}
             <div class="event-row">
               <Badge value={evt.event_type ?? evt.type ?? 'Unknown'} color={typeColor(evt.event_type ?? evt.type)} />
-              <span class="event-agent">{evt.agent_id ?? '—'}</span>
-              <span class="event-detail">{evt.details ?? evt.message ?? ''}</span>
+              <span class="event-agent" title={evt.agent_id ?? ''}>{evt.agent_id ?? '—'}</span>
+              <span class="event-detail" title={evt.details ?? evt.message ?? ''}>{evt.details ?? evt.message ?? ''}</span>
               <span class="event-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
             </div>
           {/each}
