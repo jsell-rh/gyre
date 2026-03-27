@@ -261,8 +261,17 @@
       await api.deleteMetaSpec(deleteTarget.id);
       specs = specs.filter(s => s.id !== deleteTarget.id);
       if (selected?.id === deleteTarget.id) {
-        selected = specs.length > 0 ? specs[0] : null;
-        if (selected) selectSpec(selected);
+        if (specs.length > 0) {
+          selectSpec(specs[0]);
+        } else {
+          selected = null;
+          editContent = '';
+          editDirty = false;
+          editSuggestions = [];
+          blastResult = null;
+          versions = [];
+          diffVersion = null;
+        }
       }
       deleteTarget = null;
       toastSuccess('Deleted');
@@ -482,14 +491,7 @@
       } catch { /* fall through */ }
     }
     try {
-      const res = await fetch('/api/v1/specs/assist', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('gyre_auth_token') || 'gyre-dev-token'}`,
-        },
-        body: JSON.stringify({ persona_id: selectedMsId, message: text }),
-      });
+      const res = await api.specsAssistGlobal({ persona_id: selectedMsId, message: text });
       if (res.ok) return res;
     } catch { /* fall through */ }
 
@@ -545,7 +547,7 @@
 {/if}
 
 <!-- ─── Workspace scope — preview loop ───────────────────────────────────────── -->
-{#if scope === 'workspace' || scope === 'repo'}
+{#if scope === 'workspace'}
   <div class="meta-specs-view workspace-view" aria-busy={wsLoading}>
     {#if scope !== 'repo'}
       <div class="view-header">
