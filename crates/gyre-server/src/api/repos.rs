@@ -784,4 +784,29 @@ mod tests {
             .unwrap();
         assert_eq!(del_resp2.status(), StatusCode::NO_CONTENT);
     }
+
+    #[tokio::test]
+    async fn create_mirror_repo_returns_201() {
+        let body = serde_json::json!({
+            "workspace_id": "ws-mirror-test",
+            "name": "my-mirror",
+            "url": "https://github.com/org/repo.git",
+            "interval_secs": 300
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/mirror")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "my-mirror");
+        assert_eq!(json["is_mirror"], true);
+    }
 }
