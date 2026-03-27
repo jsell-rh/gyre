@@ -113,6 +113,8 @@
       selected = (selected - 1 + Math.max(results.length, 1)) % Math.max(results.length, 1);
     } else if (e.key === 'Enter' && results[selected]) {
       navigate(results[selected]);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
     }
   }
 </script>

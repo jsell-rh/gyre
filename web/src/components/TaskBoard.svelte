@@ -172,7 +172,7 @@
                 class="task-card"
                 class:clickable={!!onSelectTask}
                 onclick={() => onSelectTask?.(task)}
-                onkeydown={(e) => e.key === 'Enter' && onSelectTask?.(task)}
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectTask?.(task); } }}
                 role={onSelectTask ? 'button' : undefined}
                 aria-label={onSelectTask ? `Task: ${task.title}` : undefined}
                 tabindex={onSelectTask ? 0 : undefined}

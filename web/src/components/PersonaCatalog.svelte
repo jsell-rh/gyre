@@ -12,6 +12,7 @@
   let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
   let scopeObjects = $state([]);
+  let deleteConfirmId = $state(null);
 
   $effect(() => { load(); });
 
@@ -164,7 +165,13 @@
             {#if persona.approval_status !== 'Approved'}
               <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)} aria-label="Approve persona {persona.name}">Approve</button>
             {/if}
-            <button class="btn-danger-sm" onclick={() => { if (confirm('Delete this persona? This cannot be undone.')) deletePersona(persona.id); }} aria-label="Delete persona {persona.name}">Delete</button>
+            {#if deleteConfirmId === persona.id}
+              <span class="delete-confirm-text">Delete?</span>
+              <button class="btn-approve-sm" onclick={() => { deleteConfirmId = null; }} aria-label="Cancel delete">No</button>
+              <button class="btn-danger-sm" onclick={() => { deleteConfirmId = null; deletePersona(persona.id); }} aria-label="Confirm delete persona {persona.name}">Yes</button>
+            {:else}
+              <button class="btn-danger-sm" onclick={() => { deleteConfirmId = persona.id; }} aria-label="Delete persona {persona.name}">Delete</button>
+            {/if}
           </div>
         </div>
       {/each}
@@ -391,6 +398,12 @@
     cursor: pointer;
     transition: background var(--transition-fast);
   }
+  .delete-confirm-text {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    font-weight: 500;
+  }
+
   .btn-approve-sm:hover { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .btn-approve-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 

@@ -140,7 +140,7 @@
               tabindex="0"
               aria-label="Repo: {node.name ?? node.id}"
               onclick={() => selectNode(node)}
-              onkeydown={(e) => e.key === 'Enter' && selectNode(node)}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectNode(node); } }}
             >
               <circle
                 class="node-circle"

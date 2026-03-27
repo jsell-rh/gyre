@@ -139,11 +139,26 @@
     }
   });
 
-  // Keyboard: Esc closes the panel.
-  function onkeydown(e) {
+  function handleKeydown(e) {
     if (e.key === 'Escape') {
       e.preventDefault();
       close();
+      return;
+    }
+    if (e.key === 'Tab' && panelEl) {
+      const focusable = panelEl.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     }
   }
 
@@ -413,9 +428,11 @@
   class="detail-panel"
   class:expanded
   class:open={!!entity}
+  role="dialog"
   aria-label="Detail panel"
+  aria-modal={expanded ? 'true' : undefined}
   tabindex="-1"
-  onkeydown={onkeydown}
+  onkeydown={handleKeydown}
   bind:this={panelEl}
 >
   {#if entity}

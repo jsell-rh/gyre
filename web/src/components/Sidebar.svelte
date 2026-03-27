@@ -100,7 +100,11 @@
 
   <!-- Bottom: server version -->
   <div class="sidebar-footer">
-    <div class="version-indicator" aria-label="Server version">
+    <div
+      class="version-indicator"
+      aria-label="Server {version}, WebSocket {wsStatus}"
+      title={collapsed ? `${version} — WS: ${wsStatus}` : undefined}
+    >
       <span class="version-dot" class:connected={wsStatus === 'connected'} class:error={wsStatus === 'error' || wsStatus === 'auth-failed'} aria-hidden="true"></span>
       {#if !collapsed}
         <span class="version-text">{version}</span>
