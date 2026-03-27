@@ -76,6 +76,8 @@ pub struct RepoResponse {
     pub mirror_url: Option<String>,
     pub mirror_interval_secs: Option<u64>,
     pub last_mirror_sync: Option<u64>,
+    /// Git Smart HTTP clone URL: {base_url}/git/{workspace_slug}/{repo_name}
+    pub clone_url: String,
 }
 
 impl From<Repository> for RepoResponse {
@@ -93,8 +95,13 @@ impl From<Repository> for RepoResponse {
             mirror_url: r.mirror_url.map(redact_url_credentials),
             mirror_interval_secs: r.mirror_interval_secs,
             last_mirror_sync: r.last_mirror_sync,
+            clone_url: String::new(),
         }
     }
+}
+
+fn build_clone_url(base_url: &str, ws_slug: &str, repo_name: &str) -> String {
+    format!("{}/git/{}/{}", base_url, ws_slug, repo_name)
 }
 
 #[derive(Deserialize)]
@@ -168,7 +175,23 @@ pub async fn list_repos(
     } else {
         state.repos.list().await?
     };
-    Ok(Json(repos.into_iter().map(RepoResponse::from).collect()))
+    let base_url = &state.base_url;
+    let mut responses = Vec::with_capacity(repos.len());
+    for repo in repos {
+        let ws_slug = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.slug)
+            .unwrap_or_else(|| repo.workspace_id.to_string());
+        let clone_url = build_clone_url(base_url, &ws_slug, &repo.name);
+        let mut r = RepoResponse::from(repo);
+        r.clone_url = clone_url;
+        responses.push(r);
+    }
+    Ok(Json(responses))
 }
 
 pub async fn get_repo(
@@ -180,7 +203,18 @@ pub async fn get_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
-    Ok(Json(RepoResponse::from(repo)))
+    let ws_slug = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.slug)
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    let clone_url = build_clone_url(&state.base_url, &ws_slug, &repo.name);
+    let mut r = RepoResponse::from(repo);
+    r.clone_url = clone_url;
+    Ok(Json(r))
 }
 
 pub async fn update_repo(
