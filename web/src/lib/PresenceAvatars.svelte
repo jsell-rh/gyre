@@ -242,7 +242,7 @@
     white-space: nowrap;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
     opacity: 0;
     pointer-events: none;
     transition: opacity 150ms;

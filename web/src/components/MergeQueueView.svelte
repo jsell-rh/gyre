@@ -784,7 +784,7 @@
     display: inline-block;
     width: 8px;
     height: 8px;
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     background: var(--color-warning);
   }
   .dag-legend-free::before {
@@ -792,7 +792,7 @@
     display: inline-block;
     width: 8px;
     height: 8px;
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     background: var(--color-success);
   }
 

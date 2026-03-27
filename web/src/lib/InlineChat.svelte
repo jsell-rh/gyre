@@ -304,7 +304,7 @@
     width: 2px;
     height: 1em;
     background: var(--color-focus, #4db0ff);
-    margin-left: 2px;
+    margin-left: var(--space-0, 2px);
     vertical-align: text-bottom;
     animation: blink 1s step-end infinite;
   }
