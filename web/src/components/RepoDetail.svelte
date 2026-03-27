@@ -412,6 +412,7 @@
 </script>
 
 <div class="page" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "repository loaded"}</span>
   <div class="page-hdr">
     <div class="breadcrumb">
       <button class="back-btn" onclick={onBack} aria-label="Back to projects list">← Projects</button>
@@ -1603,4 +1604,5 @@
     .policy-btn,
     .jj-btn { transition: none; }
   }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

@@ -331,6 +331,7 @@
 
     {:else if activeView === 'timeline'}
       <div class="timeline-view" aria-busy={timelineLoading}>
+        <span class="sr-only" aria-live="polite">{timelineLoading ? "" : "timeline loaded"}</span>
         <div class="timeline-header">
           <h3 class="timeline-title">Architectural Timeline</h3>
           {#if !repoId}
@@ -982,4 +983,5 @@
     .filter-select,
     .delta-close { transition: none; }
   }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

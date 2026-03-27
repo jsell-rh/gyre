@@ -921,7 +921,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .heatmap-legend { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--color-text-muted); }
-  .hm-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 2px; flex-shrink: 0; }
+  .hm-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: var(--space-1); flex-shrink: 0; }
   .drill-back { border-color: var(--color-link); color: var(--color-link); }
   .drill-label { font-size: var(--text-xs); color: var(--color-text-secondary); }
   .drill-label strong { color: var(--color-text); font-family: var(--font-mono); }
