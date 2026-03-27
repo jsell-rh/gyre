@@ -78,7 +78,7 @@
       }
 
       // Sort by priority ascending (1 = highest)
-      notifications = data.sort((a, b) => a.priority - b.priority);
+      notifications = data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     } catch (e) {
       error = e.message || 'Failed to load notifications';
       notifications = [];

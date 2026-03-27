@@ -60,9 +60,12 @@
 
   $effect(() => {
     if (showRiskHeatmap && repoId) {
-      api.repoGraphRisks(repoId).then(data => {
-        riskData = Array.isArray(data) ? data : [];
-      }).catch(() => { riskData = []; });
+      let cancelled = false;
+      const currentRepoId = repoId;
+      api.repoGraphRisks(currentRepoId).then(data => {
+        if (!cancelled) riskData = Array.isArray(data) ? data : [];
+      }).catch(() => { if (!cancelled) riskData = []; });
+      return () => { cancelled = true; };
     } else if (!showRiskHeatmap) {
       riskData = [];
       highlightedNodeId = null;
@@ -261,16 +264,21 @@
     }
 
     layoutPending = true;
+    let cancelled = false;
     const w = svgEl?.clientWidth  ?? 900;
     const h = svgEl?.clientHeight ?? 600;
 
     computeLayout(eng, ns, es, w, h).then(pos => {
+      if (cancelled) return;
       nodePositionsMap = pos;
       layoutPending = false;
     }).catch(() => {
+      if (cancelled) return;
       nodePositionsMap = columnLayout(ns);
       layoutPending = false;
     });
+
+    return () => { cancelled = true; };
   });
 
   function getPos(id) { return nodePositionsMap[id] ?? { x: 400, y: 300 }; }
