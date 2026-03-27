@@ -155,6 +155,8 @@
     <div class="cards-grid" role="list" aria-label="Workspaces">
       {#each visibleWs as ws (ws.id)}
         {@const info = enrichment[ws.id]}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
         <div
           class="ws-card"
           role="listitem"

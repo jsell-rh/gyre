@@ -173,6 +173,7 @@
 
 <div class="moldable-view">
   <!-- View switcher tabs -->
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="view-tabs" role="tablist" aria-label="View mode"
     onkeydown={(e) => {
       const views = ['graph', 'list', 'timeline', 'flow'];

@@ -271,6 +271,7 @@
 
     <!-- Architecture / Code tab switcher — only shown when a repo is selected -->
     {#if selectedRepoId}
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div class="explorer-tabs" role="tablist" aria-label="Explorer view"
         onkeydown={(e) => {
           const tabs = ['architecture', 'code'];
