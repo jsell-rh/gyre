@@ -160,10 +160,10 @@
         <table class="code-table">
           <thead>
             <tr>
-              <th><button class="sort-btn" onclick={() => toggleSort('name')}>Name {sortIcon('name')}</button></th>
-              <th><button class="sort-btn" onclick={() => toggleSort('last_commit')}>Last Commit {sortIcon('last_commit')}</button></th>
-              <th><button class="sort-btn" onclick={() => toggleSort('author')}>Author {sortIcon('author')}</button></th>
-              <th>Status</th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('name')}>Name {sortIcon('name')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('last_commit')}>Last Commit {sortIcon('last_commit')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>Author {sortIcon('author')}</button></th>
+              <th scope="col">Status</th>
             </tr>
           </thead>
           <tbody>
@@ -186,10 +186,10 @@
         <table class="code-table">
           <thead>
             <tr>
-              <th><button class="sort-btn" onclick={() => toggleSort('title')}>Title {sortIcon('title')}</button></th>
-              <th><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
-              <th><button class="sort-btn" onclick={() => toggleSort('author_id')}>Author {sortIcon('author_id')}</button></th>
-              <th><button class="sort-btn" onclick={() => toggleSort('updated_at')}>Updated {sortIcon('updated_at')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>Title {sortIcon('title')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author_id')}>Author {sortIcon('author_id')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('updated_at')}>Updated {sortIcon('updated_at')}</button></th>
             </tr>
           </thead>
           <tbody>
@@ -212,9 +212,9 @@
         <table class="code-table">
           <thead>
             <tr>
-              <th>MR</th>
-              <th>Priority</th>
-              <th>Status</th>
+              <th scope="col">MR</th>
+              <th scope="col">Priority</th>
+              <th scope="col">Status</th>
             </tr>
           </thead>
           <tbody>

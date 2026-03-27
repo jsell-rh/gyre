@@ -528,7 +528,7 @@
     </div>
     <div class="list-fallback-wrap">
       <table class="list-table" aria-label="Node list (graph too large for canvas)">
-        <thead><tr><th>Type</th><th>Name</th><th>File</th><th>Spec</th></tr></thead>
+        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th>File</th><th>Spec</th></tr></thead>
         <tbody>
           {#each nodes.slice(0, 1000) as node}
             <tr class="list-row" role="button" tabindex="0" aria-label="Select node {node.name}"
@@ -738,10 +738,10 @@
               <table class="risk-table" aria-label="Top 10 highest-risk nodes">
                 <thead>
                   <tr>
-                    <th><button class="sort-col" onclick={() => (riskSortBy = 'name')} aria-label="Sort by name">Name {sortIcon('name')}</button></th>
-                    <th><button class="sort-col" onclick={() => (riskSortBy = 'score')} aria-label="Sort by risk score">Score {sortIcon('score')}</button></th>
-                    <th><button class="sort-col" onclick={() => (riskSortBy = 'churn_rate')} aria-label="Sort by churn">Churn {sortIcon('churn_rate')}</button></th>
-                    <th><button class="sort-col" onclick={() => (riskSortBy = 'fan_out')} aria-label="Sort by fan-out">Fan-out {sortIcon('fan_out')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'name')} aria-label="Sort by name">Name {sortIcon('name')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'score')} aria-label="Sort by risk score">Score {sortIcon('score')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'churn_rate')} aria-label="Sort by churn">Churn {sortIcon('churn_rate')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'fan_out')} aria-label="Sort by fan-out">Fan-out {sortIcon('fan_out')}</button></th>
                   </tr>
                 </thead>
                 <tbody>

@@ -286,11 +286,11 @@
             <table class="list-table">
               <thead>
                 <tr>
-                  <th>Type</th>
-                  <th>Name</th>
-                  <th>File</th>
-                  <th>Spec</th>
-                  <th>Churn</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">File</th>
+                  <th scope="col">Spec</th>
+                  <th scope="col">Churn</th>
                 </tr>
               </thead>
               <tbody>
