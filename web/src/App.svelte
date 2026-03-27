@@ -633,7 +633,8 @@
       }
     }
   }}>
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1">
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
