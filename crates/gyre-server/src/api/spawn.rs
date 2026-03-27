@@ -506,7 +506,6 @@ pub async fn spawn_agent(
     let compute_target_label = resolved_ct_entity
         .as_ref()
         .map(|e| e.id.to_string())
-        .or_else(|| req.compute_target_id.clone())
         .unwrap_or_else(|| "local".to_string());
 
     let resolved_target_config: Option<super::compute::ComputeTargetConfig> = resolved_ct_entity
