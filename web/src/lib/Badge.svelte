@@ -60,7 +60,7 @@
   .badge-danger   { background: color-mix(in srgb, var(--color-danger) 15%, transparent);  color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, transparent); }
   .badge-info     { background: color-mix(in srgb, var(--color-info) 15%, transparent);  color: var(--color-info); border-color: color-mix(in srgb, var(--color-info) 30%, transparent); }
   .badge-purple   { background: color-mix(in srgb, var(--color-purple, #8b6fe0) 15%, transparent);  color: var(--color-purple, #8b6fe0); border-color: color-mix(in srgb, var(--color-purple, #8b6fe0) 30%, transparent); }
-  .badge-blocked  { background: color-mix(in srgb, var(--color-purple, #8b6fe0) 15%, transparent);  color: var(--color-purple, #8b6fe0); border-color: color-mix(in srgb, var(--color-purple, #8b6fe0) 30%, transparent); }
+  .badge-blocked  { background: color-mix(in srgb, var(--color-blocked) 15%, transparent);  color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-blocked) 30%, transparent); }
   .badge-muted    { background: color-mix(in srgb, var(--color-text-muted) 15%, transparent); color: var(--color-text-muted); border-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent); }
   .badge-critical { background: color-mix(in srgb, var(--color-danger) 15%, transparent);    color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, transparent); }
   .badge-default  { background: color-mix(in srgb, var(--color-text-muted) 15%, transparent); color: var(--color-text-muted); border-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent); }

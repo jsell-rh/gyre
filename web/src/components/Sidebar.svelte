@@ -35,6 +35,7 @@
 </script>
 
 <nav
+  id="sidebar-nav"
   class="sidebar"
   class:collapsed
   aria-label="Main navigation"
@@ -58,6 +59,7 @@
       onclick={() => (collapsed = !collapsed)}
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       aria-expanded={!collapsed}
+      aria-controls="sidebar-nav"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         {#if collapsed}
@@ -98,7 +100,7 @@
 
   <!-- Bottom: server version -->
   <div class="sidebar-footer">
-    <div class="version-indicator" role="status" aria-label="Server version">
+    <div class="version-indicator" aria-label="Server version">
       <span class="version-dot" class:connected={wsStatus === 'connected'} class:error={wsStatus === 'error' || wsStatus === 'auth-failed'} aria-hidden="true"></span>
       {#if !collapsed}
         <span class="version-text">{version}</span>
