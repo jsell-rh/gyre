@@ -878,3 +878,463 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
+
+// ===========================================================================
+// Meta-spec registry CRUD API (agent-runtime spec §2)
+//
+// GET    /api/v1/meta-specs-registry           — list (query: scope, scope_id, kind, required)
+// POST   /api/v1/meta-specs-registry           — create
+// GET    /api/v1/meta-specs-registry/:id       — get by id
+// PUT    /api/v1/meta-specs-registry/:id       — update (new version, bumps version)
+// DELETE /api/v1/meta-specs-registry/:id       — delete (409 if bindings)
+// GET    /api/v1/meta-specs-registry/:id/versions       — list versions
+// GET    /api/v1/meta-specs-registry/:id/versions/:ver  — get specific version
+// ===========================================================================
+
+use axum::extract::Query;
+use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+use gyre_ports::MetaSpecFilter;
+use sha2::{Digest, Sha256};
+
+fn sha256_hex(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    hex::encode(h.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// Request / response types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ListMetaSpecsQuery {
+    pub scope: Option<String>,
+    pub scope_id: Option<String>,
+    pub kind: Option<String>,
+    pub required: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateMetaSpecRequest {
+    pub kind: String,
+    pub name: String,
+    pub scope: String,
+    pub scope_id: Option<String>,
+    pub prompt: Option<String>,
+    pub required: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMetaSpecRequest {
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub required: Option<bool>,
+    pub approval_status: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn parse_kind(s: &str) -> Result<MetaSpecKind, ApiError> {
+    MetaSpecKind::from_str(s).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "invalid kind '{s}'; must be one of: meta:persona, meta:principle, meta:standard, meta:process"
+        ))
+    })
+}
+
+fn parse_scope(s: &str) -> Result<MetaSpecScope, ApiError> {
+    MetaSpecScope::from_str(s).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "invalid scope '{s}'; must be one of: Global, Workspace"
+        ))
+    })
+}
+
+fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
+    MetaSpecApprovalStatus::from_str(s).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "invalid approval_status '{s}'; must be: Pending, Approved, or Rejected"
+        ))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/meta-specs-registry
+// ---------------------------------------------------------------------------
+
+pub async fn list_meta_specs_registry(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Query(q): Query<ListMetaSpecsQuery>,
+) -> Result<Json<Vec<MetaSpec>>, ApiError> {
+    let scope = match q.scope.as_deref() {
+        None => None,
+        Some(s) => Some(parse_scope(s)?),
+    };
+    let kind = match q.kind.as_deref() {
+        None => None,
+        Some(k) => Some(parse_kind(k)?),
+    };
+    let filter = MetaSpecFilter {
+        scope,
+        scope_id: q.scope_id,
+        kind,
+        required: q.required,
+    };
+    let results = state
+        .meta_specs
+        .list(&filter)
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(results))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/meta-specs-registry
+// ---------------------------------------------------------------------------
+
+pub async fn create_meta_spec_registry(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<CreateMetaSpecRequest>,
+) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
+    let kind = parse_kind(&req.kind)?;
+    let scope = parse_scope(&req.scope)?;
+    let prompt = req.prompt.unwrap_or_default();
+    let content_hash = sha256_hex(&prompt);
+    let now = now_secs();
+
+    let ms = MetaSpec {
+        id: Id::new(uuid::Uuid::new_v4().to_string()),
+        kind,
+        name: req.name,
+        scope,
+        scope_id: req.scope_id,
+        prompt,
+        version: 1,
+        content_hash,
+        required: req.required.unwrap_or(false),
+        approval_status: MetaSpecApprovalStatus::Pending,
+        approved_by: None,
+        approved_at: None,
+        created_by: auth.agent_id.as_str().to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    state
+        .meta_specs
+        .create(&ms)
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok((StatusCode::CREATED, Json(ms)))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/meta-specs-registry/:id
+// ---------------------------------------------------------------------------
+
+pub async fn get_meta_spec_registry(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<MetaSpec>, ApiError> {
+    let ms = state
+        .meta_specs
+        .get_by_id(&Id::new(&id))
+        .await
+        .map_err(|e| ApiError::Internal(e))?
+        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+    Ok(Json(ms))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/v1/meta-specs-registry/:id
+// ---------------------------------------------------------------------------
+
+pub async fn update_meta_spec_registry(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateMetaSpecRequest>,
+) -> Result<Json<MetaSpec>, ApiError> {
+    let mut ms = state
+        .meta_specs
+        .get_by_id(&Id::new(&id))
+        .await
+        .map_err(|e| ApiError::Internal(e))?
+        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+
+    let now = now_secs();
+
+    if let Some(name) = req.name {
+        ms.name = name;
+    }
+    if let Some(prompt) = req.prompt {
+        ms.content_hash = sha256_hex(&prompt);
+        ms.prompt = prompt;
+    }
+    if let Some(required) = req.required {
+        ms.required = required;
+    }
+    if let Some(ref status_str) = req.approval_status {
+        let status = parse_approval_status(status_str)?;
+        if status == MetaSpecApprovalStatus::Approved {
+            ms.approved_by = Some(auth.agent_id.as_str().to_string());
+            ms.approved_at = Some(now);
+        }
+        ms.approval_status = status;
+    }
+
+    ms.version += 1;
+    ms.updated_at = now;
+
+    state
+        .meta_specs
+        .update(&ms)
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(ms))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v1/meta-specs-registry/:id
+// ---------------------------------------------------------------------------
+
+pub async fn delete_meta_spec_registry(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.meta_specs.delete(&Id::new(&id)).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("binding") {
+            ApiError::Conflict(msg)
+        } else {
+            ApiError::Internal(e)
+        }
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/meta-specs-registry/:id/versions
+// ---------------------------------------------------------------------------
+
+pub async fn list_meta_spec_versions(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<gyre_domain::MetaSpecVersion>>, ApiError> {
+    // Ensure meta-spec exists.
+    state
+        .meta_specs
+        .get_by_id(&Id::new(&id))
+        .await
+        .map_err(|e| ApiError::Internal(e))?
+        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+
+    let versions = state
+        .meta_specs
+        .list_versions(&Id::new(&id))
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(versions))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/meta-specs-registry/:id/versions/:version
+// ---------------------------------------------------------------------------
+
+pub async fn get_meta_spec_version(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path((id, version)): Path<(String, u32)>,
+) -> Result<Json<gyre_domain::MetaSpecVersion>, ApiError> {
+    let ver = state
+        .meta_specs
+        .get_version(&Id::new(&id), version)
+        .await
+        .map_err(|e| ApiError::Internal(e))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("version {version} of meta-spec '{id}' not found"))
+        })?;
+    Ok(Json(ver))
+}
+
+// ---------------------------------------------------------------------------
+// Registry-level tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod registry_tests {
+    use crate::mem::test_state;
+    use axum::{body::Body, Router};
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        let state = test_state();
+        crate::api::api_router().with_state(state)
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_and_get_meta_spec() {
+        let app = app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"test-worker","scope":"Global","prompt":"You are a worker."}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let id = json["id"].as_str().unwrap().to_string();
+        assert_eq!(json["name"].as_str().unwrap(), "test-worker");
+        assert_eq!(json["version"].as_u64().unwrap(), 1);
+        assert!(json["content_hash"].as_str().is_some());
+
+        // GET by id — reuse same app instance so the in-memory store is shared
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_meta_specs_registry_empty() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_bumps_version() {
+        let app = app();
+        // Create
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:principle","name":"conventional-commits","scope":"Global","prompt":"Use CC."}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().unwrap().to_string();
+
+        // Update
+        let update_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"Updated CC prompt."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let update_json = body_json(update_resp).await;
+        assert_eq!(update_json["version"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_not_found_returns_404() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_meta_spec() {
+        let app = app();
+        // Create
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:standard","name":"test-coverage","scope":"Global"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Delete
+        let del_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
+}

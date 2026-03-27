@@ -10,6 +10,7 @@ pub enum ApiError {
     InvalidInput(String),
     BadRequest(String),
     Forbidden(String),
+    /// Resource conflict (HTTP 409).
     Conflict(String),
     TooManyRequests(String),
     /// Rate limit exceeded; carries `retry_after` seconds for the `Retry-After` header.

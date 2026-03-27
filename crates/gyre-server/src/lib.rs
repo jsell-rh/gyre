@@ -57,13 +57,13 @@ use gyre_ports::{
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
     ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
     DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
-    NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
-    PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository, RepoRepository,
-    ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository,
-    SpecLedgerRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
-    WorkspaceRepository, WorktreeRepository,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
+    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
+    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
+    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository,
+    TaskRepository, TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -312,6 +312,10 @@ pub struct AppState {
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
     pub graph_store: Arc<dyn GraphPort>,
+    /// DB-backed meta-spec registry (agent-runtime spec §2).
+    pub meta_specs: Arc<dyn MetaSpecRepository>,
+    /// Meta-spec binding repository.
+    pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
     /// Message bus persistence (Directed + Event tier).
@@ -893,6 +897,14 @@ pub fn build_state(
         } else {
             Arc::new(gyre_adapters::MemGraphStore::new()) as Arc<dyn GraphPort>
         },
+        meta_specs: store!(
+            dyn MetaSpecRepository,
+            mem::MemMetaSpecRepository::default()
+        ),
+        meta_spec_bindings: store!(
+            dyn MetaSpecBindingRepository,
+            mem::MemMetaSpecBindingRepository::default()
+        ),
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
@@ -1204,6 +1216,119 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
             api::budget::reset_daily_counters(&state).await;
         }
     });
+}
+
+/// Seed built-in meta-specs on first startup.
+///
+/// Seeds a set of well-known Global meta-specs (approval_status=Approved) if
+/// the meta_specs table is empty. This is idempotent — re-running on a DB that
+/// already has rows is a no-op.
+pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
+    use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+    use gyre_ports::MetaSpecFilter;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(s: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        hex::encode(h.finalize())
+    }
+
+    let existing = state
+        .meta_specs
+        .list(&MetaSpecFilter::default())
+        .await
+        .unwrap_or_default();
+    if !existing.is_empty() {
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let seeds: &[(&str, MetaSpecKind, bool, &str)] = &[
+        // (name, kind, required, prompt_stub)
+        (
+            "default-worker",
+            MetaSpecKind::Persona,
+            false,
+            "You are a diligent software engineer agent.",
+        ),
+        (
+            "workspace-orchestrator",
+            MetaSpecKind::Persona,
+            false,
+            "You are a workspace-level orchestrator agent.",
+        ),
+        (
+            "repo-orchestrator",
+            MetaSpecKind::Persona,
+            false,
+            "You are a repo-level orchestrator agent.",
+        ),
+        (
+            "spec-reviewer",
+            MetaSpecKind::Persona,
+            false,
+            "You are a spec reviewer agent.",
+        ),
+        (
+            "accountability",
+            MetaSpecKind::Persona,
+            false,
+            "You are an accountability agent.",
+        ),
+        (
+            "security",
+            MetaSpecKind::Persona,
+            false,
+            "You are a security review agent.",
+        ),
+        (
+            "reconciliation",
+            MetaSpecKind::Persona,
+            false,
+            "You are a meta-spec reconciliation agent.",
+        ),
+        (
+            "conventional-commits",
+            MetaSpecKind::Principle,
+            true,
+            "All commits must follow Conventional Commits specification.",
+        ),
+        (
+            "test-coverage",
+            MetaSpecKind::Standard,
+            false,
+            "All new code must have adequate test coverage.",
+        ),
+    ];
+
+    for (name, kind, required, prompt) in seeds {
+        let ms = MetaSpec {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            kind: kind.clone(),
+            name: name.to_string(),
+            scope: MetaSpecScope::Global,
+            scope_id: None,
+            prompt: prompt.to_string(),
+            version: 1,
+            content_hash: sha256_hex(prompt),
+            required: *required,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: Some("system".to_string()),
+            approved_at: Some(now),
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(e) = state.meta_specs.create(&ms).await {
+            tracing::warn!("failed to seed meta-spec '{}': {e}", name);
+        }
+    }
+    tracing::info!("seeded {} built-in meta-specs", seeds.len());
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
 use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
-    procfs_monitor, register_default_compute_target, siem, spawn_budget_daily_reset,
-    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
-    spawn_stale_peer_detector, telemetry, JwtConfig,
+    procfs_monitor, register_default_compute_target, seed_builtin_meta_specs, siem,
+    spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
+    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -42,6 +42,9 @@ async fn main() -> Result<()> {
     // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
     abac_middleware::init_resolver();
     abac_middleware::seed_builtin_policies(&state).await;
+
+    // Seed built-in meta-specs on first startup (agent-runtime spec §2).
+    seed_builtin_meta_specs(&state).await;
 
     // M25: Auto-register default container compute target if Docker/Podman is available.
     register_default_compute_target(&state).await;

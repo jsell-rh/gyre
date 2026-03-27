@@ -614,6 +614,27 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs/:path/blast-radius",
             get(meta_specs::get_meta_spec_blast_radius),
         )
+        // Meta-spec registry CRUD (agent-runtime spec §2)
+        // NOTE: /:id/versions must be registered before /:id to prevent axum from
+        // matching "versions" as an id segment.
+        .route(
+            "/api/v1/meta-specs-registry",
+            get(meta_specs::list_meta_specs_registry).post(meta_specs::create_meta_spec_registry),
+        )
+        .route(
+            "/api/v1/meta-specs-registry/:id",
+            get(meta_specs::get_meta_spec_registry)
+                .put(meta_specs::update_meta_spec_registry)
+                .delete(meta_specs::delete_meta_spec_registry),
+        )
+        .route(
+            "/api/v1/meta-specs-registry/:id/versions",
+            get(meta_specs::list_meta_spec_versions),
+        )
+        .route(
+            "/api/v1/meta-specs-registry/:id/versions/:version",
+            get(meta_specs::get_meta_spec_version),
+        )
         // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
