@@ -161,10 +161,13 @@
         <div class="artifacts-section">
           {#if detail.pr_link}
             <div class="artifact-card">
-              <span class="artifact-icon">↗</span>
+              <span class="artifact-icon" aria-hidden="true">↗</span>
               <div class="artifact-body">
                 <span class="artifact-label">Pull Request</span>
-                <a class="artifact-link" href={detail.pr_link} target="_blank" rel="noreferrer">{detail.pr_link}</a>
+                <a class="artifact-link" href={detail.pr_link} target="_blank" rel="noreferrer">
+                  {detail.pr_link}
+                  <span class="sr-only">(opens in new tab)</span>
+                </a>
               </div>
             </div>
           {/if}
@@ -172,7 +175,7 @@
             <div class="artifact-section-title">Ralph Loop Refs</div>
             {#each ralphRefs as ref}
               <div class="artifact-card">
-                <span class="artifact-icon">⚡</span>
+                <span class="artifact-icon" aria-hidden="true">⚡</span>
                 <div class="artifact-body">
                   <span class="artifact-label mono">{ref}</span>
                 </div>
@@ -257,7 +260,7 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--color-text-muted);
-    padding-top: 3px;
+    padding-top: var(--space-0, 3px);
   }
 
   .info-val {
@@ -290,7 +293,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     font-family: var(--font-mono);
@@ -330,7 +333,7 @@
   .artifact-body {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
     min-width: 0;
   }
 
@@ -371,4 +374,6 @@
 
   .link-btn:hover { opacity: 0.8; }
   .link-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
