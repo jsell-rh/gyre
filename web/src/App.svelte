@@ -596,6 +596,17 @@
         </span>
       {/if}
 
+      <!-- Keyboard shortcut hint -->
+      <button
+        class="status-item status-shortcuts-hint"
+        onclick={() => (shortcutsOpen = true)}
+        title="Keyboard shortcuts (?)"
+        aria-label="Show keyboard shortcuts"
+      >
+        <kbd aria-hidden="true">?</kbd>
+        <span>Shortcuts</span>
+      </button>
+
       <!-- WebSocket status -->
       <span
         class="status-item status-ws"
@@ -935,7 +946,8 @@
     .ws-dot,
     .skip-to-content,
     .btn-primary,
-    .btn-secondary { transition: none; }
+    .btn-secondary,
+    .status-shortcuts-hint { transition: none; }
   }
 
   /* Status bar (24px) */
@@ -984,6 +996,41 @@
   .budget-bar-fill.bar-danger { background: var(--color-danger); }
   .budget-bar-fill.bar-warn { background: var(--color-warning); }
   .budget-bar-fill.bar-ok { background: var(--color-success); }
+
+  /* Shortcuts hint */
+  .status-shortcuts-hint {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: 0;
+    white-space: nowrap;
+    transition: color var(--transition-fast);
+  }
+
+  .status-shortcuts-hint:hover {
+    color: var(--color-text-secondary);
+  }
+
+  .status-shortcuts-hint:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .status-shortcuts-hint kbd {
+    background: var(--color-border);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+  }
 
   /* WebSocket status */
   .ws-dot {

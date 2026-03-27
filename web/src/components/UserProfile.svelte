@@ -174,6 +174,11 @@
 
 <div class="user-profile">
   <div class="profile-header">
+    <button class="back-btn" onclick={() => navigate?.('explorer')} aria-label="Back to Explorer" title="Back">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+        <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
+      </svg>
+    </button>
     <div class="avatar" aria-hidden="true">
       {me?.display_name?.[0]?.toUpperCase() ?? me?.username?.[0]?.toUpperCase() ?? '?'}
     </div>
@@ -338,6 +343,9 @@
                 {/if}
               </div>
               <p class="notif-msg">{notif.message ?? notif.title ?? ''}</p>
+              <button class="notif-view-btn" onclick={() => navigate?.('inbox')} aria-label="View in Inbox">
+                View in Inbox
+              </button>
             </div>
           {/each}
         </div>
@@ -358,6 +366,23 @@
     flex-shrink: 0;
     flex-wrap: wrap;
   }
+
+  .back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+  .back-btn:hover { color: var(--color-text); border-color: var(--color-text-muted); }
+  .back-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .avatar {
     width: var(--space-12);
@@ -554,6 +579,19 @@
   }
   .mark-read-btn:hover { color: var(--color-success); border-color: var(--color-success); }
 
+  .notif-view-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-link);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    padding: 0;
+    transition: color var(--transition-fast);
+  }
+  .notif-view-btn:hover { color: var(--color-link-hover); }
+  .notif-view-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
   .mono { font-family: var(--font-mono); }
   .muted { color: var(--color-text-muted); }
 
@@ -570,6 +608,8 @@
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
-    .mark-read-btn { transition: none; }
+    .mark-read-btn,
+    .back-btn,
+    .notif-view-btn { transition: none; }
   }
 </style>
