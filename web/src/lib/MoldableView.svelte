@@ -71,6 +71,55 @@
     }
   }
 
+  // ── Flow (trace) state ───────────────────────────────────────────────────────
+  let flowSpans = $state([]);
+  let flowLoading = $state(false);
+  let flowError = $state(null);
+
+  // Load traces when Flow tab is active and repoId is set
+  $effect(() => {
+    if (activeView === 'flow' && repoId) {
+      fetchFlowTraces();
+    }
+  });
+
+  async function fetchFlowTraces() {
+    flowLoading = true;
+    flowError = null;
+    flowSpans = [];
+    try {
+      // Fetch MRs for this repo, pick the most recently updated one with a trace
+      const mrs = await api.mergeRequests({ repository_id: repoId });
+      const mrList = Array.isArray(mrs) ? mrs : (mrs?.items ?? []);
+      for (const mr of mrList) {
+        try {
+          const trace = await api.mrTrace(mr.id);
+          if (trace?.spans?.length) {
+            flowSpans = trace.spans.map(s => ({
+              id: s.span_id,
+              parent_id: s.parent_span_id ?? null,
+              node_id: s.graph_node_id ?? null,
+              start_time: s.start_time,
+              duration_us: s.duration_us,
+              status: s.status,
+              name: s.operation_name,
+            }));
+            return;
+          }
+        } catch (_e) {
+          // 404 or no trace — try next MR
+        }
+      }
+      // No traces found for any MR
+      flowSpans = [];
+    } catch (_e) {
+      flowError = _e.message ?? 'Failed to load traces';
+      flowSpans = [];
+    } finally {
+      flowLoading = false;
+    }
+  }
+
   // ── Timeline state ──────────────────────────────────────────────────────────
   let timelineDeltas = $state([]);
   let timelineLoading = $state(false);
@@ -336,12 +385,28 @@
       </div>
 
     {:else if activeView === 'flow'}
-      <FlowRenderer
-        nodes={displayNodes}
-        edges={displayEdges}
-        {repoId}
-        spans={[]}
-      />
+      <div class="flow-container">
+        {#if flowLoading}
+          <div class="flow-status-bar" role="status" aria-label="Loading traces">
+            <div class="flow-spinner-inline" aria-hidden="true"></div>
+            <span>Loading traces…</span>
+          </div>
+        {:else if flowError}
+          <div class="flow-status-bar flow-status-error" role="alert">
+            <span>Failed to load traces: {flowError}</span>
+          </div>
+        {:else if repoId && flowSpans.length === 0}
+          <div class="flow-status-bar">
+            <span>No traces recorded — run integration gate tests to capture data.</span>
+          </div>
+        {/if}
+        <FlowRenderer
+          nodes={displayNodes}
+          edges={displayEdges}
+          {repoId}
+          spans={flowSpans}
+        />
+      </div>
 
     {:else if activeView === 'timeline'}
       <div class="timeline-view" aria-busy={timelineLoading}>
@@ -986,8 +1051,43 @@
     font-family: var(--font-mono);
   }
 
+  /* Flow view */
+  .flow-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .flow-status-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-4);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .flow-status-error {
+    color: var(--color-danger);
+  }
+
+  .flow-spinner-inline {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .timeline-spinner { animation: none; border-color: var(--color-border); border-top-color: var(--color-text-muted); }
+    .timeline-spinner,
+    .flow-spinner-inline { animation: none; border-color: var(--color-border); border-top-color: var(--color-text-muted); }
     .view-tab,
     .tl-node-row,
     .list-row,

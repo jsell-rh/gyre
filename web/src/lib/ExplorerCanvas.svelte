@@ -129,7 +129,7 @@
   let showAllPrivate = $state(false);
 
   let showPublicOnlyBanner = $derived.by(() => nodes.length > THRESHOLD_FILTER && nodes.length <= THRESHOLD_LIST);
-  let showListFallback     = $derived.by(() => nodes.length > THRESHOLD_LIST);
+  let showListFallback     = $derived.by(() => nodes.length > THRESHOLD_LIST && !drillNode);
   let privateNodeCount     = $derived.by(() => nodes.filter(n => n.visibility === 'private').length);
 
   // ── Visible nodes/edges ────────────────────────────────────────────────────
@@ -412,6 +412,12 @@
     setTimeout(resetView, 0);
   }
 
+  function drillInFromList(node) {
+    drillNode = node;
+    highlightedNodeIds = new Set();
+    setTimeout(resetView, 0);
+  }
+
   function panToNode(nodeId) {
     const pos = getPos(nodeId);
     viewBox = { ...viewBox, x: pos.x - viewBox.w / 2, y: pos.y - viewBox.h / 2 };
@@ -528,15 +534,22 @@
     </div>
     <div class="list-fallback-wrap">
       <table class="list-table" aria-label="Node list (graph too large for canvas)">
-        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th>File</th><th>Spec</th></tr></thead>
+        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th>File</th><th>Spec</th><th scope="col">Action</th></tr></thead>
         <tbody>
           {#each nodes.slice(0, 1000) as node}
             <tr class="list-row" role="button" tabindex="0" aria-label="Select node {node.name}"
-              onclick={() => selectNode(node)} onkeydown={(e) => e.key === 'Enter' && selectNode(node)}>
+              onclick={() => selectNode(node)} onkeydown={(e) => e.key === 'Enter' && selectNode(node)}
+              ondblclick={(e) => { e.stopPropagation(); drillInFromList(node); }}>
               <td><Badge variant="default" value={node.node_type ?? '?'} /></td>
               <td class="mono">{node.name}</td>
               <td class="mono muted">{node.file_path ?? ''}</td>
               <td>{node.spec_path ? node.spec_path.split('/').pop() : '—'}</td>
+              <td>
+                <button class="drill-in-btn" onclick={(e) => { e.stopPropagation(); drillInFromList(node); }}
+                  aria-label="Drill into {node.name}">
+                  Drill In &rarr;
+                </button>
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -635,9 +648,27 @@
         {#each visibleEdges as edge}
           {@const from = getPos(edge.source_id ?? edge.from_node_id ?? edge.from)}
           {@const to   = getPos(edge.target_id ?? edge.to_node_id ?? edge.to)}
-          <line class="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y}
-            stroke={encodedEdgeColor(edge)} stroke-dasharray={encodedEdgeDash(edge)}
-            marker-end="url(#arrow)" />
+          {@const mx = (from.x + to.x) / 2}
+          {@const my = (from.y + to.y) / 2}
+          {@const rawAngle = Math.atan2(to.y - from.y, to.x - from.x) * 180 / Math.PI}
+          {@const labelAngle = rawAngle > 90 || rawAngle < -90 ? rawAngle + 180 : rawAngle}
+          {@const label = edge.edge_type ?? ''}
+          <g class="edge-group">
+            <!-- Wide transparent hit area for hover -->
+            <line class="edge-hit" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+            <line class="graph-edge" x1={from.x} y1={from.y} x2={to.x} y2={to.y}
+              stroke={encodedEdgeColor(edge)} stroke-dasharray={encodedEdgeDash(edge)}
+              marker-end="url(#arrow)" />
+            {#if label}
+              <text class="edge-label" x={mx} y={my - 5}
+                text-anchor="middle" dominant-baseline="middle"
+                transform="rotate({labelAngle}, {mx}, {my})"
+                font-size="9" pointer-events="none"
+                style="font-family: var(--font-mono); user-select:none">
+                {label}
+              </text>
+            {/if}
+          </g>
         {/each}
 
         <!-- Nodes -->
@@ -883,6 +914,14 @@
   .list-row td { padding: var(--space-2) var(--space-3); vertical-align: middle; color: var(--color-text); }
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .muted { color: var(--color-text-muted); }
+  .drill-in-btn {
+    padding: var(--space-1) var(--space-2); background: transparent;
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm);
+    color: var(--color-link); font-size: var(--text-xs); font-family: var(--font-body);
+    cursor: pointer; white-space: nowrap; transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  .drill-in-btn:hover { background: color-mix(in srgb, var(--color-link) 10%, transparent); border-color: var(--color-link); }
+  .drill-in-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .canvas-toolbar {
     display: flex; align-items: center; gap: var(--space-4);
@@ -934,6 +973,10 @@
   .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
   .graph-svg.panning { cursor: grabbing; }
   .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
+  .edge-hit { stroke: transparent; stroke-width: 12; fill: none; }
+  .edge-label { fill: #94a3b8; opacity: 0; transition: opacity 0.15s; }
+  .edge-group:hover .edge-label { opacity: 1; }
+  .edge-group:hover .graph-edge { stroke-opacity: 1; }
   .graph-node { cursor: pointer; }
   .graph-node:hover path, .graph-node:hover ellipse { filter: brightness(1.3); }
   .graph-node.selected path, .graph-node.selected ellipse { filter: brightness(1.4); }

@@ -310,6 +310,24 @@ pub async fn get_my_notifications(
     })))
 }
 
+/// GET /api/v1/users/me/notifications/count?workspace_id=
+///
+/// Returns the count of active (unresolved, undismissed) notifications for the caller.
+/// Used by the inbox badge in the dashboard.
+pub async fn get_notification_count(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let count = state
+        .notifications
+        .count_unresolved(&user_id, workspace_id.as_ref())
+        .await?;
+    Ok(Json(serde_json::json!({ "count": count })))
+}
+
 /// POST /api/v1/notifications/:id/dismiss
 ///
 /// Per-handler auth: verifies notification belongs to caller AND caller.tenant_id matches.
@@ -826,4 +844,179 @@ pub async fn get_judgments(
         "limit": limit,
         "offset": offset,
     })))
+}
+
+// ─── Integration tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use crate::mem::test_state;
+    use axum::{body::Body, Router};
+    use gyre_common::{Id, Notification, NotificationType};
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        crate::api::api_router().with_state(test_state())
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Helper: seed one notification for user "test-token" (which maps to agent_id="test-token").
+    async fn seed_notification(
+        state: &std::sync::Arc<crate::AppState>,
+        notification_type: NotificationType,
+        title: &str,
+    ) {
+        let now = 1_700_000_000i64;
+        let notif = Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-default"),
+            Id::new("system"), // user_id matches the global test auth token (resolves as "system")
+            notification_type,
+            title,
+            "default",
+            now,
+        );
+        state.notifications.create(&notif).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_my_notifications_empty() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["notifications"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn notification_count_returns_zero_when_empty() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn notification_count_reflects_seeded_records() {
+        let state = test_state();
+        seed_notification(
+            &state,
+            NotificationType::GateFailure,
+            "Gate failed on MR 123",
+        )
+        .await;
+        seed_notification(
+            &state,
+            NotificationType::AgentCompleted,
+            "Agent worker-1 completed",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["count"], 2,
+            "badge count must match seeded notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_my_notifications_lists_seeded_record() {
+        let state = test_state();
+        seed_notification(
+            &state,
+            NotificationType::SpecPendingApproval,
+            "Spec needs approval",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0]["notification_type"], "SpecPendingApproval");
+        assert_eq!(notifs[0]["title"], "Spec needs approval");
+    }
+
+    #[tokio::test]
+    async fn agent_completed_notification_type_round_trips() {
+        // Verify AgentCompleted and AgentEscalation types serialize/deserialize correctly.
+        let state = test_state();
+        seed_notification(&state, NotificationType::AgentCompleted, "Agent done").await;
+        seed_notification(&state, NotificationType::AgentEscalation, "Agent escalated").await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 2);
+        let types: Vec<&str> = notifs
+            .iter()
+            .map(|n| n["notification_type"].as_str().unwrap())
+            .collect();
+        assert!(
+            types.contains(&"AgentCompleted"),
+            "AgentCompleted must be present: {types:?}"
+        );
+        assert!(
+            types.contains(&"AgentEscalation"),
+            "AgentEscalation must be present: {types:?}"
+        );
+    }
 }

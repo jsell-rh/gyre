@@ -304,6 +304,8 @@ export const api = {
   },
   auditStats: () => request('/audit/stats'),
   auditStreamUrl: () => `${API_BASE}/audit/stream`,
+  // Trace capture (HSI §3a)
+  mrTrace: (id) => request(`/merge-requests/${id}/trace`),
   // Spec registry (M21.1)
   getSpecs: () => request('/specs'),
   getSpec: (path) => request(`/specs/${encodeURIComponent(path)}`),
@@ -416,7 +418,14 @@ export const api = {
   myAgents: () => request('/users/me/agents'),
   myTasks: () => request('/users/me/tasks'),
   myMrs: () => request('/users/me/mrs'),
-  myNotifications: () => request('/users/me/notifications'),
+  myNotifications: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
+  },
+  notificationCount: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
+  },
   markNotificationRead: (id) =>
     request(`/users/me/notifications/${id}/read`, { method: 'PUT' }),
   myJudgments: (params) => {
