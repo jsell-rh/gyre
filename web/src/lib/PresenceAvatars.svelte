@@ -172,17 +172,22 @@
   .presence-avatars {
     display: flex;
     align-items: center;
-    gap: calc(var(--space-1) * -1);  /* slight overlap */
+    gap: 0;
   }
 
   .avatar-wrap {
     position: relative;
+    margin-left: -6px;
+  }
+
+  .avatar-wrap:first-child {
+    margin-left: 0;
   }
 
   .avatar {
     width: 24px;
     height: 24px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     /* Deterministic color from hue */
     background: hsl(var(--avatar-hue), 55%, 35%);
     border: 2px solid var(--color-surface);
@@ -201,7 +206,7 @@
   .avatar-wrap:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
   }
 
   .avatar-wrap:hover .avatar,
@@ -216,7 +221,7 @@
     right: -3px;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     background: var(--color-primary);
     border: 1.5px solid var(--color-surface);
     display: flex;
