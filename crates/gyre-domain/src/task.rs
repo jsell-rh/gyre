@@ -47,6 +47,10 @@ pub struct Task {
     pub repo_id: Id,
     /// Spec path this task was created to implement/review (e.g. "specs/system/agent-gates.md").
     pub spec_path: Option<String>,
+    /// Unix timestamp when this task was cancelled. Set when status → Cancelled.
+    pub cancelled_at: Option<u64>,
+    /// Human-readable reason for cancellation.
+    pub cancelled_reason: Option<String>,
 }
 
 impl Task {
@@ -67,7 +71,18 @@ impl Task {
             workspace_id: Id::new("default"),
             repo_id: Id::new(""),
             spec_path: None,
+            cancelled_at: None,
+            cancelled_reason: None,
         }
+    }
+
+    /// Cancel this task with an optional reason. Transitions status to Cancelled.
+    pub fn cancel(&mut self, reason: Option<String>, now: u64) -> Result<(), TaskError> {
+        self.transition_status(TaskStatus::Cancelled)?;
+        self.cancelled_at = Some(now);
+        self.cancelled_reason = reason;
+        self.updated_at = now;
+        Ok(())
     }
 
     /// Enforce valid status transitions:

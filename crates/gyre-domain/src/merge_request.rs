@@ -47,6 +47,10 @@ pub struct MergeRequest {
     pub updated_at: u64,
     /// Workspace that governs this MR (ABAC boundary). Non-optional per M34 hierarchy enforcement.
     pub workspace_id: Id,
+    /// Unix timestamp when this MR was reverted via recovery protocol.
+    pub reverted_at: Option<u64>,
+    /// ID of the revert MR that undid this MR's changes.
+    pub revert_mr_id: Option<Id>,
 }
 
 impl MergeRequest {
@@ -75,13 +79,16 @@ impl MergeRequest {
             created_at,
             updated_at: created_at,
             workspace_id: Id::new("default"),
+            reverted_at: None,
+            revert_mr_id: None,
         }
     }
 
     /// Valid transitions:
     /// Open → Approved | Closed
     /// Approved → Merged | Closed
-    /// Merged and Closed are terminal
+    /// Merged → Reverted (recovery protocol)
+    /// Closed and Reverted are terminal
     pub fn transition_status(&mut self, new_status: MrStatus) -> Result<(), MrError> {
         let valid = matches!(
             (&self.status, &new_status),
@@ -89,6 +96,7 @@ impl MergeRequest {
                 | (MrStatus::Open, MrStatus::Closed)
                 | (MrStatus::Approved, MrStatus::Merged)
                 | (MrStatus::Approved, MrStatus::Closed)
+                | (MrStatus::Merged, MrStatus::Reverted)
         );
         if valid {
             self.status = new_status;
@@ -99,6 +107,15 @@ impl MergeRequest {
                 to: new_status,
             })
         }
+    }
+
+    /// Mark this MR as reverted via the recovery protocol.
+    pub fn revert(&mut self, revert_mr_id: Id, now: u64) -> Result<(), MrError> {
+        self.transition_status(MrStatus::Reverted)?;
+        self.reverted_at = Some(now);
+        self.revert_mr_id = Some(revert_mr_id);
+        self.updated_at = now;
+        Ok(())
     }
 }
 

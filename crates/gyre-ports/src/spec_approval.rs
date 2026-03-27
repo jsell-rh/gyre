@@ -18,4 +18,7 @@ pub trait SpecApprovalRepository: Send + Sync {
         reason: &str,
         now: u64,
     ) -> Result<()>;
+
+    /// Mark a spec approval as rejected by a human reviewer.
+    async fn reject(&self, id: &Id, rejected_by: &str, reason: &str, now: u64) -> Result<()>;
 }

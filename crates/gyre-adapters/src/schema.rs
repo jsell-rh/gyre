@@ -54,6 +54,8 @@ diesel::table! {
         workspace_id -> Text,
         spec_path -> Nullable<Text>,
         repo_id -> Text,
+        cancelled_at -> Nullable<BigInt>,
+        cancelled_reason -> Nullable<Text>,
     }
 }
 
@@ -77,6 +79,8 @@ diesel::table! {
         depends_on -> Text,
         atomic_group -> Nullable<Text>,
         workspace_id -> Text,
+        reverted_at -> Nullable<BigInt>,
+        revert_mr_id -> Nullable<Text>,
     }
 }
 
@@ -374,6 +378,9 @@ diesel::table! {
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,
         revocation_reason -> Nullable<Text>,
+        rejected_at -> Nullable<BigInt>,
+        rejected_reason -> Nullable<Text>,
+        rejected_by -> Nullable<Text>,
     }
 }
 

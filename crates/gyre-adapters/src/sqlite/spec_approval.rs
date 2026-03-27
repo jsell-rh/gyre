@@ -22,6 +22,9 @@ struct SpecApprovalRow {
     revoked_at: Option<i64>,
     revoked_by: Option<String>,
     revocation_reason: Option<String>,
+    rejected_at: Option<i64>,
+    rejected_reason: Option<String>,
+    rejected_by: Option<String>,
 }
 
 impl SpecApprovalRow {
@@ -36,6 +39,9 @@ impl SpecApprovalRow {
             revoked_at: self.revoked_at.map(|v| v as u64),
             revoked_by: self.revoked_by,
             revocation_reason: self.revocation_reason,
+            rejected_at: self.rejected_at.map(|v| v as u64),
+            rejected_reason: self.rejected_reason,
+            rejected_by: self.rejected_by.map(Id::new),
         }
     }
 }
@@ -52,6 +58,9 @@ struct NewSpecApprovalRow<'a> {
     revoked_at: Option<i64>,
     revoked_by: Option<&'a str>,
     revocation_reason: Option<&'a str>,
+    rejected_at: Option<i64>,
+    rejected_reason: Option<&'a str>,
+    rejected_by: Option<&'a str>,
 }
 
 #[async_trait]
@@ -71,6 +80,9 @@ impl SpecApprovalRepository for SqliteStorage {
                 revoked_at: a.revoked_at.map(|v| v as i64),
                 revoked_by: a.revoked_by.as_deref(),
                 revocation_reason: a.revocation_reason.as_deref(),
+                rejected_at: a.rejected_at.map(|v| v as i64),
+                rejected_reason: a.rejected_reason.as_deref(),
+                rejected_by: a.rejected_by.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(spec_approvals::table)
                 .values(&row)
@@ -166,6 +178,26 @@ impl SpecApprovalRepository for SqliteStorage {
                 ))
                 .execute(&mut *conn)
                 .context("revoke spec approval")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn reject(&self, id: &Id, rejected_by: &str, reason: &str, now: u64) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let rejected_by = rejected_by.to_string();
+        let reason = reason.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(spec_approvals::table.find(id.as_str()))
+                .set((
+                    spec_approvals::rejected_at.eq(now as i64),
+                    spec_approvals::rejected_by.eq(&rejected_by),
+                    spec_approvals::rejected_reason.eq(&reason),
+                ))
+                .execute(&mut *conn)
+                .context("reject spec approval")?;
             Ok(())
         })
         .await?
