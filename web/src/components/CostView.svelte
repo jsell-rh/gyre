@@ -194,6 +194,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
     font-family: var(--font-body);
+    transition: background var(--transition-fast);
   }
   button:hover { background: var(--color-surface-elevated); }
   button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
