@@ -255,7 +255,7 @@
   h2 {
     font-family: var(--font-display);
     font-size: var(--text-xl);
-    font-weight: 700;
+    font-weight: 600;
     color: var(--color-text);
     margin: 0;
   }
