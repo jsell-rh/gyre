@@ -719,7 +719,7 @@
     border: none;
     color: inherit;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--text-xs);
     line-height: 1;
     padding: 0 var(--space-0, 2px);
     opacity: 0.7;
