@@ -828,7 +828,7 @@
   .panel-entity {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     overflow: hidden;
     min-width: 0;
   }
@@ -1144,14 +1144,14 @@
   .diff-op {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
   }
 
   .diff-badge {
     font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);

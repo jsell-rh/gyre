@@ -390,7 +390,7 @@
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    padding: 2px var(--space-1);
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -409,7 +409,7 @@
     border: 1px solid var(--color-link);
     color: var(--color-link);
     border-radius: var(--radius-full);
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     cursor: default;
   }
 
