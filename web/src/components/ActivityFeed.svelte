@@ -214,6 +214,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    contain: layout style;
   }
 
   .timeline-item {

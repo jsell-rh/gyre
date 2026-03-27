@@ -120,6 +120,8 @@
     transition: width var(--transition-normal), min-width var(--transition-normal);
     overflow: hidden;
     flex-shrink: 0;
+    will-change: width, min-width;
+    contain: layout style;
   }
 
   .sidebar.collapsed {
