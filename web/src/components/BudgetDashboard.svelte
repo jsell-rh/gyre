@@ -161,7 +161,7 @@
     cursor: pointer;
   }
   .btn-refresh:hover { color: var(--color-text); }
-  .btn-refresh:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-refresh:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .content { flex: 1; overflow-y: auto; padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-8); }
 
@@ -205,8 +205,8 @@
 
   .bar-row { display: flex; align-items: center; gap: var(--space-2); }
   .bar-lbl { font-size: var(--text-xs); color: var(--color-text-muted); width: 48px; flex-shrink: 0; }
-  .bar-track { flex: 1; height: 6px; background: var(--color-surface); border-radius: 999px; overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--color-primary); border-radius: 999px; transition: width 0.4s; }
+  .bar-track { flex: 1; height: 6px; background: var(--color-surface); border-radius: var(--radius-full); overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--color-primary); border-radius: var(--radius-full); transition: width var(--transition-slow); }
   .bar-fill.bar-warn { background: var(--color-warning); }
   .bar-fill.bar-danger { background: var(--color-danger); }
   .bar-txt { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); min-width: 120px; }

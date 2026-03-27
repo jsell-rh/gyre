@@ -196,7 +196,7 @@
     font-family: var(--font-body);
   }
   button:hover { background: var(--color-surface-elevated); }
-  button:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .summary-card {
     background: var(--color-surface);
@@ -238,7 +238,7 @@
   .bar-cell { width: 120px; }
   .bar { height: 10px; background: var(--color-primary); border-radius: var(--radius-sm); min-width: 2px; }
 
-  .detail-btn { font-size: var(--text-xs); padding: var(--space-0, 2px) var(--space-1); }
+  .detail-btn { font-size: var(--text-xs); padding: 2px var(--space-1); }
 
   .empty { color: var(--color-text-secondary); font-size: var(--text-sm); }
   .error { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border: 1px solid var(--color-danger); color: var(--color-danger); border-radius: var(--radius); padding: var(--space-3); display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
@@ -258,7 +258,7 @@
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
-  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

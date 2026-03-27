@@ -363,6 +363,7 @@
     align-items: center;
     gap: var(--space-1);
     padding: var(--space-1) 0;
+    transition: color var(--transition-fast);
   }
 
   .raw-schema-toggle:hover { color: var(--color-text-secondary); }

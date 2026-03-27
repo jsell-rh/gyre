@@ -194,7 +194,7 @@
     display: inline-flex;
     align-items: center;
     padding: var(--space-1) var(--space-3);
-    border-radius: 99px;
+    border-radius: var(--radius-full);
     border: 1px solid var(--color-border);
     background: transparent;
     color: var(--color-text-secondary);
@@ -247,7 +247,7 @@
   .node-warning { border-color: color-mix(in srgb, var(--color-warning) 40%, transparent); color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
   .node-danger  { border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);  color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
   .node-info    { border-color: color-mix(in srgb, var(--color-info) 40%, transparent);  color: var(--color-info); background: color-mix(in srgb, var(--color-info) 10%, transparent); }
-  .node-purple  { border-color: color-mix(in srgb, var(--color-blocked, #5e40be) 40%, transparent);  color: var(--color-blocked, #8b6fe0); background: color-mix(in srgb, var(--color-blocked, #5e40be) 10%, transparent); }
+  .node-purple  { border-color: color-mix(in srgb, var(--color-blocked) 40%, transparent);  color: var(--color-blocked); background: color-mix(in srgb, var(--color-blocked) 10%, transparent); }
 
   .skeleton-dot {
     width: 28px;
@@ -261,7 +261,7 @@
     flex: 1;
     width: 1px;
     background: var(--color-border);
-    margin: var(--space-0, 2px) 0;
+    margin: 2px 0;
     min-height: var(--space-4);
   }
 
@@ -311,7 +311,7 @@
   }
 
   .pill:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -333,5 +333,5 @@
     cursor: pointer;
   }
   .btn-retry:hover { background: var(--color-surface-hover); }
-  .btn-retry:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-retry:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 </style>

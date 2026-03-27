@@ -305,7 +305,7 @@
     border-color: var(--color-link);
   }
   .spec-editor:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -322,15 +322,15 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     cursor: pointer;
     font-size: var(--text-sm);
     padding: var(--space-2) var(--space-4);
     font-family: var(--font-body);
     font-weight: 500;
-    transition: opacity var(--transition-fast);
+    transition: background var(--transition-fast);
   }
-  .primary-btn:hover { opacity: 0.88; }
+  .primary-btn:hover { background: var(--color-primary-hover); }
   .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .secondary-btn {
@@ -390,7 +390,7 @@
     border-color: var(--color-link);
   }
   .id-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

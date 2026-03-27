@@ -395,7 +395,7 @@
     padding: var(--space-4) var(--space-5);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
+    border-radius: var(--radius-lg);
     cursor: pointer;
     text-align: left;
     font-family: var(--font-body);
@@ -404,12 +404,12 @@
   }
 
   .ws-repo-card:hover {
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
     background: var(--color-surface-elevated);
   }
 
   .ws-repo-card:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -428,7 +428,7 @@
   .ws-repo-info {
     display: flex;
     flex-direction: column;
-    gap: var(--space-0, 2px);
+    gap: 2px;
     min-width: 0;
   }
 
@@ -524,7 +524,7 @@
   }
 
   .repo-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -543,7 +543,7 @@
   .stat {
     display: flex;
     align-items: baseline;
-    gap: var(--space-0, 3px);
+    gap: 3px;
   }
 
   .stat-val {
@@ -586,17 +586,17 @@
 
   .go-admin-btn {
     background: var(--color-link);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     border: none;
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-4);
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
-    transition: opacity var(--transition-fast);
+    transition: background var(--transition-fast);
   }
-  .go-admin-btn:hover { opacity: 0.85; }
-  .go-admin-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .go-admin-btn:hover { background: var(--color-link-hover); }
+  .go-admin-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .loading-wrap {
     padding: var(--space-6);
@@ -637,8 +637,8 @@
   }
 
   .search-input-wrap:focus-within {
-    border-color: var(--color-focus, #4db0ff);
-    box-shadow: 0 0 0 2px var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
+    box-shadow: 0 0 0 2px var(--color-focus);
   }
 
   .search-icon {
@@ -682,7 +682,7 @@
     width: 12px;
     height: 12px;
     border: 2px solid var(--color-border-strong);
-    border-top-color: var(--color-focus, #4db0ff);
+    border-top-color: var(--color-focus);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
@@ -699,12 +699,12 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-0, 2px) var(--space-2) var(--space-0, 2px) var(--space-3);
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
-    border-radius: 999px;
+    padding: 2px var(--space-2) 2px var(--space-3);
+    background: color-mix(in srgb, var(--color-focus) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-focus) 30%, transparent);
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
-    color: var(--color-focus, #4db0ff);
+    color: var(--color-focus);
     font-family: var(--font-mono);
   }
 
@@ -721,13 +721,13 @@
     cursor: pointer;
     font-size: var(--text-xs);
     line-height: 1;
-    padding: 0 var(--space-0, 2px);
+    padding: 0 2px;
     opacity: 0.7;
     transition: opacity var(--transition-fast);
   }
 
   .chip-clear:hover { opacity: 1; }
-  .chip-clear:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .chip-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {
@@ -762,7 +762,7 @@
   }
 
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -798,11 +798,11 @@
 
   .graph-error button:hover {
     background: var(--color-surface);
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   .graph-error button:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
