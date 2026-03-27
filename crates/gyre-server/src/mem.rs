@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::BudgetUsage;
 use gyre_domain::{
-    Agent, AgentCommit, AgentStatus, AgentWorktree, AnalyticsEvent, AuditEvent, CostEntry,
-    DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest,
-    MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
+    Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
+    CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
+    MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
     ReviewDecision, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
@@ -384,6 +384,19 @@ impl AgentRepository for MemAgentRepository {
             .filter(|a| &a.workspace_id == workspace_id)
             .cloned()
             .collect())
+    }
+
+    async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(agent) = store.get_mut(agent_id.as_str()) {
+            agent.status = status;
+        }
+        Ok(())
+    }
+
+    async fn record_usage(&self, _usage: &AgentUsage) -> Result<()> {
+        // In-memory adapter: usage tracking is a no-op (not needed for tests).
+        Ok(())
     }
 }
 

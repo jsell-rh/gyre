@@ -1,5 +1,6 @@
 //! Merge attestation domain types.
 
+use crate::MetaSpecUsed;
 use gyre_common::AgentCompletionSummary;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +38,9 @@ pub struct MergeAttestation {
     /// with a `summary` field. Contains decisions, uncertainties, and conversation_sha.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_summary: Option<AgentCompletionSummary>,
+    /// Meta-specs that were consulted during the agent's work session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meta_specs_used: Vec<MetaSpecUsed>,
 }
 
 /// Signed attestation bundle returned by `GET /api/v1/merge-requests/{id}/attestation`.
