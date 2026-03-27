@@ -827,7 +827,7 @@
   .panel-entity {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
     overflow: hidden;
     min-width: 0;
   }
@@ -1142,15 +1142,15 @@
   .diff-op {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0, 2px);
   }
 
   .diff-badge {
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
-    padding: 1px 4px;
-    border-radius: 2px;
+    padding: var(--space-0, 2px) var(--space-1);
+    border-radius: var(--radius-sm, 2px);
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
     display: inline-block;
@@ -1204,7 +1204,7 @@
     color: var(--color-text-muted);
     font-weight: 500;
     display: block;
-    margin-bottom: 2px;
+    margin-bottom: var(--space-0, 2px);
   }
 
   .streaming-txt {
@@ -1220,7 +1220,7 @@
     width: 2px;
     height: 1em;
     background: var(--color-primary);
-    margin-left: 2px;
+    margin-left: var(--space-0, 2px);
     vertical-align: text-bottom;
     animation: blink 1s step-end infinite;
   }
@@ -1339,7 +1339,7 @@
 
   .progress-big {
     font-family: var(--font-display);
-    font-size: 1.5rem;
+    font-size: var(--text-2xl);
     font-weight: 700;
     color: var(--color-text);
   }
@@ -1352,14 +1352,14 @@
   .progress-bar-track {
     height: 8px;
     background: var(--color-border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
   .progress-bar-fill {
     height: 100%;
     background: var(--color-success);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     transition: width var(--transition-slow, 0.3s);
   }
 
@@ -1419,7 +1419,7 @@
   }
 
   .link-kind {
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
     color: var(--color-text-muted);
