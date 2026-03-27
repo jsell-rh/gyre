@@ -880,4 +880,11 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pill,
+    .agent-card,
+    .toggle-btn,
+    .spawn-btn { transition: none; }
+  }
 </style>

@@ -645,7 +645,7 @@
     word-break: break-all;
   }
 
-  .meta-link-btn:hover { opacity: 0.8; }
+  .meta-link-btn:hover { color: var(--color-primary-hover, var(--color-primary)); text-decoration: underline; }
 
   .branch-ref {
     font-family: var(--font-mono);
@@ -769,9 +769,9 @@
   }
 
   .timeline-step.active .timeline-dot {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    box-shadow: 0 0 8px color-mix(in srgb, var(--color-primary) 40%, transparent);
+    background: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus, #4db0ff);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--color-focus, #4db0ff) 40%, transparent);
   }
 
   .timeline-label {
@@ -1177,7 +1177,7 @@
   }
 
   .diff-line.line-delete {
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
   }
 
   .diff-line.line-context {
@@ -1334,5 +1334,16 @@
   .dep-add-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .timeline-dot,
+    .timeline-line,
+    .action-btn,
+    .file-item,
+    .review-card,
+    .tab-btn {
+      transition: none;
+    }
   }
 </style>

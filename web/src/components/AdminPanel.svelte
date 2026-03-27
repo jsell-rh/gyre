@@ -1781,4 +1781,8 @@
   }
   .target-select.narrow { width: auto; min-width: 120px; }
   .target-select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .budget-bar-fill { transition: none; }
+  }
 </style>

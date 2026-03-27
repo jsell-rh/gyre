@@ -788,7 +788,7 @@
   .impact-panel { background: var(--color-surface, #111); border: 1px solid var(--color-border, #333); border-radius: var(--radius, 6px); overflow: hidden; }
   .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border, #333); }
   .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted, #888); cursor: pointer; font-size: var(--text-sm); transition: color 0.15s; font-family: var(--font-body, sans-serif); }
-  .impact-tab.active { color: var(--color-text, #eee); border-bottom-color: var(--color-primary, #ee0000); }
+  .impact-tab.active { color: var(--color-text, #eee); border-bottom-color: var(--color-link, var(--color-focus, #4db0ff)); }
   .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
   .arch-diff { display: flex; flex-direction: column; gap: 0.3rem; }
   .arch-line { padding: 0.2rem 0.4rem; border-radius: 3px; font-family: var(--font-mono, monospace); }
@@ -807,7 +807,7 @@
   /* ── Detail panel ── */
   .detail-tabs { display: flex; margin-bottom: var(--space-4); border-bottom: 1px solid var(--color-border, #333); }
   .detail-tab { padding: 0.4rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted, #888); cursor: pointer; font-size: var(--text-sm); font-family: var(--font-body, sans-serif); }
-  .detail-tab.active { color: var(--color-text, #eee); border-bottom-color: var(--color-primary, #ee0000); }
+  .detail-tab.active { color: var(--color-text, #eee); border-bottom-color: var(--color-link, var(--color-focus, #4db0ff)); }
   .detail-info { display: flex; flex-direction: column; gap: 0.6rem; }
   .detail-row { display: flex; align-items: center; gap: 0.75rem; }
   .detail-key { font-size: 0.8rem; font-weight: 600; color: var(--color-text-muted, #888); min-width: 60px; }
@@ -831,5 +831,10 @@
   .persona-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .catalog-row,
+    .spec-check-item { transition: none; }
   }
 </style>

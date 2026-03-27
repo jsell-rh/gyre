@@ -450,7 +450,7 @@
                       >
                         {state?.loading ? 'Retrying…' : 'Retry'}
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>Override</Button>
+                      <span class="coming-soon-note">Override requires manual intervention — contact an admin</span>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -498,6 +498,7 @@
                       <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
                     {:else if n.notification_type === 'budget_warning'}
                       <Button variant="primary" size="sm" onclick={() => navigate?.('admin')}>Increase Limit</Button>
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
                         variant="primary"
@@ -534,7 +535,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Confirm
+                        Accept &amp; Dismiss
                       </Button>
                       <Button
                         variant="ghost"

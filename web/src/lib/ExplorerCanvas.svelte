@@ -912,7 +912,7 @@
     transition: all var(--transition-fast); white-space: nowrap;
   }
   .layout-btn:hover { color: var(--color-text); }
-  .layout-btn.active { background: var(--color-primary); color: #fff; }
+  .layout-btn.active { background: var(--color-link, var(--color-focus, #4db0ff)); color: #fff; }
   .layout-spinner {
     display: inline-block; width: 12px; height: 12px;
     border: 2px solid var(--color-border); border-top-color: var(--color-primary);
@@ -1044,5 +1044,10 @@
   .graph-node:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .layout-spinner { animation: none; }
+    .graph-edge { transition: none; }
   }
 </style>
