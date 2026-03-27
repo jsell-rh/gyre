@@ -14,7 +14,7 @@ use gyre_common::{
     graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge, GraphNode},
     Id, Notification, NotificationType,
 };
-use gyre_domain::{LanguageExtractor, RustExtractor, WorkspaceRole};
+use gyre_domain::{LanguageExtractor, RustExtractor, TypeScriptExtractor, WorkspaceRole};
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -676,7 +676,7 @@ fn run_all_extractors(
         Box::new(RustExtractor),
         // GoExtractor added in S2
         // PythonExtractor added in S3
-        // TypeScriptExtractor added in S4
+        Box::new(TypeScriptExtractor),
     ];
 
     let repo_id = Id::new(repo_id_str.to_string());
