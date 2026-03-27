@@ -16,7 +16,7 @@
    *   repoId      — string | null
    *   scope       — 'tenant' | 'workspace' | 'repo'
    */
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -460,6 +460,8 @@
 
   function cancelPreview() { stopPreview(); previewState = 'editing'; previewProgress = []; }
   function iterate()       { stopPreview(); previewState = 'editing'; previewProgress = []; }
+
+  onDestroy(() => { stopPreview(); });
 
   async function publish() {
     if (!selectedMsId || !workspaceId) return;

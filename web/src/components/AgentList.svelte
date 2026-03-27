@@ -1,5 +1,5 @@
 <script>
-  import { getContext, tick } from 'svelte';
+  import { getContext, tick, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -122,6 +122,8 @@
     ttyLines = [];
     ttyConnecting = false;
   }
+
+  onDestroy(() => { closeTtyWs(); });
 
   function selectAgent(a) {
     if (selected?.id === a.id) { selected = null; closeTtyWs(); containerRecord = null; return; }
