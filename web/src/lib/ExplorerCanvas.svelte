@@ -901,12 +901,12 @@
   .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: #eab308; color: #eab308; }
 
   .layout-switcher {
-    display: flex; align-items: center; gap: 2px;
+    display: flex; align-items: center; gap: var(--space-1);
     background: var(--color-surface-elevated); border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius); padding: 2px;
+    border-radius: var(--radius); padding: var(--space-1);
   }
   .layout-btn {
-    padding: 2px var(--space-2); background: transparent; border: none;
+    padding: var(--space-1) var(--space-2); background: transparent; border: none;
     border-radius: calc(var(--radius) - 2px); color: var(--color-text-muted);
     font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer;
     transition: all var(--transition-fast); white-space: nowrap;
@@ -1058,7 +1058,13 @@
     }
     .graph-node,
     .graph-node:hover path,
-    .graph-node:hover ellipse {
+    .graph-node:hover ellipse,
+    .graph-node.selected path,
+    .graph-node.selected ellipse,
+    .graph-node.highlighted path,
+    .graph-node.highlighted ellipse,
+    .graph-node.spec-highlighted path,
+    .graph-node.spec-highlighted ellipse {
       transition: none;
       filter: none;
     }

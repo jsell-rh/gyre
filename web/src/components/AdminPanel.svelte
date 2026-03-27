@@ -518,7 +518,7 @@
       if (effectiveScope === 'tenant') loadTenant();
       else if (effectiveScope === 'workspace') loadWorkspace();
       else loadRepo();
-    }} disabled={loading}>
+    }} disabled={loading} aria-busy={loading} aria-label={loading ? 'Loading…' : 'Refresh admin panel'}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
       </svg>
