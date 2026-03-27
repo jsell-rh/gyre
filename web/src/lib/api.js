@@ -304,6 +304,8 @@ export const api = {
   },
   auditStats: () => request('/audit/stats'),
   auditStreamUrl: () => `${API_BASE}/audit/stream`,
+  // Trace capture (HSI §3a)
+  mrTrace: (id) => request(`/merge-requests/${id}/trace`),
   // Spec registry (M21.1)
   getSpecs: () => request('/specs'),
   getSpec: (path) => request(`/specs/${encodeURIComponent(path)}`),
