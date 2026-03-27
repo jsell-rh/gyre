@@ -67,18 +67,30 @@
     color: var(--color-text-muted);
   }
 
-  .field-input:focus {
+  .field-input:focus:not(:focus-visible) {
     border-color: var(--color-link);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  }
+
+  .field-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-color: var(--color-link);
   }
 
   .field-input.error {
     border-color: var(--color-danger);
   }
 
-  .field-input.error:focus {
+  .field-input.error:focus:not(:focus-visible) {
     border-color: var(--color-danger);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-danger) 20%, transparent);
+  }
+
+  .field-input.error:focus-visible {
+    outline: 2px solid var(--color-danger);
+    outline-offset: 2px;
+    border-color: var(--color-danger);
   }
 
   .field-input:disabled {

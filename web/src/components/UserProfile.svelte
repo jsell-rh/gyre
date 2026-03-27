@@ -435,9 +435,9 @@
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible {
-    outline: none;
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
     border-color: var(--color-focus);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 30%, transparent);
   }
 
   .edit-actions { display: flex; gap: var(--space-2); align-items: center; }

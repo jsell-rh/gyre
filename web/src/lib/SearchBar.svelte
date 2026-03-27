@@ -247,6 +247,12 @@
     color: var(--color-text);
   }
 
+  .search-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
   .search-input::placeholder { color: var(--color-text-muted); }
 
   .search-esc {
