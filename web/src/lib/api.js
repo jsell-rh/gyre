@@ -493,4 +493,19 @@ export const api = {
     }),
   specsSave: (repoId, data) =>
     request(`/repos/${repoId}/specs/save`, { method: 'POST', body: JSON.stringify(data) }),
+  // Costs
+  costsSummary: (since, until) =>
+    request(`/costs/summary?since=${since}&until=${until}`),
+  costs: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/costs${qs ? '?' + qs : ''}`);
+  },
+  // Analytics events
+  analyticsEvents: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/events${qs ? '?' + qs : ''}`);
+  },
+  // Presence
+  workspacePresence: (workspaceId) =>
+    request(`/workspaces/${workspaceId}/presence`),
 };
