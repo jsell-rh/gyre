@@ -18,12 +18,12 @@
   } = $props();
 </script>
 
-<div class="diff-suggestion" role="region" aria-label="Suggested change">
+<div class="diff-suggestion" role="region" aria-label="Suggested change {suggestion.id}" aria-live="polite">
   <div class="diff-header">
     <span class="diff-label">Suggested Change</span>
     <span class="diff-hint">Review before accepting</span>
   </div>
-  <pre class="diff-content">{suggestion.content}</pre>
+  <pre class="diff-content" tabindex="0">{suggestion.content}</pre>
   <div class="diff-actions">
     <Button variant="primary" size="sm" onclick={onaccept}>Accept</Button>
     <Button variant="secondary" size="sm" onclick={onedit}>Edit</Button>

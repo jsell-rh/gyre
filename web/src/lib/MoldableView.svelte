@@ -421,7 +421,7 @@
           <!-- Scrubber -->
           <div class="scrubber-area" aria-label="Timeline scrubber">
             <!-- Delta markers -->
-            <div class="marker-track" aria-hidden="true">
+            <div class="marker-track">
               {#each sortedDeltas as delta}
                 <button
                   class="delta-marker"
@@ -866,6 +866,7 @@
     font-size: var(--text-xs);
     padding: 0 var(--space-1);
     line-height: 1;
+    transition: color var(--transition-fast);
   }
 
   .delta-close:hover {
@@ -938,7 +939,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--color-info, var(--color-focus));
+    background: var(--color-info);
     opacity: 0.6;
     transition: all var(--transition-fast);
     margin-top: var(--space-1);
@@ -978,6 +979,7 @@
     .marker-pip,
     .now-btn,
     .sort-btn,
-    .filter-select { transition: none; }
+    .filter-select,
+    .delta-close { transition: none; }
   }
 </style>
