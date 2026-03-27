@@ -27,6 +27,8 @@
   --color-link-hover:       #79c8ff;
   /* Focus ring — blue (~7.5:1 contrast on dark) instead of red primary */
   --color-focus:            #4db0ff;
+  /* Primary text — lightened red for readability on dark surfaces (~5.5:1 contrast) */
+  --color-primary-text:     #ff6b6b;
 
   /* Status */
   --color-success:          #63993d;

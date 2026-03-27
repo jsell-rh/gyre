@@ -47,7 +47,7 @@
   .empty-icon {
     color: var(--color-text-muted);
     margin-bottom: var(--space-2);
-    opacity: 0.6;
+    opacity: 0.75;
   }
 
   .empty-title {

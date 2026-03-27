@@ -51,7 +51,7 @@
   .diff-label {
     font-size: var(--text-xs);
     font-weight: 600;
-    color: var(--color-primary);
+    color: var(--color-primary-text);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
