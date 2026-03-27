@@ -122,6 +122,7 @@
 </Modal>
 
 <div class="page" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "repositories loaded"}</span>
   <div class="page-hdr">
     <div>
       <h1 class="page-title">Repositories</h1>
@@ -336,4 +337,5 @@
     text-align: center;
     font-size: var(--text-sm);
   }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

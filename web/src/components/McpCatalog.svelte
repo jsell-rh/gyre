@@ -95,10 +95,10 @@
                   <table class="schema-table">
                     <thead>
                       <tr>
-                        <th>Parameter</th>
-                        <th>Type</th>
-                        <th>Required</th>
-                        <th>Description</th>
+                        <th scope="col">Parameter</th>
+                        <th scope="col">Type</th>
+                        <th scope="col">Required</th>
+                        <th scope="col">Description</th>
                       </tr>
                     </thead>
                     <tbody>

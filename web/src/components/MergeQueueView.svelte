@@ -300,11 +300,11 @@
           <table class="entries-table">
             <thead>
               <tr>
-                <th>MR ID</th>
-                <th>Priority</th>
-                <th>Status</th>
-                <th>Enqueued</th>
-                <th>Processed</th>
+                <th scope="col">MR ID</th>
+                <th scope="col">Priority</th>
+                <th scope="col">Status</th>
+                <th scope="col">Enqueued</th>
+                <th scope="col">Processed</th>
                 <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>

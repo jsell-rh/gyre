@@ -162,7 +162,7 @@
   <Tabs {tabs} bind:active={activeTab} />
 
   {#if error}
-    <div class="error-banner">
+    <div class="error-banner" role="alert">
       <p>{error}</p>
       <button class="btn-retry" onclick={() => { error = null; loadAll(); }}>Retry</button>
     </div>
@@ -264,7 +264,7 @@
       {:else}
         <table class="data-table">
           <thead>
-            <tr><th>Name</th><th>Default Branch</th><th>Mirror</th></tr>
+            <tr><th scope="col">Name</th><th>Default Branch</th><th>Mirror</th></tr>
           </thead>
           <tbody>
             {#each repos as r}
@@ -292,7 +292,7 @@
       {:else}
         <table class="data-table">
           <thead>
-            <tr><th>User</th><th>Role</th><th>Joined</th></tr>
+            <tr><th scope="col">User</th><th scope="col">Role</th><th>Joined</th></tr>
           </thead>
           <tbody>
             {#each members as m}

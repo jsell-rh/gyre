@@ -363,4 +363,9 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .search-dialog { animation: none; }
+    .search-spinner { animation: none; }
+  }
 </style>

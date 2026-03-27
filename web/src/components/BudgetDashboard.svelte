@@ -39,6 +39,7 @@
 </script>
 
 <div class="budget-dash" aria-busy={loading}>
+  <span class="sr-only" aria-live="polite">{loading ? "" : "budget data loaded"}</span>
   <div class="dash-header">
     <h2>Budget Dashboard</h2>
     <p class="subtitle">Tenant-wide token and cost consumption</p>
@@ -212,4 +213,5 @@
   .bar-fill.bar-danger { background: var(--color-danger); }
   .bar-txt { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); min-width: 120px; }
   .no-limits { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

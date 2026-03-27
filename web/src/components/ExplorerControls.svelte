@@ -729,4 +729,8 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; opacity: 0.6; }
+  }
 </style>
