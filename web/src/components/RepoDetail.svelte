@@ -981,7 +981,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
   }
 
   .clone-bar {
@@ -1010,7 +1010,7 @@
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-3);
+    padding: 2px var(--space-3);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1023,7 +1023,7 @@
     color: var(--color-link);
     font-family: var(--font-body);
     font-size: var(--text-xs);
-    padding: var(--space-0, 2px) var(--space-3);
+    padding: 2px var(--space-3);
     cursor: pointer;
     white-space: nowrap;
     transition: all var(--transition-fast);
@@ -1067,7 +1067,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -1101,7 +1101,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -1291,7 +1291,7 @@
     color: var(--color-danger);
     font-family: var(--font-body);
     font-size: var(--text-xs);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     cursor: pointer;
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
@@ -1313,7 +1313,7 @@
   .rule-claim, .rule-value {
     font-family: var(--font-mono);
     background: var(--color-surface-elevated);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
   }

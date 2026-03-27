@@ -167,7 +167,7 @@
 
   select:focus-visible,
   button:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -214,7 +214,7 @@
   .ev-name { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-primary); }
   .ev-agent { font-size: var(--text-xs); color: var(--color-text-muted); }
   .ev-time { font-size: var(--text-xs); color: var(--color-text-secondary); }
-  .ev-detail { font-size: var(--text-xs); padding: var(--space-0, 2px) var(--space-1); }
+  .ev-detail { font-size: var(--text-xs); padding: 2px var(--space-1); }
   .ev-props {
     grid-column: 1 / -1;
     background: var(--color-surface);
@@ -245,7 +245,7 @@
     background: color-mix(in srgb, var(--color-primary) 25%, transparent);
     border-color: var(--color-primary);
   }
-  .retry-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .sr-only {
     position: absolute;

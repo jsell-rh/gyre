@@ -223,9 +223,9 @@
   }
 
   .nav-item.active {
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 8%, transparent);
+    background: color-mix(in srgb, var(--color-focus) 8%, transparent);
     color: var(--color-text);
-    border-left-color: var(--color-focus, #4db0ff);
+    border-left-color: var(--color-focus);
     font-weight: 500;
   }
 
@@ -250,8 +250,8 @@
     min-width: 18px;
     height: 18px;
     padding: 0 var(--space-1);
-    background: var(--color-focus, #4db0ff);
-    color: var(--color-text-inverse, #fff);
+    background: var(--color-focus);
+    color: var(--color-text-inverse);
     border-radius: var(--radius-full);
     font-size: var(--text-xs);
     font-weight: 700;
@@ -266,7 +266,7 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--color-focus, #4db0ff);
+    background: var(--color-focus);
     flex-shrink: 0;
   }
 
@@ -324,7 +324,7 @@
 
   .nav-item:focus-visible,
   .collapse-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

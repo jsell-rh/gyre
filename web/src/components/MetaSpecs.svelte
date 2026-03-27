@@ -687,7 +687,7 @@
   .catalog-row { cursor: pointer; transition: background var(--transition-fast); }
   .catalog-row:hover { background: var(--color-surface-elevated); }
   .catalog-row:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
   }
   .catalog-row td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); vertical-align: middle; }
@@ -728,7 +728,7 @@
     box-sizing: border-box;
   }
   .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong, #444); }
-  .persona-textarea:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .persona-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .persona-diff {
     min-height: 280px;
@@ -741,7 +741,7 @@
     overflow-x: auto;
   }
   .diff-line { padding: 0 var(--space-1); line-height: 1.5; }
-  .diff-line.add { background: color-mix(in srgb, var(--color-success, #3fb950) 12%, transparent); color: var(--color-success, #3fb950); }
+  .diff-line.add { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
   .diff-line.remove { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
   .diff-line.ctx { color: var(--color-text-muted); }
 
@@ -759,7 +759,7 @@
   }
   .spec-selector-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .spec-selector-shortcuts { display: flex; gap: var(--space-2); }
-  .link-btn { background: none; border: none; color: var(--color-link, #4db0ff); font-size: var(--text-xs); cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body); }
+  .link-btn { background: none; border: none; color: var(--color-link); font-size: var(--text-xs); cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body); }
   .spec-checklist { max-height: 360px; overflow-y: auto; padding: var(--space-2) 0; }
   .spec-check-item {
     display: flex;
@@ -797,12 +797,12 @@
   .impact-panel { background: var(--color-surface, #111); border: 1px solid var(--color-border); border-radius: var(--radius, 6px); overflow: hidden; }
   .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border); }
   .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
-  .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus, #4db0ff)); }
+  .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
   .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
   .arch-diff { display: flex; flex-direction: column; gap: var(--space-1); }
-  .arch-line { padding: var(--space-0, 2px) var(--space-1); border-radius: var(--radius-sm); font-family: var(--font-mono); }
-  .arch-line.add { color: var(--color-success, #3fb950); background: color-mix(in srgb, var(--color-success, #3fb950) 10%, transparent); }
-  .arch-line.mod { color: var(--color-warning, #d29922); background: color-mix(in srgb, var(--color-warning, #d29922) 10%, transparent); }
+  .arch-line { padding: 2px var(--space-1); border-radius: var(--radius-sm); font-family: var(--font-mono); }
+  .arch-line.add { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .arch-line.mod { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
   .arch-line.ctx { color: var(--color-text-muted); }
   .code-diff { display: flex; flex-direction: column; gap: var(--space-3); }
   .code-diff-file { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
@@ -816,7 +816,7 @@
   /* ── Detail panel ── */
   .detail-tabs { display: flex; margin-bottom: var(--space-4); border-bottom: 1px solid var(--color-border); }
   .detail-tab { padding: var(--space-1) var(--space-4); background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); font-family: var(--font-body); }
-  .detail-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus, #4db0ff)); }
+  .detail-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
   .detail-info { display: flex; flex-direction: column; gap: var(--space-2); }
   .detail-row { display: flex; align-items: center; gap: var(--space-3); }
   .detail-key { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); min-width: 60px; }
@@ -834,10 +834,10 @@
 
   /* ── Retry button ── */
   .retry-btn {
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 15%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
+    background: color-mix(in srgb, var(--color-focus) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-focus) 30%, transparent);
     border-radius: var(--radius, 6px);
-    color: var(--color-focus, #4db0ff);
+    color: var(--color-focus);
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-sm);
@@ -846,11 +846,11 @@
     margin-top: var(--space-3);
   }
   .retry-btn:hover {
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 25%, transparent);
-    border-color: var(--color-focus, #4db0ff);
+    background: color-mix(in srgb, var(--color-focus) 25%, transparent);
+    border-color: var(--color-focus);
   }
   .retry-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -860,7 +860,7 @@
   .detail-tab:focus-visible,
   .link-btn:focus-visible,
   .persona-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 

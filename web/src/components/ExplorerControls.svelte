@@ -457,11 +457,11 @@
   /* Tab switcher (Architecture / Code) */
   .tab-switcher {
     display: flex;
-    gap: var(--space-0, 2px);
+    gap: 2px;
     background: var(--color-surface);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
-    padding: var(--space-0, 2px);
+    padding: 2px;
   }
 
   .tab-btn {
@@ -527,7 +527,7 @@
   }
 
   .ctrl-select:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -612,7 +612,7 @@
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: var(--text-xs);
-    padding: 0 var(--space-0, 2px);
+    padding: 0 2px;
     line-height: 1;
   }
 
@@ -623,7 +623,7 @@
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm, 3px);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     font-family: var(--font-mono);
     flex-shrink: 0;
   }
@@ -669,14 +669,14 @@
 
   /* Save view button */
   .save-view-btn {
-    background: color-mix(in srgb, var(--color-success, #22c55e) 12%, transparent);
-    border-color: color-mix(in srgb, var(--color-success, #22c55e) 40%, transparent);
-    color: var(--color-success, #16a34a);
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+    color: var(--color-success);
   }
 
   .save-view-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-success, #22c55e) 20%, transparent);
-    border-color: var(--color-success, #16a34a);
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+    border-color: var(--color-success);
   }
 
   /* Playback controls */
@@ -712,7 +712,7 @@
 
   .tab-btn:focus-visible,
   .ctrl-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
