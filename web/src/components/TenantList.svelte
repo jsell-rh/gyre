@@ -170,6 +170,7 @@
     background: var(--color-bg);
     color: var(--color-text);
     box-sizing: border-box;
+    transition: border-color var(--transition-fast);
   }
   .input:focus:not(:focus-visible) { outline: none; }
   .input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
@@ -205,7 +206,7 @@
   .btn-secondary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .btn-danger-sm {
-    padding: 2px var(--space-2);
+    padding: var(--space-1) var(--space-2);
     background: transparent;
     border: 1px solid var(--color-danger);
     color: var(--color-danger);
@@ -220,6 +221,6 @@
   .btn-danger-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) {
-    .btn-primary, .btn-secondary, .btn-danger-sm { transition: none; }
+    .btn-primary, .btn-secondary, .btn-danger-sm, .input { transition: none; }
   }
 </style>
