@@ -59,6 +59,9 @@
           <tr
             class:clickable={!!onrowclick}
             onclick={onrowclick ? () => onrowclick(row) : undefined}
+            onkeydown={onrowclick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onrowclick(row); } } : undefined}
+            tabindex={onrowclick ? 0 : undefined}
+            role={onrowclick ? 'button' : undefined}
           >
             {#each columns as col}
               <td>{row[col.key] ?? '\u2014'}</td>

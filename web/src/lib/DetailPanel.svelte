@@ -28,6 +28,7 @@
 
   let activeTab = $state('info');
   let panelEl = $state(null);
+  let previousFocus = $state(null);
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
 
@@ -168,13 +169,17 @@
     }
   }
 
-  // Focus management: when panel opens, move focus into it.
+  // Focus management: when panel opens, move focus into it; restore on close.
   $effect(() => {
     if (entity && panelEl) {
+      previousFocus = document.activeElement;
       const focusable = panelEl.querySelector(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
       );
       focusable?.focus();
+    } else if (!entity && previousFocus) {
+      previousFocus?.focus();
+      previousFocus = null;
     }
   });
 
