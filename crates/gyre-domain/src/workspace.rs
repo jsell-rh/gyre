@@ -55,6 +55,8 @@ pub struct Workspace {
     /// LLM model override for workspace queries (default: GYRE_LLM_MODEL env).
     pub llm_model: Option<String>,
     pub created_at: u64,
+    /// Optional compute target for agent spawning within this workspace.
+    pub compute_target_id: Option<Id>,
 }
 
 impl Workspace {
@@ -77,6 +79,7 @@ impl Workspace {
             trust_level: TrustLevel::Guided,
             llm_model: None,
             created_at,
+            compute_target_id: None,
         }
     }
 }

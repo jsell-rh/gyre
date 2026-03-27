@@ -14,6 +14,7 @@ pub mod analytics;
 pub mod attestation;
 pub mod audit;
 pub mod budget;
+pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;

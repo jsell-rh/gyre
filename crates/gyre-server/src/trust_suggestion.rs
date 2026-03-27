@@ -324,6 +324,7 @@ mod tests {
             trust_level: trust,
             llm_model: None,
             created_at: 1_000_000,
+            compute_target_id: None,
         }
     }
 

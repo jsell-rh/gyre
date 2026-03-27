@@ -55,15 +55,15 @@ use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
-    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyRepository,
-    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
-    PushGateRepository, QualityGateRepository, RepoRepository, ReviewRepository,
-    SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
+    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
+    NetworkPeerRepository, NotificationRepository, PersonaRepository, PolicyRepository,
+    PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository, RepoRepository,
+    ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository,
+    SpecLedgerRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -352,6 +352,8 @@ pub struct AppState {
     pub repos_root: String,
     /// Prompt template repository (DB-backed, per-workspace + tenant defaults).
     pub prompt_templates: Arc<dyn gyre_ports::PromptRepository>,
+    /// Compute target repository — tenant-scoped infrastructure targets for agent spawning.
+    pub compute_targets: Arc<dyn ComputeTargetRepository>,
     /// LLM inference factory. None = LLM disabled (GYRE_VERTEX_PROJECT not set).
     ///
     /// When None, all LLM endpoints return HTTP 503 with a structured error.
@@ -931,6 +933,10 @@ pub fn build_state(
         prompt_templates: store!(
             dyn gyre_ports::PromptRepository,
             mem::MemPromptRepository::default()
+        ),
+        compute_targets: store!(
+            dyn ComputeTargetRepository,
+            mem::MemComputeTargetRepository::default()
         ),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {

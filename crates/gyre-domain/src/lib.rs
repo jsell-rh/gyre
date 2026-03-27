@@ -17,6 +17,7 @@ pub mod attestation;
 pub mod audit;
 pub mod budget;
 pub mod compose;
+pub mod compute_target;
 pub mod container_audit;
 pub mod dependency;
 pub mod extractor;
@@ -52,6 +53,7 @@ pub use attestation::{AttestationBundle, AttestationGateResult, MergeAttestation
 pub use audit::{AuditEvent, AuditEventType};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
+pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
 pub use container_audit::ContainerAuditRecord;
 pub use dependency::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
