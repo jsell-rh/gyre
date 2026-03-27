@@ -662,7 +662,7 @@
     color: var(--color-text, #eee);
     cursor: pointer;
     font-size: 0.85rem;
-    transition: background 0.15s;
+    transition: background var(--transition-fast);
   }
   .pill:hover { background: var(--color-surface-elevated, #222); }
   .pill.active {

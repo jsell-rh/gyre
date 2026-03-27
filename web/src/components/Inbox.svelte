@@ -593,7 +593,7 @@
     min-width: 22px;
     height: 22px;
     padding: 0 var(--space-1);
-    background: var(--color-primary);
+    background: var(--color-focus, #4db0ff);
     color: var(--color-text-inverse, #fff);
     border-radius: 999px;
     font-size: var(--text-xs);
@@ -755,7 +755,7 @@
     margin: 0;
     padding: var(--space-3);
     background: var(--color-surface);
-    border-left: 3px solid var(--color-primary);
+    border-left: 3px solid var(--color-focus, #4db0ff);
     border-radius: 0 var(--radius) var(--radius) 0;
     font-size: var(--text-sm);
     color: var(--color-text);

@@ -634,7 +634,7 @@
   .meta-link-btn {
     background: none;
     border: none;
-    color: var(--color-primary);
+    color: var(--color-link);
     cursor: pointer;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
@@ -645,7 +645,7 @@
     word-break: break-all;
   }
 
-  .meta-link-btn:hover { color: var(--color-primary-hover, var(--color-primary)); text-decoration: underline; }
+  .meta-link-btn:hover { color: color-mix(in srgb, var(--color-link) 80%, transparent); text-decoration: underline; }
 
   .branch-ref {
     font-family: var(--font-mono);
@@ -963,7 +963,7 @@
 
   .tab-btn.active {
     color: var(--color-text);
-    border-bottom-color: var(--color-primary);
+    border-bottom-color: var(--color-link);
   }
 
   .tab-badge {
@@ -1085,7 +1085,7 @@
   }
 
   .file-item.selected {
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    background: color-mix(in srgb, var(--color-link) 8%, transparent);
     color: var(--color-text);
   }
 
@@ -1342,7 +1342,10 @@
     .action-btn,
     .file-item,
     .review-card,
-    .tab-btn {
+    .tab-btn,
+    .back-btn,
+    .dep-remove-btn,
+    .dep-add-btn {
       transition: none;
     }
   }

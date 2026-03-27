@@ -96,7 +96,7 @@
         <button class="toggle-btn" class:active={viewMode === 'dag'} onclick={() => switchView('dag')} aria-pressed={viewMode === 'dag'}>DAG</button>
       </div>
       <button class="refresh-btn" onclick={load} disabled={loading}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
           <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
         </svg>
         {loading ? 'Loading…' : 'Refresh'}
@@ -114,7 +114,7 @@
       </div>
     {:else if error}
       <div class="error-msg" role="alert">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
         {error}
       </div>
     {:else if entries.length === 0}
@@ -664,7 +664,7 @@
   }
   .toggle-btn:last-child { border-right: none; }
   .toggle-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
-  .toggle-btn.active { background: var(--color-surface-elevated); color: var(--color-text); font-weight: 600; }
+  .toggle-btn.active { background: var(--color-surface-elevated); color: var(--color-focus, #4db0ff); border-color: var(--color-focus, #4db0ff); font-weight: 600; }
 
   /* DAG view */
   .dag-list {
@@ -779,4 +779,18 @@
   }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pulse,
+    .queue-card.processing {
+      animation: none;
+    }
+    .queue-card,
+    .entries-table tbody tr,
+    .dag-node,
+    .cancel-btn,
+    .toggle-btn {
+      transition: none;
+    }
+  }
 </style>

@@ -417,4 +417,16 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .edit-btn,
+    .field-input,
+    .field-textarea,
+    .cancel-btn,
+    .save-btn,
+    .edit-btn-secondary,
+    .publish-btn {
+      transition: none;
+    }
+  }
 </style>

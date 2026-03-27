@@ -1588,7 +1588,7 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
-  .trust-option.selected { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
+  .trust-option.selected { border-color: var(--color-focus, #4db0ff); background: color-mix(in srgb, var(--color-focus, #4db0ff) 4%, transparent); }
   .trust-radio {
     width: 18px;
     height: 18px;
@@ -1600,7 +1600,7 @@
     flex-shrink: 0;
     transition: border-color var(--transition-fast);
   }
-  .trust-option.selected .trust-radio { border-color: var(--color-primary); }
+  .trust-option.selected .trust-radio { border-color: var(--color-focus, #4db0ff); }
   .trust-radio-dot {
     width: 8px;
     height: 8px;
@@ -1608,7 +1608,7 @@
     background: transparent;
     transition: background var(--transition-fast);
   }
-  .trust-radio-dot.active { background: var(--color-primary); }
+  .trust-radio-dot.active { background: var(--color-focus, #4db0ff); }
   .trust-option-body { display: flex; flex-direction: column; gap: 2px; }
   .trust-option-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .trust-option-desc { font-size: var(--text-xs); color: var(--color-text-muted); }
@@ -1735,7 +1735,7 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }
-  .chip.selected { background: color-mix(in srgb, var(--color-primary) 10%, transparent); border-color: var(--color-primary); color: var(--color-primary); }
+  .chip.selected { background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent); border-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
 
   /* Modal */
   .modal-backdrop {
