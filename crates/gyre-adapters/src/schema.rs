@@ -170,6 +170,29 @@ diesel::table! {
         roles -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,
+        display_name -> Nullable<Text>,
+        timezone -> Nullable<Text>,
+        locale -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    user_notification_preferences (user_id, notification_type) {
+        user_id -> Text,
+        notification_type -> Text,
+        enabled -> Integer,
+    }
+}
+
+diesel::table! {
+    user_tokens (id) {
+        id -> Text,
+        user_id -> Text,
+        name -> Text,
+        token_hash -> Text,
+        created_at -> BigInt,
+        last_used_at -> Nullable<BigInt>,
+        expires_at -> Nullable<BigInt>,
     }
 }
 
@@ -636,6 +659,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     agent_commits,
     agent_worktrees,
     users,
+    user_notification_preferences,
+    user_tokens,
     api_keys,
     analytics_events,
     cost_entries,

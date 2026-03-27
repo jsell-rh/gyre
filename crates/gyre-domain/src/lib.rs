@@ -41,6 +41,7 @@ pub mod task;
 pub mod team;
 pub mod tenant;
 pub mod user;
+pub mod user_profile;
 pub mod workspace;
 pub mod workspace_membership;
 
@@ -80,5 +81,6 @@ pub use task::{Task, TaskError, TaskPriority, TaskStatus};
 pub use team::Team;
 pub use tenant::Tenant;
 pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
+pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};

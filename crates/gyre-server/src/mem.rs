@@ -2850,6 +2850,9 @@ pub fn test_state() -> Arc<crate::AppState> {
         prompt_templates: Arc::new(MemPromptRepository::default()),
         compute_targets: Arc::new(MemComputeTargetRepository::default()),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
+        user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
+        user_tokens: Arc::new(MemUserTokenRepository::default()),
+        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
     })
 }
 
@@ -3082,5 +3085,125 @@ impl gyre_ports::ComputeTargetRepository for MemComputeTargetRepository {
         // so this always returns false in tests. The 409 Conflict path is covered
         // by the SQLite adapter integration tests.
         Ok(false)
+    }
+}
+
+// ─── MemUserNotificationPreferenceRepository ─────────────────────────────────
+
+#[derive(Default)]
+pub struct MemUserNotificationPreferenceRepository {
+    prefs: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserNotificationPreference>>>,
+}
+
+#[async_trait]
+impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPreferenceRepository {
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+    ) -> Result<Vec<gyre_domain::UserNotificationPreference>> {
+        let guard = self.prefs.read().await;
+        Ok(guard
+            .iter()
+            .filter(|p| &p.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert(&self, pref: &gyre_domain::UserNotificationPreference) -> Result<()> {
+        let mut guard = self.prefs.write().await;
+        if let Some(existing) = guard
+            .iter_mut()
+            .find(|p| p.user_id == pref.user_id && p.notification_type == pref.notification_type)
+        {
+            existing.enabled = pref.enabled;
+        } else {
+            guard.push(pref.clone());
+        }
+        Ok(())
+    }
+
+    async fn upsert_batch(&self, prefs: &[gyre_domain::UserNotificationPreference]) -> Result<()> {
+        for pref in prefs {
+            self.upsert(pref).await?;
+        }
+        Ok(())
+    }
+}
+
+// ─── MemUserTokenRepository ──────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemUserTokenRepository {
+    tokens: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserToken>>>,
+}
+
+#[async_trait]
+impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
+    async fn create(&self, token: &gyre_domain::UserToken) -> Result<()> {
+        self.tokens.write().await.push(token.clone());
+        Ok(())
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<gyre_domain::UserToken>> {
+        let guard = self.tokens.read().await;
+        Ok(guard
+            .iter()
+            .filter(|t| &t.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_domain::UserToken>> {
+        Ok(self
+            .tokens
+            .read()
+            .await
+            .iter()
+            .find(|t| &t.id == id)
+            .cloned())
+    }
+
+    async fn find_by_hash(&self, token_hash: &str) -> Result<Option<gyre_domain::UserToken>> {
+        Ok(self
+            .tokens
+            .read()
+            .await
+            .iter()
+            .find(|t| t.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn touch(&self, id: &Id, last_used_at: u64) -> Result<()> {
+        let mut guard = self.tokens.write().await;
+        if let Some(t) = guard.iter_mut().find(|t| &t.id == id) {
+            t.last_used_at = Some(last_used_at);
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let mut guard = self.tokens.write().await;
+        guard.retain(|t| !(t.id == *id && t.user_id == *user_id));
+        Ok(())
+    }
+}
+
+// ─── MemJudgmentLedgerRepository ─────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemJudgmentLedgerRepository;
+
+#[async_trait]
+impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
+    async fn list_for_user(
+        &self,
+        _approver_id: &str,
+        _workspace_id: Option<&Id>,
+        _judgment_type: Option<gyre_domain::JudgmentType>,
+        _since: Option<u64>,
+        _limit: u32,
+        _offset: u32,
+    ) -> Result<Vec<gyre_domain::JudgmentEntry>> {
+        Ok(vec![])
     }
 }

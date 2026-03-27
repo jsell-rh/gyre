@@ -47,6 +47,7 @@ pub mod team;
 pub mod tenant;
 pub mod trace;
 pub mod user;
+pub mod user_profile;
 pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
@@ -95,6 +96,9 @@ pub use team::TeamRepository;
 pub use tenant::TenantRepository;
 pub use trace::{SpanPayload, TraceRepository};
 pub use user::{ApiKeyRepository, UserRepository};
+pub use user_profile::{
+    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+};
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};
 pub use workspace_membership::WorkspaceMembershipRepository;

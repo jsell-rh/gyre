@@ -359,6 +359,12 @@ pub struct AppState {
     /// When None, all LLM endpoints return HTTP 503 with a structured error.
     /// Tests wire `MockLlmPortFactory` so this is always `Some(...)` in tests.
     pub llm: Option<Arc<dyn gyre_ports::LlmPortFactory>>,
+    /// Per-user notification preferences (HSI §12).
+    pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
+    /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
+    pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
+    /// Aggregated judgment ledger for user activity history (HSI §12).
+    pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -937,6 +943,18 @@ pub fn build_state(
         compute_targets: store!(
             dyn ComputeTargetRepository,
             mem::MemComputeTargetRepository::default()
+        ),
+        user_notification_prefs: store!(
+            dyn gyre_ports::UserNotificationPreferenceRepository,
+            mem::MemUserNotificationPreferenceRepository::default()
+        ),
+        user_tokens: store!(
+            dyn gyre_ports::UserTokenRepository,
+            mem::MemUserTokenRepository::default()
+        ),
+        judgment_ledger: store!(
+            dyn gyre_ports::JudgmentLedgerRepository,
+            mem::MemJudgmentLedgerRepository
         ),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
