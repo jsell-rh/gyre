@@ -31,6 +31,7 @@ pub mod network_peer;
 pub mod notification;
 pub mod policy;
 pub mod prompt_template;
+pub mod python_extractor;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
@@ -76,6 +77,7 @@ pub use policy::{
     PolicyDecision, PolicyEffect, PolicyScope,
 };
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
+pub use python_extractor::PythonExtractor;
 pub use quality_gate::{GateResult, GateStatus, GateType, QualityGate};
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
