@@ -44,6 +44,7 @@ impl GraphPort for MemGraphStore {
         Ok(nodes
             .iter()
             .filter(|n| &n.repo_id == repo_id)
+            .filter(|n| n.deleted_at.is_none())
             .filter(|n| node_type.as_ref().is_none_or(|nt| &n.node_type == nt))
             .cloned()
             .collect())
@@ -63,9 +64,34 @@ impl GraphPort for MemGraphStore {
         Ok(edges
             .iter()
             .filter(|e| &e.repo_id == repo_id)
+            .filter(|e| e.deleted_at.is_none())
             .filter(|e| edge_type.as_ref().is_none_or(|et| &e.edge_type == et))
             .cloned()
             .collect())
+    }
+
+    async fn delete_node(&self, id: &Id) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut nodes = self.nodes.write().unwrap();
+        if let Some(node) = nodes.iter_mut().find(|n| &n.id == id) {
+            node.deleted_at = Some(now);
+        }
+        Ok(())
+    }
+
+    async fn delete_edge(&self, id: &Id) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut edges = self.edges.write().unwrap();
+        if let Some(edge) = edges.iter_mut().find(|e| &e.id == id) {
+            edge.deleted_at = Some(now);
+        }
+        Ok(())
     }
 
     async fn delete_nodes_by_repo(&self, repo_id: &Id) -> Result<u64> {

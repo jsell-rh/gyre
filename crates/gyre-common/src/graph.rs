@@ -78,6 +78,12 @@ pub struct GraphNode {
     pub churn_count_30d: u32,
     /// Test coverage ratio (0.0–1.0). `None` when coverage data is unavailable.
     pub test_coverage: Option<f64>,
+    /// Unix timestamp when this node first appeared in any extraction.
+    pub first_seen_at: u64,
+    /// Unix timestamp of the most recent extraction that included this node.
+    pub last_seen_at: u64,
+    /// Set when a node is no longer present in extraction (soft-delete). `None` = active.
+    pub deleted_at: Option<u64>,
 }
 
 /// A directed edge between two graph nodes.
@@ -90,6 +96,12 @@ pub struct GraphEdge {
     pub edge_type: EdgeType,
     /// Optional JSON metadata for the edge.
     pub metadata: Option<String>,
+    /// Unix timestamp when this edge first appeared in any extraction.
+    pub first_seen_at: u64,
+    /// Unix timestamp of the most recent extraction that included this edge.
+    pub last_seen_at: u64,
+    /// Set when an edge is no longer present in extraction (soft-delete). `None` = active.
+    pub deleted_at: Option<u64>,
 }
 
 /// A single field change within a modified graph node (HSI §8 / realized-model.md §3).
