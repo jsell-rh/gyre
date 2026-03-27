@@ -89,7 +89,7 @@
     flowSpans = [];
     try {
       // Fetch MRs for this repo, pick the most recently updated one with a trace
-      const mrs = await api.mergeRequests({ repo_id: repoId, limit: 20 });
+      const mrs = await api.mergeRequests({ repository_id: repoId });
       const mrList = Array.isArray(mrs) ? mrs : (mrs?.items ?? []);
       for (const mr of mrList) {
         try {
