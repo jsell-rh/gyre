@@ -1,5 +1,5 @@
 <script>
-  import { getContext, onMount } from 'svelte';
+  import { getContext, onMount, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import { toast as showToast } from '../lib/toast.svelte.js';
 
@@ -20,6 +20,13 @@
   } = $props();
 
   const openDetailPanel = getContext('openDetailPanel');
+
+  // AbortController for cancelling in-flight LLM streaming requests
+  let askAbortController = $state(null);
+
+  onDestroy(() => {
+    askAbortController?.abort();
+  });
 
   // Lens options
   const LENSES = [
@@ -114,6 +121,10 @@
 
   async function submitAsk() {
     if (!askQuery.trim() || !workspaceId || askLoading) return;
+    // Cancel any in-flight request before starting a new one
+    askAbortController?.abort();
+    const controller = new AbortController();
+    askAbortController = controller;
     askLoading = true;
     askExplanation = '';
     askError = '';
@@ -123,7 +134,7 @@
       const res = await api.generateExplorerView(workspaceId, {
         question: askQuery.trim(),
         ...(repoId ? { repo_id: repoId } : {}),
-      });
+      }, { signal: controller.signal });
 
       if (!res.ok) {
         askError = `Request failed: ${res.status}`;
@@ -188,9 +199,13 @@
         }
       }
     } catch (e) {
+      if (e.name === 'AbortError') return; // cancelled — don't update state
       askError = 'LLM connection failed';
     } finally {
-      askLoading = false;
+      if (!controller.signal.aborted) {
+        askLoading = false;
+        askAbortController = null;
+      }
     }
   }
 
