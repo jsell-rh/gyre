@@ -49,7 +49,6 @@
   let policyLoading = $state(false);
   let policyError = $state(null);
   let policySaving = $state(false);
-  let policySaveMsg = $state(null);
   // New ABAC policy editing state
   let newPolicyName = $state('');
   let newPolicyClaim = $state('');
@@ -258,11 +257,10 @@
   }
 
   async function saveSpecPolicy() {
-    policySaving = true; policySaveMsg = null;
+    policySaving = true;
     try {
       await api.setRepoSpecPolicy(repo.id, specPolicy);
-      policySaveMsg = 'Spec policy saved.';
-      setTimeout(() => { policySaveMsg = null; }, 3000);
+      toastSuccess('Spec policy saved.');
     } catch (e) {
       policyError = e.message;
     } finally {
@@ -278,13 +276,12 @@
       required_claims: { [newPolicyClaim.trim()]: newPolicyValue.trim() },
     };
     const updated = [...abacPolicies, newPolicy];
-    policySaving = true; policySaveMsg = null;
+    policySaving = true;
     try {
       await api.setRepoAbacPolicy(repo.id, updated);
       abacPolicies = updated;
       newPolicyName = ''; newPolicyClaim = ''; newPolicyValue = '';
-      policySaveMsg = 'ABAC policy added.';
-      setTimeout(() => { policySaveMsg = null; }, 3000);
+      toastSuccess('ABAC policy added.');
     } catch (e) {
       policyError = e.message;
     } finally {
@@ -638,9 +635,6 @@
             <button class="policy-btn primary" onclick={saveSpecPolicy} disabled={policySaving}>
               {policySaving ? 'Saving…' : 'Save Spec Policy'}
             </button>
-            {#if policySaveMsg}
-              <span class="save-msg">{policySaveMsg}</span>
-            {/if}
           </div>
         </div>
 
@@ -1256,6 +1250,11 @@
     font-size: var(--text-xs);
     padding: 0.1rem var(--space-2);
     cursor: pointer;
+  }
+
+  .abac-remove-btn:hover {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border-color: var(--color-danger);
   }
 
   .abac-rules { display: flex; flex-direction: column; gap: var(--space-1); }
