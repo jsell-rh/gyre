@@ -957,7 +957,7 @@
     cursor: pointer; text-align: left; font-size: var(--text-sm); font-family: var(--font-body);
     transition: background var(--transition-fast);
   }
-  .ctx-item:hover:not(.disabled) { background: var(--color-surface, #0f172a); color: var(--color-link); }
+  .ctx-item:hover:not(.disabled) { background: var(--color-surface); color: var(--color-link); }
   .ctx-item.disabled, .ctx-item:disabled { opacity: 0.4; cursor: default; }
   .ctx-separator { height: 1px; background: var(--color-border); margin: var(--space-1) 0; }
 
