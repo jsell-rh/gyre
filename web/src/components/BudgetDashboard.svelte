@@ -214,4 +214,8 @@
   .bar-txt { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); min-width: 120px; }
   .no-limits { font-size: var(--text-xs); color: var(--color-text-muted); }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bar-fill, .btn-refresh { transition: none; }
+  }
 </style>
