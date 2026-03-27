@@ -300,7 +300,7 @@
                     tabindex="0"
                     aria-label="Select node {node.name}"
                     onclick={() => onSelectNode?.(node)}
-                    onkeydown={(e) => e.key === 'Enter' && onSelectNode?.(node)}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
                   >
                     <td><Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} /></td>
                     <td class="mono">{node.name}</td>
@@ -566,6 +566,8 @@
     font-family: var(--font-body);
     transition: all var(--transition-fast);
   }
+
+  .sort-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
 
   .sort-btn:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);

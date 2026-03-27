@@ -288,6 +288,11 @@
           ? 'No specs are registered.'
           : 'No specs match the current filters.'}
       />
+      {#if filterStatus !== 'all' || filterKind !== 'all'}
+        <div class="clear-filters-wrap">
+          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; }}>Clear filters</button>
+        </div>
+      {/if}
 
     {:else if scope === 'repo'}
       <!-- Repo scope: progress bar list -->
@@ -799,6 +804,35 @@
   }
 
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  /* ── Clear filters ───────────────────────────────────────────────────── */
+  .clear-filters-wrap {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-3);
+  }
+
+  .clear-filters-btn {
+    padding: var(--space-1) var(--space-4);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast);
+  }
+
+  .clear-filters-btn:hover {
+    border-color: var(--color-text-muted);
+    color: var(--color-text);
+  }
+
+  .clear-filters-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
 
   /* ── Error banner ─────────────────────────────────────────────────────── */
   .error-banner {

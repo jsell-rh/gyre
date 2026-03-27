@@ -205,7 +205,7 @@
             {/if}
           </div>
           {#if !budget.config?.max_tokens_per_day && !budget.config?.max_cost_per_day && !budget.config?.max_concurrent_agents}
-            <EmptyState title="No budget limits configured for this workspace." />
+            <EmptyState title="No budget limits configured for this workspace." description="No budget limits set. Click 'Configure Budget' to add limits." />
           {/if}
           {#if !budgetFormOpen}
             <button class="configure-budget-btn" aria-expanded={budgetFormOpen} aria-controls="budget-form" onclick={() => { budgetFormOpen = true; budgetForm = { max_tokens_per_day: budget.config?.max_tokens_per_day ?? '', max_cost_per_day: budget.config?.max_cost_per_day ?? '', max_concurrent_agents: budget.config?.max_concurrent_agents ?? '', max_agent_lifetime_secs: budget.config?.max_agent_lifetime_secs ?? '' }; }}>Configure Budget</button>
@@ -490,9 +490,9 @@
   .budget-field { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); color: var(--color-text-secondary); }
   .budget-field input { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text); font-size: var(--text-sm); }
   .budget-field input:focus-visible {
-    outline: none;
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: -2px;
     border-color: var(--color-focus, #4db0ff);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus, #4db0ff) 30%, transparent);
   }
   .budget-form-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
   .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: var(--color-surface, #fff); border: none; border-radius: var(--radius); font-size: var(--text-sm); cursor: pointer; }
