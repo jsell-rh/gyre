@@ -469,7 +469,7 @@
               <dt>Status</dt><dd>{entity.data.status}</dd>
             {/if}
             {#if entity.data?.created_at}
-              <dt>Created</dt><dd>{new Date(entity.data.created_at * 1000).toLocaleString()}</dd>
+              <dt>Created</dt><dd>{fmtDate(entity.data.created_at)}</dd>
             {/if}
             {#if entity.data?.spec_path}
               <dt>Spec</dt><dd class="mono">{entity.data.spec_path}</dd>
