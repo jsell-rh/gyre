@@ -440,9 +440,22 @@
                   ⚠ Preview unavailable — showing example layout only. Results are not based on real data.
                 </div>
               {/if}
-              <div class="impact-tabs" role="tablist">
-                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} onclick={() => impactTab = 'architecture'}>Architecture</button>
-                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
+              <div
+                class="impact-tabs"
+                role="tablist"
+                aria-label="Impact view"
+                onkeydown={(e) => {
+                  const tabs = ['architecture', 'code-diff'];
+                  const ids = ['impact-tab-arch', 'impact-tab-diff'];
+                  const idx = tabs.indexOf(impactTab);
+                  if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
+                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
+                  if (e.key === 'Home') { e.preventDefault(); impactTab = tabs[0]; document.getElementById(ids[0])?.focus(); }
+                  if (e.key === 'End')  { e.preventDefault(); impactTab = tabs[1]; document.getElementById(ids[1])?.focus(); }
+                }}
+              >
+                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>Architecture</button>
+                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} tabindex={impactTab === 'code-diff' ? 0 : -1} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
               </div>
               {#if isSimulatedPreview}
                 <div class="impact-content impact-unavailable" role="tabpanel" id={impactTab === 'architecture' ? 'impact-panel-arch' : 'impact-panel-diff'} aria-labelledby={impactTab === 'architecture' ? 'impact-tab-arch' : 'impact-tab-diff'}>

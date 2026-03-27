@@ -187,7 +187,7 @@
                   <span class="bar-nums">{fmtNum(budget.usage?.tokens_used_today)} / {fmtNum(budget.config.max_tokens_per_day)}</span>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Budget usage: {p}%"></div>
+                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Tokens per day: {p}% used"></div>
                 </div>
                 <span class="bar-pct">{p}%</span>
               </div>
@@ -200,7 +200,7 @@
                   <span class="bar-nums">{fmtCost(budget.usage?.cost_today)} / {fmtCost(budget.config.max_cost_per_day)}</span>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Budget usage: {p}%"></div>
+                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Cost per day: {p}% used"></div>
                 </div>
                 <span class="bar-pct">{p}%</span>
               </div>
@@ -213,7 +213,7 @@
                   <span class="bar-nums">{budget.usage?.active_agents ?? 0} / {budget.config.max_concurrent_agents}</span>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Budget usage: {p}%"></div>
+                  <div class="bar-fill" class:bar-warn={p > 75} class:bar-danger={p > 90} style="width: {p}%" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label="Concurrent agents: {p}% of limit used"></div>
                 </div>
                 <span class="bar-pct">{p}%</span>
               </div>

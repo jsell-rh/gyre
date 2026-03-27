@@ -759,7 +759,7 @@
     background: var(--color-border);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: 2px var(--space-1);
+    padding: var(--space-1) var(--space-1);
     font-size: var(--text-xs);
     font-family: var(--font-mono);
     color: var(--color-text-muted);
