@@ -1360,8 +1360,8 @@
     <h3 class="modal-title">Add Member</h3>
     <div class="form-field">
       <label class="form-label" for="member-email">Email address</label>
-      <input id="member-email" class="filter-input full-width" bind:value={memberForm.email}
-        placeholder="user@example.com"
+      <input id="member-email" type="email" class="filter-input full-width" bind:value={memberForm.email}
+        placeholder="user@example.com" required aria-required="true"
         onkeydown={(e) => e.key === 'Enter' && addMember()} />
     </div>
     <div class="modal-actions">
@@ -1487,7 +1487,7 @@
     <h3 class="modal-title">New Workspace</h3>
     <div class="form-field">
       <label class="form-label" for="wsf-name">Name</label>
-      <input id="wsf-name" class="filter-input full-width" bind:value={wsForm.name} placeholder="e.g. payments-team" />
+      <input id="wsf-name" class="filter-input full-width" bind:value={wsForm.name} placeholder="e.g. payments-team" required aria-required="true" />
     </div>
     <div class="form-field">
       <label class="form-label" for="wsf-desc">Description</label>
@@ -1648,8 +1648,8 @@
     <h3 class="modal-title">Import Repository</h3>
     <div class="form-field">
       <label class="form-label" for="ir-url">Clone URL</label>
-      <input id="ir-url" class="filter-input full-width" bind:value={importRepoForm.clone_url}
-        placeholder="https://github.com/org/repo.git" required />
+      <input id="ir-url" type="url" class="filter-input full-width" bind:value={importRepoForm.clone_url}
+        placeholder="https://github.com/org/repo.git" required aria-required="true" />
     </div>
     <div class="form-field">
       <label class="form-label" for="ir-name">Name <span class="form-hint">(optional — inferred from URL)</span></label>

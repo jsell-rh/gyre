@@ -107,7 +107,7 @@
       <input class="form-input" bind:value={mirrorName} placeholder="my-mirror" />
     </label>
     <label class="form-label">Remote URL
-      <input class="form-input" bind:value={mirrorUrl} placeholder="https://github.com/org/repo.git" />
+      <input class="form-input" type="url" bind:value={mirrorUrl} placeholder="https://github.com/org/repo.git" required aria-required="true" />
     </label>
     <label class="form-label">Sync Interval (seconds)
       <input class="form-input" type="number" bind:value={mirrorInterval} min="60" placeholder="300" />

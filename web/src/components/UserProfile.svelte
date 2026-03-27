@@ -213,7 +213,7 @@
       </label>
       <div class="edit-actions">
         <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
-        <button class="btn-primary" onclick={saveEdit} disabled={saving} aria-busy={saving}>
+        <button class="btn-primary" onclick={saveEdit} disabled={saving || !editForm.display_name.trim()} aria-busy={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
