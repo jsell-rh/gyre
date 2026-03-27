@@ -90,7 +90,7 @@
   <div class="panel-header">
     <div class="header-left">
       <h2>Merge Queue</h2>
-      <span class="queue-count">{entries.length} entries</span>
+      <span class="queue-count">{entries.length} {entries.length === 1 ? 'entry' : 'entries'}</span>
     </div>
     <div class="header-right">
       <div class="view-toggle" role="group" aria-label="Queue view mode">

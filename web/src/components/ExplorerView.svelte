@@ -346,7 +346,7 @@
         {:else if conceptNodes !== null && conceptQuery.trim()}
           {#if conceptNodes.length > 0}
             <span class="concept-chip">
-              {conceptNodes.length} nodes matching '{conceptQuery.trim()}'
+              {conceptNodes.length} {conceptNodes.length === 1 ? 'node' : 'nodes'} matching '{conceptQuery.trim()}'
               <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
             </span>
           {:else}

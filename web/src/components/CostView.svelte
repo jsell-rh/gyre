@@ -18,6 +18,13 @@
     ).sort((a, b) => b[1] - a[1])
   );
 
+  function authHeaders() {
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${localStorage.getItem('gyre_auth_token') || 'gyre-dev-token'}`,
+    };
+  }
+
   async function load() {
     loading = true;
     error = null;
@@ -26,12 +33,12 @@
       const until = Math.floor(Date.now() / 1000) + 86400;
 
       // Load summary
-      const sumRes = await fetch(`/api/v1/costs/summary?since=${since}&until=${until}`);
+      const sumRes = await fetch(`/api/v1/costs/summary?since=${since}&until=${until}`, { headers: authHeaders() });
       if (sumRes.ok) summary = await sumRes.json();
 
       // Load costs
       if (agentFilter) {
-        const res = await fetch(`/api/v1/costs?agent_id=${encodeURIComponent(agentFilter)}`);
+        const res = await fetch(`/api/v1/costs?agent_id=${encodeURIComponent(agentFilter)}`, { headers: authHeaders() });
         if (!res.ok) throw new Error(await res.text());
         costs = await res.json();
       } else {
@@ -49,7 +56,7 @@
   async function loadAgent(agentId) {
     agentFilter = agentId;
     try {
-      const res = await fetch(`/api/v1/costs?agent_id=${encodeURIComponent(agentId)}`);
+      const res = await fetch(`/api/v1/costs?agent_id=${encodeURIComponent(agentId)}`, { headers: authHeaders() });
       if (!res.ok) throw new Error(await res.text());
       costs = await res.json();
     } catch (e) {

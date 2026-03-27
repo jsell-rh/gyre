@@ -33,7 +33,7 @@
     <div class="header-left">
       <h2>MCP Tool Catalog</h2>
       {#if !loading && tools.length > 0}
-        <span class="tool-count">{tools.length} tools</span>
+        <span class="tool-count">{tools.length} {tools.length === 1 ? 'tool' : 'tools'}</span>
       {/if}
     </div>
   </div>
@@ -81,7 +81,8 @@
               {/if}
               <div class="tool-meta">
                 {#if tool.inputSchema?.properties}
-                  <Badge value={`${Object.keys(tool.inputSchema.properties).length} params`} variant="info" />
+                  {@const paramCount = Object.keys(tool.inputSchema.properties).length}
+                  <Badge value={`${paramCount} ${paramCount === 1 ? 'param' : 'params'}`} variant="info" />
                 {:else}
                   <Badge value="no params" variant="muted" />
                 {/if}
