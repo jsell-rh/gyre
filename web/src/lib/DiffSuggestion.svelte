@@ -73,6 +73,11 @@
     word-break: break-word;
   }
 
+  .diff-content:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
   .diff-actions {
     display: flex;
     gap: var(--space-2);
