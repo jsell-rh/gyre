@@ -76,7 +76,7 @@
           class="nav-item"
           class:active={currentNav === item.id}
           onclick={() => nav(item.id)}
-          aria-label={item.label}
+          aria-label={item.id === 'inbox' && inboxBadge > 0 ? `Inbox, ${inboxBadge} unresolved` : item.label}
           aria-current={currentNav === item.id ? 'page' : undefined}
           title={collapsed ? `${item.label} (⌘${item.shortcut})` : undefined}
         >
@@ -222,9 +222,9 @@
   }
 
   .nav-item.active {
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    background: color-mix(in srgb, var(--color-focus, #4db0ff) 8%, transparent);
     color: var(--color-text);
-    border-left-color: var(--color-primary);
+    border-left-color: var(--color-focus, #4db0ff);
     font-weight: 500;
   }
 
@@ -337,5 +337,14 @@
     clip: rect(0,0,0,0);
     white-space: nowrap;
     border: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar,
+    .collapse-btn,
+    .nav-item,
+    .nav-shortcut {
+      transition: none;
+    }
   }
 </style>

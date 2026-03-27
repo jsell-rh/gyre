@@ -336,6 +336,7 @@
   }
 
   async function deleteGate(gateId) {
+    if (!confirm('Delete this gate? This cannot be undone.')) return;
     deletingGateId = gateId;
     try {
       await api.deleteRepoGate(repo.id, gateId);
@@ -1152,7 +1153,7 @@
   .blame-agent {
     width: 5rem;
     flex-shrink: 0;
-    color: var(--color-primary);
+    color: var(--color-text-secondary);
   }
 
   .blame-content {
@@ -1494,5 +1495,13 @@
   .branch-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .back-btn,
+    .copy-btn,
+    .hot-file-row,
+    .policy-btn,
+    .jj-btn { transition: none; }
   }
 </style>

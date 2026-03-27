@@ -187,7 +187,7 @@
 
   function briefingAskHandler(question) {
     if (!workspaceId) {
-      return Promise.resolve('Briefing Q&A requires a workspace context.');
+      throw new Error('Briefing Q&A is only available within a workspace.');
     }
     return api.briefingAsk(workspaceId, { question, history: [] });
   }

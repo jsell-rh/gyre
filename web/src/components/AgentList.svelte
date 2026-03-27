@@ -261,7 +261,16 @@
             <p class="success-msg">Agent spawned successfully.</p>
             <dl>
               <dt>Agent ID</dt><dd>{spawnResult.agent.id}</dd>
-              <dt>Token</dt><dd class="mono">{spawnResult.token}</dd>
+              <dt>Token</dt>
+              <dd class="token-row">
+                <span class="mono">{spawnResult.token}</span>
+                <button class="copy-token-btn" onclick={() => navigator.clipboard.writeText(spawnResult.token)} title="Copy token" aria-label="Copy agent token">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                    <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                  </svg>
+                </button>
+              </dd>
               <dt>Clone URL</dt><dd class="mono">{spawnResult.clone_url}</dd>
               <dt>Worktree</dt><dd>{spawnResult.worktree_path}</dd>
               <dt>Branch</dt><dd>{spawnResult.branch}</dd>
@@ -843,6 +852,30 @@
   .spawn-success dd { margin: 0; color: var(--color-text-muted); word-break: break-all; }
   .success-msg { color: var(--color-success); font-size: var(--text-sm); margin: 0 0 var(--space-2); }
 
+  .token-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    word-break: break-all;
+  }
+
+  .copy-token-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    padding: 2px var(--space-1);
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    transition: all var(--transition-fast);
+  }
+
+  .copy-token-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
+  .copy-token-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+
   .error-msg {
     padding: var(--space-8);
     color: var(--color-danger);
@@ -885,6 +918,12 @@
     .pill,
     .agent-card,
     .toggle-btn,
-    .spawn-btn { transition: none; }
+    .spawn-btn,
+    .dtab,
+    .close-btn,
+    .modal-btn,
+    .copy-token-btn,
+    .form input,
+    .form select { transition: none; }
   }
 </style>

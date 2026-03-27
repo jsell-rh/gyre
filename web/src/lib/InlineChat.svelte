@@ -295,7 +295,7 @@
   }
 
   .streaming .msg-content {
-    border-color: var(--color-primary);
+    border-color: var(--color-focus, #4db0ff);
   }
 
   /* Blinking cursor for streaming */
@@ -303,7 +303,7 @@
     display: inline-block;
     width: 2px;
     height: 1em;
-    background: var(--color-primary);
+    background: var(--color-focus, #4db0ff);
     margin-left: 2px;
     vertical-align: text-bottom;
     animation: blink 1s step-end infinite;

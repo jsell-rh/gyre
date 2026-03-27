@@ -789,7 +789,7 @@
 
   .ref-link {
     font-size: var(--text-xs);
-    color: var(--color-primary);
+    color: var(--color-link);
     background: transparent;
     border: none;
     padding: 0;
