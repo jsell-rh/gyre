@@ -938,5 +938,9 @@
 
   @media (prefers-reduced-motion: reduce) {
     .timeline-spinner { animation: none; border-color: var(--color-border); border-top-color: var(--color-text-muted); }
+    .tl-node-row,
+    .list-row,
+    .marker-pip,
+    .now-btn { transition: none; }
   }
 </style>
