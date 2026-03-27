@@ -15,7 +15,8 @@ use gyre_common::{
     Id, Notification, NotificationType,
 };
 use gyre_domain::{
-    LanguageExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor, WorkspaceRole,
+    GoExtractor, LanguageExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor,
+    WorkspaceRole,
 };
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
@@ -676,7 +677,7 @@ fn run_all_extractors(
 ) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let extractors: Vec<Box<dyn LanguageExtractor>> = vec![
         Box::new(RustExtractor),
-        // GoExtractor added in S2
+        Box::new(GoExtractor),
         Box::new(PythonExtractor),
         Box::new(TypeScriptExtractor),
     ];
