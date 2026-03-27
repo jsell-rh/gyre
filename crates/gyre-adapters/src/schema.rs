@@ -702,6 +702,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     graph_edges,
     graph_deltas,
     compute_targets,
+    meta_specs,
+    meta_spec_versions,
+    meta_spec_bindings,
 );
 
 diesel::table! {
@@ -819,5 +822,46 @@ diesel::table! {
         is_default -> Integer,
         created_at -> BigInt,
         updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    meta_specs (id) {
+        id -> Text,
+        kind -> Text,
+        name -> Text,
+        scope -> Text,
+        scope_id -> Nullable<Text>,
+        prompt -> Text,
+        version -> Integer,
+        content_hash -> Text,
+        required -> Integer,
+        approval_status -> Text,
+        approved_by -> Nullable<Text>,
+        approved_at -> Nullable<BigInt>,
+        created_by -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    meta_spec_versions (id) {
+        id -> Text,
+        meta_spec_id -> Text,
+        version -> Integer,
+        prompt -> Text,
+        content_hash -> Text,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    meta_spec_bindings (id) {
+        id -> Text,
+        spec_id -> Text,
+        meta_spec_id -> Text,
+        pinned_version -> Integer,
+        created_at -> BigInt,
     }
 }

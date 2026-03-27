@@ -2816,6 +2816,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         wg_config: crate::WireGuardConfig::from_env(),
+        meta_specs: Arc::new(MemMetaSpecRepository::default()),
+        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
@@ -3130,6 +3132,135 @@ impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPre
     }
 }
 
+// ── In-memory MetaSpecRepository ─────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemMetaSpecRepository {
+    store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpec>>>,
+    versions: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecVersion>>>,
+}
+
+#[async_trait]
+impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
+    async fn create(&self, meta_spec: &gyre_domain::MetaSpec) -> Result<()> {
+        self.store.write().await.push(meta_spec.clone());
+        Ok(())
+    }
+
+    async fn get_by_id(&self, id: &Id) -> Result<Option<gyre_domain::MetaSpec>> {
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .find(|m| &m.id == id)
+            .cloned())
+    }
+
+    async fn list(
+        &self,
+        filter: &gyre_ports::MetaSpecFilter,
+    ) -> Result<Vec<gyre_domain::MetaSpec>> {
+        let guard = self.store.read().await;
+        Ok(guard
+            .iter()
+            .filter(|m| {
+                if let Some(ref scope) = filter.scope {
+                    if &m.scope != scope {
+                        return false;
+                    }
+                }
+                if let Some(ref scope_id) = filter.scope_id {
+                    if m.scope_id.as_deref() != Some(scope_id.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(ref kind) = filter.kind {
+                    if &m.kind != kind {
+                        return false;
+                    }
+                }
+                if let Some(required) = filter.required {
+                    if m.required != required {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn update(&self, meta_spec: &gyre_domain::MetaSpec) -> Result<()> {
+        let mut store = self.store.write().await;
+        let mut versions = self.versions.write().await;
+        if let Some(existing) = store.iter().find(|m| m.id == meta_spec.id).cloned() {
+            // Archive old version.
+            let ver = gyre_domain::MetaSpecVersion {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                meta_spec_id: existing.id.clone(),
+                version: existing.version,
+                prompt: existing.prompt.clone(),
+                content_hash: existing.content_hash.clone(),
+                created_at: existing.updated_at,
+            };
+            versions.push(ver);
+        }
+        store.retain(|m| m.id != meta_spec.id);
+        store.push(meta_spec.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.write().await.retain(|m| &m.id != id);
+        Ok(())
+    }
+
+    async fn list_versions(&self, meta_spec_id: &Id) -> Result<Vec<gyre_domain::MetaSpecVersion>> {
+        Ok(self
+            .versions
+            .read()
+            .await
+            .iter()
+            .filter(|v| &v.meta_spec_id == meta_spec_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_version(
+        &self,
+        meta_spec_id: &Id,
+        version: u32,
+    ) -> Result<Option<gyre_domain::MetaSpecVersion>> {
+        // Check archive first.
+        let archived = self
+            .versions
+            .read()
+            .await
+            .iter()
+            .find(|v| &v.meta_spec_id == meta_spec_id && v.version == version)
+            .cloned();
+        if archived.is_some() {
+            return Ok(archived);
+        }
+        // Fall back to live row for current version.
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .find(|m| &m.id == meta_spec_id && m.version == version)
+            .map(|m| gyre_domain::MetaSpecVersion {
+                id: m.id.clone(),
+                meta_spec_id: m.id.clone(),
+                version: m.version,
+                prompt: m.prompt.clone(),
+                content_hash: m.content_hash.clone(),
+                created_at: m.updated_at,
+            }))
+    }
+}
+
 // ─── MemUserTokenRepository ──────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -3205,5 +3336,45 @@ impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
         _offset: u32,
     ) -> Result<Vec<gyre_domain::JudgmentEntry>> {
         Ok(vec![])
+    }
+}
+
+// ── In-memory MetaSpecBindingRepository ──────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemMetaSpecBindingRepository {
+    store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+}
+
+#[async_trait]
+impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
+    async fn create(&self, binding: &gyre_domain::MetaSpecBinding) -> Result<()> {
+        self.store.write().await.push(binding.clone());
+        Ok(())
+    }
+
+    async fn list_by_spec_id(&self, spec_id: &str) -> Result<Vec<gyre_domain::MetaSpecBinding>> {
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .filter(|b| b.spec_id == spec_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.write().await.retain(|b| &b.id != id);
+        Ok(())
+    }
+
+    async fn has_bindings_for(&self, meta_spec_id: &Id) -> Result<bool> {
+        Ok(self
+            .store
+            .read()
+            .await
+            .iter()
+            .any(|b| &b.meta_spec_id == meta_spec_id))
     }
 }
