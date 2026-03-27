@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{BranchInfo, CommitInfo, DiffResult, Repository};
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, RepoStatus, Repository};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -30,9 +30,19 @@ fn redact_url_credentials(url: String) -> String {
 pub struct CreateRepoRequest {
     pub workspace_id: String,
     pub name: String,
+    pub description: Option<String>,
     /// Ignored — path is always computed server-side (C-4 security fix).
     #[serde(default)]
     pub _path: Option<String>,
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub initialize: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateRepoRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub default_branch: Option<String>,
 }
 
@@ -54,9 +64,12 @@ pub struct RepoResponse {
     pub id: String,
     pub workspace_id: String,
     pub name: String,
+    pub description: Option<String>,
     // path is intentionally omitted — it is a server-internal filesystem path.
     pub default_branch: String,
+    pub status: String,
     pub created_at: u64,
+    pub updated_at: u64,
     pub is_mirror: bool,
     pub mirror_url: Option<String>,
     pub mirror_interval_secs: Option<u64>,
@@ -69,8 +82,11 @@ impl From<Repository> for RepoResponse {
             id: r.id.to_string(),
             workspace_id: r.workspace_id.to_string(),
             name: r.name,
+            description: r.description,
             default_branch: r.default_branch,
+            status: r.status.to_string(),
             created_at: r.created_at,
+            updated_at: r.updated_at,
             is_mirror: r.is_mirror,
             mirror_url: r.mirror_url.map(redact_url_credentials),
             mirror_interval_secs: r.mirror_interval_secs,
@@ -117,6 +133,9 @@ pub async fn create_repo(
     if let Some(branch) = req.default_branch {
         repo.default_branch = branch;
     }
+    if let Some(desc) = req.description {
+        repo.description = Some(desc);
+    }
     state.repos.create(&repo).await?;
 
     // Initialize the bare git repository; log on failure but don't block the response.
@@ -162,6 +181,99 @@ pub async fn get_repo(
     Ok(Json(RepoResponse::from(repo)))
 }
 
+pub async fn update_repo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateRepoRequest>,
+) -> Result<Json<RepoResponse>, ApiError> {
+    let mut repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    if let Some(name) = req.name {
+        if name.contains("..") || name.contains('/') {
+            return Err(ApiError::InvalidInput(
+                "name must not contain '..' or '/'".to_string(),
+            ));
+        }
+        repo.name = name;
+    }
+    if let Some(desc) = req.description {
+        repo.description = Some(desc);
+    }
+    if let Some(branch) = req.default_branch {
+        repo.default_branch = branch;
+    }
+    repo.updated_at = now_secs();
+
+    state.repos.update(&repo).await?;
+    Ok(Json(RepoResponse::from(repo)))
+}
+
+pub async fn archive_repo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RepoResponse>, ApiError> {
+    let mut repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    if repo.is_archived() {
+        return Err(ApiError::InvalidInput(
+            "repo is already archived".to_string(),
+        ));
+    }
+
+    repo.archive();
+    repo.updated_at = now_secs();
+    state.repos.update(&repo).await?;
+    Ok(Json(RepoResponse::from(repo)))
+}
+
+pub async fn unarchive_repo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RepoResponse>, ApiError> {
+    let mut repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    if !repo.is_archived() {
+        return Err(ApiError::InvalidInput("repo is not archived".to_string()));
+    }
+
+    repo.unarchive();
+    repo.updated_at = now_secs();
+    state.repos.update(&repo).await?;
+    Ok(Json(RepoResponse::from(repo)))
+}
+
+pub async fn delete_repo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    if !repo.is_archived() {
+        return Err(ApiError::InvalidInput(
+            "repo must be archived before deletion".to_string(),
+        ));
+    }
+
+    state.repos.delete(&repo.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn list_branches(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -185,7 +297,7 @@ pub async fn commit_log(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
-    let branch = params.branch.unwrap_or_else(|| repo.default_branch.clone());
+    let branch = params.branch.unwrap_or(repo.default_branch);
     let limit = params.limit.unwrap_or(50);
     let commits = state.git_ops.commit_log(&repo.path, &branch, limit).await?;
     Ok(Json(commits))
@@ -229,6 +341,7 @@ pub async fn create_mirror_repo(
     let repo_path = format!("{}/{}/{}.git", state.repos_root, req.workspace_id, req.name);
 
     let now = now_secs();
+    let url = req.url;
     let repo = Repository {
         id: new_id(),
         workspace_id: Id::new(req.workspace_id),
@@ -237,14 +350,17 @@ pub async fn create_mirror_repo(
         default_branch: "main".to_string(),
         created_at: now,
         is_mirror: true,
-        mirror_url: Some(req.url.clone()),
+        mirror_url: Some(url.clone()),
         mirror_interval_secs: req.interval_secs,
         last_mirror_sync: None,
+        description: None,
+        status: RepoStatus::Active,
+        updated_at: now,
     };
     state.repos.create(&repo).await?;
 
     // Clone the remote as a bare mirror; log on failure but don't block the response.
-    if let Err(e) = state.git_ops.clone_mirror(&req.url, &repo_path).await {
+    if let Err(e) = state.git_ops.clone_mirror(&url, &repo_path).await {
         tracing::warn!("clone_mirror failed for {repo_path}: {e}");
     }
 
@@ -266,7 +382,9 @@ pub async fn sync_mirror(
     }
 
     state.git_ops.fetch_mirror(&repo.path).await?;
-    repo.last_mirror_sync = Some(now_secs());
+    let now = now_secs();
+    repo.last_mirror_sync = Some(now);
+    repo.updated_at = now;
     state.repos.update(&repo).await?;
 
     Ok(Json(RepoResponse::from(repo)))
@@ -313,6 +431,7 @@ mod tests {
         let created = body_json(create_resp).await;
         let id = created["id"].as_str().unwrap().to_string();
         assert_eq!(created["default_branch"], "main");
+        assert_eq!(created["status"], "Active");
 
         let get_resp = app
             .oneshot(
@@ -502,5 +621,167 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_repo_settings() {
+        let app = app();
+        let body = serde_json::json!({
+            "workspace_id": "ws-1",
+            "name": "my-repo",
+            "description": "original"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update_body = serde_json::json!({
+            "description": "updated description",
+            "default_branch": "develop"
+        });
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let updated = body_json(update_resp).await;
+        assert_eq!(updated["description"], "updated description");
+        assert_eq!(updated["default_branch"], "develop");
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_repo() {
+        let app = app();
+        let body = serde_json::json!({
+            "workspace_id": "ws-1",
+            "name": "archive-me"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Archive
+        let archive_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{id}/archive"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(archive_resp.status(), StatusCode::OK);
+        let archived = body_json(archive_resp).await;
+        assert_eq!(archived["status"], "Archived");
+
+        // Unarchive
+        let unarchive_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{id}/unarchive"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unarchive_resp.status(), StatusCode::OK);
+        let unarchived = body_json(unarchive_resp).await;
+        assert_eq!(unarchived["status"], "Active");
+    }
+
+    #[tokio::test]
+    async fn delete_repo_requires_archived() {
+        let app = app();
+        let body = serde_json::json!({
+            "workspace_id": "ws-1",
+            "name": "delete-me"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Delete without archiving should fail
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/repos/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::BAD_REQUEST);
+
+        // Archive first, then delete succeeds
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{id}/archive"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let del_resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/repos/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp2.status(), StatusCode::NO_CONTENT);
     }
 }

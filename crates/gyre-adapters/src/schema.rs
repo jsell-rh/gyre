@@ -14,6 +14,9 @@ diesel::table! {
         last_mirror_sync -> Nullable<BigInt>,
         tenant_id -> Text,
         workspace_id -> Text,
+        description -> Nullable<Text>,
+        status -> Text,
+        updated_at -> BigInt,
     }
 }
 
