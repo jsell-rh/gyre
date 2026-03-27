@@ -351,7 +351,9 @@
   }
 
   /* Raw schema collapsible */
-  .raw-schema { }
+  .raw-schema {
+    margin-top: var(--space-2);
+  }
 
   .raw-schema-toggle {
     font-size: var(--text-xs);

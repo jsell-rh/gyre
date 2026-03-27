@@ -45,7 +45,7 @@
     onfocusin={() => (showTooltip = true)}
     onfocusout={() => (showTooltip = false)}
     tabindex="0"
-    role="img"
+    role="group"
     aria-label="Node {node.name ?? node.id}: {spanCount} spans, {(errorRate * 100).toFixed(1)}% errors, mean {formatDuration(meanDuration)}"
   >
     <!-- Background ring (border) -->
