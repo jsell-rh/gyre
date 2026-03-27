@@ -1,5 +1,5 @@
 <script>
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import MoldableView from '../lib/MoldableView.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -40,6 +40,8 @@
   let conceptNodes = $state(null); // null = no active search
   let conceptEdges = $state(null);
   let debounceTimer = null;
+
+  onDestroy(() => clearTimeout(debounceTimer));
 
   // Load repos when in workspace/repo scope (graph dropdown)
   $effect(() => {
