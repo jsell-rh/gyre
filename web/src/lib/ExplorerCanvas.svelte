@@ -979,7 +979,7 @@
   .panel-header { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; }
   .panel-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-1); }
   .panel-type { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-muted); }
-  .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; padding: 0; }
+  .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; padding: 0; transition: color var(--transition-fast); }
   .close-btn:hover { color: var(--color-text); }
   .panel-name { display: block; font-size: var(--text-base); font-weight: 600; color: var(--color-text); font-family: var(--font-mono); word-break: break-all; }
   .panel-qualified { display: block; font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); margin-top: 2px; word-break: break-all; }
