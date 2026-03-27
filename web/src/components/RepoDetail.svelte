@@ -149,7 +149,7 @@
   }
 
   async function loadSignatures(shas) {
-    const entries = await Promise.all(
+    const results = await Promise.allSettled(
       shas.map(async (sha) => {
         try {
           await api.commitSignature(repo.id, sha);
@@ -160,8 +160,11 @@
       })
     );
     const map = { ...sigMap };
-    for (const [sha, signed] of entries) {
-      map[sha] = signed;
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        const [sha, signed] = result.value;
+        map[sha] = signed;
+      }
     }
     sigMap = map;
   }
