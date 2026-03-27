@@ -34,6 +34,10 @@ pub enum NotificationType {
     SpecAssertionFailure,
     /// Priority 9 — an agent branch has been abandoned.
     AbandonedBranch,
+    /// Priority 9 — an agent completed its task and created an MR for review.
+    AgentCompleted,
+    /// Priority 5 — an agent has escalated or failed and needs human attention.
+    AgentEscalation,
     /// Priority 10 — knowledge-graph extraction suggests a spec link.
     SuggestedSpecLink,
 }
@@ -52,6 +56,8 @@ impl NotificationType {
             Self::TrustSuggestion => "TrustSuggestion",
             Self::SpecAssertionFailure => "SpecAssertionFailure",
             Self::AbandonedBranch => "AbandonedBranch",
+            Self::AgentCompleted => "AgentCompleted",
+            Self::AgentEscalation => "AgentEscalation",
             Self::SuggestedSpecLink => "SuggestedSpecLink",
         }
     }
@@ -69,6 +75,8 @@ impl NotificationType {
             "TrustSuggestion" => Some(Self::TrustSuggestion),
             "SpecAssertionFailure" => Some(Self::SpecAssertionFailure),
             "AbandonedBranch" => Some(Self::AbandonedBranch),
+            "AgentCompleted" => Some(Self::AgentCompleted),
+            "AgentEscalation" => Some(Self::AgentEscalation),
             "SuggestedSpecLink" => Some(Self::SuggestedSpecLink),
             _ => None,
         }
@@ -87,6 +95,8 @@ impl NotificationType {
             Self::TrustSuggestion => 8,
             Self::SpecAssertionFailure => 9,
             Self::AbandonedBranch => 9,
+            Self::AgentCompleted => 9,
+            Self::AgentEscalation => 5,
             Self::SuggestedSpecLink => 10,
         }
     }
@@ -186,6 +196,8 @@ mod tests {
             NotificationType::TrustSuggestion,
             NotificationType::SpecAssertionFailure,
             NotificationType::AbandonedBranch,
+            NotificationType::AgentCompleted,
+            NotificationType::AgentEscalation,
             NotificationType::SuggestedSpecLink,
         ];
         for v in &variants {
