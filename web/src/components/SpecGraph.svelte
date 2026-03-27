@@ -310,9 +310,9 @@
   .panel-title { font-weight: 600; color: var(--color-text); font-size: var(--text-sm); flex: 1; overflow: hidden; text-overflow: ellipsis; }
   .close-btn { background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-lg); line-height: 1; flex-shrink: 0; }
   .close-btn:hover { color: var(--color-text); }
-  .close-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
-  .panel-field { display: flex; flex-direction: column; gap: var(--space-0, 2px); }
+  .panel-field { display: flex; flex-direction: column; gap: 2px; }
   .field-label { font-size: var(--text-xs); color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .text-sm { font-size: var(--text-sm); color: var(--color-text); }
 

@@ -24,7 +24,7 @@
 
   // Arc length for error_rate ring
   let errorArc = $derived(Math.max(0, Math.min(1, errorRate)) * CIRCUMFERENCE);
-  let ringColor = $derived(errorRate > 0.1 ? 'var(--color-danger, #ef4444)' : 'var(--color-success, #22c55e)');
+  let ringColor = $derived(errorRate > 0.1 ? 'var(--color-danger)' : 'var(--color-success)');
 
   let showTooltip = $state(false);
 
@@ -51,8 +51,8 @@
     <!-- Background ring (border) -->
     <circle
       r={RADIUS}
-      fill="color-mix(in srgb, var(--color-bg, #0f172a) 70%, transparent)"
-      stroke="var(--color-border, #334155)"
+      fill="color-mix(in srgb, var(--color-bg) 70%, transparent)"
+      stroke="var(--color-border)"
       stroke-width="2.5"
     />
     <!-- Error-rate arc -->
@@ -70,8 +70,8 @@
       text-anchor="middle"
       dominant-baseline="middle"
       font-size="5"
-      fill="var(--color-text, #f1f5f9)"
-      font-family="var(--font-mono, monospace)"
+      fill="var(--color-text)"
+      font-family="var(--font-mono)"
       pointer-events="none"
     >{spanCount > 99 ? '99+' : spanCount}</text>
 
@@ -82,11 +82,11 @@
           x="-4" y="-14"
           width="80" height="36"
           rx="3"
-          fill="color-mix(in srgb, var(--color-bg, #0f172a) 95%, transparent)"
-          stroke="var(--color-border, #334155)"
+          fill="color-mix(in srgb, var(--color-bg) 95%, transparent)"
+          stroke="var(--color-border)"
           stroke-width="1"
         />
-        <text font-size="7" fill="var(--color-text, #f1f5f9)" font-family="var(--font-mono, monospace)">
+        <text font-size="7" fill="var(--color-text)" font-family="var(--font-mono)">
           <tspan x="0" dy="0">spans: {spanCount}</tspan>
           <tspan x="0" dy="10">errors: {(errorRate * 100).toFixed(1)}%</tspan>
           <tspan x="0" dy="10">mean: {formatDuration(meanDuration)}</tspan>

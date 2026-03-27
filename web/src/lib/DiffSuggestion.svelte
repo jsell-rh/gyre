@@ -33,10 +33,10 @@
 
 <style>
   .diff-suggestion {
-    border: 1px solid var(--color-primary, #ee0000);
-    border-radius: var(--radius, 6px);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius);
     overflow: hidden;
-    background: color-mix(in srgb, var(--color-primary, #ee0000) 6%, transparent);
+    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
   }
 
   .diff-header {

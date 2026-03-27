@@ -288,11 +288,11 @@
 
   .speed-controls {
     display: flex;
-    gap: var(--space-0, 2px);
+    gap: 2px;
   }
 
   .speed-btn {
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -339,12 +339,12 @@
 
   .ctrl-btn:focus-visible,
   .speed-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
   .scrubber-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 </style>

@@ -253,7 +253,7 @@
     border-radius: var(--radius-sm);
     color: var(--color-text-muted);
     font-size: var(--text-xs);
-    padding: var(--space-0, 2px) var(--space-2);
+    padding: 2px var(--space-2);
     font-family: var(--font-mono);
   }
 
@@ -358,7 +358,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
