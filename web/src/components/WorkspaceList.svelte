@@ -159,7 +159,7 @@
 
   .ws-info { flex: 1; }
   .ws-name { font-weight: 600; color: var(--color-text); font-size: var(--text-base); }
-  .ws-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: 2px; }
+  .ws-desc { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: var(--space-0, 2px); }
 
   .chevron { color: var(--color-text-muted); flex-shrink: 0; }
 
@@ -176,6 +176,7 @@
   }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -187,6 +188,7 @@
     font-size: var(--text-sm);
     cursor: pointer;
   }
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }

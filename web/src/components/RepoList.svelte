@@ -130,7 +130,7 @@
       {/if}
     </div>
     <div class="hdr-actions">
-      <Button variant="secondary" onclick={() => (showMirrorRepo = true)}>⟳ Mirror</Button>
+      <Button variant="secondary" onclick={() => (showMirrorRepo = true)}><span aria-hidden="true">⟳</span> Mirror</Button>
       <Button variant="primary" onclick={() => (showAddRepo = true)}>+ New Repo</Button>
     </div>
   </div>
@@ -148,7 +148,7 @@
       {/each}
     </div>
   {:else if error}
-    <div class="error-msg">Error: {error}</div>
+    <div class="error-msg" role="alert">Error: {error}</div>
   {:else if repos.length === 0}
     <EmptyState
       title="No repositories yet"
@@ -281,8 +281,8 @@
     background: var(--color-surface-elevated);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm, 3px);
+    padding: var(--space-0, 2px) var(--space-1);
     font-weight: 500;
   }
 
@@ -292,8 +292,8 @@
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm, 3px);
+    padding: var(--space-0, 2px) var(--space-1);
   }
 
   .repo-url {

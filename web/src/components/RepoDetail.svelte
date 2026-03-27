@@ -981,7 +981,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 0.15rem 0.5rem;
+    padding: var(--space-0, 2px) var(--space-2);
   }
 
   .clone-bar {
@@ -1010,7 +1010,7 @@
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: 0.2rem var(--space-3);
+    padding: var(--space-0, 2px) var(--space-3);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1023,7 +1023,7 @@
     color: var(--color-link);
     font-family: var(--font-body);
     font-size: var(--text-xs);
-    padding: 0.2rem var(--space-3);
+    padding: var(--space-0, 2px) var(--space-3);
     cursor: pointer;
     white-space: nowrap;
     transition: all var(--transition-fast);
@@ -1067,7 +1067,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
-    padding: 0.1rem 0.4rem;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -1099,7 +1099,7 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
-    padding: 0.1rem 0.3rem;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: var(--radius-sm);
   }
 
@@ -1289,7 +1289,7 @@
     color: var(--color-danger);
     font-family: var(--font-body);
     font-size: var(--text-xs);
-    padding: 0.1rem var(--space-2);
+    padding: var(--space-0, 2px) var(--space-2);
     cursor: pointer;
   }
 
@@ -1310,7 +1310,7 @@
   .rule-claim, .rule-value {
     font-family: var(--font-mono);
     background: var(--color-surface-elevated);
-    padding: 0.1rem 0.4rem;
+    padding: var(--space-0, 2px) var(--space-1);
     border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
   }
@@ -1560,7 +1560,7 @@
   .commit-bar {
     height: 6px;
     background: var(--color-link);
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     min-width: 2px;
     flex-shrink: 0;
   }
