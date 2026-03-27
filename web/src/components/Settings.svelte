@@ -42,7 +42,7 @@
   })());
 </script>
 
-<div class="panel">
+<div class="panel" aria-busy={loading}>
   <div class="panel-header">
     <h2>{$t('settings.title')}</h2>
   </div>
@@ -85,7 +85,7 @@
           <span>{$t('settings.server_info.reachable')}</span>
         </div>
       {:else}
-        <div class="error-row">
+        <div class="error-row" role="alert">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
             <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
           </svg>
@@ -492,5 +492,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .ws-dot.pulse { animation: none; }
+    .config-table tbody tr { transition: none; }
   }
 </style>

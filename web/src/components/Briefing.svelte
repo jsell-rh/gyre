@@ -195,8 +195,8 @@
   onMount(load);
 </script>
 
+<span class="sr-only" aria-live="polite">{loading ? 'Loading briefing…' : 'Briefing loaded'}</span>
 <div class="briefing" data-testid="briefing-view" aria-busy={loading}>
-    <span class="sr-only" aria-live="polite">{loading ? 'Loading briefing…' : 'Briefing loaded'}</span>
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
@@ -621,6 +621,7 @@
     background-repeat: no-repeat;
     background-position: right var(--space-2) center;
     background-size: var(--space-3);
+    transition: border-color var(--transition-fast);
   }
 
   .range-select:hover {
@@ -644,6 +645,7 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     padding: var(--space-1) var(--space-2);
+    transition: border-color var(--transition-fast);
   }
 
   .date-input:hover {
@@ -918,6 +920,8 @@
   @media (prefers-reduced-motion: reduce) {
     .apply-btn,
     .entity-ref,
-    .action-btn { transition: none; }
+    .action-btn,
+    .range-select,
+    .date-input { transition: none; }
   }
 </style>

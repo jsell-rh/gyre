@@ -243,7 +243,7 @@
 </script>
 
 <div class="inbox" aria-busy={loading}>
-  <span class="sr-only" aria-live="polite" role="status">
+  <span class="sr-only" role="status">
     {#if !loading}{visibleNotifications.length} notification{visibleNotifications.length === 1 ? '' : 's'}{/if}
   </span>
   <div class="inbox-header">
@@ -853,6 +853,7 @@
     font-weight: 500;
     padding: var(--space-1) var(--space-3);
     white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 
   .retry-btn:hover {
@@ -888,6 +889,9 @@
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
-    .inbox-card { transition: none; }
+    .inbox-card,
+    .card-header,
+    .ref-link,
+    .retry-btn { transition: none; }
   }
 </style>
