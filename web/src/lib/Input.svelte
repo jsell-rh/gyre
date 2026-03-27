@@ -10,7 +10,8 @@
     id = undefined,
   } = $props();
 
-  let inputId = $derived(id ?? `input-${Math.random().toString(36).slice(2, 8)}`);
+  const fallbackId = `input-${Math.random().toString(36).slice(2, 8)}`;
+  let inputId = $derived(id ?? fallbackId);
 </script>
 
 <div class="field" class:has-error={!!error}>

@@ -193,7 +193,7 @@
                   </div>
                 {/if}
                 {#if task.pr_link}
-                  <a class="pr-link" href={task.pr_link} target="_blank" rel="noreferrer">PR ↗<span class="sr-only"> (opens in new tab)</span></a>
+                  <a class="pr-link" href={/^https?:\/\//i.test(task.pr_link) ? task.pr_link : '#'} target="_blank" rel="noreferrer">PR ↗<span class="sr-only"> (opens in new tab)</span></a>
                 {/if}
                 {#if task.spec_path}
                   <span class="spec-chip" title={task.spec_path}><span aria-hidden="true">📋</span> spec</span>
