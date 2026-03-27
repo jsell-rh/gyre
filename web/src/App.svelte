@@ -759,7 +759,7 @@
     background: var(--color-border);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
-    padding: var(--space-0, 2px) var(--space-1);
+    padding: 2px var(--space-1);
     font-size: var(--text-xs);
     font-family: var(--font-mono);
     color: var(--color-text-muted);
@@ -796,7 +796,7 @@
 
   .search-trigger:focus-visible,
   .inbox-badge-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -808,7 +808,7 @@
     height: 14px;
     padding: 0 3px;
     background: var(--color-danger);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     border-radius: 999px;
     font-size: var(--text-xs);
     font-weight: 700;
@@ -917,7 +917,7 @@
     flex-direction: column;
     overflow: hidden;
     min-height: 0;
-    transition: opacity 150ms ease;
+    transition: opacity var(--transition-fast);
   }
 
   .content-inner.faded {
@@ -1011,7 +1011,7 @@
     z-index: 9999;
     padding: var(--space-2) var(--space-4);
     background: var(--color-primary);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     border-radius: 0 0 var(--radius) var(--radius);
     font-size: var(--text-sm);
     text-decoration: none;
@@ -1027,7 +1027,7 @@
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: color-mix(in srgb, var(--color-bg, #000) 60%, transparent);
+    background: color-mix(in srgb, var(--color-bg) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1069,11 +1069,11 @@
 
   .shortcuts-header button:hover {
     color: var(--color-text);
-    background: color-mix(in srgb, var(--color-focus, #4db0ff) 8%, transparent);
+    background: color-mix(in srgb, var(--color-focus) 8%, transparent);
   }
 
   .shortcuts-header button:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
@@ -1188,9 +1188,9 @@
   }
 
   .token-input:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
-    border-color: var(--color-focus, #4db0ff);
+    border-color: var(--color-focus);
   }
 
   .token-actions {
@@ -1204,14 +1204,14 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: var(--color-surface, #fff);
+    color: var(--color-text-inverse);
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
-    transition: opacity var(--transition-fast);
+    transition: background var(--transition-fast);
   }
 
-  .btn-primary:hover { opacity: 0.85; }
+  .btn-primary:hover { background: var(--color-primary-hover); }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -1229,25 +1229,22 @@
 
   .btn-primary:focus-visible,
   .btn-secondary:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
   .btn-primary:active {
-    opacity: 0.85;
-  }
-  .btn-secondary:active {
-    opacity: 0.85;
+    background: var(--color-primary-hover);
   }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   .user-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
   .user-dropdown-item:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
     background: var(--color-border);
     color: var(--color-text);
