@@ -1750,7 +1750,7 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--color-surface, #0a0a0a) 60%, transparent);
+    background: color-mix(in srgb, var(--color-bg) 60%, transparent);
     z-index: 100;
   }
   .modal {

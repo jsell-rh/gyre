@@ -614,6 +614,7 @@
     font-size: var(--text-xs);
     padding: 0 2px;
     line-height: 1;
+    transition: color var(--transition-fast);
   }
 
   .search-clear:hover { color: var(--color-text); }

@@ -803,6 +803,7 @@
     text-align: left;
     font-family: var(--font-mono);
     text-decoration: underline;
+    transition: color var(--transition-fast);
   }
 
   .ref-link:hover {

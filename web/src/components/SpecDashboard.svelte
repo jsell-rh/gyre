@@ -563,6 +563,7 @@
     align-items: center;
     gap: var(--space-1);
     transition: color var(--transition-fast);
+    transition: color var(--transition-fast);
   }
 
   .sort-btn:hover { color: var(--color-text); }
