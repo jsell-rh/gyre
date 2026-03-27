@@ -43,6 +43,7 @@ pub mod team;
 pub mod tenant;
 pub mod trace;
 pub mod user;
+pub mod user_profile;
 pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
@@ -218,6 +219,9 @@ mod tests {
             "graph_deltas",
             // LLM function config (migration 000031)
             "llm_function_configs",
+            // User profile tables (migration 000036)
+            "user_notification_preferences",
+            "user_tokens",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",

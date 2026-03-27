@@ -42,6 +42,7 @@ pub mod team;
 pub mod tenant;
 pub mod trace;
 pub mod user;
+pub mod user_profile;
 pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;

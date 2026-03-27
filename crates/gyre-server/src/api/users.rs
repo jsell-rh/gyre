@@ -1,4 +1,4 @@
-//! User management, workspace membership, teams, and notification endpoints (HSI §2).
+//! User management, workspace membership, teams, and notification endpoints (HSI §2 + §12).
 //!
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
@@ -17,6 +17,14 @@
 //! PUT  /api/v1/workspaces/:id/teams/:team_id
 //! DELETE /api/v1/workspaces/:id/teams/:team_id
 //!
+//! HSI §12 User Profile endpoints (all per-handler auth — NOT ABAC middleware):
+//! GET    /api/v1/users/me/tokens
+//! POST   /api/v1/users/me/tokens
+//! DELETE /api/v1/users/me/tokens/:id
+//! GET    /api/v1/users/me/notification-preferences
+//! PUT    /api/v1/users/me/notification-preferences
+//! GET    /api/v1/users/me/judgments?workspace_id=&type=&since=&limit=&offset=
+//!
 //! All notification endpoints use per-handler auth (not ABAC):
 //! the handler verifies notification.user_id == caller AND notification.tenant_id == caller.tenant_id.
 
@@ -26,8 +34,12 @@ use axum::{
     Json,
 };
 use gyre_common::{Id, Notification, NotificationType};
-use gyre_domain::{Team, User, WorkspaceMembership, WorkspaceRole};
+use gyre_domain::{
+    JudgmentType, Team, User, UserNotificationPreference, UserToken, WorkspaceMembership,
+    WorkspaceRole,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
@@ -576,4 +588,242 @@ fn resolve_user_id(auth: &AuthenticatedAgent) -> Id {
     auth.user_id
         .clone()
         .unwrap_or_else(|| Id::new(auth.agent_id.clone()))
+}
+
+// ─── HSI §12: API Tokens ─────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct UserTokenResponse {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub last_used_at: Option<u64>,
+    pub expires_at: Option<u64>,
+}
+
+impl From<UserToken> for UserTokenResponse {
+    fn from(t: UserToken) -> Self {
+        Self {
+            id: t.id.to_string(),
+            name: t.name,
+            created_at: t.created_at,
+            last_used_at: t.last_used_at,
+            expires_at: t.expires_at,
+        }
+    }
+}
+
+/// GET /api/v1/users/me/tokens
+pub async fn list_tokens(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let tokens = state.user_tokens.list_for_user(&user_id).await?;
+    let items: Vec<UserTokenResponse> = tokens.into_iter().map(Into::into).collect();
+    Ok(Json(serde_json::json!({ "tokens": items })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateTokenRequest {
+    pub name: String,
+    pub expires_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct CreateTokenResponse {
+    pub id: String,
+    pub name: String,
+    pub token: String, // plaintext, returned once
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+}
+
+/// POST /api/v1/users/me/tokens
+///
+/// Creates a new API token. Returns the plaintext token exactly once.
+/// Only the SHA-256 hash is stored.
+pub async fn create_token(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateTokenRequest>,
+) -> Result<(StatusCode, Json<CreateTokenResponse>), ApiError> {
+    let user_id = resolve_user_id(&auth);
+
+    // Generate a cryptographically random token from two UUID v4 values.
+    let raw_token = {
+        use uuid::Uuid;
+        let a = Uuid::new_v4().simple().to_string();
+        let b = Uuid::new_v4().simple().to_string();
+        format!("gyre_{a}{b}")
+    };
+
+    let token_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(raw_token.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    let now = now_secs();
+    let token_id = new_id();
+    let token = UserToken::new(token_id.clone(), user_id, &req.name, token_hash, now);
+    let mut token = token;
+    token.expires_at = req.expires_at;
+    state.user_tokens.create(&token).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateTokenResponse {
+            id: token.id.to_string(),
+            name: token.name,
+            token: raw_token,
+            created_at: token.created_at,
+            expires_at: token.expires_at,
+        }),
+    ))
+}
+
+/// DELETE /api/v1/users/me/tokens/:id
+pub async fn delete_token(
+    auth: AuthenticatedAgent,
+    Path(token_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let tid = Id::new(token_id);
+    // find_by_id to confirm existence, then scoped delete.
+    state
+        .user_tokens
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Token not found".to_string()))?;
+    state.user_tokens.delete(&tid, &user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── HSI §12: Notification Preferences ──────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct NotifPrefResponse {
+    pub notification_type: String,
+    pub enabled: bool,
+}
+
+impl From<UserNotificationPreference> for NotifPrefResponse {
+    fn from(p: UserNotificationPreference) -> Self {
+        Self {
+            notification_type: p.notification_type,
+            enabled: p.enabled,
+        }
+    }
+}
+
+/// GET /api/v1/users/me/notification-preferences
+pub async fn get_notification_preferences(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let prefs = state
+        .user_notification_prefs
+        .list_for_user(&user_id)
+        .await?;
+    let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
+    Ok(Json(serde_json::json!({ "preferences": items })))
+}
+
+#[derive(Deserialize)]
+pub struct NotifPrefItem {
+    pub notification_type: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateNotifPrefsRequest {
+    pub preferences: Vec<NotifPrefItem>,
+}
+
+/// PUT /api/v1/users/me/notification-preferences
+pub async fn update_notification_preferences(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateNotifPrefsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let prefs: Vec<UserNotificationPreference> = req
+        .preferences
+        .into_iter()
+        .map(|item| {
+            UserNotificationPreference::new(user_id.clone(), item.notification_type, item.enabled)
+        })
+        .collect();
+    state.user_notification_prefs.upsert_batch(&prefs).await?;
+    let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
+    Ok(Json(serde_json::json!({ "preferences": items })))
+}
+
+// ─── HSI §12: Judgment Ledger ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct JudgmentParams {
+    pub workspace_id: Option<String>,
+    #[serde(rename = "type")]
+    pub judgment_type: Option<String>,
+    pub since: Option<u64>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct JudgmentEntryResponse {
+    pub judgment_type: String,
+    pub entity_ref: String,
+    pub workspace_id: Option<String>,
+    pub timestamp: u64,
+    pub detail: Option<String>,
+}
+
+/// GET /api/v1/users/me/judgments
+pub async fn get_judgments(
+    auth: AuthenticatedAgent,
+    Query(params): Query<JudgmentParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let judgment_type = params
+        .judgment_type
+        .as_deref()
+        .and_then(JudgmentType::from_str);
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
+    let entries = state
+        .judgment_ledger
+        .list_for_user(
+            user_id.as_str(),
+            workspace_id.as_ref(),
+            judgment_type,
+            params.since,
+            limit,
+            offset,
+        )
+        .await?;
+
+    let items: Vec<JudgmentEntryResponse> = entries
+        .into_iter()
+        .map(|e| JudgmentEntryResponse {
+            judgment_type: e.judgment_type.as_str().to_string(),
+            entity_ref: e.entity_ref,
+            workspace_id: e.workspace_id.map(|id| id.to_string()),
+            timestamp: e.timestamp,
+            detail: e.detail,
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "judgments": items,
+        "limit": limit,
+        "offset": offset,
+    })))
 }
