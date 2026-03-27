@@ -659,7 +659,7 @@
             data-node-id={node.id}
             transform="translate({pos.x},{pos.y}) scale({scale})"
             role="button" tabindex="0"
-            aria-label="{node.node_type}: {node.name}" aria-pressed={isSelected}
+            aria-label="{node.node_type}: {node.name}{isSelected ? ' (selected)' : ''}"
             onclick={(e) => selectNode(node, e)}
             onkeydown={(e) => e.key === 'Enter' && selectNode(node)}>
             <title>{getNodeTooltip(node)}</title>
@@ -751,7 +751,7 @@
                       aria-label="Highlight node {entry.name} on canvas"
                       onclick={() => panToNode(entry.id)} onkeydown={(e) => e.key === 'Enter' && panToNode(entry.id)}>
                       <td class="risk-name" title={entry.name}>{entry.name.substring(0, 14)}</td>
-                      <td><span class="risk-score-chip" style="background: color-mix(in srgb, {fill} 12%, transparent); color: {fill}; border-color: color-mix(in srgb, {fill} 25%, transparent)">{entry.score.toFixed(2)}</span></td>
+                      <td><span class="risk-score-chip" style="--chip-color: {fill}">{entry.score.toFixed(2)}</span></td>
                       <td class="risk-num">{typeof entry.churn_rate === 'number' ? entry.churn_rate.toFixed(2) : entry.churn_rate}</td>
                       <td class="risk-num">{entry.fan_out}</td>
                     </tr>
@@ -1013,7 +1013,7 @@
   .risk-row.highlighted { background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
   .risk-row td { padding: var(--space-1) var(--space-2); vertical-align: middle; color: var(--color-text); }
   .risk-name { font-family: var(--font-mono); font-size: var(--text-xs); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .risk-score-chip { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: var(--radius-sm); border: 1px solid transparent; }
+  .risk-score-chip { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--chip-color) 12%, transparent); color: var(--chip-color); border-color: color-mix(in srgb, var(--chip-color) 25%, transparent); }
   .risk-num { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text-secondary); text-align: right; }
   .risk-panel-footer { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; }
   .risk-panel-hint { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
@@ -1039,5 +1039,10 @@
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: -2px;
     background: var(--color-surface-elevated);
+  }
+
+  .graph-node:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 3px;
   }
 </style>

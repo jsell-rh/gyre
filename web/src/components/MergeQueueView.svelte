@@ -104,7 +104,8 @@
     </div>
   </div>
 
-  <div class="scroll">
+  <span class="sr-only" aria-live="polite">{loading ? '' : 'Merge queue loaded'}</span>
+  <div class="scroll" aria-busy={loading}>
     {#if loading}
       <div class="skeleton-panel">
         <Skeleton height="120px" />

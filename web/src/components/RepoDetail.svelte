@@ -432,7 +432,7 @@
     <Tabs {tabs} bind:active={activeTab} />
   </div>
 
-  <div class="tab-content" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}">
+  <div class="tab-content" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}" tabindex="0">
     {#if error}
       <div class="error-msg" role="alert">Error: {error}</div>
     {:else if loading && (activeTab === 'branches' || activeTab === 'commits')}
@@ -540,7 +540,7 @@
         >
           {#snippet children()}
             {#each mrs as mr (mr.id)}
-              <tr class="clickable" onclick={() => onSelectMr(mr)} tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectMr(mr); } }}>
+              <tr class="clickable" onclick={() => onSelectMr(mr)} tabindex="0" aria-label="View merge request: {mr.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectMr(mr); } }}>
                 <td><Badge value={mr.status} /></td>
                 <td class="mr-title-cell">{mr.title}</td>
                 <td class="secondary-cell">{mr.author ?? '—'}</td>
@@ -569,6 +569,8 @@
                     class="hot-file-row"
                     class:selected={blameFile === f.path}
                     onclick={() => loadBlame(f.path)}
+                    aria-label="View blame for {f.path}"
+                    aria-pressed={blameFile === f.path}
                   >
                     <span class="hot-file-path">{f.path}</span>
                     <Badge value={`${f.agent_count} agent${f.agent_count === 1 ? '' : 's'}`} variant="info" />
@@ -1486,6 +1488,11 @@
   .jj-btn:focus-visible,
   .copy-btn:focus-visible,
   .abac-remove-btn:focus-visible {
+    outline: 2px solid var(--color-focus, #4db0ff);
+    outline-offset: 2px;
+  }
+
+  .branch-select:focus-visible {
     outline: 2px solid var(--color-focus, #4db0ff);
     outline-offset: 2px;
   }

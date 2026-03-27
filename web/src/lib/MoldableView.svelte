@@ -4,6 +4,7 @@
   import Badge from './Badge.svelte';
   import EmptyState from './EmptyState.svelte';
   import { api } from './api.js';
+  import { toast as showToast } from './toast.svelte.js';
 
   let {
     nodes = [],
@@ -122,6 +123,7 @@
       timelineDeltas = Array.isArray(data) ? data : [];
     } catch (_e) {
       timelineDeltas = [];
+      showToast('Failed to load timeline: ' + _e.message, { type: 'error' });
     } finally {
       timelineLoading = false;
       // Default scrubber to "Now"
@@ -328,7 +330,7 @@
       />
 
     {:else if activeView === 'timeline'}
-      <div class="timeline-view">
+      <div class="timeline-view" aria-busy={timelineLoading}>
         <div class="timeline-header">
           <h3 class="timeline-title">Architectural Timeline</h3>
           {#if !repoId}
@@ -371,6 +373,7 @@
                     class="tl-node-row"
                     role="button"
                     tabindex="0"
+                    aria-label="{node.name} ({node.node_type})"
                     onclick={() => onSelectNode?.(node)}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
                   >

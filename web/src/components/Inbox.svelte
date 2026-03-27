@@ -474,6 +474,7 @@
                     {:else if n.notification_type === 'conflicting_interpretations'}
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>View Both Specs</Button>
                       <span class="coming-soon-note">Auto-reconciliation coming soon — view both specs above to resolve manually.</span>
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
                         variant="primary"
