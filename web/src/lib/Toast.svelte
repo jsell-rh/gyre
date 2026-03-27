@@ -2,7 +2,7 @@
   import { fly } from 'svelte/transition';
   import { getToasts, dismiss } from './toast.svelte.js';
 
-  const prefersReducedMotion = typeof window !== 'undefined'
+  const prefersReducedMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
     ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
     : false;
 

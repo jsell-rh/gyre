@@ -9,7 +9,7 @@
   import { getContext } from 'svelte';
 
   /** Respect prefers-reduced-motion: skip rAF loop, show static frame only */
-  const prefersReducedMotion = typeof window !== 'undefined'
+  const prefersReducedMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
     ? window.matchMedia('(prefers-reduced-motion: reduce)')
     : { matches: false };
 
