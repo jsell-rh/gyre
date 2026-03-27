@@ -116,8 +116,8 @@
 
 <div class="workspace-cards">
   <div class="cards-header">
-    <h2>Explorer</h2>
-    <p class="subtitle">Select a workspace to explore its architecture</p>
+    <h2>Workspaces</h2>
+    <p class="subtitle">Select a workspace to explore its architecture and activity</p>
   </div>
 
   {#if loading}
@@ -155,7 +155,16 @@
     <div class="cards-grid" role="list" aria-label="Workspaces">
       {#each visibleWs as ws (ws.id)}
         {@const info = enrichment[ws.id]}
-        <div class="ws-card" role="listitem">
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="ws-card"
+          role="listitem"
+          onclick={() => handleEnter(ws)}
+          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEnter(ws); } }}
+          tabindex="0"
+          aria-label="Enter workspace {ws.name}"
+        >
           <Card>
             {#snippet header()}
               <span class="ws-name" title={ws.name}>{ws.name}</span>
@@ -328,6 +337,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .ws-card {
+    cursor: pointer;
+    border-radius: var(--radius-lg);
+    transition: box-shadow var(--transition-fast);
+  }
+
+  .ws-card:hover {
+    box-shadow: 0 0 0 1px var(--color-focus);
+  }
+
+  .ws-card:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* Card internals */
@@ -524,6 +548,7 @@
   @media (prefers-reduced-motion: reduce) {
     .budget-bar-fill { transition: none; }
     .ws-filter,
+    .ws-card,
     .enter-btn,
     .btn-secondary,
     .retry-btn {

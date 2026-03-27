@@ -28,6 +28,6 @@ export function dismiss(id) {
 }
 
 export const toastSuccess = (msg, opts) => toast(msg, { type: 'success', ...opts });
-export const toastError   = (msg, opts) => toast(msg, { type: 'error',   ...opts });
+export const toastError   = (msg, opts) => toast(msg, { type: 'error', duration: 8000, ...opts });
 export const toastWarning = (msg, opts) => toast(msg, { type: 'warning', ...opts });
 export const toastInfo    = (msg, opts) => toast(msg, { type: 'info',    ...opts });

@@ -180,7 +180,12 @@
   {/if}
 
   {#if error}
-    <div class="chat-error" role="alert">{error}</div>
+    <div class="chat-error" role="alert">
+      <span class="chat-error-msg">{error}</span>
+      <button class="chat-error-dismiss" onclick={() => error = null} aria-label="Dismiss error">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
   {/if}
 
   <div class="chat-input-area" aria-busy={streaming}>
@@ -330,6 +335,9 @@
   .clear-btn:hover { color: var(--color-text-secondary); }
 
   .chat-error {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
     background: color-mix(in srgb, var(--color-danger) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
@@ -337,6 +345,25 @@
     color: var(--color-danger);
     font-size: var(--text-sm);
   }
+
+  .chat-error-msg { flex: 1; }
+
+  .chat-error-dismiss {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--color-danger);
+    cursor: pointer;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+    transition: opacity var(--transition-fast);
+  }
+
+  .chat-error-dismiss:hover { opacity: 1; }
+  .chat-error-dismiss:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* Input area */
   .chat-input-area {

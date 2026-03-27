@@ -348,7 +348,7 @@
               Request Changes
             </button>
             {#if mr.status === 'approved'}
-              <button class="action-btn enqueue" onclick={addToQueue} disabled={submitting || enqueueing} aria-busy={submitting}>
+              <button class="action-btn enqueue" onclick={addToQueue} disabled={submitting || enqueueing} aria-busy={enqueueing}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M3 12h18M3 6h18M3 18h12"/></svg>
                 {enqueueing ? 'Adding…' : 'Add to Queue'}
               </button>

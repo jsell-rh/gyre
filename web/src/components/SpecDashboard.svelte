@@ -221,11 +221,9 @@
   <span class="sr-only" aria-live="polite">{loading ? "" : "specs loaded"}</span>
   <!-- ── Header ─────────────────────────────────────────────────────────────── -->
   <div class="view-header">
-    <div>
+    <div class="title-row">
       <h1 class="page-title">Specs</h1>
-      {#if scope !== 'repo'}
-        <p class="page-desc">{scope} scope</p>
-      {/if}
+      <span class="scope-hint">{scope === 'tenant' ? 'All workspaces' : scope === 'repo' ? 'Repository' : 'Workspace'}</span>
     </div>
     <div class="header-actions">
       {#if scope === 'repo' && repoId}
@@ -453,6 +451,12 @@
     flex-shrink: 0;
   }
 
+  .title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .page-title {
     font-family: var(--font-display);
     font-size: var(--text-xl);
@@ -461,11 +465,15 @@
     margin: 0;
   }
 
-  .page-desc {
-    font-size: var(--text-sm);
+  .scope-hint {
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
-    margin: 0;
-    text-transform: capitalize;
+    font-weight: 400;
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    align-self: center;
   }
 
   .header-actions {
