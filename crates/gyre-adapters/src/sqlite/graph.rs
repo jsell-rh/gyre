@@ -592,6 +592,7 @@ impl GraphPort for SqliteStorage {
             let rows = graph_nodes::table
                 .filter(graph_nodes::repo_id.eq(repo_id.as_str()))
                 .filter(graph_nodes::spec_path.eq(&spec_path))
+                .filter(graph_nodes::deleted_at.is_null())
                 .load::<GraphNodeRow>(&mut *conn)
                 .context("get nodes by spec")?;
             rows.into_iter().map(GraphNodeRow::into_node).collect()
