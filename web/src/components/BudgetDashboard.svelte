@@ -38,7 +38,7 @@
   }
 </script>
 
-<div class="budget-dash">
+<div class="budget-dash" aria-busy={loading}>
   <div class="dash-header">
     <h2>Budget Dashboard</h2>
     <p class="subtitle">Tenant-wide token and cost consumption</p>

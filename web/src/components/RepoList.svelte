@@ -121,7 +121,7 @@
   {/snippet}
 </Modal>
 
-<div class="page">
+<div class="page" aria-busy={loading}>
   <div class="page-hdr">
     <div>
       <h1 class="page-title">Repositories</h1>

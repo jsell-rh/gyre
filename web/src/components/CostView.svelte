@@ -68,7 +68,7 @@
   onMount(() => load());
 </script>
 
-<div class="cost-view">
+<div class="cost-view" aria-busy={loading}>
   <div class="toolbar">
     <h2>Cost Tracking</h2>
     <div class="actions">
