@@ -3,7 +3,8 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Modal from '../lib/Modal.svelte';
-  import { toast as showToast } from '../lib/toast.svelte.js';
+  import Button from '../lib/Button.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let tenants = $state([]);
   let loading = $state(true);
@@ -19,7 +20,7 @@
     try {
       tenants = (await api.tenants()) ?? [];
     } catch (e) {
-      showToast('Failed to load tenants: ' + e.message, { type: 'error' });
+      toastError('Failed to load tenants: ' + e.message);
     } finally {
       loading = false;
     }
@@ -31,12 +32,12 @@
     try {
       const slug = form.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
       await api.createTenant({ name: form.name.trim(), slug, oidc_issuer: form.oidc_issuer || undefined });
-      showToast('Tenant created', { type: 'success' });
+      toastSuccess('Tenant created');
       createOpen = false;
       form = { name: '', oidc_issuer: '' };
       await load();
     } catch (e) {
-      showToast('Failed to create tenant: ' + e.message, { type: 'error' });
+      toastError('Failed to create tenant: ' + e.message);
     } finally {
       saving = false;
     }
@@ -47,10 +48,10 @@
     deleting = id;
     try {
       await api.deleteTenant(id);
-      showToast('Tenant deleted', { type: 'success' });
+      toastSuccess('Tenant deleted');
       await load();
     } catch (e) {
-      showToast('Failed to delete tenant: ' + e.message, { type: 'error' });
+      toastError('Failed to delete tenant: ' + e.message);
     } finally {
       deleting = null;
     }
@@ -64,7 +65,7 @@
       <h2>Tenants</h2>
       <p class="subtitle">Enterprise/org boundaries. Each tenant has its own users, workspaces, and budgets.</p>
     </div>
-    <button class="btn-primary" onclick={() => (createOpen = true)}>+ New Tenant</button>
+    <Button variant="primary" onclick={() => (createOpen = true)}>+ New Tenant</Button>
   </div>
 
   {#if loading}
@@ -116,10 +117,10 @@
     <input id="tenant-oidc" class="input" bind:value={form.oidc_issuer} placeholder="https://keycloak.example.com/realms/acme" />
   </div>
   {#snippet footer()}
-    <button class="btn-secondary" onclick={() => (createOpen = false)}>Cancel</button>
-    <button class="btn-primary" onclick={create} disabled={saving || !form.name.trim()}>
+    <Button variant="secondary" onclick={() => (createOpen = false)}>Cancel</Button>
+    <Button variant="primary" onclick={create} disabled={saving || !form.name.trim()}>
       {saving ? 'Creating…' : 'Create Tenant'}
-    </button>
+    </Button>
   {/snippet}
 </Modal>
 
@@ -157,7 +158,7 @@
   .tenant-slug { color: var(--color-text-secondary); font-size: var(--text-xs); margin-left: var(--space-1); }
 
   .tenant-meta { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--color-text-secondary); }
-  .tenant-id { opacity: 0.5; font-family: var(--font-mono); font-size: var(--text-xs); }
+  .tenant-id { color: var(--color-text-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
 
   .form-group { margin-bottom: var(--space-4); }
   .form-group label { display: block; font-size: var(--text-sm); font-weight: 500; margin-bottom: var(--space-1); color: var(--color-text); }
