@@ -449,7 +449,7 @@
             <AgentCardPanel agentId={selected.id} />
           </div>
         {:else if detailTab === 'logs'}
-          <div class="logs-panel" role="tabpanel" id="dtabpanel-logs" aria-labelledby="dtab-logs" aria-busy={logsLoading}
+          <div class="logs-panel" role="tabpanel" id="dtabpanel-logs" aria-labelledby="dtab-logs" aria-busy={logsLoading}>
             {#if logsLoading}
               <p class="logs-empty">Loading logs…</p>
             {:else if agentLogLines.length === 0}
@@ -541,7 +541,7 @@
 
   .spawn-btn {
     background: var(--color-primary);
-    color: var(--color-text-inverse, #fff);
+    color: var(--color-text-inverse);
     border: none;
     border-radius: var(--radius);
     padding: var(--space-2) var(--space-4);
@@ -560,7 +560,7 @@
     display: inline-flex;
     align-items: center;
     padding: var(--space-1) var(--space-3);
-    border-radius: 99px;
+    border-radius: var(--radius-full);
     border: 1px solid var(--color-border);
     background: transparent;
     color: var(--color-text-secondary);
@@ -572,7 +572,7 @@
   }
 
   .pill:hover { border-color: var(--color-border-strong); color: var(--color-text); }
-  .pill.active { background: color-mix(in srgb, var(--color-focus, #4db0ff) 12%, transparent); border-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
+  .pill.active { background: color-mix(in srgb, var(--color-focus) 12%, transparent); border-color: var(--color-focus); color: var(--color-focus); }
 
   .content {
     flex: 1;
@@ -604,7 +604,7 @@
   }
 
   .agent-card:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .agent-card.selected { border-color: var(--color-focus, #4db0ff); background: color-mix(in srgb, var(--color-focus, #4db0ff) 4%, transparent); }
+  .agent-card.selected { border-color: var(--color-focus); background: color-mix(in srgb, var(--color-focus) 4%, transparent); }
   .skeleton-card { cursor: default; }
   .skeleton-card:hover { border-color: var(--color-border); background: var(--color-surface); }
 
@@ -644,7 +644,7 @@
   .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
   .muted { color: var(--color-text-secondary); font-size: var(--text-xs); }
 
-  :global(tr.row-selected td) { background: color-mix(in srgb, var(--color-focus, #4db0ff) 4%, transparent); }
+  :global(tr.row-selected td) { background: color-mix(in srgb, var(--color-focus) 4%, transparent); }
 
   .detail-panel {
     background: var(--color-surface);
@@ -690,7 +690,7 @@
   }
 
   .dtab:hover { color: var(--color-text); }
-  .dtab.active { border-bottom-color: var(--color-focus, #4db0ff); color: var(--color-focus, #4db0ff); }
+  .dtab.active { border-bottom-color: var(--color-focus); color: var(--color-focus); }
 
   .logs-panel {
     display: flex;
@@ -723,16 +723,16 @@
   }
 
   .tty-error {
-    color: var(--color-danger, #ef4444);
-    background: color-mix(in srgb, var(--color-danger, #ef4444) 10%, transparent);
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
     padding: var(--space-2) var(--space-4);
     font-size: var(--text-sm);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-danger, #ef4444) 25%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
   }
 
   .tty-panel { height: 360px; }
-  .tty-output { background: var(--color-bg, #0d0d0d); }
-  .tty-output .log-line { color: var(--color-text-secondary, #d4d4d4); }
+  .tty-output { background: var(--color-bg); }
+  .tty-output .log-line { color: var(--color-text-secondary); }
 
   .close-btn {
     background: none;
@@ -838,7 +838,7 @@
   .form input:focus:not(:focus-visible),
   .form select:focus:not(:focus-visible) { outline: none; }
   .form input:focus-visible,
-  .form select:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .form select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
   .field-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-0, 2px); }
 
@@ -858,7 +858,7 @@
     transition: all var(--transition-fast);
   }
 
-  .modal-btn.primary { background: var(--color-primary); color: var(--color-text-inverse, #fff); border-color: var(--color-primary); }
+  .modal-btn.primary { background: var(--color-primary); color: var(--color-text-inverse); border-color: var(--color-primary); }
   .modal-btn.primary:hover { background: var(--color-primary-hover); }
   .modal-btn.secondary:hover { background: var(--color-surface-elevated); }
   .modal-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -897,7 +897,7 @@
   }
 
   .copy-token-btn:hover { background: var(--color-surface-elevated); color: var(--color-text); }
-  .copy-token-btn:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .copy-token-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .error-msg {
     padding: var(--space-8);
@@ -918,7 +918,7 @@
     text-underline-offset: 2px;
   }
 
-  .link-btn:hover { opacity: 0.8; }
+  .link-btn:hover { color: var(--color-link-hover); }
 
   .toggle-btn:focus-visible,
   .spawn-btn:focus-visible,
@@ -928,13 +928,16 @@
   .dtab:focus-visible,
   .agent-card:focus-visible,
   .close-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
-  :global(tr[tabindex]:focus-visible td) {
-    outline: 2px solid var(--color-focus, #4db0ff);
+  :global(tr[tabindex]:focus-visible) {
+    outline: 2px solid var(--color-focus);
     outline-offset: -2px;
+  }
+  :global(tr[tabindex]:focus-visible td) {
+    outline: none;
   }
 
   @media (prefers-reduced-motion: reduce) {

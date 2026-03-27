@@ -50,7 +50,7 @@
       <h2>Workspaces</h2>
       <p class="subtitle">Budget-bounded environments grouping repos and agents</p>
     </div>
-    <button class="btn-primary" onclick={() => (createOpen = true)}>+ New Workspace</button>
+    <button class="btn-primary" onclick={() => (createOpen = true)} aria-haspopup="dialog">+ New Workspace</button>
   </div>
 
   {#if loading}
@@ -62,7 +62,7 @@
   {:else if workspaces.length === 0}
     <EmptyState
       title="No workspaces"
-      message="Create a workspace to group repos under shared budget limits."
+      description="Create a workspace to group repos under shared budget limits."
     />
   {:else}
     <div class="content">
@@ -168,15 +168,16 @@
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
-    color: #fff;
+    color: var(--color-text-inverse);
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
     white-space: nowrap;
+    transition: background var(--transition-fast);
   }
-  .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-primary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -187,8 +188,10 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
   }
-  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; }
+  .btn-secondary:hover { background: var(--color-surface-elevated); color: var(--color-text); }
+  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
@@ -202,6 +205,6 @@
     font-size: var(--text-sm);
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
-  .field-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .field-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .form-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 </style>

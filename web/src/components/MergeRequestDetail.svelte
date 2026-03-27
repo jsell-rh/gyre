@@ -776,9 +776,9 @@
   }
 
   .timeline-step.active .timeline-dot {
-    background: var(--color-focus, #4db0ff);
-    border-color: var(--color-focus, #4db0ff);
-    box-shadow: 0 0 8px color-mix(in srgb, var(--color-focus, #4db0ff) 40%, transparent);
+    background: var(--color-focus);
+    border-color: var(--color-focus);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--color-focus) 40%, transparent);
   }
 
   .timeline-label {
@@ -797,7 +797,7 @@
     flex: 1;
     height: 2px;
     background: var(--color-border);
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
     min-width: var(--space-4);
     transition: background var(--transition-fast);
   }
@@ -976,7 +976,7 @@
   .tab-badge {
     background: var(--color-surface-raised);
     border: 1px solid var(--color-border);
-    border-radius: 9999px;
+    border-radius: var(--radius-full);
     font-size: var(--text-xs);
     padding: 0 var(--space-1);
     color: var(--color-text-muted);
@@ -1066,7 +1066,7 @@
     color: var(--color-text-muted);
     background: var(--color-surface-raised);
     border: 1px solid var(--color-border);
-    border-radius: 9999px;
+    border-radius: var(--radius-full);
     padding: 0 var(--space-2);
   }
 
@@ -1310,7 +1310,7 @@
     min-width: 0;
   }
   .dep-input:focus:not(:focus-visible) { outline: none; }
-  .dep-input:focus-visible { outline: 2px solid var(--color-focus, #4db0ff); outline-offset: 2px; border-color: var(--color-focus, #4db0ff); }
+  .dep-input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
   .dep-add-btn {
     background: color-mix(in srgb, var(--color-info) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
@@ -1339,7 +1339,7 @@
   .file-item:focus-visible,
   .dep-remove-btn:focus-visible,
   .dep-add-btn:focus-visible {
-    outline: 2px solid var(--color-focus, #4db0ff);
+    outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
