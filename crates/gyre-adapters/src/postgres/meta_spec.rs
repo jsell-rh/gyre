@@ -44,17 +44,17 @@ impl MetaSpecRow {
     fn into_domain(self) -> Result<MetaSpec> {
         Ok(MetaSpec {
             id: Id::new(self.id),
-            kind: MetaSpecKind::from_str(&self.kind)
+            kind: MetaSpecKind::parse(&self.kind)
                 .ok_or_else(|| anyhow!("unknown meta_spec kind: {}", self.kind))?,
             name: self.name,
-            scope: MetaSpecScope::from_str(&self.scope)
+            scope: MetaSpecScope::parse(&self.scope)
                 .ok_or_else(|| anyhow!("unknown meta_spec scope: {}", self.scope))?,
             scope_id: self.scope_id,
             prompt: self.prompt,
             version: self.version as u32,
             content_hash: self.content_hash,
             required: self.required != 0,
-            approval_status: MetaSpecApprovalStatus::from_str(&self.approval_status)
+            approval_status: MetaSpecApprovalStatus::parse(&self.approval_status)
                 .ok_or_else(|| anyhow!("unknown approval_status: {}", self.approval_status))?,
             approved_by: self.approved_by,
             approved_at: self.approved_at.map(|t| t as u64),

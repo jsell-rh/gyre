@@ -35,7 +35,7 @@ impl MetaSpecKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "meta:persona" => Some(MetaSpecKind::Persona),
             "meta:principle" => Some(MetaSpecKind::Principle),
@@ -67,7 +67,7 @@ impl MetaSpecScope {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Global" => Some(MetaSpecScope::Global),
             "Workspace" => Some(MetaSpecScope::Workspace),
@@ -99,7 +99,7 @@ impl MetaSpecApprovalStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Pending" => Some(MetaSpecApprovalStatus::Pending),
             "Approved" => Some(MetaSpecApprovalStatus::Approved),

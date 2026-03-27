@@ -939,7 +939,7 @@ pub struct UpdateMetaSpecRequest {
 // ---------------------------------------------------------------------------
 
 fn parse_kind(s: &str) -> Result<MetaSpecKind, ApiError> {
-    MetaSpecKind::from_str(s).ok_or_else(|| {
+    MetaSpecKind::parse(s).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "invalid kind '{s}'; must be one of: meta:persona, meta:principle, meta:standard, meta:process"
         ))
@@ -947,7 +947,7 @@ fn parse_kind(s: &str) -> Result<MetaSpecKind, ApiError> {
 }
 
 fn parse_scope(s: &str) -> Result<MetaSpecScope, ApiError> {
-    MetaSpecScope::from_str(s).ok_or_else(|| {
+    MetaSpecScope::parse(s).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "invalid scope '{s}'; must be one of: Global, Workspace"
         ))
@@ -955,7 +955,7 @@ fn parse_scope(s: &str) -> Result<MetaSpecScope, ApiError> {
 }
 
 fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
-    MetaSpecApprovalStatus::from_str(s).ok_or_else(|| {
+    MetaSpecApprovalStatus::parse(s).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "invalid approval_status '{s}'; must be: Pending, Approved, or Rejected"
         ))
@@ -989,7 +989,7 @@ pub async fn list_meta_specs_registry(
         .meta_specs
         .list(&filter)
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     Ok(Json(results))
 }
 
@@ -1030,7 +1030,7 @@ pub async fn create_meta_spec_registry(
         .meta_specs
         .create(&ms)
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     Ok((StatusCode::CREATED, Json(ms)))
 }
 
@@ -1047,7 +1047,7 @@ pub async fn get_meta_spec_registry(
         .meta_specs
         .get_by_id(&Id::new(&id))
         .await
-        .map_err(|e| ApiError::Internal(e))?
+        .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
     Ok(Json(ms))
 }
@@ -1066,7 +1066,7 @@ pub async fn update_meta_spec_registry(
         .meta_specs
         .get_by_id(&Id::new(&id))
         .await
-        .map_err(|e| ApiError::Internal(e))?
+        .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
 
     let now = now_secs();
@@ -1101,7 +1101,7 @@ pub async fn update_meta_spec_registry(
         .meta_specs
         .update(&ms)
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     Ok(Json(ms))
 }
 
@@ -1119,7 +1119,7 @@ pub async fn delete_meta_spec_registry(
         .meta_spec_bindings
         .has_bindings_for(&rid)
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     if has_bindings {
         return Err(ApiError::Conflict(format!(
             "cannot delete meta-spec '{id}': active bindings reference it"
@@ -1129,7 +1129,7 @@ pub async fn delete_meta_spec_registry(
         .meta_specs
         .delete(&rid)
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1147,14 +1147,14 @@ pub async fn list_meta_spec_versions(
         .meta_specs
         .get_by_id(&Id::new(&id))
         .await
-        .map_err(|e| ApiError::Internal(e))?
+        .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
 
     let versions = state
         .meta_specs
         .list_versions(&Id::new(&id))
         .await
-        .map_err(|e| ApiError::Internal(e))?;
+        .map_err(ApiError::Internal)?;
     Ok(Json(versions))
 }
 
@@ -1171,7 +1171,7 @@ pub async fn get_meta_spec_version(
         .meta_specs
         .get_version(&Id::new(&id), version)
         .await
-        .map_err(|e| ApiError::Internal(e))?
+        .map_err(ApiError::Internal)?
         .ok_or_else(|| {
             ApiError::NotFound(format!("version {version} of meta-spec '{id}' not found"))
         })?;
