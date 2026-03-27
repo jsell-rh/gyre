@@ -1,10 +1,15 @@
 <script>
   /**
-   * MetaSpecs — S4.6 Meta-specs View.
+   * MetaSpecs — S4.6 Meta-specs View (first-class creative surface).
    *
-   * Spec ref: ui-layout.md §9 (Meta-specs Preview Loop Layout)
-   *           human-system-interface.md §1 (meta-specs nav scope table)
-   *           agent-runtime spec §2 (DB-backed meta-spec registry CRUD)
+   * Meta-specs are the human's PRIMARY ENCODING MECHANISM — personas, principles,
+   * standards, and process norms that govern every agent in the platform. This view
+   * treats them accordingly: a rich editor-first surface, not an admin config panel.
+   *
+   * Layout (tenant scope):
+   *   [Sidebar: list + filter] | [Editor: Edit | Impact | History | Approval tabs]
+   *
+   * Spec ref: ui-layout.md §9, human-system-interface.md §1, agent-runtime spec §2
    *
    * Props:
    *   workspaceId — string | null
@@ -24,10 +29,9 @@
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
-  // Shell context (may be undefined in tests/standalone)
   const navigate = getContext('navigate');
 
-  // ─── Shared constants ────────────────────────────────────────────────────────
+  // ─── Constants ───────────────────────────────────────────────────────────────
 
   const KIND_LABELS = {
     'meta:persona':   'Persona',
@@ -53,39 +57,55 @@
     return 'gray';
   }
 
+  function approvalIcon(status) {
+    if (status === 'Approved') return '✓';
+    if (status === 'Pending') return '◎';
+    if (status === 'Rejected') return '✗';
+    return '?';
+  }
+
   // ─── Shared state ────────────────────────────────────────────────────────────
 
   let loading = $state(true);
   let error   = $state(null);
 
-  // ─── Tenant scope — catalog ──────────────────────────────────────────────────
+  // ─── Tenant scope — sidebar + editor ─────────────────────────────────────────
 
   let specs      = $state([]);
   let kindFilter = $state('all');
-  let detailSpec = $state(null);
-  let detailTab  = $state('info');
+  let selected   = $state(null);   // selected meta-spec
+  let editorTab  = $state('edit'); // 'edit' | 'impact' | 'history' | 'approval'
 
-  // Version history
-  let versions        = $state([]);
-  let versionsLoading = $state(false);
+  // Edit tab
+  let editContent  = $state('');
+  let editDirty    = $state(false);
+  let editSaving   = $state(false);
+  let editSuggestions     = $state([]);
+  let nextSuggestionId    = 0;
 
-  // Blast radius modal
-  let blastOpen    = $state(false);
-  let blastPath    = $state('');
+  // Impact tab
   let blastLoading = $state(false);
   let blastResult  = $state(null);
 
-  // Create modal
-  let createOpen    = $state(false);
-  let createSaving  = $state(false);
-  let createForm    = $state({ kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false });
+  // History tab
+  let versions        = $state([]);
+  let versionsLoading = $state(false);
+  let diffVersion     = $state(null); // version to show diff for
 
-  // Delete confirmation
-  let deleteTarget  = $state(null);
-  let deleteSaving  = $state(false);
+  // Approval tab
+  let approvalSaving = $state(null); // 'approve' | 'reject' | null
 
-  // Inline action saving (approve/reject/required toggle)
-  let actionSaving  = $state(null); // spec id currently saving
+  // Create flow
+  let createMode = $state(false); // true = showing create panel instead of list
+  let createForm = $state({ kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false });
+  let createSaving = $state(false);
+
+  // Delete
+  let deleteTarget = $state(null);
+  let deleteSaving = $state(false);
+
+  // Required toggle
+  let requiredSaving = $state(null); // spec id
 
   const filtered = $derived.by(() => {
     if (kindFilter === 'all') return specs;
@@ -98,47 +118,114 @@
     try {
       const all = await api.getMetaSpecs();
       specs = Array.isArray(all) ? all : [];
+      // Auto-select first if nothing selected
+      if (specs.length > 0 && !selected) {
+        selectSpec(specs[0]);
+      }
     } catch (e) {
       error = e.message;
     }
     loading = false;
   }
 
-  async function openBlastRadius(id) {
-    blastPath = id;
-    blastOpen = true;
+  function selectSpec(spec) {
+    selected = spec;
+    editContent = spec.prompt || '';
+    editDirty = false;
+    editorTab = 'edit';
+    blastResult = null;
+    versions = [];
+    diffVersion = null;
+    editSuggestions = [];
+  }
+
+  function onEditorTabChange(tab) {
+    editorTab = tab;
+    if (tab === 'impact' && selected && !blastResult) {
+      loadBlastRadius();
+    }
+    if (tab === 'history' && selected && versions.length === 0) {
+      loadVersionHistory();
+    }
+  }
+
+  async function loadBlastRadius() {
+    if (!selected) return;
     blastLoading = true;
     blastResult = null;
     try {
-      blastResult = await api.getMetaSpecBlastRadius(id);
+      blastResult = await api.getMetaSpecBlastRadius(selected.id);
     } catch (e) {
       blastResult = { error: e.message };
     }
     blastLoading = false;
   }
 
-  async function loadVersionHistory(specId) {
+  async function loadVersionHistory() {
+    if (!selected) return;
     versionsLoading = true;
     versions = [];
     try {
-      versions = await api.getMetaSpecVersions(specId);
+      versions = await api.getMetaSpecVersions(selected.id);
     } catch (e) {
       versions = [];
     }
     versionsLoading = false;
   }
 
-  function openDetail(spec) {
-    detailSpec = spec;
-    detailTab = 'info';
-    versions = [];
+  async function saveEdit() {
+    if (!selected || !editDirty) return;
+    editSaving = true;
+    try {
+      const updated = await api.updateMetaSpec(selected.id, { prompt: editContent });
+      specs = specs.map(s => s.id === selected.id ? updated : s);
+      selected = updated;
+      editDirty = false;
+      toastSuccess('Saved — content change bumped to v' + updated.version);
+    } catch (e) {
+      toastError('Save failed: ' + (e?.message ?? 'unknown error'));
+    }
+    editSaving = false;
   }
 
-  function onDetailTabChange(tab) {
-    detailTab = tab;
-    if (tab === 'history' && detailSpec) {
-      loadVersionHistory(detailSpec.id);
+  async function handleApprove() {
+    if (!selected) return;
+    approvalSaving = 'approve';
+    try {
+      const updated = await api.updateMetaSpec(selected.id, { approval_status: 'Approved' });
+      specs = specs.map(s => s.id === selected.id ? updated : s);
+      selected = updated;
+      toastSuccess('Approved — now active in all bound workspaces');
+    } catch (e) {
+      toastError('Approve failed: ' + (e?.message ?? 'unknown error'));
     }
+    approvalSaving = null;
+  }
+
+  async function handleReject() {
+    if (!selected) return;
+    approvalSaving = 'reject';
+    try {
+      const updated = await api.updateMetaSpec(selected.id, { approval_status: 'Rejected' });
+      specs = specs.map(s => s.id === selected.id ? updated : s);
+      selected = updated;
+      toastSuccess('Rejected');
+    } catch (e) {
+      toastError('Reject failed: ' + (e?.message ?? 'unknown error'));
+    }
+    approvalSaving = null;
+  }
+
+  async function handleRequiredToggle(spec) {
+    requiredSaving = spec.id;
+    try {
+      const updated = await api.updateMetaSpec(spec.id, { required: !spec.required });
+      specs = specs.map(s => s.id === spec.id ? updated : s);
+      if (selected?.id === spec.id) selected = updated;
+    } catch (e) {
+      toastError('Update failed: ' + (e?.message ?? 'unknown error'));
+    }
+    requiredSaving = null;
   }
 
   async function handleCreate() {
@@ -157,9 +244,10 @@
       }
       const created = await api.createMetaSpec(payload);
       specs = [created, ...specs];
-      createOpen = false;
+      createMode = false;
       createForm = { kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false };
-      toastSuccess('Meta-spec created');
+      selectSpec(created);
+      toastSuccess('Created "' + created.name + '" — now pending review');
     } catch (e) {
       toastError('Create failed: ' + (e?.message ?? 'unknown error'));
     }
@@ -172,104 +260,120 @@
     try {
       await api.deleteMetaSpec(deleteTarget.id);
       specs = specs.filter(s => s.id !== deleteTarget.id);
-      if (detailSpec?.id === deleteTarget.id) detailSpec = null;
+      if (selected?.id === deleteTarget.id) {
+        selected = specs.length > 0 ? specs[0] : null;
+        if (selected) selectSpec(selected);
+      }
       deleteTarget = null;
-      toastSuccess('Meta-spec deleted');
+      toastSuccess('Deleted');
     } catch (e) {
-      toastError('Delete failed: ' + (e?.message ?? 'unknown error'));
+      toastError('Delete failed (may have active bindings): ' + (e?.message ?? 'unknown error'));
     }
     deleteSaving = false;
   }
 
-  async function handleApprove(spec) {
-    actionSaving = spec.id;
-    try {
-      const updated = await api.updateMetaSpec(spec.id, { approval_status: 'Approved' });
-      specs = specs.map(s => s.id === spec.id ? updated : s);
-      if (detailSpec?.id === spec.id) detailSpec = updated;
-      toastSuccess('Approved');
-    } catch (e) {
-      toastError('Approve failed: ' + (e?.message ?? 'unknown error'));
+  async function handleChatMessage(text) {
+    // Try LLM assist via specsAssist (repo-scoped) if repoId available
+    if (repoId) {
+      try {
+        const res = await api.specsAssist(repoId, {
+          message: text,
+          context: editContent,
+          kind: selected?.kind,
+        });
+        if (res.ok) return res;
+      } catch { /* fall through */ }
     }
-    actionSaving = null;
+    // Fallback: add as suggestion
+    const id = `suggestion-${nextSuggestionId++}`;
+    editSuggestions = [...editSuggestions, { id, content: `# Suggested addition\n${text}` }];
+    return 'Suggestion added below the editor.';
   }
 
-  async function handleReject(spec) {
-    actionSaving = spec.id;
-    try {
-      const updated = await api.updateMetaSpec(spec.id, { approval_status: 'Rejected' });
-      specs = specs.map(s => s.id === spec.id ? updated : s);
-      if (detailSpec?.id === spec.id) detailSpec = updated;
-      toastSuccess('Rejected');
-    } catch (e) {
-      toastError('Reject failed: ' + (e?.message ?? 'unknown error'));
+  function acceptSuggestion(s) {
+    editContent = editContent + '\n\n' + s.content;
+    editDirty = true;
+    editSuggestions = editSuggestions.filter(x => x.id !== s.id);
+  }
+  function dismissSuggestion(id) { editSuggestions = editSuggestions.filter(s => s.id !== id); }
+
+  // Diff between two version contents
+  function computeDiff(older, newer) {
+    if (!older || !newer) return [];
+    const oldLines = older.split('\n');
+    const newLines = newer.split('\n');
+    // Simple line-by-line diff
+    const result = [];
+    const maxLen = Math.max(oldLines.length, newLines.length);
+    for (let i = 0; i < maxLen; i++) {
+      const o = oldLines[i];
+      const n = newLines[i];
+      if (o === undefined) result.push({ type: 'add', text: n });
+      else if (n === undefined) result.push({ type: 'remove', text: o });
+      else if (o !== n) {
+        result.push({ type: 'remove', text: o });
+        result.push({ type: 'add', text: n });
+      } else {
+        result.push({ type: 'ctx', text: o });
+      }
     }
-    actionSaving = null;
+    return result;
   }
 
-  async function handleRequiredToggle(spec) {
-    actionSaving = spec.id;
-    try {
-      const updated = await api.updateMetaSpec(spec.id, { required: !spec.required });
-      specs = specs.map(s => s.id === spec.id ? updated : s);
-      if (detailSpec?.id === spec.id) detailSpec = updated;
-    } catch (e) {
-      toastError('Update failed: ' + (e?.message ?? 'unknown error'));
-    }
-    actionSaving = null;
-  }
+  // ─── Workspace scope — preview loop ──────────────────────────────────────────
 
-  // ─── Workspace scope — editor + preview loop ─────────────────────────────────
+  let wsLoading   = $state(true);
+  let wsError     = $state(null);
 
   /** @type {'editing' | 'running' | 'complete'} */
   let previewState = $state('editing');
 
-  let personas          = $state([]);
-  let selectedPersonaId = $state('');
-  let personaContent    = $state('');
+  let wsMetaSpecs       = $state([]);   // all kinds, not just personas
+  let selectedMsId      = $state('');
+  let selectedMsContent = $state('');
 
   let targetSpecs       = $state([]);
   let selectedSpecPaths = $state([]);
 
-  let previewId       = $state(null);
-  let previewProgress = $state([]);   // [{path, status: 'running'|'complete'}]
-  let previewInterval = $state(null);
+  let previewId        = $state(null);
+  let previewProgress  = $state([]);
+  let previewInterval  = $state(null);
 
-  let impactTab       = $state('architecture');
-  let previewApiResult  = $state(null);   // full API response when preview_id is used
-  let isSimulatedPreview = $state(false); // true when falling back to client-side simulation
+  let impactTab        = $state('architecture');
+  let previewApiResult = $state(null);
+  let isSimulatedPreview = $state(false);
 
-  let suggestions      = $state([]);
-  let nextSuggestionId = 0;
-  let publishSaving    = $state(false);
+  let wsSuggestions     = $state([]);
+  let wsNextSuggId      = 0;
+  let publishSaving     = $state(false);
 
   async function loadWorkspaceData() {
-    loading = true;
-    error = null;
+    wsLoading = true;
+    wsError = null;
     try {
-      const [ps, sp] = await Promise.all([
-        api.getMetaSpecs({ kind: 'meta:persona' }).catch(() => []),
+      const [ms, sp] = await Promise.all([
+        api.getMetaSpecs().catch(() => []),
         api.getSpecs().catch(() => []),
       ]);
-      personas = Array.isArray(ps) ? ps : [];
-      if (personas.length > 0 && !selectedPersonaId) {
-        selectedPersonaId = personas[0].id;
-        personaContent = personas[0].prompt || '';
+      wsMetaSpecs = Array.isArray(ms) ? ms : [];
+      if (wsMetaSpecs.length > 0 && !selectedMsId) {
+        selectedMsId = wsMetaSpecs[0].id;
+        selectedMsContent = wsMetaSpecs[0].prompt || '';
       }
       targetSpecs = Array.isArray(sp)
         ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:'))
         : [];
     } catch (e) {
-      error = e.message;
+      wsError = e.message;
     }
-    loading = false;
+    wsLoading = false;
   }
 
-  function onPersonaChange(id) {
-    selectedPersonaId = id;
-    const p = personas.find(p => p.id === id);
-    personaContent = p?.prompt || '';
-    suggestions = [];
+  function onMsChange(id) {
+    selectedMsId = id;
+    const ms = wsMetaSpecs.find(m => m.id === id);
+    selectedMsContent = ms?.prompt || '';
+    wsSuggestions = [];
     previewState = 'editing';
     stopPreview();
   }
@@ -296,8 +400,8 @@
     let usedPreviewId = null;
     try {
       const res = await api.previewPersona(workspaceId, {
-        persona_id: selectedPersonaId,
-        content: personaContent,
+        persona_id: selectedMsId,
+        content: selectedMsContent,
         spec_paths: selectedSpecPaths,
       });
       usedPreviewId = res?.preview_id ?? null;
@@ -358,19 +462,25 @@
   function iterate()       { stopPreview(); previewState = 'editing'; previewProgress = []; }
 
   async function publish() {
-    if (!selectedPersonaId || !workspaceId) return;
+    if (!selectedMsId || !workspaceId) return;
     publishSaving = true;
     try {
-      await api.publishPersona(workspaceId, selectedPersonaId, { content: personaContent });
-      toastSuccess('Persona published successfully');
+      await api.publishPersona(workspaceId, selectedMsId, { content: selectedMsContent });
+      toastSuccess('Published successfully');
     } catch (e) {
-      toastError('Failed to publish: ' + (e?.message ?? 'unknown error'));
+      toastError('Publish failed: ' + (e?.message ?? 'unknown error'));
     } finally {
       publishSaving = false;
     }
   }
 
-  async function handleChatMessage(text) {
+  async function handleWsChatMessage(text) {
+    if (repoId) {
+      try {
+        const res = await api.specsAssist(repoId, { message: text, context: selectedMsContent });
+        if (res.ok) return res;
+      } catch { /* fall through */ }
+    }
     try {
       const res = await fetch('/api/v1/specs/assist', {
         method: 'POST',
@@ -378,32 +488,28 @@
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${localStorage.getItem('gyre_auth_token') || 'gyre-dev-token'}`,
         },
-        body: JSON.stringify({ persona_id: selectedPersonaId, message: text }),
+        body: JSON.stringify({ persona_id: selectedMsId, message: text }),
       });
       if (res.ok) return res;
     } catch { /* fall through */ }
 
-    // Fallback mock suggestion
-    const id = `suggestion-${nextSuggestionId++}`;
-    suggestions = [...suggestions, { id, content: `+ ${text}\n# Suggested addition` }];
+    const id = `ws-suggestion-${wsNextSuggId++}`;
+    wsSuggestions = [...wsSuggestions, { id, content: `+ ${text}\n# Suggested addition` }];
     return 'Suggestion added below the editor.';
   }
 
-  function acceptSuggestion(s) {
-    personaContent = personaContent + '\n\n' + s.content;
-    suggestions = suggestions.filter(x => x.id !== s.id);
+  function wsAcceptSuggestion(s) {
+    selectedMsContent = selectedMsContent + '\n\n' + s.content;
+    wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
   }
-  function dismissSuggestion(id) { suggestions = suggestions.filter(s => s.id !== id); }
-  function editSuggestion(s) {
-    personaContent = personaContent + '\n\n' + s.content;
-    suggestions = suggestions.filter(x => x.id !== s.id);
+  function wsDismissSuggestion(id) { wsSuggestions = wsSuggestions.filter(s => s.id !== id); }
+  function wsEditSuggestion(s) {
+    selectedMsContent = selectedMsContent + '\n\n' + s.content;
+    wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
   }
 
-  // Repo scope redirect via shell
   function handleRepoRedirect() {
-    if (navigate && workspaceId) {
-      navigate('meta-specs', { scope: 'workspace', workspaceId });
-    }
+    if (navigate && workspaceId) navigate('meta-specs', { scope: 'workspace', workspaceId });
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
@@ -418,7 +524,10 @@
   });
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && previewState === 'running') cancelPreview(); }} />
+<svelte:window onkeydown={(e) => {
+  if (e.key === 'Escape' && previewState === 'running') cancelPreview();
+  if (e.key === 'Escape' && createMode) createMode = false;
+}} />
 
 <!-- ─── Repo scope redirect ──────────────────────────────────────────────────── -->
 {#if scope === 'repo'}
@@ -432,76 +541,72 @@
         Select a workspace to edit meta-specs.
       {/if}
     </div>
-    <!-- Fall through: still render workspace editor below for convenience -->
   </div>
 {/if}
 
-<!-- ─── Workspace scope — editor + preview loop ──────────────────────────────── -->
+<!-- ─── Workspace scope — preview loop ───────────────────────────────────────── -->
 {#if scope === 'workspace' || scope === 'repo'}
-  <div class="meta-specs-view workspace-view" aria-busy={loading}>
+  <div class="meta-specs-view workspace-view" aria-busy={wsLoading}>
     {#if scope !== 'repo'}
       <div class="view-header">
         <h2>Meta-Specs</h2>
-        <p class="subtitle">Edit persona prompts and preview impact across your workspace specs.</p>
+        <p class="subtitle">Preview how persona and principle changes affect your workspace specs.</p>
       </div>
     {/if}
 
-    {#if loading}
+    {#if wsLoading}
       <div class="split-layout"><div class="split-left"><Skeleton /></div><div class="split-right"><Skeleton /></div></div>
-    {:else if error}
-      <div role="alert">
-        <EmptyState title="Failed to load" description={error} />
-      </div>
+    {:else if wsError}
+      <div role="alert"><EmptyState title="Failed to load" description={wsError} /></div>
       <button class="retry-btn" onclick={loadWorkspaceData}>Retry</button>
     {:else}
       <div class="split-layout" data-testid="preview-loop">
-        <!-- LEFT: Persona editor / diff view -->
+        <!-- LEFT: Meta-spec editor -->
         <div class="split-left">
           <div class="editor-header">
-            <label class="persona-label" for="persona-select">Persona</label>
+            <label class="persona-label" for="ms-select">Meta-spec</label>
             <select
-              id="persona-select"
+              id="ms-select"
               class="persona-select"
-              value={selectedPersonaId}
-              onchange={(e) => onPersonaChange(e.target.value)}
+              value={selectedMsId}
+              onchange={(e) => onMsChange(e.target.value)}
               disabled={previewState === 'running'}
+              aria-label="Persona"
             >
-              {#each personas as p (p.id)}
-                <option value={p.id}>{p.name}</option>
+              {#each wsMetaSpecs as ms (ms.id)}
+                <option value={ms.id}>[{kindLabel(ms.kind)}] {ms.name}</option>
               {/each}
             </select>
           </div>
 
           {#if previewState === 'running'}
-            <!-- Locked diff view -->
-            <div class="persona-diff" role="region" aria-label="Persona diff (read-only)">
-              {#each personaContent.split('\n') as line}
+            <div class="persona-diff" role="region" aria-label="Meta-spec diff (read-only)">
+              {#each selectedMsContent.split('\n') as line}
                 <div class="diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
               {/each}
             </div>
           {:else}
-            <!-- Editable textarea (editing + complete) -->
             <textarea
               class="persona-textarea"
-              bind:value={personaContent}
-              placeholder="Enter system prompt for this persona…"
+              bind:value={selectedMsContent}
+              placeholder="Enter prompt content for this meta-spec…"
               aria-label="Persona system prompt"
               data-testid="persona-textarea"
             ></textarea>
 
-            {#each suggestions as s (s.id)}
+            {#each wsSuggestions as s (s.id)}
               <DiffSuggestion
                 suggestion={s}
-                onaccept={() => acceptSuggestion(s)}
-                onedit={() => editSuggestion(s)}
-                ondismiss={() => dismissSuggestion(s.id)}
+                onaccept={() => wsAcceptSuggestion(s)}
+                onedit={() => wsEditSuggestion(s)}
+                ondismiss={() => wsDismissSuggestion(s.id)}
               />
             {/each}
 
             <InlineChat
-              recipient="persona editor"
+              recipient="meta-spec editor"
               recipientType="spec-edit"
-              onmessage={handleChatMessage}
+              onmessage={handleWsChatMessage}
             />
 
             <div class="editor-actions">
@@ -520,7 +625,7 @@
           {#if previewState === 'editing'}
             <div class="spec-selector">
               <div class="spec-selector-header">
-                <span class="spec-selector-title">Select specs to preview against:</span>
+                <span class="spec-selector-title">Preview against specs:</span>
                 <div class="spec-selector-shortcuts">
                   <button class="link-btn" onclick={selectAll}>Select All</button>
                   <button class="link-btn" onclick={clearAll}>Clear</button>
@@ -529,11 +634,7 @@
               <div class="spec-checklist">
                 {#each targetSpecs as spec (spec.path)}
                   <label class="spec-check-item">
-                    <input
-                      type="checkbox"
-                      checked={selectedSpecPaths.includes(spec.path)}
-                      onchange={() => toggleSpec(spec.path)}
-                    />
+                    <input type="checkbox" checked={selectedSpecPaths.includes(spec.path)} onchange={() => toggleSpec(spec.path)} />
                     <span class="spec-check-path">{spec.path}</span>
                   </label>
                 {:else}
@@ -554,32 +655,22 @@
                   </div>
                 {/each}
               </div>
-              <div class="progress-summary">
-                Progress: {previewProgress.filter(p => p.status === 'complete').length}/{previewProgress.length} specs
-              </div>
+              <div class="progress-summary">Progress: {previewProgress.filter(p => p.status === 'complete').length}/{previewProgress.length} specs</div>
               <Button variant="secondary" onclick={cancelPreview}>Cancel Preview <kbd>Esc</kbd></Button>
             </div>
 
           {:else}
-            <!-- State 3: Impact panel -->
             <div class="impact-panel" data-testid="preview-complete">
               {#if isSimulatedPreview}
-                <div class="sim-banner" role="status">
-                  ⚠ Preview unavailable — showing example layout only. Results are not based on real data.
-                </div>
+                <div class="sim-banner" role="status">⚠ Preview unavailable — showing example layout only.</div>
               {/if}
-              <div
-                class="impact-tabs"
-                role="tablist"
-                aria-label="Impact view"
+              <div class="impact-tabs" role="tablist" aria-label="Impact view"
                 onkeydown={(e) => {
                   const tabs = ['architecture', 'code-diff'];
                   const ids = ['impact-tab-arch', 'impact-tab-diff'];
                   const idx = tabs.indexOf(impactTab);
                   if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
                   if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                  if (e.key === 'Home') { e.preventDefault(); impactTab = tabs[0]; document.getElementById(ids[0])?.focus(); }
-                  if (e.key === 'End')  { e.preventDefault(); impactTab = tabs[1]; document.getElementById(ids[1])?.focus(); }
                 }}
               >
                 <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>Architecture</button>
@@ -601,7 +692,7 @@
                           <div class="code-diff-path">{item.path}</div>
                           <pre class="code-diff-body">--- original
 +++ modified
-@@ persona system prompt applied @@</pre>
+@@ meta-spec applied @@</pre>
                         </div>
                       {/each}
                     </div>
@@ -643,19 +734,21 @@
     {/if}
   </div>
 
-<!-- ─── Tenant scope — catalog table ────────────────────────────────────────── -->
+<!-- ─── Tenant scope — split panel creative surface ───────────────────────────── -->
 {:else}
-  <div class="meta-specs-view" aria-busy={loading}>
-    <div class="view-header">
-      <div class="view-header-row">
-        <div>
-          <h2>Meta-Specs</h2>
-          <p class="subtitle">Versioned specs that govern agent behavior — personas, principles, standards, and process norms.</p>
-        </div>
-        <Button variant="primary" onclick={() => createOpen = true}>+ New Meta-spec</Button>
+  <div class="meta-specs-view tenant-view" aria-busy={loading}>
+    <!-- Top bar -->
+    <div class="top-bar">
+      <div class="top-bar-left">
+        <h2>Meta-Specs</h2>
+        <p class="subtitle">Your primary encoding mechanism — personas, principles, standards, and process norms.</p>
+      </div>
+      <div class="top-bar-actions">
+        <Button variant="primary" onclick={() => { createMode = true; selected = null; }}>+ New Meta-spec</Button>
       </div>
     </div>
 
+    <!-- Filter pills -->
     <div class="filter-pills" role="group" aria-label="Filter by kind">
       <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} aria-pressed={kindFilter === 'all'}>All</button>
       {#each META_KINDS as k}
@@ -664,250 +757,409 @@
     </div>
 
     {#if loading}
-      <Skeleton />
-    {:else if error}
-      <div role="alert">
-        <EmptyState title="Failed to load meta-specs" description={error} />
+      <div class="creative-surface">
+        <div class="spec-sidebar"><Skeleton /></div>
+        <div class="spec-editor"><Skeleton /></div>
       </div>
+    {:else if error}
+      <div role="alert"><EmptyState title="Failed to load meta-specs" description={error} /></div>
       <button class="retry-btn" onclick={loadTenantSpecs}>Retry</button>
-    {:else if filtered.length === 0}
-      <EmptyState
-        title="No meta-specs found"
-        description="Create your first meta-spec using the button above."
-      />
     {:else}
-      <table class="catalog-table" data-testid="catalog-table">
-        <thead>
-          <tr>
-            <th scope="col">Name</th>
-            <th scope="col">Kind</th>
-            <th scope="col">Scope</th>
-            <th scope="col">Status</th>
-            <th scope="col">Version</th>
-            <th scope="col">Required</th>
-            <th scope="col"><span class="sr-only">Actions</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each filtered as spec (spec.id)}
-            <tr
-              class="catalog-row"
-              onclick={() => openDetail(spec)}
-              tabindex="0"
-              aria-label="View {spec.name}"
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(spec); } }}
-            >
-              <td class="cell-name">{spec.name}</td>
-              <td><Badge value={kindLabel(spec.kind)} variant={kindBadgeVariant(spec.kind)} /></td>
-              <td><span class="scope-badge">{spec.scope}</span></td>
-              <td>
-                <Badge
-                  value={spec.approval_status || 'unknown'}
-                  variant={approvalVariant(spec.approval_status)}
-                />
-              </td>
-              <td class="mono cell-ver">v{spec.version}</td>
-              <td>
+      <div class="creative-surface">
+        <!-- Sidebar: list of meta-specs -->
+        <nav class="spec-sidebar" aria-label="Meta-specs list">
+          {#if filtered.length === 0}
+            <div class="sidebar-empty">
+              <p>No meta-specs yet.</p>
+              <button class="link-btn" onclick={() => createMode = true}>Create one</button>
+            </div>
+          {:else}
+            {#each filtered as spec (spec.id)}
+              <button
+                class="sidebar-item"
+                class:active={selected?.id === spec.id && !createMode}
+                onclick={() => { createMode = false; selectSpec(spec); }}
+                aria-current={selected?.id === spec.id && !createMode ? 'true' : undefined}
+              >
+                <div class="sidebar-item-top">
+                  <span class="sidebar-item-name">{spec.name}</span>
+                  <span class="sidebar-status-dot status-{spec.approval_status?.toLowerCase()}" title={spec.approval_status}></span>
+                </div>
+                <div class="sidebar-item-meta">
+                  <Badge value={kindLabel(spec.kind)} variant={kindBadgeVariant(spec.kind)} />
+                  {#if spec.required}
+                    <span class="required-chip">Required</span>
+                  {/if}
+                  <span class="ver-chip">v{spec.version}</span>
+                </div>
+              </button>
+            {/each}
+          {/if}
+        </nav>
+
+        <!-- Editor area -->
+        <main class="spec-editor">
+          {#if createMode}
+            <!-- ─── Create panel ───────────────────────────────────────── -->
+            <div class="create-panel">
+              <div class="create-panel-header">
+                <h3>New Meta-spec</h3>
+                <p class="create-subtitle">Define how agents think, behave, and communicate across your platform.</p>
+              </div>
+
+              <div class="create-kind-grid" role="group" aria-label="Select kind">
+                {#each META_KINDS as k}
+                  <button
+                    class="kind-card"
+                    class:selected={createForm.kind === k}
+                    onclick={() => createForm.kind = k}
+                    aria-pressed={createForm.kind === k}
+                  >
+                    <span class="kind-card-label">{KIND_LABELS[k]}</span>
+                    <span class="kind-card-desc">{
+                      k === 'meta:persona' ? 'Who the agent is — identity, tone, expertise' :
+                      k === 'meta:principle' ? 'What to prioritize — values and trade-offs' :
+                      k === 'meta:standard' ? 'How to write code — conventions and patterns' :
+                      'How to work — workflows and ceremonies'
+                    }</span>
+                  </button>
+                {/each}
+              </div>
+
+              <div class="form-row">
+                <div class="form-field form-field-grow">
+                  <label for="cf-name">Name</label>
+                  <input id="cf-name" type="text" bind:value={createForm.name} placeholder="e.g. backend-engineer, no-mocking-principle" />
+                </div>
+                <div class="form-field">
+                  <label for="cf-scope">Scope</label>
+                  <select id="cf-scope" bind:value={createForm.scope}>
+                    <option value="Global">Global (all workspaces)</option>
+                    <option value="Workspace">Specific workspace</option>
+                  </select>
+                </div>
+              </div>
+
+              {#if createForm.scope === 'Workspace'}
+                <div class="form-field">
+                  <label for="cf-scope-id">Workspace ID</label>
+                  <input id="cf-scope-id" type="text" bind:value={createForm.scope_id} placeholder="workspace UUID" />
+                </div>
+              {/if}
+
+              <div class="form-field">
+                <label for="cf-prompt">Content / Prompt</label>
+                <textarea id="cf-prompt" bind:value={createForm.prompt} placeholder="Write the system prompt that will be injected into every agent bound to this meta-spec. Be specific about behaviors, constraints, and tone." rows="10"></textarea>
+              </div>
+
+              <div class="form-field form-field-inline">
+                <input id="cf-required" type="checkbox" bind:checked={createForm.required} />
+                <label for="cf-required">Required — org-wide mandatory (all agents must load this)</label>
+              </div>
+
+              <div class="create-actions">
+                <Button variant="secondary" onclick={() => createMode = false}>Cancel</Button>
+                <Button variant="primary" onclick={handleCreate} disabled={createSaving}>
+                  {createSaving ? 'Creating…' : 'Create Meta-spec'}
+                </Button>
+              </div>
+            </div>
+
+          {:else if !selected}
+            <div class="editor-empty">
+              <EmptyState title="Select or create a meta-spec" description="Choose from the list on the left, or create a new one." />
+            </div>
+
+          {:else}
+            <!-- ─── Editor tabs ─────────────────────────────────────────── -->
+            <div class="editor-header-bar">
+              <div class="editor-title-row">
+                <h3 class="editor-title">{selected.name}</h3>
+                <Badge value={kindLabel(selected.kind)} variant={kindBadgeVariant(selected.kind)} />
+                <Badge value={selected.approval_status} variant={approvalVariant(selected.approval_status)} />
+                {#if selected.required}
+                  <span class="required-chip">Required</span>
+                {/if}
+                <span class="ver-chip">v{selected.version}</span>
+              </div>
+              <div class="editor-header-actions">
                 <button
                   class="required-toggle"
-                  class:required-on={spec.required}
-                  onclick={(e) => { e.stopPropagation(); handleRequiredToggle(spec); }}
-                  disabled={actionSaving === spec.id}
-                  aria-label={spec.required ? 'Required (click to make optional)' : 'Optional (click to make required)'}
-                  title={spec.required ? 'Required' : 'Optional'}
+                  class:required-on={selected.required}
+                  onclick={() => handleRequiredToggle(selected)}
+                  disabled={requiredSaving === selected.id}
+                  aria-label={selected.required ? 'Required — click to make optional' : 'Optional — click to make required'}
                 >
-                  {spec.required ? 'Required' : 'Optional'}
+                  {selected.required ? 'Required' : 'Optional'}
                 </button>
-              </td>
-              <td class="actions-cell" onclick={(e) => e.stopPropagation()}>
-                {#if spec.approval_status === 'Pending'}
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onclick={() => handleApprove(spec)}
-                    disabled={actionSaving === spec.id}
-                  >Approve</Button>
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    onclick={() => handleReject(spec)}
-                    disabled={actionSaving === spec.id}
-                  >Reject</Button>
+                <Button variant="danger" size="sm" onclick={() => deleteTarget = selected}>Delete</Button>
+              </div>
+            </div>
+
+            <div
+              class="editor-tabs"
+              role="tablist"
+              aria-label="Meta-spec editor"
+              onkeydown={(e) => {
+                const tabs = ['edit', 'impact', 'history', 'approval'];
+                const idx = tabs.indexOf(editorTab);
+                if (e.key === 'ArrowRight') { e.preventDefault(); onEditorTabChange(tabs[(idx + 1) % tabs.length]); }
+                if (e.key === 'ArrowLeft')  { e.preventDefault(); onEditorTabChange(tabs[(idx + tabs.length - 1) % tabs.length]); }
+              }}
+            >
+              <button class="editor-tab" role="tab" id="etab-edit" aria-controls="epanel-edit" aria-selected={editorTab === 'edit'} class:active={editorTab === 'edit'} tabindex={editorTab === 'edit' ? 0 : -1} onclick={() => onEditorTabChange('edit')}>Edit</button>
+              <button class="editor-tab" role="tab" id="etab-impact" aria-controls="epanel-impact" aria-selected={editorTab === 'impact'} class:active={editorTab === 'impact'} tabindex={editorTab === 'impact' ? 0 : -1} onclick={() => onEditorTabChange('impact')}>Impact</button>
+              <button class="editor-tab" role="tab" id="etab-history" aria-controls="epanel-history" aria-selected={editorTab === 'history'} class:active={editorTab === 'history'} tabindex={editorTab === 'history' ? 0 : -1} onclick={() => onEditorTabChange('history')}>History</button>
+              <button class="editor-tab" role="tab" id="etab-approval" aria-controls="epanel-approval" aria-selected={editorTab === 'approval'} class:active={editorTab === 'approval'} tabindex={editorTab === 'approval' ? 0 : -1} onclick={() => onEditorTabChange('approval')}>Approval</button>
+            </div>
+
+            <!-- Edit tab -->
+            {#if editorTab === 'edit'}
+              <div class="editor-panel" role="tabpanel" id="epanel-edit" aria-labelledby="etab-edit">
+                <textarea
+                  class="spec-textarea"
+                  bind:value={editContent}
+                  oninput={() => editDirty = true}
+                  placeholder="System prompt content…"
+                  aria-label="Meta-spec content"
+                  data-testid="spec-textarea"
+                ></textarea>
+
+                {#each editSuggestions as s (s.id)}
+                  <DiffSuggestion
+                    suggestion={s}
+                    onaccept={() => acceptSuggestion(s)}
+                    onedit={() => acceptSuggestion(s)}
+                    ondismiss={() => dismissSuggestion(s.id)}
+                  />
+                {/each}
+
+                <InlineChat
+                  recipient="meta-spec editor"
+                  recipientType="spec-edit"
+                  onmessage={handleChatMessage}
+                />
+
+                <div class="edit-actions">
+                  <span class="word-count" aria-live="polite">{editContent.split(/\s+/).filter(Boolean).length} words</span>
+                  <Button variant="primary" onclick={saveEdit} disabled={!editDirty || editSaving}>
+                    {editSaving ? 'Saving…' : editDirty ? 'Save (creates v' + (selected.version + 1) + ')' : 'Saved'}
+                  </Button>
+                </div>
+              </div>
+
+            <!-- Impact tab -->
+            {:else if editorTab === 'impact'}
+              <div class="editor-panel" role="tabpanel" id="epanel-impact" aria-labelledby="etab-impact">
+                <!-- Metric cards (usage stats — data available via future endpoint) -->
+                <div class="metric-grid">
+                  <div class="metric-card">
+                    <div class="metric-label">Bound workspaces</div>
+                    <div class="metric-value">{blastResult?.affected_workspaces?.length ?? '—'}</div>
+                    <div class="metric-sub">currently binding this spec</div>
+                  </div>
+                  <div class="metric-card">
+                    <div class="metric-label">Affected repos</div>
+                    <div class="metric-value">{blastResult?.affected_repos?.length ?? '—'}</div>
+                    <div class="metric-sub">transitively impacted</div>
+                  </div>
+                  <div class="metric-card metric-card-dim">
+                    <div class="metric-label">Agent runs</div>
+                    <div class="metric-value">—</div>
+                    <div class="metric-sub">usage tracking coming soon</div>
+                  </div>
+                  <div class="metric-card metric-card-dim">
+                    <div class="metric-label">Gate failures</div>
+                    <div class="metric-value">—</div>
+                    <div class="metric-sub">drift analytics coming soon</div>
+                  </div>
+                </div>
+
+                {#if blastLoading}
+                  <Skeleton />
+                {:else if blastResult?.error}
+                  <p class="impact-error" role="alert">{blastResult.error}</p>
+                {:else if blastResult}
+                  <!-- Binding panel -->
+                  <div class="binding-section">
+                    <h4 class="binding-title">Bound Workspaces</h4>
+                    {#if blastResult.affected_workspaces?.length}
+                      <div class="binding-list">
+                        {#each blastResult.affected_workspaces as ws}
+                          <div class="binding-row">
+                            <span class="mono">{ws.id}</span>
+                            <Badge value="active" variant="green" />
+                          </div>
+                        {/each}
+                      </div>
+                    {:else}
+                      <p class="impact-empty">No workspaces currently bind this meta-spec.</p>
+                    {/if}
+                  </div>
+
+                  <div class="binding-section">
+                    <h4 class="binding-title">Transitively Affected Repos</h4>
+                    {#if blastResult.affected_repos?.length}
+                      <div class="binding-list">
+                        {#each blastResult.affected_repos as repo}
+                          <div class="binding-row">
+                            <span class="mono">{repo.id}</span>
+                            <Badge value={repo.reason} variant="gray" />
+                            <span class="mono text-muted">{repo.workspace_id}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {:else}
+                      <p class="impact-empty">No repos affected.</p>
+                    {/if}
+                  </div>
+
+                  <!-- Drift section -->
+                  <div class="binding-section">
+                    <h4 class="binding-title">Version Drift</h4>
+                    <div class="drift-notice">
+                      <p class="drift-text">
+                        This spec is at <strong>v{selected.version}</strong>.
+                        Workspace-level drift tracking (repos built under older versions) is available after the spec-bindings API is extended.
+                      </p>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="impact-cta">
+                    <button class="link-btn" onclick={loadBlastRadius}>Load blast radius</button>
+                  </div>
                 {/if}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onclick={() => openBlastRadius(spec.id)}
-                >Blast Radius</Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onclick={() => deleteTarget = spec}
-                >Delete</Button>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+              </div>
+
+            <!-- History tab -->
+            {:else if editorTab === 'history'}
+              <div class="editor-panel" role="tabpanel" id="epanel-history" aria-labelledby="etab-history">
+                {#if versionsLoading}
+                  <Skeleton />
+                {:else if versions.length === 0}
+                  <EmptyState title="No version history" description="Save content changes to create new versions." />
+                {:else}
+                  <div class="version-timeline">
+                    {#each versions as ver, i (ver.version)}
+                      {@const prev = versions[i + 1]}
+                      <div class="version-entry" class:selected-ver={diffVersion?.version === ver.version}>
+                        <div class="version-spine"></div>
+                        <button
+                          class="version-node"
+                          onclick={() => diffVersion = diffVersion?.version === ver.version ? null : ver}
+                          aria-expanded={diffVersion?.version === ver.version}
+                        >
+                          <span class="ver-badge">v{ver.version}</span>
+                          <span class="ver-hash mono">{ver.content_hash?.slice(0, 10)}</span>
+                          {#if i === 0}<Badge value="current" variant="green" />{/if}
+                        </button>
+
+                        {#if diffVersion?.version === ver.version}
+                          <div class="version-diff-panel">
+                            {#if prev}
+                              {@const diffLines = computeDiff(prev.prompt, ver.prompt)}
+                              {#if diffLines.length === 0}
+                                <p class="impact-empty">No changes (identical content).</p>
+                              {:else}
+                                <pre class="diff-output">{#each diffLines as dl}<span class="dl-{dl.type}">{dl.type === 'add' ? '+' : dl.type === 'remove' ? '-' : ' '} {dl.text}
+</span>{/each}</pre>
+                              {/if}
+                            {:else}
+                              <pre class="diff-output">{ver.prompt || '(empty)'}</pre>
+                            {/if}
+                          </div>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+
+            <!-- Approval tab -->
+            {:else}
+              <div class="editor-panel" role="tabpanel" id="epanel-approval" aria-labelledby="etab-approval">
+                <!-- Approval flow visualization -->
+                <div class="approval-flow" aria-label="Approval workflow">
+                  <div class="flow-step" class:flow-done={selected.approval_status !== 'Pending' || true} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
+                    <div class="flow-step-icon flow-icon-done">✓</div>
+                    <div class="flow-step-label">Draft</div>
+                  </div>
+                  <div class="flow-connector" class:flow-done={selected.approval_status === 'Approved' || selected.approval_status === 'Rejected'}></div>
+                  <div class="flow-step" class:flow-active={selected.approval_status === 'Pending'} class:flow-done={selected.approval_status === 'Approved' || selected.approval_status === 'Rejected'} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
+                    <div class="flow-step-icon {selected.approval_status === 'Pending' ? 'flow-icon-active' : selected.approval_status !== 'Pending' ? 'flow-icon-done' : ''}">
+                      {approvalIcon(selected.approval_status === 'Pending' ? 'Pending' : 'Approved')}
+                    </div>
+                    <div class="flow-step-label">Review</div>
+                  </div>
+                  <div class="flow-connector" class:flow-done={selected.approval_status === 'Approved'}></div>
+                  <div class="flow-step" class:flow-active={selected.approval_status === 'Approved'} class:flow-rejected={selected.approval_status === 'Rejected'} aria-current={selected.approval_status === 'Approved' ? 'step' : undefined}>
+                    <div class="flow-step-icon {selected.approval_status === 'Approved' ? 'flow-icon-done' : selected.approval_status === 'Rejected' ? 'flow-icon-rejected' : ''}">
+                      {selected.approval_status === 'Approved' ? '✓' : selected.approval_status === 'Rejected' ? '✗' : '◎'}
+                    </div>
+                    <div class="flow-step-label">{selected.approval_status === 'Rejected' ? 'Rejected' : 'Approved'}</div>
+                  </div>
+                </div>
+
+                <div class="approval-status-detail">
+                  <div class="approval-current">
+                    <Badge value={selected.approval_status} variant={approvalVariant(selected.approval_status)} />
+                    <span class="approval-status-text">
+                      {#if selected.approval_status === 'Approved'}
+                        Approved by <code>{selected.approved_by || 'unknown'}</code> — active in all bound workspaces.
+                      {:else if selected.approval_status === 'Pending'}
+                        Awaiting review. Approve to make active, or reject to block.
+                      {:else}
+                        Rejected — content changes will reset to Pending for re-review.
+                      {/if}
+                    </span>
+                  </div>
+
+                  {#if selected.approval_status === 'Pending'}
+                    <div class="approval-actions">
+                      <Button variant="primary" onclick={handleApprove} disabled={approvalSaving !== null}>
+                        {approvalSaving === 'approve' ? 'Approving…' : 'Approve'}
+                      </Button>
+                      <Button variant="danger" onclick={handleReject} disabled={approvalSaving !== null}>
+                        {approvalSaving === 'reject' ? 'Rejecting…' : 'Reject'}
+                      </Button>
+                    </div>
+                  {:else if selected.approval_status === 'Approved'}
+                    <div class="approval-actions">
+                      <Button variant="danger" onclick={handleReject} disabled={approvalSaving !== null}>
+                        {approvalSaving === 'reject' ? 'Revoking…' : 'Revoke Approval'}
+                      </Button>
+                    </div>
+                  {:else}
+                    <div class="approval-actions">
+                      <Button variant="primary" onclick={handleApprove} disabled={approvalSaving !== null}>
+                        {approvalSaving === 'approve' ? 'Approving…' : 'Re-approve'}
+                      </Button>
+                    </div>
+                  {/if}
+                </div>
+
+                <div class="approval-meta">
+                  <div class="approval-meta-row"><span>Scope</span><span>{selected.scope}{selected.scope_id ? ' / ' + selected.scope_id : ''}</span></div>
+                  <div class="approval-meta-row"><span>Created by</span><code>{selected.created_by}</code></div>
+                  <div class="approval-meta-row"><span>Version</span><span>v{selected.version}</span></div>
+                  {#if selected.approved_by}
+                    <div class="approval-meta-row"><span>Approved by</span><code>{selected.approved_by}</code></div>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          {/if}
+        </main>
+      </div>
     {/if}
   </div>
-
-  <!-- Detail panel modal -->
-  {#if detailSpec}
-    <Modal open={true} title={detailSpec.name} onclose={() => detailSpec = null}>
-      <div
-        class="detail-tabs"
-        role="tablist"
-        onkeydown={(e) => {
-          const tabs = ['info', 'content', 'history'];
-          const idx = tabs.indexOf(detailTab);
-          if (e.key === 'ArrowRight') { e.preventDefault(); onDetailTabChange(tabs[(idx + 1) % tabs.length]); }
-          if (e.key === 'ArrowLeft')  { e.preventDefault(); onDetailTabChange(tabs[(idx + tabs.length - 1) % tabs.length]); }
-        }}
-      >
-        <button class="detail-tab" role="tab" id="detail-tab-info" aria-controls="detail-panel-info" aria-selected={detailTab === 'info'} class:active={detailTab === 'info'} tabindex={detailTab === 'info' ? 0 : -1} onclick={() => onDetailTabChange('info')}>Info</button>
-        <button class="detail-tab" role="tab" id="detail-tab-content" aria-controls="detail-panel-content" aria-selected={detailTab === 'content'} class:active={detailTab === 'content'} tabindex={detailTab === 'content' ? 0 : -1} onclick={() => onDetailTabChange('content')}>Content</button>
-        <button class="detail-tab" role="tab" id="detail-tab-history" aria-controls="detail-panel-history" aria-selected={detailTab === 'history'} class:active={detailTab === 'history'} tabindex={detailTab === 'history' ? 0 : -1} onclick={() => onDetailTabChange('history')}>History</button>
-      </div>
-      {#if detailTab === 'info'}
-        <div class="detail-info" role="tabpanel" id="detail-panel-info" aria-labelledby="detail-tab-info">
-          <div class="detail-row"><span class="detail-key">Name</span><span>{detailSpec.name}</span></div>
-          <div class="detail-row"><span class="detail-key">Kind</span><Badge value={kindLabel(detailSpec.kind)} variant={kindBadgeVariant(detailSpec.kind)} /></div>
-          <div class="detail-row"><span class="detail-key">Scope</span><span>{detailSpec.scope}{detailSpec.scope_id ? ` (${detailSpec.scope_id})` : ''}</span></div>
-          <div class="detail-row"><span class="detail-key">Status</span><Badge value={detailSpec.approval_status || '—'} variant={approvalVariant(detailSpec.approval_status)} /></div>
-          <div class="detail-row"><span class="detail-key">Version</span><span class="mono">v{detailSpec.version}</span></div>
-          <div class="detail-row"><span class="detail-key">Required</span><span>{detailSpec.required ? 'Yes' : 'No'}</span></div>
-          {#if detailSpec.approved_by}
-            <div class="detail-row"><span class="detail-key">Approved by</span><span class="mono">{detailSpec.approved_by}</span></div>
-          {/if}
-          <div class="detail-row"><span class="detail-key">Created by</span><span class="mono">{detailSpec.created_by}</span></div>
-          <div class="detail-actions">
-            {#if detailSpec.approval_status === 'Pending'}
-              <Button variant="primary" onclick={() => handleApprove(detailSpec)} disabled={actionSaving === detailSpec.id}>Approve</Button>
-              <Button variant="danger" onclick={() => handleReject(detailSpec)} disabled={actionSaving === detailSpec.id}>Reject</Button>
-            {/if}
-            <Button variant="secondary" onclick={() => handleRequiredToggle(detailSpec)} disabled={actionSaving === detailSpec.id}>
-              {detailSpec.required ? 'Make Optional' : 'Make Required'}
-            </Button>
-          </div>
-        </div>
-      {:else if detailTab === 'content'}
-        <div role="tabpanel" id="detail-panel-content" aria-labelledby="detail-tab-content">
-          <pre class="detail-content">{detailSpec.prompt || 'No content available.'}</pre>
-        </div>
-      {:else}
-        <div role="tabpanel" id="detail-panel-history" aria-labelledby="detail-tab-history">
-          {#if versionsLoading}
-            <Skeleton />
-          {:else if versions.length === 0}
-            <p class="empty">No version history available.</p>
-          {:else}
-            <div class="version-list">
-              {#each versions as ver (ver.version)}
-                <div class="version-item">
-                  <div class="version-header">
-                    <span class="version-num">v{ver.version}</span>
-                    <span class="version-hash mono">{ver.content_hash?.slice(0, 12) || '—'}</span>
-                  </div>
-                  <pre class="version-prompt">{ver.prompt || '(empty)'}</pre>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/if}
-    </Modal>
-  {/if}
-
-  <!-- Blast radius modal -->
-  {#if blastOpen}
-    <Modal open={true} title="Blast Radius" onclose={() => blastOpen = false}>
-      {#if blastLoading}
-        <Skeleton />
-      {:else if blastResult?.error}
-        <p class="error" role="alert">{blastResult.error}</p>
-      {:else if blastResult}
-        <div class="blast-section">
-          <h4>Affected Workspaces ({blastResult.affected_workspaces?.length ?? 0})</h4>
-          {#if blastResult.affected_workspaces?.length}
-            <ul class="blast-list">
-              {#each blastResult.affected_workspaces as ws}
-                <li class="mono">{ws.id}</li>
-              {/each}
-            </ul>
-          {:else}
-            <p class="empty">No workspaces currently bind this meta-spec.</p>
-          {/if}
-        </div>
-        <div class="blast-section">
-          <h4>Affected Repos ({blastResult.affected_repos?.length ?? 0})</h4>
-          {#if blastResult.affected_repos?.length}
-            <ul class="blast-list">
-              {#each blastResult.affected_repos as repo}
-                <li><span class="mono">{repo.id}</span><Badge value={repo.reason} variant="gray" /></li>
-              {/each}
-            </ul>
-          {:else}
-            <p class="empty">No repos affected.</p>
-          {/if}
-        </div>
-      {/if}
-    </Modal>
-  {/if}
-
-  <!-- Create modal -->
-  {#if createOpen}
-    <Modal open={true} title="New Meta-spec" onclose={() => createOpen = false}>
-      <div class="create-form">
-        <div class="form-field">
-          <label for="cf-kind">Kind</label>
-          <select id="cf-kind" bind:value={createForm.kind}>
-            {#each META_KINDS as k}
-              <option value={k}>{KIND_LABELS[k]}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="form-field">
-          <label for="cf-name">Name</label>
-          <input id="cf-name" type="text" bind:value={createForm.name} placeholder="e.g. backend-engineer" />
-        </div>
-        <div class="form-field">
-          <label for="cf-scope">Scope</label>
-          <select id="cf-scope" bind:value={createForm.scope}>
-            <option value="Global">Global</option>
-            <option value="Workspace">Workspace</option>
-          </select>
-        </div>
-        {#if createForm.scope === 'Workspace'}
-          <div class="form-field">
-            <label for="cf-scope-id">Workspace ID</label>
-            <input id="cf-scope-id" type="text" bind:value={createForm.scope_id} placeholder="workspace UUID" />
-          </div>
-        {/if}
-        <div class="form-field">
-          <label for="cf-prompt">Content / Prompt</label>
-          <textarea id="cf-prompt" bind:value={createForm.prompt} placeholder="System prompt content…" rows="6"></textarea>
-        </div>
-        <div class="form-field form-field-inline">
-          <input id="cf-required" type="checkbox" bind:checked={createForm.required} />
-          <label for="cf-required">Required (org-wide mandatory)</label>
-        </div>
-        <div class="form-actions">
-          <Button variant="secondary" onclick={() => createOpen = false}>Cancel</Button>
-          <Button variant="primary" onclick={handleCreate} disabled={createSaving}>
-            {createSaving ? 'Creating…' : 'Create'}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  {/if}
 
   <!-- Delete confirmation modal -->
   {#if deleteTarget}
     <Modal open={true} title="Delete Meta-spec" onclose={() => deleteTarget = null}>
       <p class="delete-confirm-text">
         Are you sure you want to delete <strong>{deleteTarget.name}</strong>?
-        This cannot be undone. If the spec has active bindings, deletion will fail.
+        This cannot be undone. If active bindings exist, deletion will fail with 409.
       </p>
       <div class="form-actions">
         <Button variant="secondary" onclick={() => deleteTarget = null}>Cancel</Button>
@@ -920,16 +1172,8 @@
 {/if}
 
 <style>
-  .meta-specs-view {
-    padding: var(--space-6);
-    max-width: 1400px;
-  }
-
-  .view-header { margin-bottom: var(--space-6); }
-  .view-header h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
-  .view-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
-  .subtitle { margin: 0; color: var(--color-text-muted); font-size: var(--text-sm); }
-
+  /* ── Base ── */
+  .meta-specs-view { padding: var(--space-6); max-width: 100%; }
   .repo-redirect {
     padding: var(--space-4);
     background: var(--color-surface-elevated);
@@ -938,72 +1182,91 @@
     color: var(--color-text-muted);
     font-size: var(--text-sm);
     margin-bottom: var(--space-4);
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
+    display: flex; align-items: center; gap: var(--space-2);
   }
 
+  /* ── Tenant top bar ── */
+  .tenant-view { padding: var(--space-4) var(--space-6); height: calc(100vh - 80px); display: flex; flex-direction: column; overflow: hidden; }
+  .top-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-3); flex-shrink: 0; }
+  .top-bar h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
+  .top-bar-left { flex: 1; }
+  .subtitle { margin: 0; color: var(--color-text-muted); font-size: var(--text-sm); }
+
   /* ── Filter pills ── */
-  .filter-pills { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-6); }
+  .filter-pills { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); flex-shrink: 0; }
   .pill {
     padding: var(--space-1) var(--space-3);
     border-radius: var(--radius-full);
     border: 1px solid var(--color-border);
-    background: transparent;
-    color: var(--color-text);
-    cursor: pointer;
-    font-size: var(--text-sm);
+    background: transparent; color: var(--color-text);
+    cursor: pointer; font-size: var(--text-sm);
     transition: background var(--transition-fast);
   }
   .pill:hover { background: var(--color-surface-elevated); }
-  .pill.active {
-    background: color-mix(in srgb, var(--color-link) 15%, transparent);
-    border-color: var(--color-link);
-    color: var(--color-link);
-  }
+  .pill.active { background: color-mix(in srgb, var(--color-link) 15%, transparent); border-color: var(--color-link); color: var(--color-link); }
 
-  /* ── Catalog table ── */
-  .catalog-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
-  .catalog-table th {
-    text-align: left;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 2px solid var(--color-border);
-    color: var(--color-text-muted);
-    font-weight: 600;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .catalog-row { cursor: pointer; transition: background var(--transition-fast); }
-  .catalog-row:hover { background: var(--color-surface-elevated); }
-  .catalog-row:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-  }
-  .catalog-row td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); vertical-align: middle; }
-  .cell-name { font-weight: 500; }
-  .cell-ver { font-size: var(--text-xs); }
-  .actions-cell { display: flex; gap: var(--space-1); flex-wrap: wrap; align-items: center; }
+  /* ── Creative surface layout ── */
+  .creative-surface { display: grid; grid-template-columns: 240px 1fr; gap: 0; flex: 1; min-height: 0; border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
 
-  .scope-badge {
-    font-size: var(--text-xs);
-    padding: 1px var(--space-2);
+  /* ── Sidebar ── */
+  .spec-sidebar { border-right: 1px solid var(--color-border); overflow-y: auto; background: var(--color-surface); }
+  .sidebar-item {
+    display: block; width: 100%; text-align: left;
+    padding: var(--space-3) var(--space-3);
+    border: none; border-bottom: 1px solid var(--color-border);
+    background: transparent; cursor: pointer;
+    transition: background var(--transition-fast);
+    color: var(--color-text);
+    font-family: var(--font-body);
+  }
+  .sidebar-item:hover { background: var(--color-surface-elevated); }
+  .sidebar-item.active { background: color-mix(in srgb, var(--color-link) 10%, transparent); border-left: 3px solid var(--color-link); }
+  .sidebar-item-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-1); gap: var(--space-2); }
+  .sidebar-item-name { font-size: var(--text-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sidebar-item-meta { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
+  .sidebar-status-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .status-approved { background: var(--color-success); }
+  .status-pending { background: var(--color-warning); }
+  .status-rejected { background: var(--color-danger); }
+  .sidebar-empty { padding: var(--space-4); color: var(--color-text-muted); font-size: var(--text-sm); text-align: center; }
+
+  .required-chip {
+    font-size: 10px; padding: 1px 4px;
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
+    color: var(--color-warning); border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+  .ver-chip {
+    font-size: 10px; padding: 1px 4px;
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    color: var(--color-text-muted);
+    color: var(--color-text-muted); border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
   }
+
+  /* ── Editor area ── */
+  .spec-editor { display: flex; flex-direction: column; overflow: hidden; background: var(--color-surface); }
+  .editor-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: var(--space-8); }
+
+  .editor-header-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    gap: var(--space-3); flex-shrink: 0; flex-wrap: wrap;
+  }
+  .editor-title-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .editor-title { margin: 0; font-size: var(--text-base); font-weight: 600; }
+  .editor-header-actions { display: flex; align-items: center; gap: var(--space-2); }
 
   .required-toggle {
-    font-size: var(--text-xs);
-    padding: 1px var(--space-2);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-    color: var(--color-text-muted);
-    cursor: pointer;
-    font-family: var(--font-body);
-    transition: background var(--transition-fast);
+    font-size: var(--text-xs); padding: 2px var(--space-2);
+    border-radius: var(--radius-sm); border: 1px solid var(--color-border);
+    background: var(--color-surface-elevated); color: var(--color-text-muted);
+    cursor: pointer; font-family: var(--font-body); transition: background var(--transition-fast);
   }
   .required-toggle.required-on {
     background: color-mix(in srgb, var(--color-warning) 15%, transparent);
@@ -1012,106 +1275,232 @@
   }
   .required-toggle:disabled { opacity: 0.6; cursor: not-allowed; }
 
-  /* ── Split layout (workspace scope) ── */
+  /* ── Editor tabs ── */
+  .editor-tabs { display: flex; border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); flex-shrink: 0; }
+  .editor-tab {
+    padding: var(--space-2) var(--space-4);
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm);
+    font-family: var(--font-body); transition: color var(--transition-fast);
+  }
+  .editor-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
+
+  .editor-panel { flex: 1; overflow-y: auto; padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-4); }
+
+  /* ── Edit tab ── */
+  .spec-textarea {
+    flex: 1; min-height: 300px;
+    padding: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-sm);
+    line-height: 1.6; resize: vertical; box-sizing: border-box;
+  }
+  .spec-textarea:focus:not(:focus-visible) { outline: none; }
+  .spec-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
+  .edit-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+  .word-count { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); }
+
+  /* ── Impact tab ── */
+  .metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3); }
+  .metric-card {
+    padding: var(--space-3); border: 1px solid var(--color-border);
+    border-radius: var(--radius); background: var(--color-surface-elevated);
+    display: flex; flex-direction: column; gap: var(--space-1);
+  }
+  .metric-card-dim { opacity: 0.6; }
+  .metric-label { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .metric-value { font-size: var(--text-2xl); font-weight: 700; color: var(--color-text); font-family: var(--font-mono); }
+  .metric-sub { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+  .binding-section { display: flex; flex-direction: column; gap: var(--space-2); }
+  .binding-title { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+  .binding-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .binding-row {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+  }
+  .text-muted { color: var(--color-text-muted); font-size: var(--text-xs); }
+  .impact-empty { font-size: var(--text-sm); color: var(--color-text-muted); margin: 0; }
+  .impact-error { color: var(--color-danger); font-size: var(--text-sm); }
+  .impact-cta { padding: var(--space-4); text-align: center; }
+
+  .drift-notice {
+    padding: var(--space-3);
+    background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, transparent);
+    border-radius: var(--radius);
+  }
+  .drift-text { margin: 0; font-size: var(--text-sm); color: var(--color-text); }
+
+  /* ── History tab ── */
+  .version-timeline { display: flex; flex-direction: column; gap: 0; }
+  .version-entry { display: flex; flex-direction: column; position: relative; padding-left: var(--space-6); }
+  .version-spine {
+    position: absolute; left: 11px; top: 28px; bottom: 0;
+    width: 2px; background: var(--color-border);
+  }
+  .version-entry:last-child .version-spine { display: none; }
+  .version-node {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) 0;
+    background: none; border: none; cursor: pointer; text-align: left;
+    font-family: var(--font-body); color: var(--color-text);
+    width: 100%;
+  }
+  .version-node::before {
+    content: '';
+    position: absolute; left: 6px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--color-link); border: 2px solid var(--color-surface);
+    flex-shrink: 0;
+  }
+  .ver-badge {
+    font-size: var(--text-sm); font-weight: 600;
+    font-family: var(--font-mono); color: var(--color-text);
+  }
+  .ver-hash { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .version-diff-panel {
+    margin: var(--space-2) 0 var(--space-3);
+    border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden;
+  }
+  .diff-output {
+    margin: 0; padding: var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs);
+    line-height: 1.5; white-space: pre-wrap; word-break: break-word; background: var(--color-surface-elevated);
+  }
+  :global(.dl-add) { color: var(--color-success); display: block; }
+  :global(.dl-remove) { color: var(--color-danger); display: block; }
+  :global(.dl-ctx) { color: var(--color-text-muted); display: block; }
+
+  /* ── Approval tab ── */
+  .approval-flow { display: flex; align-items: center; gap: 0; padding: var(--space-6) var(--space-4); }
+  .flow-step { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); flex-shrink: 0; }
+  .flow-step-icon {
+    width: 40px; height: 40px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: var(--text-base); font-weight: 700;
+    border: 2px solid var(--color-border);
+    background: var(--color-surface-elevated); color: var(--color-text-muted);
+  }
+  .flow-icon-done { background: color-mix(in srgb, var(--color-success) 15%, transparent); border-color: var(--color-success); color: var(--color-success); }
+  .flow-icon-active { background: color-mix(in srgb, var(--color-warning) 15%, transparent); border-color: var(--color-warning); color: var(--color-warning); }
+  .flow-icon-rejected { background: color-mix(in srgb, var(--color-danger) 15%, transparent); border-color: var(--color-danger); color: var(--color-danger); }
+  .flow-step-label { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .flow-connector { flex: 1; height: 2px; background: var(--color-border); }
+  .flow-connector.flow-done { background: var(--color-success); }
+
+  .approval-status-detail { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); background: var(--color-surface-elevated); border: 1px solid var(--color-border); border-radius: var(--radius); }
+  .approval-current { display: flex; align-items: flex-start; gap: var(--space-3); }
+  .approval-status-text { font-size: var(--text-sm); color: var(--color-text); }
+  .approval-actions { display: flex; gap: var(--space-2); }
+  .approval-meta { display: flex; flex-direction: column; gap: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+  .approval-meta-row { display: flex; gap: var(--space-4); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); font-size: var(--text-sm); }
+  .approval-meta-row:last-child { border-bottom: none; }
+  .approval-meta-row > span:first-child { color: var(--color-text-muted); font-weight: 600; min-width: 100px; }
+  .approval-meta-row code { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  /* ── Create panel ── */
+  .create-panel { padding: var(--space-6); overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: var(--space-5); }
+  .create-panel-header h3 { margin: 0 0 var(--space-1); font-size: var(--text-xl); }
+  .create-subtitle { margin: 0; color: var(--color-text-muted); font-size: var(--text-sm); }
+
+  .create-kind-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--space-3); }
+  .kind-card {
+    display: flex; flex-direction: column; gap: var(--space-1);
+    padding: var(--space-3); border: 2px solid var(--color-border);
+    border-radius: var(--radius); background: var(--color-surface-elevated);
+    cursor: pointer; text-align: left; font-family: var(--font-body);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+  .kind-card:hover { border-color: var(--color-link); }
+  .kind-card.selected { border-color: var(--color-link); background: color-mix(in srgb, var(--color-link) 8%, transparent); }
+  .kind-card-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+  .kind-card-desc { font-size: var(--text-xs); color: var(--color-text-muted); line-height: 1.4; }
+
+  .form-row { display: flex; gap: var(--space-3); }
+  .form-field { display: flex; flex-direction: column; gap: var(--space-1); }
+  .form-field-grow { flex: 1; }
+  .form-field label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+  .form-field input[type="text"],
+  .form-field select,
+  .form-field textarea {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius); color: var(--color-text);
+    font-size: var(--text-sm); font-family: var(--font-body);
+  }
+  .form-field textarea { resize: vertical; font-family: var(--font-mono); line-height: 1.5; }
+  .form-field input[type="text"]:focus-visible,
+  .form-field select:focus-visible,
+  .form-field textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .form-field-inline { flex-direction: row; align-items: center; gap: var(--space-2); }
+  .form-field-inline label { font-weight: 400; }
+  .form-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+  .create-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-2); }
+
+  /* ── Workspace scope ── */
   .workspace-view { max-width: 1400px; }
+  .view-header { margin-bottom: var(--space-6); }
+  .view-header h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl); }
   .split-layout { display: grid; grid-template-columns: 60fr 40fr; gap: var(--space-6); align-items: start; }
   .split-left { display: flex; flex-direction: column; gap: var(--space-4); }
   .split-right { display: flex; flex-direction: column; gap: var(--space-4); position: sticky; top: var(--space-4); }
 
-  /* ── Editor ── */
   .editor-header { display: flex; align-items: center; gap: var(--space-3); }
   .persona-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-muted); white-space: nowrap; }
   .persona-select {
-    flex: 1;
-    padding: var(--space-1) var(--space-3);
+    flex: 1; padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-size: var(--text-sm);
+    border-radius: var(--radius); color: var(--color-text); font-size: var(--text-sm);
   }
-
   .persona-textarea {
-    width: 100%;
-    min-height: 280px;
-    padding: var(--space-3);
+    width: 100%; min-height: 280px; padding: var(--space-3);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    line-height: 1.6;
-    resize: vertical;
-    box-sizing: border-box;
+    border-radius: var(--radius); color: var(--color-text);
+    font-family: var(--font-mono); font-size: var(--text-sm);
+    line-height: 1.6; resize: vertical; box-sizing: border-box;
   }
   .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong); }
   .persona-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
-
   .persona-diff {
-    min-height: 280px;
-    padding: var(--space-3);
+    min-height: 280px; padding: var(--space-3);
     background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    overflow-x: auto;
+    border: 1px solid var(--color-border); border-radius: var(--radius);
+    font-family: var(--font-mono); font-size: var(--text-sm); overflow-x: auto;
   }
   .diff-line { padding: 0 var(--space-1); line-height: 1.5; }
   .diff-line.add { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
   .diff-line.remove { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
   .diff-line.ctx { color: var(--color-text-muted); }
-
   .editor-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
 
-  /* ── Spec selector ── */
   .spec-selector { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
-  .spec-selector-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-  }
+  .spec-selector-header { display: flex; justify-content: space-between; align-items: center; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); }
   .spec-selector-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
   .spec-selector-shortcuts { display: flex; gap: var(--space-2); }
   .link-btn { background: none; border: none; color: var(--color-link); font-size: var(--text-xs); cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body); }
   .spec-checklist { max-height: 360px; overflow-y: auto; padding: var(--space-2) 0; }
-  .spec-check-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-3);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--color-text);
-    transition: background var(--transition-fast);
-  }
+  .spec-check-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3); cursor: pointer; font-size: var(--text-sm); color: var(--color-text); transition: background var(--transition-fast); }
   .spec-check-item:hover { background: var(--color-surface-elevated); }
   .spec-check-path { font-family: var(--font-mono); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty-specs { padding: 1rem 0.75rem; color: var(--color-text-muted); font-size: var(--text-sm); margin: 0; }
 
-  /* ── Preview progress ── */
-  .preview-progress {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  .progress-header { font-weight: 600; font-size: var(--text-base); color: var(--color-text); }
+  .preview-progress { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+  .progress-header { font-weight: 600; font-size: var(--text-base); }
   .progress-list { display: flex; flex-direction: column; gap: var(--space-1); }
   .progress-item { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
   .progress-icon { font-size: 0.9rem; width: 1.2rem; text-align: center; }
-  .progress-path { font-family: var(--font-mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text); }
+  .progress-path { font-family: var(--font-mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .progress-status { color: var(--color-text-muted); font-size: var(--text-xs); white-space: nowrap; }
   .progress-summary { font-size: var(--text-sm); color: var(--color-text-muted); }
 
-  /* ── Impact panel ── */
   .impact-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
   .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border); }
   .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
@@ -1125,119 +1514,37 @@
   .code-diff { display: flex; flex-direction: column; gap: var(--space-3); }
   .code-diff-file { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
   .code-diff-path { padding: var(--space-1) var(--space-2); background: var(--color-surface-elevated); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); }
-  .code-diff-body { margin: 0; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); line-height: 1.5; }
+  .code-diff-body { margin: 0; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
   .impact-unavailable { display: flex; flex-direction: column; gap: var(--space-3); }
-  .sim-banner { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); font-size: var(--text-sm); color: var(--color-text-secondary); margin: var(--space-3) var(--space-3) 0; }
   .impact-unavailable-label { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
   .impact-empty { font-size: var(--text-sm); color: var(--color-text-muted); }
-
-  /* ── Detail panel ── */
-  .detail-tabs { display: flex; margin-bottom: var(--space-4); border-bottom: 1px solid var(--color-border); }
-  .detail-tab { padding: var(--space-1) var(--space-4); background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); font-family: var(--font-body); }
-  .detail-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
-  .detail-info { display: flex; flex-direction: column; gap: var(--space-2); }
-  .detail-row { display: flex; align-items: center; gap: var(--space-3); }
-  .detail-key { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); min-width: 80px; }
-  .detail-content { font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.6; color: var(--color-text); white-space: pre-wrap; word-break: break-word; margin: 0; }
-  .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
-
-  /* ── Version history ── */
-  .version-list { display: flex; flex-direction: column; gap: var(--space-3); }
-  .version-item { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
-  .version-header { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); background: var(--color-surface-elevated); border-bottom: 1px solid var(--color-border); }
-  .version-num { font-weight: 600; font-size: var(--text-sm); }
-  .version-hash { font-size: var(--text-xs); color: var(--color-text-muted); }
-  .version-prompt { margin: 0; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto; line-height: 1.5; }
-
-  /* ── Blast radius ── */
-  .blast-section { margin-bottom: 1.25rem; }
-  .blast-section h4 { margin: 0 0 var(--space-2); font-size: var(--text-base); }
-  .blast-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
-  .blast-list li { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); padding: var(--space-1) var(--space-2); background: var(--color-surface-elevated); border-radius: var(--radius-sm); }
-
-  /* ── Create form ── */
-  .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
-  .form-field { display: flex; flex-direction: column; gap: var(--space-1); }
-  .form-field label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
-  .form-field input[type="text"],
-  .form-field select,
-  .form-field textarea {
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-size: var(--text-sm);
-    font-family: var(--font-body);
-  }
-  .form-field textarea { resize: vertical; font-family: var(--font-mono); line-height: 1.5; }
-  .form-field input[type="text"]:focus-visible,
-  .form-field select:focus-visible,
-  .form-field textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-  .form-field-inline { flex-direction: row; align-items: center; gap: var(--space-2); }
-  .form-field-inline label { font-weight: 400; }
-  .form-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+  .sim-banner { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); font-size: var(--text-sm); margin: var(--space-3) var(--space-3) 0; }
 
   /* ── Delete confirm ── */
   .delete-confirm-text { font-size: var(--text-sm); color: var(--color-text); margin: 0 0 var(--space-4); }
-
-  .mono { font-family: var(--font-mono); }
-  .empty { color: var(--color-text-muted); font-size: var(--text-sm); margin: 0; }
-  .error { color: var(--color-danger); font-size: var(--text-sm); }
 
   /* ── Retry button ── */
   .retry-btn {
     background: color-mix(in srgb, var(--color-focus) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-focus) 30%, transparent);
-    border-radius: var(--radius);
-    color: var(--color-focus);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    font-weight: 500;
-    padding: var(--space-2) var(--space-4);
-    margin-top: var(--space-3);
+    border-radius: var(--radius); color: var(--color-focus); cursor: pointer;
+    font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
+    padding: var(--space-2) var(--space-4); margin-top: var(--space-3);
   }
-  .retry-btn:hover {
-    background: color-mix(in srgb, var(--color-focus) 25%, transparent);
-    border-color: var(--color-focus);
-  }
-  .retry-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
+  .retry-btn:hover { background: color-mix(in srgb, var(--color-focus) 25%, transparent); border-color: var(--color-focus); }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* ── Focus-visible ── */
+  .pill:focus-visible, .impact-tab:focus-visible, .editor-tab:focus-visible,
+  .link-btn:focus-visible, .persona-select:focus-visible, .required-toggle:focus-visible,
+  .sidebar-item:focus-visible, .kind-card:focus-visible, .version-node:focus-visible {
+    outline: 2px solid var(--color-focus); outline-offset: 2px;
   }
 
-  /* Focus-visible for interactive elements */
-  .pill:focus-visible,
-  .impact-tab:focus-visible,
-  .detail-tab:focus-visible,
-  .link-btn:focus-visible,
-  .persona-select:focus-visible,
-  .required-toggle:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
+  .mono { font-family: var(--font-mono); }
 
   @media (prefers-reduced-motion: reduce) {
-    .catalog-row,
-    .spec-check-item,
-    .pill,
-    .impact-tab,
-    .detail-tab,
-    .link-btn,
-    .required-toggle,
-    .persona-textarea { transition: none; }
+    .spec-check-item, .pill, .impact-tab, .editor-tab, .link-btn, .required-toggle,
+    .sidebar-item, .kind-card, .persona-textarea, .spec-textarea { transition: none; }
   }
 </style>
