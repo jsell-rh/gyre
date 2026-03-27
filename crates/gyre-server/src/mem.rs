@@ -2099,6 +2099,15 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
         }
         Ok(())
     }
+
+    async fn reject(&self, id: &Id, rejected_by: &str, reason: &str, now: u64) -> Result<()> {
+        if let Some(a) = self.store.lock().await.get_mut(id.as_str()) {
+            a.rejected_at = Some(now);
+            a.rejected_by = Some(Id::new(rejected_by));
+            a.rejected_reason = Some(reason.to_string());
+        }
+        Ok(())
+    }
 }
 
 /// In-memory BudgetRepository (stores BudgetConfig limits by entity key).

@@ -72,6 +72,8 @@ struct TaskRow {
     workspace_id: String,
     spec_path: Option<String>,
     repo_id: String,
+    cancelled_at: Option<i64>,
+    cancelled_reason: Option<String>,
 }
 
 impl TaskRow {
@@ -93,6 +95,8 @@ impl TaskRow {
             workspace_id: Id::new(self.workspace_id),
             repo_id: Id::new(self.repo_id),
             spec_path: self.spec_path,
+            cancelled_at: self.cancelled_at.map(|v| v as u64),
+            cancelled_reason: self.cancelled_reason,
         })
     }
 }
@@ -116,6 +120,8 @@ struct NewTaskRow<'a> {
     workspace_id: &'a str,
     spec_path: Option<&'a str>,
     repo_id: &'a str,
+    cancelled_at: Option<i64>,
+    cancelled_reason: Option<&'a str>,
 }
 
 #[async_trait]
@@ -144,6 +150,8 @@ impl TaskRepository for PgStorage {
                 workspace_id: t.workspace_id.as_str(),
                 spec_path: t.spec_path.as_deref(),
                 repo_id: t.repo_id.as_str(),
+                cancelled_at: t.cancelled_at.map(|v| v as i64),
+                cancelled_reason: t.cancelled_reason.as_deref(),
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -163,6 +171,8 @@ impl TaskRepository for PgStorage {
                     tasks::workspace_id.eq(row.workspace_id),
                     tasks::spec_path.eq(row.spec_path),
                     tasks::repo_id.eq(row.repo_id),
+                    tasks::cancelled_at.eq(row.cancelled_at),
+                    tasks::cancelled_reason.eq(row.cancelled_reason),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -280,6 +290,8 @@ impl TaskRepository for PgStorage {
                 tasks::workspace_id.eq(t.workspace_id.as_str()),
                 tasks::spec_path.eq(t.spec_path.as_deref()),
                 tasks::repo_id.eq(t.repo_id.as_str()),
+                tasks::cancelled_at.eq(t.cancelled_at.map(|v| v as i64)),
+                tasks::cancelled_reason.eq(t.cancelled_reason.as_deref()),
             ))
             .execute(&mut *conn)
             .context("update task")?;

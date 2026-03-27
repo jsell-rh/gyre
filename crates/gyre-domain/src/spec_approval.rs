@@ -23,6 +23,10 @@ pub struct SpecApproval {
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
     pub revocation_reason: Option<String>,
+    /// When this approval was rejected by a human reviewer.
+    pub rejected_at: Option<u64>,
+    pub rejected_reason: Option<String>,
+    pub rejected_by: Option<Id>,
 }
 
 impl SpecApproval {
@@ -43,11 +47,21 @@ impl SpecApproval {
             revoked_at: None,
             revoked_by: None,
             revocation_reason: None,
+            rejected_at: None,
+            rejected_reason: None,
+            rejected_by: None,
         }
     }
 
-    /// Returns true if this approval is still active (not revoked).
+    /// Returns true if this approval is still active (not revoked or rejected).
     pub fn is_active(&self) -> bool {
-        self.revoked_at.is_none()
+        self.revoked_at.is_none() && self.rejected_at.is_none()
+    }
+
+    /// Reject this approval with a reason and actor.
+    pub fn reject(&mut self, reason: impl Into<String>, by: Id, now: u64) {
+        self.rejected_at = Some(now);
+        self.rejected_reason = Some(reason.into());
+        self.rejected_by = Some(by);
     }
 }

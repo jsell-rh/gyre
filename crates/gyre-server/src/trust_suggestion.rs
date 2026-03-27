@@ -290,6 +290,8 @@ mod tests {
             workspace_id: Id::new(ws_id),
             created_at,
             updated_at: created_at,
+            reverted_at: None,
+            revert_mr_id: None,
         }
     }
 
