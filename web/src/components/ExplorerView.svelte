@@ -1,5 +1,5 @@
 <script>
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import MoldableView from '../lib/MoldableView.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -165,6 +165,8 @@
       searchInputEl?.focus();
     }
   }
+
+  onDestroy(() => clearTimeout(debounceTimer));
 
   let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
   let conceptFilterIds = $derived.by(() =>
