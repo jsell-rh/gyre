@@ -280,13 +280,6 @@
     flex-shrink: 0;
   }
 
-  .cards-header .page-title {
-    margin: 0 0 var(--space-1);
-    font-size: var(--text-xl);
-    font-weight: 600;
-    color: var(--color-text);
-  }
-
   .subtitle {
     margin: 0;
     font-size: var(--text-sm);

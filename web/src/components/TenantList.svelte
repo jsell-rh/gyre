@@ -190,22 +190,6 @@
   .input:focus:not(:focus-visible) { outline: none; }
   .input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
 
-  .btn-primary {
-    padding: var(--space-2) var(--space-4);
-    background: var(--color-primary);
-    color: var(--color-text-inverse);
-    border: none;
-    border-radius: var(--radius);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    font-weight: 500;
-    transition: background var(--transition-fast);
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
     background: transparent;
@@ -236,7 +220,7 @@
   .btn-danger-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) {
-    .btn-primary, .btn-secondary, .btn-danger-sm, .input { transition: none; }
+    .btn-secondary, .btn-danger-sm, .input { transition: none; }
   }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
