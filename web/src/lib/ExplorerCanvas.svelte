@@ -272,13 +272,11 @@
     if (!ns.length) { nodePositionsMap = {}; return; }
 
     if (eng === 'column') {
-      layoutGeneration++;
       nodePositionsMap = columnLayout(ns);
       return;
     }
 
     layoutPending = true;
-    const gen = ++layoutGeneration;
     const w = svgEl?.clientWidth  ?? 900;
     const h = svgEl?.clientHeight ?? 600;
 
