@@ -776,7 +776,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-1);
+    padding: var(--space-1) var(--space-2);
   }
   .dag-free {
     font-size: var(--text-xs);

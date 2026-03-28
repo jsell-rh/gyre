@@ -232,14 +232,14 @@
   .repo-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: var(--space-6);
+    gap: var(--space-4);
   }
 
   .repo-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding: var(--space-5) var(--space-6);
+    border-radius: var(--radius-lg);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
@@ -291,7 +291,7 @@
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-1);
+    padding: var(--space-1) var(--space-2);
     font-weight: 500;
   }
 
@@ -308,7 +308,7 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-1);
+    padding: var(--space-1) var(--space-2);
   }
 
   .repo-url {
