@@ -282,87 +282,8 @@ vi.mock('../components/UserProfile.svelte', () => ({ default: function UserProfi
 
 import { api } from '../lib/api.js';
 import App from '../App.svelte';
-import Sidebar from '../components/Sidebar.svelte';
 
-// ── Sidebar still renders in isolation ────────────────────────────────
-// (Sidebar.svelte is preserved; just no longer used in App)
-
-describe('Sidebar (component isolation)', () => {
-  it('renders without throwing', () => {
-    expect(() => render(Sidebar)).not.toThrow();
-  });
-
-  it('renders all 6 legacy nav items', () => {
-    const { getByText } = render(Sidebar);
-    expect(getByText('Inbox')).toBeTruthy();
-    expect(getByText('Briefing')).toBeTruthy();
-    expect(getByText('Explorer')).toBeTruthy();
-    expect(getByText('Specs')).toBeTruthy();
-    expect(getByText('Meta-specs')).toBeTruthy();
-    expect(getByText('Admin')).toBeTruthy();
-  });
-
-  it('highlights active nav item', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox' } });
-    const activeBtn = container.querySelector('.nav-item.active');
-    expect(activeBtn).toBeTruthy();
-    expect(activeBtn.textContent).toContain('Inbox');
-  });
-
-  it('shows inbox badge when inboxBadge > 0', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox', inboxBadge: 5 } });
-    const badge = container.querySelector('.nav-badge');
-    expect(badge).toBeTruthy();
-    expect(badge.textContent).toBe('5');
-  });
-
-  it('shows 99+ when inboxBadge > 99', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox', inboxBadge: 150 } });
-    const badge = container.querySelector('.nav-badge');
-    expect(badge?.textContent).toBe('99+');
-  });
-
-  it('does not show badge when inboxBadge is 0', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox', inboxBadge: 0 } });
-    expect(container.querySelector('.nav-badge')).toBeNull();
-  });
-
-  it('collapses when collapse button clicked', async () => {
-    const { container, getByLabelText } = render(Sidebar);
-    const collapseBtn = getByLabelText('Collapse sidebar');
-    await fireEvent.click(collapseBtn);
-    expect(container.querySelector('.sidebar.collapsed')).toBeTruthy();
-  });
-
-  it('expands when expand button clicked after collapse', async () => {
-    const { container, getByLabelText } = render(Sidebar);
-    const collapseBtn = getByLabelText('Collapse sidebar');
-    await fireEvent.click(collapseBtn);
-    const expandBtn = getByLabelText('Expand sidebar');
-    await fireEvent.click(expandBtn);
-    expect(container.querySelector('.sidebar.collapsed')).toBeNull();
-  });
-
-  it('calls onnavigate when nav item clicked', async () => {
-    const onnavigate = vi.fn();
-    const { getByText } = render(Sidebar, { props: { currentNav: 'inbox', onnavigate } });
-    await fireEvent.click(getByText('Briefing'));
-    expect(onnavigate).toHaveBeenCalledWith('briefing');
-  });
-
-  it('shows version indicator at bottom', () => {
-    const { getByText } = render(Sidebar);
-    expect(getByText('v0.1.0')).toBeTruthy();
-  });
-
-  it('does not show workspace switcher', () => {
-    const { container } = render(Sidebar);
-    expect(container.querySelector('select')).toBeNull();
-    expect(container.querySelector('.ws-selector')).toBeNull();
-  });
-});
-
-// ── App shell — no sidebar, topbar-first ─────────────────────────────
+// ── App shell — topbar-first ─────────────────────────────────────────
 
 describe('App shell — no sidebar', () => {
   beforeEach(() => {
