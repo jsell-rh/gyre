@@ -64,14 +64,12 @@
   let reposLoading = $state(true);
   let reposError = $state(null);
   let repos = $state([]);
-  let showNewRepoModal = $state(false);
 
   // ── Specs state ────────────────────────────────────────────────────────
   let specsLoading = $state(true);
   let specsError = $state(null);
   let specs = $state([]);
   let specsStatusFilter = $state('');
-  let specsOwnerMe = $state(false);
 
   // ── Agent Rules state ──────────────────────────────────────────────────
   let rulesLoading = $state(true);
@@ -432,8 +430,8 @@
             </ul>
           {/if}
           <div class="repo-actions">
-            <button class="section-btn" onclick={() => { showNewRepoModal = true; }} data-testid="btn-new-repo">+ New Repo</button>
-            <button class="section-btn" onclick={() => { showNewRepoModal = true; }} data-testid="btn-import-repo">Import</button>
+            <button class="section-btn" data-testid="btn-new-repo">+ New Repo</button>
+            <button class="section-btn" data-testid="btn-import-repo">Import</button>
           </div>
         </div>
       </section>
