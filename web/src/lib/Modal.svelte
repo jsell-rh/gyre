@@ -55,13 +55,19 @@
   $effect(() => {
     if (open) {
       previousFocus = document.activeElement;
-      document.body.style.overflow = 'hidden';
-      // Focus the modal close button (first focusable element) after render
+      // Focus the first form field if available, otherwise first focusable element
       tick().then(() => {
-        const focusable = modalEl?.querySelector(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        const formField = modalEl?.querySelector(
+          '.modal-body input, .modal-body select, .modal-body textarea'
         );
-        focusable?.focus();
+        if (formField) {
+          formField.focus();
+        } else {
+          const focusable = modalEl?.querySelector(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          );
+          focusable?.focus();
+        }
       });
     } else {
       document.body.style.overflow = '';

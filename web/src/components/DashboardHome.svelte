@@ -100,6 +100,7 @@
     if (!ts) return '';
     const diff = Date.now() - new Date(ts).getTime();
     const s = Math.floor(diff / 1000);
+    if (s < 5) return 'just now';
     if (s < 60) return `${s}s ago`;
     const m = Math.floor(s / 60);
     if (m < 60) return `${m}m ago`;
@@ -117,7 +118,7 @@
   }
 </script>
 
-<Modal bind:open={showNewProject} title={$t('projects.new_project.title')}>
+<Modal bind:open={showNewProject} title={$t('projects.new_project.title')} onsubmit={quickCreateProject}>
   <div class="qa-form">
     <label class="qa-label">{$t('projects.new_project.name_label')}
       <input class="qa-input" bind:value={qaName} placeholder={$t('projects.new_project.name_placeholder')} />
@@ -134,7 +135,7 @@
   {/snippet}
 </Modal>
 
-<Modal bind:open={showNewTask} title={$t('tasks.new_task.title')}>
+<Modal bind:open={showNewTask} title={$t('tasks.new_task.title')} onsubmit={quickCreateTask}>
   <div class="qa-form">
     <label class="qa-label">{$t('tasks.new_task.title_label')}
       <input class="qa-input" bind:value={qaTaskTitle} placeholder={$t('tasks.new_task.title_placeholder')} />

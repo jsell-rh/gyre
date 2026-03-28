@@ -3,7 +3,8 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Modal from '../lib/Modal.svelte';
-  import { toast as showToast } from '../lib/toast.svelte.js';
+  import Button from '../lib/Button.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   let { onSelect } = $props();
 
@@ -20,7 +21,7 @@
     try {
       workspaces = (await api.workspaces()) ?? [];
     } catch (e) {
-      showToast('Failed to load workspaces: ' + e.message, { type: 'error' });
+      toastError('Failed to load workspaces: ' + e.message);
     } finally {
       loading = false;
     }
@@ -32,12 +33,12 @@
     try {
       const slug = form.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
       await api.createWorkspace({ ...form, tenant_id: 'default', slug });
-      showToast('Workspace created', { type: 'success' });
+      toastSuccess('Workspace created');
       createOpen = false;
       form = { name: '', description: '' };
       await load();
     } catch (e) {
-      showToast('Failed to create workspace: ' + e.message, { type: 'error' });
+      toastError('Failed to create workspace: ' + e.message);
     } finally {
       saving = false;
     }
@@ -51,7 +52,7 @@
       <h2>Workspaces</h2>
       <p class="subtitle">Budget-bounded environments grouping repos and agents</p>
     </div>
-    <button class="btn-primary" onclick={() => (createOpen = true)} aria-haspopup="dialog">+ New Workspace</button>
+    <Button variant="primary" onclick={() => (createOpen = true)}>+ New Workspace</Button>
   </div>
 
   {#if loading}
@@ -88,16 +89,16 @@
 <Modal bind:open={createOpen} title="New Workspace" size="sm" onsubmit={create}>
   <div class="create-form">
     <label class="field-label">Name *
-      <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Team" onkeydown={(e) => e.key === 'Enter' && !saving && create()} />
+      <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Team" />
     </label>
     <label class="field-label">Description
       <input class="field-input" bind:value={form.description} placeholder="What is this workspace for?" />
     </label>
     <div class="form-actions">
-      <button class="btn-secondary" onclick={() => (createOpen = false)}>Cancel</button>
-      <button class="btn-primary" onclick={create} disabled={saving || !form.name.trim()}>
-        {saving ? 'Creating…' : 'Create'}
-      </button>
+      <Button variant="secondary" onclick={() => (createOpen = false)}>Cancel</Button>
+      <Button variant="primary" onclick={create} disabled={saving || !form.name.trim()}>
+        {saving ? 'Creating…' : 'Create Workspace'}
+      </Button>
     </div>
   </div>
 </Modal>

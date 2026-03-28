@@ -163,7 +163,7 @@
     </label>
 
     <span class="time-label" aria-live={playing ? 'off' : 'polite'}>
-      {(currentTime / 1000).toFixed(1)}ms
+      {(currentTime / 1000).toFixed(1)}s
     </span>
 
     <div class="speed-controls" role="group" aria-label="Playback speed">

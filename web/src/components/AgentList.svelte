@@ -5,6 +5,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Table from '../lib/Table.svelte';
+  import Button from '../lib/Button.svelte';
   import AgentCardPanel from './AgentCardPanel.svelte';
 
   const navigate = getContext('navigate');
@@ -239,7 +240,7 @@
           </svg>
         </button>
       </div>
-      <button class="spawn-btn" onclick={openSpawnModal}>+ Spawn Agent</button>
+      <Button variant="primary" onclick={openSpawnModal}>+ Spawn Agent</Button>
     </div>
   </div>
 
