@@ -51,7 +51,7 @@
     loadHistory();
   });
 
-  let abortCtrl = $state(null);
+  let abortCtrl = null;
 
   async function connectSSE() {
     disconnectSSE();

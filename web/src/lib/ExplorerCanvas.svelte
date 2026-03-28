@@ -47,7 +47,7 @@
   let svgEl = $state(null);
   let viewBox = $state({ x: 0, y: 0, w: 900, h: 600 });
   let isPanning = $state(false);
-  let panStart = $state({ x: 0, y: 0 });
+  let panStart = { x: 0, y: 0 };
 
   // ── Node selection ─────────────────────────────────────────────────────────
   let selectedNode = $state(null);

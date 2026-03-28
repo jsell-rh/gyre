@@ -12,7 +12,7 @@
   } = $props();
 
   let modalEl = $state(null);
-  let previousFocus = $state(null);
+  let previousFocus = null;
   const titleId = 'modal-title-' + Math.random().toString(36).slice(2);
 
   function close() {
