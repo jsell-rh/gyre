@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -9,7 +10,7 @@
   let error = $state(null);
   let expandedTool = $state(null);
 
-  $effect(() => {
+  onMount(() => {
     api.mcpTools()
       .then((data) => { tools = data; loading = false; })
       .catch((e) => { error = e.message; loading = false; });

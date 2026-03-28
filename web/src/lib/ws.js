@@ -26,7 +26,12 @@ export function createWsStore() {
     };
 
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return; // ignore malformed messages
+      }
       if (msg.type === 'AuthResult') {
         setStatus(msg.success ? 'connected' : 'auth-failed');
       } else {

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -72,7 +73,7 @@
       .catch((err) => { error = err.message; loading = false; });
   }
 
-  $effect(() => {
+  onMount(() => {
     loadActivity();
   });
 

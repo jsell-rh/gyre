@@ -78,10 +78,12 @@
 
   // Content cross-fade key (increment to trigger fade transition)
   let contentVisible = $state(true);
+  let fadeTimer = null;
 
   function fadeContent() {
     contentVisible = false;
-    setTimeout(() => { contentVisible = true; }, 150);
+    clearTimeout(fadeTimer);
+    fadeTimer = setTimeout(() => { contentVisible = true; }, 150);
   }
 
   // ── Data ─────────────────────────────────────────────────────────────
@@ -417,6 +419,7 @@
       window.removeEventListener('keydown', handleKeydown);
       window.removeEventListener('click', handleOutsideClick, true);
       clearInterval(inboxInterval);
+      clearTimeout(fadeTimer);
     };
   });
 </script>

@@ -60,9 +60,11 @@
 
   $effect(() => {
     if (showRiskHeatmap && repoId) {
+      let cancelled = false;
       api.repoGraphRisks(repoId).then(data => {
-        riskData = Array.isArray(data) ? data : [];
-      }).catch(() => { riskData = []; });
+        if (!cancelled) riskData = Array.isArray(data) ? data : [];
+      }).catch(() => { if (!cancelled) riskData = []; });
+      return () => { cancelled = true; };
     } else if (!showRiskHeatmap) {
       riskData = [];
       highlightedNodeId = null;
@@ -261,16 +263,23 @@
     }
 
     layoutPending = true;
+    let cancelled = false;
     const w = svgEl?.clientWidth  ?? 900;
     const h = svgEl?.clientHeight ?? 600;
 
     computeLayout(eng, ns, es, w, h).then(pos => {
-      nodePositionsMap = pos;
-      layoutPending = false;
+      if (!cancelled) {
+        nodePositionsMap = pos;
+        layoutPending = false;
+      }
     }).catch(() => {
-      nodePositionsMap = columnLayout(ns);
-      layoutPending = false;
+      if (!cancelled) {
+        nodePositionsMap = columnLayout(ns);
+        layoutPending = false;
+      }
     });
+
+    return () => { cancelled = true; };
   });
 
   function getPos(id) { return nodePositionsMap[id] ?? { x: 400, y: 300 }; }
@@ -314,6 +323,59 @@
   }
 
   function onMouseUp() { isPanning = false; }
+
+  // ── Touch handlers (parity with mouse for mobile/tablet) ────────────────
+  let lastTouchDist = $state(0);
+
+  function onTouchStart(e) {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      if (e.target.closest('.graph-node')) return;
+      isPanning = true;
+      panStart = { x: t.clientX, y: t.clientY };
+    } else if (e.touches.length === 2) {
+      // Pinch-to-zoom: record initial distance
+      isPanning = false;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      lastTouchDist = Math.hypot(dx, dy);
+    }
+  }
+
+  function onTouchMove(e) {
+    if (e.touches.length === 1 && isPanning) {
+      e.preventDefault();
+      const t = e.touches[0];
+      const dx = t.clientX - panStart.x;
+      const dy = t.clientY - panStart.y;
+      const scaleX = viewBox.w / (svgEl?.clientWidth  ?? 900);
+      const scaleY = viewBox.h / (svgEl?.clientHeight ?? 600);
+      viewBox = { ...viewBox, x: viewBox.x - dx * scaleX, y: viewBox.y - dy * scaleY };
+      panStart = { x: t.clientX, y: t.clientY };
+    } else if (e.touches.length === 2) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      if (lastTouchDist > 0) {
+        const factor = lastTouchDist / dist;
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const rect = svgEl?.getBoundingClientRect();
+        const mx = rect ? (midX - rect.left) / rect.width  * viewBox.w + viewBox.x : viewBox.x + viewBox.w / 2;
+        const my = rect ? (midY - rect.top)  / rect.height * viewBox.h + viewBox.y : viewBox.y + viewBox.h / 2;
+        const newW = Math.max(viewBox.w / 5, Math.min(viewBox.w * 5, viewBox.w * factor));
+        const scale = newW / viewBox.w;
+        viewBox = { x: mx - (mx - viewBox.x) * scale, y: my - (my - viewBox.y) * scale, w: newW, h: viewBox.h * scale };
+      }
+      lastTouchDist = dist;
+    }
+  }
+
+  function onTouchEnd() {
+    isPanning = false;
+    lastTouchDist = 0;
+  }
 
   function onWheel(e) {
     e.preventDefault();
@@ -637,7 +699,8 @@
         role="application"
         aria-label="Architecture graph canvas — pan with drag, zoom with scroll, right-click for options, double-click to drill in"
         onmousedown={onMouseDown} onmousemove={onMouseMove} onmouseup={onMouseUp}
-        onmouseleave={onMouseUp} onwheel={onWheel} oncontextmenu={onContextMenu} ondblclick={onDblClick}>
+        onmouseleave={onMouseUp} onwheel={onWheel} oncontextmenu={onContextMenu} ondblclick={onDblClick}
+        ontouchstart={onTouchStart} ontouchmove={onTouchMove} ontouchend={onTouchEnd} ontouchcancel={onTouchEnd}>
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
             <path d="M0,0 L0,6 L8,3 z" fill="#475569" />
@@ -970,7 +1033,7 @@
   .legend-dot { width: 8px; height: 8px; border-radius: var(--radius-sm); flex-shrink: 0; }
 
   .graph-area { flex: 1; display: flex; overflow: hidden; position: relative; }
-  .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
+  .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; touch-action: none; }
   .graph-svg.panning { cursor: grabbing; }
   .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
   .edge-hit { stroke: transparent; stroke-width: 12; fill: none; }
