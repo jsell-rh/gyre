@@ -16,12 +16,12 @@
   $effect(() => {
     const id = agentId;
     if (!id) { card = null; return; }
-    loading = true;
+    cardLoading = true;
     editing = false;
     api.getAgentCard(id)
       .then((data) => { card = data ?? null; })
       .catch(() => { card = null; })
-      .finally(() => { loading = false; });
+      .finally(() => { cardLoading = false; });
   });
 
   // Editable fields
