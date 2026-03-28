@@ -290,7 +290,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 │  │ Principles             │  │                        │   │
 │  │  ● conventional... v3  │  │ Required: [toggle]     │   │
 │  │                        │  │                        │   │
-│  │ Agent Rules              │  │ ┌─ Impact ──────────┐ │   │
+│  │ Standards                │  │ ┌─ Impact ──────────┐ │   │
 │  │  ○ test-coverage  v1  │  │ │ 4 specs affected   │ │   │
 │  │                        │  │ │ 2 repos impacted   │ │   │
 │  │ [+ New Meta-Spec]      │  │ └────────────────────┘ │   │
@@ -367,7 +367,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 | Shortcut | Action | Context |
 |---|---|---|
 | `⌘K` | Global search (command palette) | Always |
-| `Esc` | Close detail panel / back to workspace home | Always |
+| `Esc` | Close detail panel (if open). If no panel open in repo mode, navigate to workspace home. Priority: panel close first, then home navigation. | Always |
 | `/` | Focus search within current view (suppressed during text input) | Always |
 | `?` | Show keyboard shortcut reference (suppressed during text input) | Always |
 | `g h` | Go to workspace home | Always (GitHub-style two-key sequence: press `g`, then within 500ms press the second key. Suppressed during text input.) |
@@ -389,9 +389,11 @@ Every state is URL-addressable for deep linking and sharing:
 ```
 /                                          → workspace selector (or redirect to default workspace)
 /all                                       → cross-workspace view (tenant scope)
+/all/settings                              → tenant administration (Users, Compute, Budget, Audit)
 /workspaces/:slug                          → workspace home
 /workspaces/:slug/settings                 → workspace settings
 /workspaces/:slug/agent-rules                → meta-spec management
+/workspaces/:slug/specs                    → workspace-level cross-repo specs list
 /workspaces/:slug/decisions                → full decisions list
 /workspaces/:slug/r/:repo                    → repo mode, Specs tab (default)
 /workspaces/:slug/r/:repo/specs              → repo Specs tab
@@ -404,9 +406,9 @@ Every state is URL-addressable for deep linking and sharing:
 /profile                                   → user profile (HSI §12, outside workspace hierarchy)
 ```
 
-**URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). Repos are nested under a `/r/` segment to avoid collision with reserved workspace paths (`settings`, `standards`, `decisions`). This produces readable URLs: `/workspaces/payments/r/payment-api/specs`.
+**URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). Repos are nested under a `/r/` segment to avoid collision with reserved workspace paths (`settings`, `agent-rules`, `decisions`). This produces readable URLs: `/workspaces/payments/r/payment-api/specs`.
 
-**Reserved workspace paths:** `settings`, `agent-rules`, `decisions`, `r`. These are workspace-level pages or URL segments and cannot be used as repo names. The server rejects repo creation with these names (400 error).
+**Reserved workspace paths:** `settings`, `agent-rules`, `decisions`, `specs`, `r`. These are workspace-level pages or URL segments and cannot be used as repo names. The server rejects repo creation with these names (400 error).
 
 **Reserved workspace slugs:** `all`, `profile`. The slug `all` is the cross-workspace view. The slug `profile` would collide with `/profile`. The server rejects workspace creation with these slugs (400 error).
 
@@ -425,7 +427,7 @@ Full layout as described above. Workspace home sections stack vertically. Repo m
 Same layout, detail panels become full-width overlays instead of side panels.
 
 ### Mobile (<768px)
-- Top bar: hamburger icon opens a navigation drawer listing workspace home sections (Decisions, Repos, Briefing, Agent Rules) as links — not full content, just navigation to scroll anchors on the workspace home page
+- Top bar: hamburger icon opens a navigation drawer listing workspace home sections (Decisions, Specs, Repos, Briefing, Agent Rules) as links — not full content, just navigation to scroll anchors on the workspace home page
 - Repo mode: tabs become a **scrollable horizontal strip** pinned below the top bar (not a bottom tab bar — bottom bars conflict with mobile browser chrome)
 - Detail panels become full-screen modals
 - Meta-spec editor: left/right panels stack vertically (registry above, editor below)
