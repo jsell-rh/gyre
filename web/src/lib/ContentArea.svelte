@@ -80,9 +80,6 @@
     transition: opacity var(--transition-fast);
   }
 
-  .content-main.faded {
-    opacity: 0;
-  }
 
   /* Split layout: main compresses to 60% */
   .split .content-main {

@@ -208,13 +208,24 @@
     return nodeTypeColor(node.node_type);
   }
 
+  // Pre-compute max values for size encoding to avoid O(n^2) in encodedNodeSize
+  let sizeEncodingMax = $derived.by(() => {
+    const enc = viewSpec?.encoding?.size;
+    if (!enc) return 1;
+    let max = 1;
+    for (const n of visibleNodes) {
+      const v = n[enc.field] ?? 0;
+      if (v > max) max = v;
+    }
+    return max;
+  });
+
   function encodedNodeSize(node) {
     const enc = viewSpec?.encoding?.size;
     if (!enc) return 1;
     const val = node[enc.field] ?? 0;
     const [minS, maxS] = enc.range ?? [1, 2.5];
-    const maxVal = Math.max(1, ...visibleNodes.map(n => n[enc.field] ?? 0));
-    return minS + (val / maxVal) * (maxS - minS);
+    return minS + (val / sizeEncodingMax) * (maxS - minS);
   }
 
   function encodedNodeLabel(node) {
@@ -1031,22 +1042,18 @@
   .legend-item { display: flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs); color: var(--color-text-muted); }
   .legend-dot { width: 8px; height: 8px; border-radius: var(--radius-sm); flex-shrink: 0; }
 
-  .graph-area { flex: 1; display: flex; overflow: hidden; position: relative; }
-  .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; touch-action: none; }
+  .graph-area { flex: 1; display: flex; overflow: hidden; position: relative; contain: layout style; }
+  .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
   .graph-svg.panning { cursor: grabbing; }
-  .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
-  .edge-hit { stroke: transparent; stroke-width: 12; fill: none; }
-  .edge-label { fill: #94a3b8; opacity: 0; transition: opacity 0.15s; }
-  .edge-group:hover .edge-label { opacity: 1; }
-  .edge-group:hover .graph-edge { stroke-opacity: 1; }
-  .graph-node { cursor: pointer; }
+  .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; }
+  .graph-node { cursor: pointer; will-change: opacity; }
   .graph-node:hover path, .graph-node:hover ellipse { filter: brightness(1.3); }
   .graph-node.selected path, .graph-node.selected ellipse { filter: brightness(1.4); }
   .graph-node.highlighted path, .graph-node.highlighted ellipse {
-    filter: brightness(1.5) drop-shadow(0 0 6px #facc15); stroke-width: 2.5;
+    filter: brightness(1.5); stroke-width: 2.5;
   }
   .graph-node.spec-highlighted path, .graph-node.spec-highlighted ellipse {
-    filter: brightness(1.4) drop-shadow(0 0 8px #a78bfa);
+    filter: brightness(1.4);
   }
   .graph-node.dimmed { opacity: 0.3; }
 
@@ -1068,10 +1075,10 @@
 
   .spec-legend {
     position: absolute; bottom: var(--space-4); left: var(--space-4);
-    background: color-mix(in srgb, black 90%, transparent); border: 1px solid var(--color-border);
+    background: color-mix(in srgb, black 92%, transparent); border: 1px solid var(--color-border);
     border-radius: var(--radius); padding: var(--space-3); display: flex;
     flex-direction: column; gap: var(--space-2); min-width: 160px;
-    backdrop-filter: blur(4px); pointer-events: none;
+    pointer-events: none;
   }
   .spec-legend-title { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-muted); margin-bottom: var(--space-1); }
   .spec-legend-item { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--color-text-secondary); }
