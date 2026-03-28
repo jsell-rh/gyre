@@ -718,7 +718,9 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--color-text-muted);
-    margin: 0 0 var(--space-2) 0;
+    margin: 0 0 var(--space-3) 0;
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
   }
 
   .completed-icon { color: var(--color-success); }
@@ -910,7 +912,7 @@
   }
 
   .metric-val {
-    font-size: var(--text-xl);
+    font-size: var(--text-2xl);
     font-weight: 700;
     color: var(--color-text);
     font-family: var(--font-mono);
