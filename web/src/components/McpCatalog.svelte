@@ -54,6 +54,7 @@
           <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
         </svg>
         {error}
+        <button class="retry-btn" onclick={() => { error = null; loading = true; api.mcpTools().then(d => { tools = d; loading = false; }).catch(e => { error = e.message; loading = false; }); }}>Retry</button>
       </div>
     {:else if tools.length === 0}
       <EmptyState
@@ -187,6 +188,25 @@
     color: var(--color-danger);
     font-size: var(--text-sm);
   }
+
+  .retry-btn {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-body);
+    white-space: nowrap;
+    margin-left: auto;
+  }
+  .retry-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-color: var(--color-primary);
+  }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* Tool grid */
   .tool-grid {

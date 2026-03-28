@@ -264,7 +264,7 @@
       {:else}
         <table class="data-table">
           <thead>
-            <tr><th scope="col">Name</th><th>Default Branch</th><th>Mirror</th></tr>
+            <tr><th scope="col">Name</th><th scope="col">Default Branch</th><th scope="col">Mirror</th></tr>
           </thead>
           <tbody>
             {#each repos as r}

@@ -201,7 +201,7 @@
   </div>
 
   {#if editing}
-    <div class="edit-form">
+    <form class="edit-form" onsubmit={(e) => { e.preventDefault(); saveEdit(); }}>
       <label class="field-label">Display Name
         <input class="field-input" bind:value={editForm.display_name} placeholder="Your display name" autocomplete="name" />
       </label>
@@ -212,12 +212,12 @@
         <input class="field-input" bind:value={editForm.locale} placeholder="e.g. en-US" autocomplete="off" />
       </label>
       <div class="edit-actions">
-        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
-        <button class="btn-primary" onclick={saveEdit} disabled={saving} aria-busy={saving}>
+        <button type="button" class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
+        <button type="submit" class="btn-primary" disabled={saving} aria-busy={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
-    </div>
+    </form>
   {/if}
 
   <Tabs {tabs} bind:active={activeTab} />

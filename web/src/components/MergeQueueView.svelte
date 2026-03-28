@@ -288,6 +288,9 @@
                   </div>
                 </div>
               {/each}
+              {#if done.length > 5}
+                <div class="lane-truncated">+{done.length - 5} more in table below</div>
+              {/if}
             {/if}
           </div>
         </div>
@@ -510,6 +513,14 @@
     background: var(--color-surface);
     border: 1px dashed var(--color-border);
     border-radius: var(--radius);
+  }
+
+  .lane-truncated {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-align: center;
+    padding: var(--space-2);
+    font-style: italic;
   }
 
   /* Queue cards */

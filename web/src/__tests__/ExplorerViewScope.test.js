@@ -34,7 +34,7 @@ describe('ExplorerView scope branching', () => {
       props: { scope: { type: 'workspace', workspaceId: 'ws-1' } },
     });
     await waitFor(() => {
-      expect(getByText('Workspace Architecture')).toBeTruthy();
+      expect(getByText('Workspace Repositories')).toBeTruthy();
     });
   });
 
