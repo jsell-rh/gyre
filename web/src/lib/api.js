@@ -542,6 +542,15 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
+  specsAssistGlobal: (body) =>
+    fetch(`${API_BASE}/specs/assist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   specsSave: (repoId, data) =>
     request(`/repos/${repoId}/specs/save`, { method: 'POST', body: JSON.stringify(data) }),
   // Costs
