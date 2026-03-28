@@ -45,6 +45,7 @@
 
 <div class="repo-mode" data-testid="repo-mode">
   <!-- Tab bar -->
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="tab-bar" role="tablist" aria-label="Repo navigation" data-testid="repo-tab-bar" onkeydown={handleTabKeydown}>
     {#each TABS as tab}
       <button

@@ -383,6 +383,10 @@
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('code');
             return;
+          case '5': // g 5 → Settings tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('settings');
+            return;
         }
       }
     }
@@ -918,6 +922,7 @@
           <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>Architecture tab (repo mode)</dd></div>
           <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>Decisions tab (repo mode)</dd></div>
           <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>Code tab (repo mode)</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>Settings tab (repo mode)</dd></div>
           <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / return to workspace home</dd></div>
           <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>Focus search</dd></div>
           <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd></div>

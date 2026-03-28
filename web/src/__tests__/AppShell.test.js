@@ -572,6 +572,20 @@ describe('Keyboard shortcuts', () => {
     });
   });
 
+  it('shortcut overlay shows g 5 for settings tab', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      const overlay = document.querySelector('.shortcuts-overlay');
+      expect(overlay?.textContent).toContain('g 5');
+      expect(overlay?.textContent).toContain('Settings tab');
+    });
+  });
+
   it('shortcut overlay does NOT show old ⌘1-6 nav shortcuts', async () => {
     const { container } = render(App);
     await waitFor(() => {
