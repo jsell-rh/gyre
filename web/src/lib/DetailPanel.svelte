@@ -28,7 +28,7 @@
 
   let activeTab = $state('info');
   let panelEl = $state(null);
-  let previousFocus = $state(null);
+  let previousFocus = null;
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
 
