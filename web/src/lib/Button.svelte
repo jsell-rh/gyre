@@ -42,14 +42,17 @@
     border-radius: var(--radius);
     cursor: pointer;
     white-space: nowrap;
-    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform 50ms ease;
     text-decoration: none;
   }
 
   .btn:disabled {
-    opacity: 0.45;
+    opacity: 0.5;
     cursor: not-allowed;
-    pointer-events: none;
+  }
+
+  .btn:active:not(:disabled) {
+    transform: scale(0.98);
   }
 
   /* Sizes */
@@ -107,6 +110,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .btn { transition: none; }
+    .btn { transition: none; transform: none; }
   }
 </style>
