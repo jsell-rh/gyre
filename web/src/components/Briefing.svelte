@@ -1,5 +1,5 @@
 <script>
-  import { onMount, getContext } from 'svelte';
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -192,7 +192,11 @@
     return api.briefingAsk(workspaceId, { question, history: [] });
   }
 
-  onMount(load);
+  // Reload when scope or workspace changes
+  $effect(() => {
+    void scope; void workspaceId; void repoId;
+    load();
+  });
 </script>
 
 <span class="sr-only" aria-live="polite">{loading ? 'Loading briefing…' : 'Briefing loaded'}</span>
@@ -532,23 +536,21 @@
 
       {#if !briefing.completed?.length && !briefing.in_progress?.length && !briefing.cross_workspace?.length && !briefing.exceptions?.length && !briefing.metrics}
         <EmptyState
-          title={scope === 'repo' ? 'No briefing for this repository' : 'All caught up'}
-          description={scope === 'tenant'
-            ? 'No activity across any workspace since your last visit.'
-            : scope === 'repo'
-              ? 'Briefings are available at the workspace level. Navigate up to see workspace activity.'
-              : 'No activity since your last visit.'}
+          title="All caught up"
+          description="No activity in the {sinceLabel} window."
         />
       {/if}
 
-      <!-- Q&A Chat (bottom) -->
-      <div class="chat-section" data-testid="briefing-chat">
-        <InlineChat
-          recipient="this briefing"
-          recipientType="llm-qa"
-          onmessage={briefingAskHandler}
-        />
-      </div>
+      <!-- Q&A Chat (bottom) — only available with a workspace context -->
+      {#if scope === 'workspace' && workspaceId}
+        <div class="chat-section" data-testid="briefing-chat">
+          <InlineChat
+            recipient="this briefing"
+            recipientType="llm-qa"
+            onmessage={briefingAskHandler}
+          />
+        </div>
+      {/if}
     {/if}
   </div>
 

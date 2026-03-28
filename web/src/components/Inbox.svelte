@@ -286,11 +286,13 @@
           {@const isExpanded = expandedId === n.id}
           {@const state = actionStates[n.id]}
           {@const isDismissed = !!n.dismissed_at}
+          {@const isResolved = !!n.resolved_at}
 
           <div
             class="inbox-card"
             class:expanded={isExpanded}
             class:dismissed={isDismissed}
+            class:resolved={isResolved && !isDismissed}
             role="listitem"
             data-type={n.notification_type}
           >
@@ -329,6 +331,9 @@
                 </div>
               </div>
               <div class="card-header-right">
+                {#if isResolved}
+                  <Badge value="Resolved" variant="success" />
+                {/if}
                 {#if scope === 'tenant' && n.workspace_id}
                   <Badge value={workspaceMap[n.workspace_id] ?? n.workspace_id} variant="default" />
                 {/if}
@@ -346,6 +351,12 @@
               <div class="card-body" id="inbox-card-{n.id}">
                 {#if body.message}
                   <blockquote class="card-message">"{body.message}"</blockquote>
+                {/if}
+                {#if body.gate_name || body.command}
+                  <div class="gate-detail">
+                    {#if body.gate_name}<span class="gate-label">Gate: <strong>{body.gate_name}</strong></span>{/if}
+                    {#if body.command}<code class="gate-command">{body.command}</code>{/if}
+                  </div>
                 {/if}
                 {#if body.diff_summary}
                   <p class="card-detail">{body.diff_summary}</p>
@@ -400,7 +411,7 @@
                 {/if}
 
                 <!-- Action buttons per notification type -->
-                {#if !state?.success && !isDismissed}
+                {#if !state?.success && !isDismissed && !n.resolved_at}
                   <div class="card-actions">
                     {#if n.notification_type === 'agent_clarification'}
                       <Button variant="primary" size="sm" onclick={() => handleRespondToAgent(n)}>
@@ -442,10 +453,7 @@
                       </Button>
                     {:else if n.notification_type === 'gate_failure'}
                       <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
-                        View Diff
-                      </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
-                        View Output
+                        View MR
                       </Button>
                       <Button
                         variant="primary"
@@ -453,16 +461,15 @@
                         disabled={state?.loading}
                         onclick={() => handleRetry(n)}
                       >
-                        {state?.loading ? 'Retrying…' : 'Retry'}
+                        {state?.loading ? 'Retrying…' : 'Retry Gate'}
                       </Button>
-                      <span class="coming-soon-note">Override requires manual intervention — contact an admin</span>
                       <Button
                         variant="ghost"
                         size="sm"
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Close MR
+                        Dismiss
                       </Button>
                     {:else if n.notification_type === 'cross_workspace_change'}
                       <Button variant="primary" size="sm" onclick={() => handleViewSpec(n)}>
@@ -568,8 +575,8 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+    height: 100%;
     overflow-y: auto;
-    flex: 1;
   }
 
   .inbox-header {
@@ -651,6 +658,11 @@
 
   .inbox-card.dismissed {
     opacity: 0.45;
+  }
+
+  .inbox-card.resolved {
+    border-left: 3px solid var(--color-success);
+    opacity: 0.7;
   }
 
   .card-header {
@@ -768,6 +780,28 @@
     font-size: var(--text-sm);
     color: var(--color-text);
     font-style: italic;
+  }
+
+  .gate-detail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .gate-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .gate-command {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    word-break: break-all;
   }
 
   .card-detail {
