@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
 
   let costs = $state([]);
@@ -33,14 +34,11 @@
       const until = Math.floor(Date.now() / 1000) + 86400;
 
       // Load summary
-      const sumRes = await fetch(`/api/v1/costs/summary?since=${since}&until=${until}`, { headers: authHeaders() });
-      if (sumRes.ok) summary = await sumRes.json();
+      summary = await api.costSummary(since, until).catch(() => null);
 
       // Load costs
       if (agentFilter) {
-        const res = await fetch(`/api/v1/costs?agent_id=${encodeURIComponent(agentFilter)}`, { headers: authHeaders() });
-        if (!res.ok) throw new Error(await res.text());
-        costs = await res.json();
+        costs = await api.costsByAgent(agentFilter);
       } else {
         // Load all by querying a known set — we'll use the agentTotals workaround:
         // Query with a broad time range via summary, then show agent table from summary
@@ -56,9 +54,7 @@
   async function loadAgent(agentId) {
     agentFilter = agentId;
     try {
-      const res = await fetch(`/api/v1/costs?agent_id=${encodeURIComponent(agentId)}`, { headers: authHeaders() });
-      if (!res.ok) throw new Error(await res.text());
-      costs = await res.json();
+      costs = await api.costsByAgent(agentId);
     } catch (e) {
       error = e.message;
     }
