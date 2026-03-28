@@ -961,8 +961,8 @@
     display: flex; align-items: center; gap: var(--space-2);
     padding: var(--space-2) var(--space-4); font-size: var(--text-xs); flex-shrink: 0;
   }
-  .threshold-banner.info { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent); color: #60a5fa; }
-  .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: #fbbf24; }
+  .threshold-banner.info { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent); color: var(--color-info); }
+  .threshold-banner.warning { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); color: var(--color-warning); }
   .banner-action {
     margin-left: var(--space-2); background: transparent; border: 1px solid currentColor; color: inherit;
     border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer; opacity: 0.8;
@@ -1010,7 +1010,7 @@
   }
   .tool-btn:hover { border-color: var(--color-focus); color: var(--color-text); }
   .tool-btn.active { background: color-mix(in srgb, var(--color-focus) 12%, transparent); border-color: var(--color-focus); color: var(--color-focus); }
-  .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: #eab308; color: #eab308; }
+  .risk-toggle.active { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border-color: var(--color-warning); color: var(--color-warning); }
 
   .layout-switcher {
     display: flex; align-items: center; gap: var(--space-1);
@@ -1045,8 +1045,8 @@
   .graph-area { flex: 1; display: flex; overflow: hidden; position: relative; contain: layout style; }
   .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
   .graph-svg.panning { cursor: grabbing; }
-  .graph-edge { stroke: #334155; stroke-width: 1.5; stroke-opacity: 0.7; }
-  .graph-node { cursor: pointer; will-change: opacity; }
+  .graph-edge { stroke: var(--color-border); stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
+  .graph-node { cursor: pointer; }
   .graph-node:hover path, .graph-node:hover ellipse { filter: brightness(1.3); }
   .graph-node.selected path, .graph-node.selected ellipse { filter: brightness(1.4); }
   .graph-node.highlighted path, .graph-node.highlighted ellipse {
