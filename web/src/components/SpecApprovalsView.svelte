@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -36,7 +37,7 @@
     loading = false;
   }
 
-  $effect(() => { load(); });
+  $effect(() => { untrack(() => load()); });
 
   async function doApprove() {
     if (!approvePath.trim() || approveSha.trim().length !== 40) {
@@ -401,8 +402,9 @@
     font-family: var(--font-body);
     font-size: var(--text-sm);
     box-sizing: border-box;
-    resize: vertical;
   }
+
+  .field-textarea { resize: vertical; }
 
   .field-input.mono { font-family: var(--font-mono); }
 
