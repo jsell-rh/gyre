@@ -122,8 +122,8 @@
 
 <div class="workspace-cards">
   <div class="cards-header">
-    <h2>Workspaces</h2>
-    <p class="subtitle">Each workspace groups related repositories, agents, and specs. Select one to begin.</p>
+    <h1 class="page-title">Explorer</h1>
+    <p class="subtitle">Select a workspace to explore its architecture</p>
   </div>
 
   {#if loading}
@@ -280,7 +280,7 @@
     flex-shrink: 0;
   }
 
-  .cards-header h2 {
+  .cards-header .page-title {
     margin: 0 0 var(--space-1);
     font-size: var(--text-xl);
     font-weight: 600;

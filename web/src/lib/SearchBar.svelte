@@ -4,6 +4,8 @@
   let { open = $bindable(false), onnavigate = undefined } = $props();
   let query = $state('');
   let inputEl = $state(null);
+  let dialogEl = $state(null);
+  let previousFocus = $state(null);
   let apiResults = $state([]);
   let searching = $state(false);
   let searchError = $state(false);
@@ -88,8 +90,12 @@
   });
 
   $effect(() => {
-    if (open && inputEl) {
-      setTimeout(() => inputEl?.focus(), 10);
+    if (open) {
+      previousFocus = document.activeElement;
+      if (inputEl) setTimeout(() => inputEl?.focus(), 10);
+    } else {
+      previousFocus?.focus();
+      previousFocus = null;
     }
   });
 
@@ -126,6 +132,21 @@
     role="dialog"
     aria-label="Quick navigation"
     aria-modal="true"
+    bind:this={dialogEl}
+    onkeydown={(e) => {
+      if (e.key === 'Tab' && dialogEl) {
+        const focusable = dialogEl.querySelectorAll('input, button, [tabindex]:not([tabindex="-1"])');
+        const els = Array.from(focusable);
+        if (!els.length) return;
+        const first = els[0];
+        const last = els[els.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+        } else {
+          if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      }
+    }}
   >
     <div class="search-input-wrap">
       <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">

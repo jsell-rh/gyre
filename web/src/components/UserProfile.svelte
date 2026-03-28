@@ -187,7 +187,7 @@
       {me?.display_name?.[0]?.toUpperCase() ?? me?.username?.[0]?.toUpperCase() ?? '?'}
     </div>
     <div class="profile-meta">
-      <h2>{me?.display_name ?? me?.username ?? 'My Profile'}</h2>
+      <h1 class="page-title">{me?.display_name ?? me?.username ?? 'My Profile'}</h1>
       {#if me?.username}
         <p class="username">@{me.username}</p>
       {/if}
@@ -383,7 +383,7 @@
   }
 
   .profile-meta { flex: 1; }
-  .profile-meta h2 { margin: 0 0 var(--space-1); font-size: var(--text-xl); font-weight: 600; color: var(--color-text); }
+  .profile-meta .page-title { margin: 0 0 var(--space-1); font-size: var(--text-xl); font-weight: 600; color: var(--color-text); }
   .username { margin: 0 0 var(--space-1); font-size: var(--text-sm); color: var(--color-text-muted); font-family: var(--font-mono); }
 
   .btn-edit {

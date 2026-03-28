@@ -106,10 +106,11 @@
           <p class="empty">No cost entries recorded yet.</p>
         {:else}
           <table>
+            <caption class="sr-only">Cost by agent</caption>
             <thead>
               <tr>
                 <th scope="col">Agent ID</th>
-                <th class="right" scope="col">Total ($)</th>
+                <th scope="col" class="right">Total</th>
                 <th scope="col">Bar</th>
                 <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
@@ -140,10 +141,11 @@
           <p class="empty">No cost entries for this agent.</p>
         {:else}
           <table>
+            <caption class="sr-only">Cost entries for agent</caption>
             <thead>
               <tr>
                 <th scope="col">Type</th>
-                <th class="right">Amount</th>
+                <th scope="col" class="right">Amount</th>
                 <th scope="col">Currency</th>
                 <th scope="col">Task</th>
                 <th scope="col">Time</th>
