@@ -47,7 +47,7 @@
   let svgEl = $state(null);
   let viewBox = $state({ x: 0, y: 0, w: 900, h: 600 });
   let isPanning = $state(false);
-  let panStart = $state({ x: 0, y: 0 });
+  let panStart = { x: 0, y: 0 };
 
   // ── Node selection ─────────────────────────────────────────────────────────
   let selectedNode = $state(null);
@@ -272,13 +272,11 @@
     if (!ns.length) { nodePositionsMap = {}; return; }
 
     if (eng === 'column') {
-      layoutGeneration++;
       nodePositionsMap = columnLayout(ns);
       return;
     }
 
     layoutPending = true;
-    const gen = ++layoutGeneration;
     const w = svgEl?.clientWidth  ?? 900;
     const h = svgEl?.clientHeight ?? 600;
 
@@ -291,8 +289,6 @@
       nodePositionsMap = columnLayout(ns);
       layoutPending = false;
     });
-
-    return () => { cancelled = true; };
   });
 
   function getPos(id) { return nodePositionsMap[id] ?? { x: 400, y: 300 }; }
@@ -338,7 +334,7 @@
   function onMouseUp() { isPanning = false; }
 
   // ── Touch handlers (parity with mouse for mobile/tablet) ────────────────
-  let lastTouchDist = $state(0);
+  let lastTouchDist = 0;
 
   function onTouchStart(e) {
     if (e.touches.length === 1) {

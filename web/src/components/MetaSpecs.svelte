@@ -104,6 +104,9 @@
   let deleteTarget = $state(null);
   let deleteSaving = $state(false);
 
+  // Discard-changes confirmation (replaces native confirm())
+  let discardTarget = $state(null); // { action: 'select', spec } | { action: 'create' }
+
   // Required toggle
   let requiredSaving = $state(null); // spec id
 
@@ -130,7 +133,8 @@
 
   function selectSpec(spec, force = false) {
     if (!force && editDirty && selected && selected.id !== spec.id) {
-      if (!confirm('You have unsaved changes. Discard them?')) return;
+      discardTarget = { action: 'select', spec };
+      return;
     }
     selected = spec;
     editContent = spec.prompt || '';
@@ -348,9 +352,9 @@
   let targetSpecs       = $state([]);
   let selectedSpecPaths = $state([]);
 
-  let previewId        = $state(null);
+  let previewId        = null;
   let previewProgress  = $state([]);
-  let previewInterval  = $state(null);
+  let previewInterval  = null;
 
   let impactTab        = $state('architecture');
   let previewApiResult = $state(null);
@@ -475,8 +479,6 @@
 
   function cancelPreview() { stopPreview(); previewState = 'editing'; previewProgress = []; }
   function iterate()       { stopPreview(); previewState = 'editing'; previewProgress = []; }
-
-  onDestroy(() => { stopPreview(); });
 
   async function publish() {
     if (!selectedMsId || !workspaceId) return;
@@ -758,7 +760,7 @@
         <p class="subtitle">Your primary encoding mechanism — personas, principles, standards, and process norms.</p>
       </div>
       <div class="top-bar-actions">
-        <Button variant="primary" onclick={() => { if (editDirty && !confirm('You have unsaved changes. Discard them?')) return; createMode = true; selected = null; editDirty = false; }}>+ New Meta-spec</Button>
+        <Button variant="primary" onclick={() => { if (editDirty) { discardTarget = { action: 'create' }; return; } createMode = true; selected = null; editDirty = false; }}>+ New Meta-spec</Button>
       </div>
     </div>
 
@@ -1168,6 +1170,17 @@
       </div>
     {/if}
   </div>
+
+  <!-- Discard unsaved changes confirmation modal -->
+  {#if discardTarget}
+    <Modal open={true} title="Unsaved Changes" onclose={() => discardTarget = null}>
+      <p class="delete-confirm-text">You have unsaved changes. Discard them?</p>
+      <div class="form-actions">
+        <Button variant="secondary" onclick={() => discardTarget = null}>Keep Editing</Button>
+        <Button variant="danger" onclick={() => { const t = discardTarget; discardTarget = null; editDirty = false; if (t.action === 'select') { selectSpec(t.spec, true); } else if (t.action === 'create') { createMode = true; selected = null; } }}>Discard</Button>
+      </div>
+    </Modal>
+  {/if}
 
   <!-- Delete confirmation modal -->
   {#if deleteTarget}

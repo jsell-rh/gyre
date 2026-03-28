@@ -11,7 +11,7 @@
 
   let { mr: initialMr, repo, onBack } = $props();
 
-  let mr = $state(null);
+  let mr = $state(initialMr);
   $effect(() => { mr = initialMr; });
   let reviews = $state([]);
   let comments = $state([]);

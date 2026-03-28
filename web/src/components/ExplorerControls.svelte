@@ -22,7 +22,7 @@
   const openDetailPanel = getContext('openDetailPanel');
 
   // AbortController for cancelling in-flight LLM streaming requests
-  let askAbortController = $state(null);
+  let askAbortController = null;
 
   onDestroy(() => {
     askAbortController?.abort();
@@ -44,7 +44,7 @@
 
   // Saved views fetched from server
   let savedViews = $state([]);
-  let savedViewsLoading = $state(false);
+  let savedViewsLoading = false;
 
   // LLM Ask state
   let askQuery = $state('');

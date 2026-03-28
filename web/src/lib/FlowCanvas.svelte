@@ -193,7 +193,7 @@
   let useWebGL = $derived.by(() => activeParticles.length > 100);
 
   // Animation loop
-  let animFrameId = $state(null);
+  let animFrameId = null;
 
   $effect(() => {
     if (playing) {
@@ -242,7 +242,7 @@
 
   // Cache the 2D context — calling getContext('2d') after getContext('webgl2')
   // on the same canvas returns null. Caching also avoids repeated context lookups.
-  let ctx2d = $state(null);
+  let ctx2d = null;
 
   function draw2D(particles) {
     if (!canvasEl) return;
@@ -292,9 +292,9 @@
   }
 
   // Minimal WebGL renderer for > 100 particles (points-based)
-  let glCtx = $state(null);
-  let glProgram = $state(null);
-  let glInitialized = $state(false);
+  let glCtx = null;
+  let glProgram = null;
+  let glInitialized = false;
 
   function initWebGL() {
     if (!canvasEl || glInitialized) return;
@@ -345,8 +345,8 @@
   }
 
   // Reusable GL buffers to avoid per-frame allocation/leak
-  let glPosBuf = $state(null);
-  let glColBuf = $state(null);
+  let glPosBuf = null;
+  let glColBuf = null;
 
   function drawWebGL(particles) {
     if (!glInitialized) initWebGL();
@@ -387,10 +387,6 @@
     gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
 
     gl.drawArrays(gl.POINTS, 0, particles.length);
-
-    // Clean up per-frame buffers to prevent GPU memory leak
-    gl.deleteBuffer(posBuf);
-    gl.deleteBuffer(colBuf);
   }
 
   // Parse a CSS hsl() color string to RGBA [0..1].
@@ -494,7 +490,6 @@
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}
   tabindex="0"
-  role="img"
   aria-label="Particle flow animation — {activeParticles.length} active traces"
   aria-roledescription="interactive particle animation canvas"
 ></canvas>

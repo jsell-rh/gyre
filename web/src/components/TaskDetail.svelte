@@ -15,7 +15,7 @@
   let loading = $state(true);
   let error = $state(null);
   let activeTab = $state('info');
-  let loadGeneration = $state(0);
+  let loadGeneration = 0; // plain counter — not reactive, only used for stale-check
 
   const tabs = [
     { id: 'info',      label: 'Info' },

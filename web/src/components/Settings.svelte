@@ -1,7 +1,6 @@
 <script>
   import { onMount } from 'svelte';
   import { t, locale } from 'svelte-i18n';
-  import { onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
 
@@ -20,13 +19,6 @@
 
   onMount(() => {
     fetchVersion();
-  });
-
-  // Relative uptime via interval update
-  let now = $state(Date.now());
-  $effect(() => {
-    const id = setInterval(() => { now = Date.now(); }, 60000);
-    return () => clearInterval(id);
   });
 
   const supportedLocales = [

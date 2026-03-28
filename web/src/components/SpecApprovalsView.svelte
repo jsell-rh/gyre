@@ -21,7 +21,7 @@
 
   // Revoke modal
   let showRevoke = $state(false);
-  let revokeId = $state('');
+  let revokeId = '';
   let revokeReason = $state('');
   let revokeWorking = $state(false);
 
