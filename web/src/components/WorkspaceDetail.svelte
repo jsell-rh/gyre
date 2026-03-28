@@ -67,7 +67,7 @@
     { id: 'policies', label: 'Policies' },
   ];
 
-  let lastLoadedId = $state(null);
+  let lastLoadedId = null;
   $effect(() => {
     const id = workspace?.id;
     if (id && id !== lastLoadedId) {

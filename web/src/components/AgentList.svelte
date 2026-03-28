@@ -37,12 +37,12 @@
   let agentLogLines = $state([]);
   let logsLoading = $state(false);
   let ttyLines = $state([]);
-  let ttyWs = $state(null);
+  let ttyWs = null;
   let ttyConnecting = $state(false);
   let ttyError = $state(false);
   let containerRecord = $state(null);
   let spawnModalEl = $state(null);
-  let spawnTriggerEl = $state(null);
+  let spawnTriggerEl = null;
 
   $effect(() => {
     if (showSpawnModal) {
