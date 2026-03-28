@@ -85,7 +85,6 @@
       <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
         <div class="section-header">
           <h2 class="section-title" id="section-agent-rules">Agent Rules</h2>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
           <a class="section-action" href="/workspaces/{workspace.slug ?? workspace.id}/agent-rules"
              onclick={(e) => { e.preventDefault(); window.history.pushState({ mode: 'workspace_home', wsId: workspace.id, repoName: null, repoTab: 'specs' }, '', `/workspaces/${encodeURIComponent(workspace.slug ?? workspace.id)}/agent-rules`); }}
           >Manage rules</a>
