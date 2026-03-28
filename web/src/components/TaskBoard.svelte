@@ -50,13 +50,16 @@
   }
 
   async function loadTasks(wsId = '') {
+    loading = true;
+    error = null;
     try {
       const raw = await api.tasks({ workspaceId: wsId });
       tasks = Array.isArray(raw) ? raw : (raw?.tasks ?? raw ?? []);
     } catch (err) {
       error = err.message;
+    } finally {
+      loading = false;
     }
-    loading = false;
   }
 
   $effect(() => { loadTasks(workspaceId); });

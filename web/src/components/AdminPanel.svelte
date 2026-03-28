@@ -87,6 +87,7 @@
 
   // ---- SHARED ----
   let loading = $state(true);
+  let refreshing = $state(false);
   let error = $state(null);
 
   // ---- TRUST LEVEL ----
@@ -224,7 +225,12 @@
   });
 
   async function loadTenant() {
-    loading = true; error = null;
+    if (tenantWorkspaces.length > 0 || tenantCompute.length > 0) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
+    error = null;
     try {
       const [compute, budget, audit, wsList] = await Promise.all([
         api.computeList().catch(() => []),
@@ -237,12 +243,17 @@
       tenantAudit     = audit?.events ?? [];
       tenantWorkspaces = Array.isArray(wsList) ? wsList : [];
     } catch (e) { error = e.message; }
-    finally { loading = false; }
+    finally { loading = false; refreshing = false; }
   }
 
   async function loadWorkspace() {
     if (!workspaceId) return;
-    loading = true; error = null;
+    if (workspace) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
+    error = null;
     try {
       const [ws, budget, members, policies, repos] = await Promise.all([
         api.workspace(workspaceId),
@@ -259,12 +270,17 @@
       wsTrustLevel = ws?.trust_level ?? 'Autonomous';
       wsSettingsForm = { name: ws?.name ?? '', description: ws?.description ?? '' };
     } catch (e) { error = e.message; }
-    finally { loading = false; }
+    finally { loading = false; refreshing = false; }
   }
 
   async function loadRepo() {
     if (!repoId) return;
-    loading = true; error = null;
+    if (repoData) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
+    error = null;
     try {
       const [gates, policies, repo] = await Promise.all([
         api.repoGates(repoId).catch(() => []),
@@ -283,7 +299,7 @@
         };
       }
     } catch (e) { error = e.message; }
-    finally { loading = false; }
+    finally { loading = false; refreshing = false; }
   }
 
   // ---- TRUST LEVEL ----
@@ -660,11 +676,11 @@
       if (effectiveScope === 'tenant') loadTenant();
       else if (effectiveScope === 'workspace') loadWorkspace();
       else loadRepo();
-    }} disabled={loading} aria-busy={loading} aria-label={loading ? 'Loading…' : 'Refresh admin panel'}>
+    }} disabled={loading || refreshing} aria-busy={loading || refreshing} aria-label={loading ? 'Loading…' : refreshing ? 'Refreshing…' : 'Refresh admin panel'}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
       </svg>
-      {loading ? 'Loading…' : 'Refresh'}
+      {loading ? 'Loading…' : refreshing ? 'Refreshing…' : 'Refresh'}
     </button>
   </div>
 
@@ -1373,8 +1389,8 @@
     <h3 class="modal-title">Add Member</h3>
     <div class="form-field">
       <label class="form-label" for="member-email">Email address</label>
-      <input id="member-email" class="filter-input full-width" bind:value={memberForm.email}
-        placeholder="user@example.com"
+      <input id="member-email" type="email" class="filter-input full-width" bind:value={memberForm.email}
+        placeholder="user@example.com" required aria-required="true"
         onkeydown={(e) => e.key === 'Enter' && addMember()} />
     </div>
     <div class="modal-actions">
@@ -1500,7 +1516,7 @@
     <h3 class="modal-title">New Workspace</h3>
     <div class="form-field">
       <label class="form-label" for="wsf-name">Name</label>
-      <input id="wsf-name" class="filter-input full-width" bind:value={wsForm.name} placeholder="e.g. payments-team" aria-required="true" />
+      <input id="wsf-name" class="filter-input full-width" bind:value={wsForm.name} placeholder="e.g. payments-team" required aria-required="true" />
     </div>
     <div class="form-field">
       <label class="form-label" for="wsf-desc">Description</label>
@@ -1661,8 +1677,8 @@
     <h3 class="modal-title">Import Repository</h3>
     <div class="form-field">
       <label class="form-label" for="ir-url">Clone URL</label>
-      <input id="ir-url" class="filter-input full-width" bind:value={importRepoForm.clone_url}
-        placeholder="https://github.com/org/repo.git" required />
+      <input id="ir-url" type="url" class="filter-input full-width" bind:value={importRepoForm.clone_url}
+        placeholder="https://github.com/org/repo.git" required aria-required="true" />
     </div>
     <div class="form-field">
       <label class="form-label" for="ir-name">Name <span class="form-hint">(optional — inferred from URL)</span></label>

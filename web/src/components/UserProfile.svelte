@@ -221,8 +221,8 @@
         <input class="field-input" bind:value={editForm.locale} placeholder="e.g. en-US" autocomplete="off" />
       </label>
       <div class="edit-actions">
-        <button type="button" class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
-        <button type="submit" class="btn-primary" disabled={saving} aria-busy={saving}>
+        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
+        <button class="btn-primary" onclick={saveEdit} disabled={saving || !editForm.display_name.trim()} aria-busy={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>

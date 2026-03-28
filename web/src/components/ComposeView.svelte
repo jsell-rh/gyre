@@ -142,7 +142,7 @@
       {/if}
 
       <div class="btn-row">
-        <button class="primary-btn" onclick={applyCompose} disabled={applyLoading || !yamlInput.trim()} aria-busy={applyLoading}>
+        <button class="primary-btn" onclick={applyCompose} disabled={applyLoading || !yamlInput.trim() || jsonStatus === 'invalid'} aria-busy={applyLoading}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <path d="M5 12h14M12 5l7 7-7 7"/>
           </svg>

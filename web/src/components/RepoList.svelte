@@ -108,7 +108,7 @@
       <input class="form-input" bind:value={mirrorName} placeholder="my-mirror" />
     </label>
     <label class="form-label">Remote URL
-      <input class="form-input" bind:value={mirrorUrl} placeholder="https://github.com/org/repo.git" type="url" />
+      <input class="form-input" type="url" bind:value={mirrorUrl} placeholder="https://github.com/org/repo.git" required aria-required="true" />
     </label>
     <label class="form-label">Sync Interval (seconds)
       <input class="form-input" type="number" bind:value={mirrorInterval} min="60" placeholder="300" />
@@ -150,7 +150,10 @@
       {/each}
     </div>
   {:else if error}
-    <div class="error-msg" role="alert">Error: {error}</div>
+    <div class="error-msg" role="alert">
+      Error: {error}
+      <button class="retry-btn" onclick={() => loadRepos(workspaceId)}>Retry</button>
+    </div>
   {:else if repos.length === 0}
     <EmptyState
       title="No repositories yet"
@@ -351,6 +354,25 @@
     color: var(--color-danger);
     text-align: center;
     font-size: var(--text-sm);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
   }
+
+  .retry-btn {
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    font-weight: 500;
+    transition: background var(--transition-fast);
+  }
+  .retry-btn:hover { background: color-mix(in srgb, var(--color-primary) 25%, transparent); }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
