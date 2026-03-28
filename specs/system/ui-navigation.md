@@ -199,11 +199,11 @@ The system explorer for this repo. Shows the realized architecture (knowledge gr
 
 **Content:**
 - Graph canvas (C4 progressive drill-down per `system-explorer.md`)
-- Two sub-tabs in the control bar: **Graph** (default) and **Timeline**
+- Three sub-tabs in the control bar: **Graph** (default), **Timeline**, and **Briefing**
 - Control bar: Lens selector (Structural/Evaluative/Observable), view selector, search (`/`), Ask input
 - Ghost overlays for structural prediction (HSI §3, Phase 1)
 - Flow view available via view selector (when trace data exists)
-- Briefing for this repo (repo-scoped narrative) shown as a collapsible panel above the graph, with "Ask a question" Q&A capability (same as workspace briefing, but scoped to this repo via `?repo_id=` parameter)
+- **Briefing sub-tab**: Full repo-scoped narrative view (not a collapsed panel — a full content area) with time range selector and "Ask a question" Q&A capability. Same structure as workspace home briefing but scoped to this repo via `?repo_id=` parameter. This gives the briefing proper space for the narrative + Q&A chat, rather than cramming it above the graph.
 
 **Agent discovery:** The Architecture tab is the primary surface for finding agents. Active agent count is shown per graph node (repo boundary view shows agent badges on nodes). Clicking an agent badge opens the agent detail panel with Pause/Stop/Message controls (HSI §4). The workspace orchestrator is also reachable from the workspace home's Repos section (clicking the agent count on a repo row opens the agent list for that repo in a modal). This ensures agents are always discoverable without a dedicated Agent tab — agents are visible in the context of the architecture they're modifying.
 
@@ -343,19 +343,21 @@ This is the **creative surface** for encoding organizational judgment (vision §
 
 ## 6. Keyboard Shortcuts
 
-| Shortcut | Action |
-|---|---|
-| `⌘K` | Global search (command palette) |
-| `⌘1` | Go to Specs tab (repo mode). If no repo selected, opens workspace home. |
-| `⌘2` | Go to Architecture tab (repo mode) |
-| `⌘3` | Go to Decisions tab (repo mode) |
-| `⌘4` | Go to Code tab (repo mode) |
-| `Esc` | Close detail panel / back to workspace home |
-| `/` | Focus search within current view |
-| `?` | Show keyboard shortcut reference |
-| `g h` | Go to workspace home (GitHub-style `g` prefix) |
-| `g s` | Go to workspace settings |
-| `g r` | Go to standards/meta-spec management |
+| Shortcut | Action | Context |
+|---|---|---|
+| `⌘K` | Global search (command palette) | Always |
+| `Esc` | Close detail panel / back to workspace home | Always |
+| `/` | Focus search within current view (suppressed during text input) | Always |
+| `?` | Show keyboard shortcut reference (suppressed during text input) | Always |
+| `g h` | Go to workspace home | Always (GitHub-style two-key sequence: press `g`, then within 500ms press the second key. Suppressed during text input.) |
+| `g s` | Go to workspace settings | Always |
+| `g a` | Go to Agent Rules management | Always |
+| `g 1` | Go to Specs tab in current repo | Repo mode only (no-op at workspace home) |
+| `g 2` | Go to Architecture tab | Repo mode only |
+| `g 3` | Go to Decisions tab | Repo mode only |
+| `g 4` | Go to Code tab | Repo mode only |
+
+**Design choice:** Tab shortcuts use the `g` prefix (not `⌘1-4`) to avoid context-dependent behavior. `⌘K` and `Esc` work everywhere. The `g` prefix sequences are suppressed when any text input is focused. The 500ms timeout ensures accidental `g` presses in normal typing don't trigger navigation.
 
 ---
 
@@ -369,17 +371,22 @@ Every state is URL-addressable for deep linking and sharing:
 /workspaces/:slug/settings                 → workspace settings
 /workspaces/:slug/standards                → meta-spec management
 /workspaces/:slug/decisions                → full decisions list
-/workspaces/:slug/:repo                    → repo mode, Specs tab (default)
-/workspaces/:slug/:repo/specs              → repo Specs tab
-/workspaces/:slug/:repo/architecture       → repo Architecture tab
-/workspaces/:slug/:repo/decisions          → repo Decisions tab
-/workspaces/:slug/:repo/code               → repo Code tab
-/workspaces/:slug/:repo/settings           → repo Settings tab
-/workspaces/:slug/:repo/specs?path=auth.md → specific spec detail
-/workspaces/:slug/:repo/architecture?detail=node:uuid → specific node detail
+/workspaces/:slug/r/:repo                    → repo mode, Specs tab (default)
+/workspaces/:slug/r/:repo/specs              → repo Specs tab
+/workspaces/:slug/r/:repo/architecture       → repo Architecture tab
+/workspaces/:slug/r/:repo/decisions          → repo Decisions tab
+/workspaces/:slug/r/:repo/code               → repo Code tab
+/workspaces/:slug/r/:repo/settings           → repo Settings tab
+/workspaces/:slug/r/:repo/specs?path=auth.md → specific spec detail
+/workspaces/:slug/r/:repo/architecture?detail=node:uuid → specific node detail
+/profile                                   → user profile (HSI §12, outside workspace hierarchy)
 ```
 
-**URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). This produces readable URLs: `/workspaces/payments/payment-api/specs` instead of `/workspaces/90b1c214/repos/a3f2b1c4/specs`.
+**URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). Repos are nested under a `/r/` segment to avoid collision with reserved workspace paths (`settings`, `standards`, `decisions`). This produces readable URLs: `/workspaces/payments/r/payment-api/specs`.
+
+**Reserved workspace paths:** `settings`, `standards`, `decisions`. These are workspace-level pages and cannot be used as repo names. The server rejects repo creation with these names (400 error).
+
+**Profile URL:** `/profile` is preserved outside the `/workspaces/...` hierarchy (it is user-scoped, not workspace-scoped).
 
 **Migration from old URLs:** The server should support legacy URL redirects. Old HSI-style URLs (`/repos/:uuid/explorer`, `/workspaces/:uuid/inbox`) are redirected (301) to the new structure by looking up the workspace slug and repo name from the UUID. The `/profile` URL is preserved as-is (outside the `/workspaces/...` hierarchy). This ensures existing bookmarks and CI integrations continue to work.
 
@@ -394,8 +401,8 @@ Full layout as described above. Workspace home sections stack vertically. Repo m
 Same layout, detail panels become full-width overlays instead of side panels.
 
 ### Mobile (<768px)
-- Top bar: hamburger menu replaces workspace name (opens workspace home sections as a drawer)
-- Repo mode: tabs become a scrollable horizontal strip or a bottom tab bar
+- Top bar: hamburger icon opens a navigation drawer listing workspace home sections (Decisions, Repos, Briefing, Agent Rules) as links — not full content, just navigation to scroll anchors on the workspace home page
+- Repo mode: tabs become a **scrollable horizontal strip** pinned below the top bar (not a bottom tab bar — bottom bars conflict with mobile browser chrome)
 - Detail panels become full-screen modals
 - Meta-spec editor: left/right panels stack vertically (registry above, editor below)
 - Graph canvas: falls back to list view (already implemented in ExplorerCanvas)
