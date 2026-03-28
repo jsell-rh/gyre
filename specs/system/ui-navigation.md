@@ -55,7 +55,7 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 
 - **[←] Back arrow**: Returns to workspace home. Always visible in repo mode.
 - **Workspace / Repo path**: Shows context. Clicking "Payments" returns to workspace home (same as back arrow). The repo name is not clickable (you're already there).
-- **Decisions badge**: In repo mode, shows count for THIS repo only. Clicking opens the Decisions tab.
+- **Decisions badge**: In repo mode, shows count for THIS repo only (excludes workspace-scoped notifications with `repo_id: NULL` per HSI §1). This is intentional — workspace-scoped items are visible on the workspace home, which the user sees first on every app open. Clicking opens the Decisions tab.
 
 ### Status Bar (bottom, always visible)
 
@@ -123,7 +123,8 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - Each item shows: type icon, description, which repo, inline action buttons (Approve/Reject/Retry).
 - "View all" expands to a full-page decisions list with filtering by type, repo, priority.
 - Data source: `GET /api/v1/users/me/notifications` (the notification system, not raw MR/spec queries).
-- Items include both actionable decisions (gate failures, spec approvals) and informational alerts (trust suggestions, spec assertions). All use the HSI §8 priority system. The name "Decisions" emphasizes that this surface is for human judgment, even when some items are informational — the human decides whether to act on them or dismiss them.
+- Surfaces ALL 10 notification types from HSI §8 (agent clarification, spec approval, gate failure, cross-workspace spec change, conflicting interpretations, meta-spec drift, budget warning, trust suggestion, spec assertion, suggested spec link). Items include both actionable decisions and informational alerts. The name "Decisions" emphasizes that this surface is for human judgment, even when some items are informational — the human decides whether to act on them or dismiss them.
+- **Trust-level filtering:** The workspace's trust level controls which priority levels are shown, per HSI §2 "Inbox priorities shown" row. At Guided/Autonomous trust, priority-10 items (suggested links) are excluded. This is client-side filtering on the notification query (same as the old Inbox). Custom trust shows all priorities.
 - When empty: shows "No decisions needed — system is running autonomously." This is the ideal state.
 
 **Specs** (cross-repo spec overview):
@@ -343,7 +344,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 
 ### Daily Flow
 
-1. Open app → **always workspace home first** (even if last repo is stored). This ensures workspace-scoped decisions (with `repo_id: NULL`) are never missed. The last-used repo is remembered and pre-selected in the repo dropdown, one click away. If there are zero unresolved decisions, the user can click their repo immediately.
+1. Open app → **always workspace home first** (even if last repo is stored). This ensures workspace-scoped decisions (with `repo_id: NULL`) are never missed. The last-used repo is remembered and highlighted in the workspace home Repos section, one click away. If there are zero unresolved decisions, the user can click their repo immediately.
 2. Glance at Decisions count in top bar — any urgent items?
 3. If decisions exist: handle them (approve specs, retry gates)
 4. Click repo to focus → Specs tab shows implementation progress
@@ -516,7 +517,8 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 |---|---|
 | `human-system-interface.md` §1 | Navigation model replaced by this spec. The nav scope table (what each nav item shows at each scope) is replaced by §2-§3 of this spec. Deep link URLs change to the new structure (§7). Keyboard shortcuts updated (§6). |
 | `ui-layout.md` §1 | Application shell changes: no persistent sidebar, topbar layout updated. Content area layouts (§2-§4 of ui-layout) remain valid. Status bar unchanged. |
-| `ui-layout.md` §2 | Full-Width layout used by workspace home. Split layout used by repo mode tabs + detail panel. Canvas+Controls used by Architecture tab. Editor Split used by meta-spec management. All layouts preserved; the views that USE them change. |
+| `ui-layout.md` §2 | Full-Width layout used by workspace home and repo Decisions/Code tabs. Split layout used by repo Specs tab + detail panel. Canvas+Controls used by Architecture tab. Editor Split used by meta-spec management. All layouts preserved; the views that USE them change. |
+| `ui-layout.md` §5 | The Explorer's Code sub-tab (Architecture/Code toggle in the control bar) is moved to a separate repo-mode tab. The Architecture tab no longer has a Code sub-tab — Code is a peer tab. |
 | `human-system-interface.md` §8 | Inbox becomes "Decisions" throughout. Priority types and notification system unchanged — only the UI surface name and location change. |
 | `human-system-interface.md` §9 | Briefing becomes a section in workspace home (not a standalone nav item) and a sub-tab in the Architecture tab at repo scope. Q&A endpoint amended to accept optional `repo_id` in request body. Briefing detail and data sources unchanged. |
 | `repo-lifecycle.md` §1 | Repo management moves from "Admin → Repos tab" to workspace home Repos section (create/import) and repo settings tab (configure/archive/delete). |
