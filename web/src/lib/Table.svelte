@@ -5,6 +5,7 @@
     sortKey = $bindable(null),
     sortDir = $bindable('asc'),
     onrowclick = undefined,
+    caption = undefined,
     children,
   } = $props();
 
@@ -20,6 +21,9 @@
 
 <div class="table-wrap">
   <table>
+    {#if caption}
+      <caption class="sr-only">{caption}</caption>
+    {/if}
     <thead>
       <tr>
         {#each columns as col}
@@ -55,9 +59,12 @@
           <tr
             class:clickable={!!onrowclick}
             onclick={onrowclick ? () => onrowclick(row) : undefined}
+            onkeydown={onrowclick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onrowclick(row); } } : undefined}
+            tabindex={onrowclick ? 0 : undefined}
+            role={onrowclick ? 'button' : undefined}
           >
             {#each columns as col}
-              <td>{row[col.key] ?? ''}</td>
+              <td>{row[col.key] ?? '\u2014'}</td>
             {/each}
           </tr>
         {/each}
@@ -153,6 +160,18 @@
 
   tbody tr.clickable {
     transition: background var(--transition-fast);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {

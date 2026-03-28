@@ -303,6 +303,7 @@
         <div class="all-entries">
           <h3 class="all-entries-title">All Entries</h3>
           <table class="entries-table">
+            <caption class="sr-only">All merge queue entries</caption>
             <thead>
               <tr>
                 <th scope="col">MR ID</th>

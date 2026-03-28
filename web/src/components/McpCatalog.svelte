@@ -67,6 +67,7 @@
         {#each tools as tool (tool.name)}
           <div class="tool-card" class:expanded={expandedTool === tool.name}>
             <button class="tool-header" onclick={() => toggle(tool.name)}
+              onkeydown={(e) => { if (e.key === 'Escape' && expandedTool === tool.name) { e.stopPropagation(); expandedTool = null; } }}
               aria-expanded={expandedTool === tool.name}
               aria-label="Toggle details for {tool.name}">
               <div class="tool-title-row">

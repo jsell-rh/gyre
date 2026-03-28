@@ -188,8 +188,8 @@
   <!-- Workspace scope: repo list for graph exploration — S4.4b -->
   <div class="ws-repo-list" aria-busy={wsReposLoading}>
     <div class="ws-repo-header">
-      <h2>{workspaceName ? `${workspaceName} — Repositories` : 'Workspace Repositories'}</h2>
-      <p class="ws-repo-desc">Select a repository to explore its knowledge graph</p>
+      <h1 class="page-title">Workspace Architecture</h1>
+      <p class="ws-repo-desc">Select a workspace repository to explore its knowledge graph</p>
     </div>
     {#if wsReposLoading}
       <div class="ws-repo-grid">
@@ -232,7 +232,7 @@
     <!-- Header -->
     <div class="explorer-header">
       <div class="header-left">
-        <h2>System Explorer</h2>
+        <h1 class="page-title">System Explorer</h1>
         <p class="subtitle">Realized architecture — navigate the living knowledge graph</p>
       </div>
       <div class="header-right">
@@ -417,7 +417,7 @@
     height: 100%;
   }
 
-  .ws-repo-header h2 {
+  .ws-repo-header .page-title {
     margin: 0 0 var(--space-1);
     font-size: var(--text-xl);
     font-weight: 600;
@@ -522,7 +522,7 @@
     flex-wrap: wrap;
   }
 
-  .header-left h2 {
+  .header-left .page-title {
     margin: 0 0 var(--space-1);
     font-size: var(--text-xl);
     font-weight: 600;
