@@ -334,7 +334,7 @@
   function onMouseUp() { isPanning = false; }
 
   // ── Touch handlers (parity with mouse for mobile/tablet) ────────────────
-  let lastTouchDist = $state(0);
+  let lastTouchDist = 0;
 
   function onTouchStart(e) {
     if (e.touches.length === 1) {
