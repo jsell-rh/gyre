@@ -53,7 +53,7 @@
     diffLoading = true;
     try {
       diff = await api.mrDiff(mr.id);
-      if (diff.files && diff.files.length > 0) {
+      if (diff?.files?.length > 0) {
         selectedFile = diff.files[0].path;
       }
     } catch (e) {
@@ -126,7 +126,7 @@
     removingDepId = depId;
     try {
       await api.removeMrDependency(mr.id, depId);
-      deps = { ...deps, depends_on: deps.depends_on.filter(id => id !== depId) };
+      deps = { ...deps, depends_on: (deps?.depends_on ?? []).filter(id => id !== depId) };
       toastSuccess('Dependency removed.');
     } catch (e) {
       toastError(e.message);
@@ -136,8 +136,7 @@
   }
 
   function relativeTime(ts) {
-    if (!ts) return '';
-    const msTs = typeof ts === 'string' ? new Date(ts).getTime() : (ts < 1e12 ? ts * 1000 : ts);
+    if (ts == null) return '—';
     const now = Date.now();
     const diff = Math.floor((now - msTs) / 1000);
     if (diff < 0) return 'just now';
@@ -148,6 +147,7 @@
   }
 
   function formatDate(ts) {
+    if (ts == null) return '—';
     return new Date(ts * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
   }
 
