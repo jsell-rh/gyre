@@ -154,11 +154,14 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - "Ask a question" opens the briefing Q&A chat (HSI §9).
 - Data source: `GET /api/v1/workspaces/:id/briefing` (existing).
 
-**Agent Rules** (workspace-level meta-specs):
-- Summary of active meta-specs (personas, principles, standards, process norms) at the workspace level.
-- Shows required meta-specs prominently (these apply to every agent in every repo).
-- "Manage rules" opens the meta-spec management surface (§4).
-- Data source: `GET /api/v1/meta-specs?scope=Workspace&scope_id=:id` (per `agent-runtime.md` §2).
+**Agent Rules** (meta-spec cascade summary):
+- Shows the **full effective meta-spec set** for this workspace — not just workspace-level rules, but the complete cascade:
+  - **Tenant (inherited)**: Required tenant meta-specs shown with a 🔒 lock icon and "Tenant" badge. These apply to every agent in every workspace. Cannot be edited here (managed by tenant admins via cross-workspace view §10).
+  - **Workspace**: Workspace-level meta-specs (both required and optional). Required ones shown with 🔒. Optional ones available for spec-level binding.
+  - **Effective set**: Combined view showing what agents in this workspace will actually receive. Required tenant + required workspace = the mandatory prompt set. Optional ones are available for spec authors to select.
+- "Manage rules" opens the meta-spec management surface (§4) for workspace-level editing.
+- "View tenant rules" link navigates to the cross-workspace Agent Rules section for browsing (and editing, if tenant admin).
+- Data source: `GET /api/v1/meta-specs?scope=Workspace&scope_id=:id` merged with `GET /api/v1/meta-specs?scope=Global&required=true` for the inherited tenant rules.
 
 ### Workspace Settings
 
@@ -215,7 +218,15 @@ The primary tab. Shows the spec registry for this repo with implementation progr
 - Click a spec → detail panel slides in from right (HSI existing detail panel pattern) showing:
   - Content (spec text, editable with LLM assist)
   - Progress (tasks, agents, MRs linked to this spec)
-  - Meta-spec bindings (which meta-specs are bound, pinned versions) — the binding editor shows available meta-specs from the workspace registry inline (no need to navigate to the Agent Rules page). Required meta-specs are shown as locked. The user selects optional meta-specs and pins versions directly in the spec detail panel.
+  - Meta-spec bindings — shows the **effective prompt set** for this spec's implementation:
+    - **Required (locked)**: Tenant-required and workspace-required meta-specs, shown with 🔒 icon. Cannot be removed. These are what every agent implementing this spec will receive.
+    - **Bound (author's selections)**: Optional meta-specs the spec author explicitly selected from the tenant/workspace registry, with pinned version numbers. The binding editor shows available meta-specs inline (no need to navigate to the Agent Rules page) grouped by kind (Persona, Principle, Standard, Process).
+    - **Stale pins**: If a bound meta-spec has a newer approved version than the pinned one, a warning badge shows "v3 pinned, v5 available" with a one-click "Update pin" action.
+    - The binding editor is the spec author's primary tool for directing HOW agents implement this spec (vision §2: "Set direction on how to build it").
+  - Preview — inline preview controls for this spec:
+    - "Predict" button → fast ghost overlay (2-5 seconds, structural prediction via `POST /repos/:id/graph/predict`)
+    - "Preview" button → thorough preview (spawns agent on throwaway branch, shows real code diff + architecture delta). Uses the Editor Split layout (ui-layout.md §9).
+    - Preview results shown inline in the detail panel — architecture diff and code diff tabs.
   - Links (cross-workspace spec links)
   - History (approval ledger, version history)
   - Ask Why (interrogation agent for the implementing agent)
@@ -224,21 +235,43 @@ The primary tab. Shows the spec registry for this repo with implementation progr
 
 **This tab closes the spec-to-execution gap.** You see a spec AND its implementation progress in one place. No switching to Explorer to find what code was produced.
 
-### Tab: Architecture
+### Tab: Architecture (Moldable Development Surface)
 
-The system explorer for this repo. Shows the realized architecture (knowledge graph).
+The system explorer for this repo. This is where **moldable development** lives — the user shapes their view of the system to match how they think about it. The architecture is not a fixed diagram; it's a queryable, composable, LLM-augmented exploration surface.
 
-**Content:**
-- Graph canvas (C4 progressive drill-down per `system-explorer.md`)
-- Three sub-tabs in the control bar: **Graph** (default), **Timeline**, and **Briefing**
-- Control bar: Lens selector (Structural/Evaluative/Observable), view selector, search (`/`), Ask input
-- Ghost overlays for structural prediction (HSI §3, Phase 1)
-- Flow view available via view selector (when trace data exists)
-- **Briefing sub-tab**: Full repo-scoped narrative view (not a collapsed panel — a full content area) with time range selector and "Ask a question" Q&A capability. Same structure as workspace home briefing but scoped to this repo via `?repo_id=` parameter on both the briefing endpoint and the Q&A endpoint (amends HSI §9: add optional `repo_id` field to `POST /workspaces/:id/briefing/ask` request body to scope Q&A to a specific repo). This gives the briefing proper space for the narrative + Q&A chat, rather than cramming it above the graph.
+**Canvas and Controls:**
+- Graph canvas with pan, zoom, C4 progressive drill-down (per `system-explorer.md`)
+- Control bar:
+  - **Lens selector**: Structural (default) / Evaluative / Observable. Each lens overlays different data on the same graph. Structural shows boundaries and dependencies. Evaluative shows test results, gate outcomes, spec coverage, risk metrics. Observable shows production telemetry (future). Lenses compose — you can view the domain model (structural) with test coverage overlay (evaluative).
+  - **View selector**: Boundary View (default), Spec Realization, Change View, saved views (user-curated), LLM-generated views (ephemeral). The view selector is a dropdown listing built-in views, then user's saved views, then a "Generate view..." option.
+  - **Search** (`/`): Canvas-local search, highlights matching nodes.
+  - **Ask input**: Natural language → `POST /workspaces/:workspace_id/explorer-views/generate`. LLM translates the question into a view spec (data query + layout + encoding) and renders it immediately. Generated views are ephemeral — the user can save explicitly via the saved views CRUD. Examples: "How does authentication work?", "Show me the payment retry flow", "What has the highest churn in the last 30 days?"
+- **In-view filter panel** (200px, collapsible left panel): Category filters — Boundaries, Interfaces, Data, Specs. Toggle via filter icon in the control bar. Not part of the sidebar — inside the Architecture content area.
 
-**Agent discovery:** The Architecture tab is the primary surface for finding agents. Active agent count is shown per graph node (repo boundary view shows agent badges on nodes). Clicking an agent badge opens the agent detail panel with Pause/Stop/Message controls (HSI §4). The workspace orchestrator is also reachable from the workspace home's Repos section (clicking the agent count on a repo row opens the agent list for that repo in a modal). This ensures agents are always discoverable without a dedicated Agent tab — agents are visible in the context of the architecture they're modifying.
+**View Spec Grammar (per `ui-layout.md` §4):**
+Every view (built-in, saved, or generated) is a declarative JSON specification with four layers: Data (what to query), Layout (how to arrange — graph, hierarchical, layered, list, timeline, side-by-side, diff, flow), Encoding (how to visualize — color, size, border, opacity, labels), and Highlight (what to emphasize). The grammar is the shared language between the user, saved views, and the LLM. Users can inspect and edit the view spec directly if they want fine-grained control.
 
-**This tab is "understand what the system IS."** The graph, the timeline, the flow visualization, the LLM-generated views — all here.
+**Saved Views:**
+- Users curate views by adjusting filters, layout, encoding, and save them for reuse.
+- Stored per workspace, shareable with all workspace members.
+- CRUD via `GET/POST/PUT/DELETE /workspaces/:workspace_id/explorer-views`.
+- Built-in saved views shipped with every workspace: API Surface, Domain Model, Security Boundary, Test Coverage.
+- The view selector dropdown shows: built-in views → user's saved views → "Generate view..." option.
+
+**Ghost Overlays (Phase 1 — structural prediction):**
+When editing a spec (from the Specs tab detail panel → Edit), the Architecture canvas shows **ghost nodes** — predicted structural changes rendered as dotted outlines with color-coded meaning (green = new, yellow = modified, red = removed). These appear within 2-5 seconds of editing via `POST /repos/:id/graph/predict`. Ghost overlays give fast, probabilistic feedback; the full preview loop (spawn agent on throwaway branch) gives certain feedback.
+
+**Flow View:**
+Available via the view selector when trace data exists. Animated particle visualization (Vizceral-inspired) showing how data flows through the system during test execution. Particles travel along edges between graph nodes, colored by test case. Playback controls: play/pause/step/speed/scrub/test-selector. Data from OTel traces captured by `TraceCapture` gate (per HSI §3a). When no trace data exists, the flow view shows an empty state explaining how to enable trace capture.
+
+**Sub-tabs in the control bar:**
+- **Graph** (default): The moldable graph canvas with all the above features.
+- **Timeline**: Architectural history scrubber. Shows `ArchitecturalDelta` records on a horizontal timeline. Scrub to see how the architecture evolved. Click a delta marker to see commit SHA, agent, spec, and change summary.
+- **Briefing**: Full repo-scoped narrative view with time range selector and "Ask a question" Q&A. Same structure as workspace home briefing but scoped to this repo via `?repo_id=` parameter (amends HSI §9: add optional `repo_id` field to `POST /workspaces/:id/briefing/ask` request body).
+
+**Agent discovery:** Active agent count shown per graph node (boundary view shows agent badges). Clicking an agent badge opens the agent detail panel with Pause/Stop/Message controls (HSI §4). Also accessible from the repo header agent count (§3 Repo Header).
+
+**This tab is "understand what the system IS and how it changes."** It is the primary surface for vision §3 (maintain understanding), §4 (structure is discovered), and §5 (feedback loop — the Observe/Understand steps).
 
 ### Tab: Decisions
 
@@ -312,23 +345,39 @@ This is the **creative surface** for encoding organizational judgment (vision §
 └──────────────────────────────────────────────────────────┘
 ```
 
-**Left panel — Registry:**
-- List of all meta-specs in this workspace + ALL tenant meta-specs (required ones shown as locked, optional ones available for workspace-level binding or spec-level binding)
-- Grouped by kind (Persona, Principle, Standard, Process)
-- Shows name, version, approval status indicator
-- "+ New Meta-Spec" button
+**Left panel — Registry (cascade view):**
+- Shows the **full meta-spec cascade** visible from this workspace:
+  - **Tenant (inherited)**: Tenant-level meta-specs grouped by kind. Required ones shown with 🔒 — always injected, cannot be edited here. Optional tenant meta-specs shown with "Tenant" badge — available for workspace-level binding or spec-level binding. Editing tenant meta-specs requires navigating to the cross-workspace Agent Rules surface (link provided).
+  - **Workspace**: Workspace-level meta-specs grouped by kind. Editable by workspace admins.
+  - **Effective set summary**: At the top of the registry, a compact summary: "Agents in this workspace receive: 2 required tenant rules + 1 required workspace rule + spec-level selections."
+- Grouped by kind within each scope level (Persona, Principle, Standard, Process)
+- Shows name, version, approval status indicator (✓ approved, ⏳ pending, ✗ rejected)
+- "+ New Meta-Spec" button (creates at workspace scope)
 - Click to select → loads in editor
 
 **Right panel — Editor:**
 - Prompt text editor (the meta-spec content)
-- Approval status with Approve/Reject buttons (human-only)
-- Required toggle (workspace admin only, per `agent-runtime.md` §2)
-- Version history (expandable, shows all previous versions with diff)
-- Impact panel (blast radius — which repos and specs are affected)
-- Preview button → launches preview loop (meta-spec-reconciliation preview)
-- Inline LLM chat for editing assistance
+- **Scope and inheritance indicator**: Shows which scope this meta-spec belongs to (Tenant/Workspace) and whether it's required. For tenant meta-specs, the editor is read-only at workspace level (tenant admins edit via cross-workspace view).
+- Approval status with Approve/Reject buttons (human-only, per `agent-runtime.md` §2 approval lifecycle — editing resets to Pending)
+- Required toggle (workspace admin only for workspace-scoped; tenant admin only for tenant-scoped)
+- Version history (expandable, shows all previous versions with inline diff between versions)
+- **Impact panel (always visible, not behind a tab)**:
+  - Blast radius: which repos and specs are affected by this meta-spec
+  - Stale pins: which specs still pin an older version of this meta-spec
+  - Drift status: which code was produced under an older version (from attestation `meta_specs_used` records)
+- **Preview loop** (per `meta-spec-reconciliation.md` §5):
+  1. Edit the prompt text in the editor
+  2. Select 1-3 real specs from repos in the workspace (spec selector checklist)
+  3. Click "Preview" → agents spawn with the draft meta-spec on throwaway branches
+  4. Progress shown inline (per-spec: running/complete indicators)
+  5. Results shown as: Architecture delta (structural impact) + Code diff (actual code changes)
+  6. Iterate: edit again → preview again → repeat until satisfied (typically 3-8 iterations)
+  7. Click "Publish" → commits the meta-spec change, triggers approval workflow
+  8. Preview branches are ephemeral (auto-deleted after 24 hours)
+- Inline LLM chat for editing assistance ("make this stricter about null handling", "add error retry guidance")
+- **Reconciliation status**: After publishing and approving a required meta-spec change, shows reconciliation progress — which repos have been re-implemented, which are pending, which are in progress.
 
-**This is the "power tool" for encoding judgment.** Impact is always visible, not hidden behind a tab. The preview loop is one click away. The approval workflow is inline.
+**This is the "power tool" for encoding judgment** (vision §2: "Set direction on how to build it" and §5: "Discover and encode"). Impact and drift are always visible. The preview loop is the primary interaction — edit, preview, iterate, publish. The approval workflow is inline. The reconciliation progress shows the cascade propagating through the system.
 
 ---
 
