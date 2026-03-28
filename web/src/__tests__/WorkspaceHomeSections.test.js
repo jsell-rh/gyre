@@ -347,21 +347,21 @@ describe('Decisions section', () => {
     });
   });
 
-  it('shows "View all" link when there are decisions', async () => {
+  it('shows "View all" button when there are decisions', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
-      const link = container.querySelector('[data-testid="section-decisions"] .section-action');
-      expect(link).toBeTruthy();
-      expect(link.textContent.trim()).toBe('View all');
+      const btn = container.querySelector('[data-testid="section-decisions"] .section-action-btn');
+      expect(btn).toBeTruthy();
+      expect(btn.textContent.trim()).toBe('View all');
     });
   });
 
-  it('does not show "View all" link when empty', async () => {
+  it('does not show "View all" button when empty', async () => {
     api.myNotifications.mockResolvedValue([]);
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
-      const link = container.querySelector('[data-testid="section-decisions"] .section-action');
-      expect(link).toBeFalsy();
+      const btn = container.querySelector('[data-testid="section-decisions"] .section-action-btn');
+      expect(btn).toBeFalsy();
     });
   });
 
@@ -655,10 +655,11 @@ describe('Agent Rules section', () => {
     });
   });
 
-  it('shows "Manage rules" link with correct href', async () => {
+  it('shows "Manage rules" button', async () => {
     const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    const link = getByTestId('manage-rules-link');
-    expect(link.getAttribute('href')).toBe('/workspaces/payments/agent-rules');
+    const btn = getByTestId('manage-rules-link');
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.textContent.trim()).toBe('Manage rules');
   });
 
   it('shows reconcile status when meta-specs recently updated', async () => {

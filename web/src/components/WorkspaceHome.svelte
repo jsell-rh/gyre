@@ -318,7 +318,7 @@
             {/if}
           </h2>
           {#if notifications.length > 0}
-            <a class="section-action" href="/workspaces/{workspace.slug ?? workspace.id}/decisions">View all</a>
+            <button class="section-action-btn" onclick={() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>View all</button>
           {/if}
         </div>
         <div class="section-body">
@@ -326,7 +326,10 @@
             <div class="skeleton-row"></div>
             <div class="skeleton-row"></div>
           {:else if decisionsError}
-            <p class="error-text" role="alert">{decisionsError}</p>
+            <div class="error-row" role="alert">
+              <p class="error-text">{decisionsError}</p>
+              <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">Retry</button>
+            </div>
           {:else if notifications.length === 0}
             <p class="empty-text" data-testid="decisions-empty">No decisions needed — system is running autonomously.</p>
           {:else}
@@ -395,7 +398,10 @@
             <div class="skeleton-row"></div>
             <div class="skeleton-row"></div>
           {:else if reposError}
-            <p class="error-text" role="alert">{reposError}</p>
+            <div class="error-row" role="alert">
+              <p class="error-text">{reposError}</p>
+              <button class="retry-btn" onclick={loadRepos} aria-label="Retry loading repos">Retry</button>
+            </div>
           {:else if repos.length === 0}
             <p class="empty-text" data-testid="repos-empty">No repositories yet.</p>
           {:else}
@@ -430,8 +436,8 @@
             </ul>
           {/if}
           <div class="repo-actions">
-            <button class="section-btn" data-testid="btn-new-repo">+ New Repo</button>
-            <button class="section-btn" data-testid="btn-import-repo">Import</button>
+            <button class="section-btn" data-testid="btn-new-repo" disabled title="Coming soon">+ New Repo</button>
+            <button class="section-btn" data-testid="btn-import-repo" disabled title="Coming soon">Import</button>
           </div>
         </div>
       </section>
@@ -471,7 +477,10 @@
             <div class="skeleton-row"></div>
             <div class="skeleton-row"></div>
           {:else if specsError}
-            <p class="error-text" role="alert">{specsError}</p>
+            <div class="error-row" role="alert">
+              <p class="error-text">{specsError}</p>
+              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">Retry</button>
+            </div>
           {:else if filteredSpecs.length === 0}
             <p class="empty-text" data-testid="specs-empty">
               {specsStatusFilter ? 'No specs with that status.' : 'No specs yet.'}
@@ -524,16 +533,16 @@
       <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
         <div class="section-header">
           <h2 class="section-title" id="section-agent-rules">Agent Rules</h2>
-          <a class="section-action" href="/workspaces/{workspace.slug ?? workspace.id}/agent-rules"
-             data-testid="manage-rules-link"
-             onclick={(e) => { e.preventDefault(); window.history.pushState({ mode: 'workspace_home', wsId: workspace.id, repoName: null, repoTab: 'specs' }, '', `/workspaces/${encodeURIComponent(workspace.slug ?? workspace.id)}/agent-rules`); }}
-          >Manage rules</a>
+          <button class="section-action-btn" data-testid="manage-rules-link">Manage rules</button>
         </div>
         <div class="section-body">
           {#if rulesLoading}
             <div class="skeleton-row"></div>
           {:else if rulesError}
-            <p class="error-text" role="alert">{rulesError}</p>
+            <div class="error-row" role="alert">
+              <p class="error-text">{rulesError}</p>
+              <button class="retry-btn" onclick={loadRules} aria-label="Retry loading agent rules">Retry</button>
+            </div>
           {:else}
             <p class="rules-summary" data-testid="rules-summary">
               {allMetaSpecs.length} meta-spec{allMetaSpecs.length !== 1 ? 's' : ''} active
@@ -663,14 +672,23 @@
     font-weight: 700;
   }
 
-  .section-action {
+  .section-action-btn {
     font-size: var(--text-xs);
     color: var(--color-primary);
-    text-decoration: none;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    padding: 0;
   }
 
-  .section-action:hover {
+  .section-action-btn:hover {
     text-decoration: underline;
+  }
+
+  .section-action-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .section-body {
@@ -705,10 +723,39 @@
   }
 
   /* ── Error / empty ──────────────────────────────────────────────────── */
+  .error-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .error-text {
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-danger);
+  }
+
+  .retry-btn {
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .retry-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .empty-text {
@@ -1107,10 +1154,15 @@
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 
-  .section-btn:hover {
+  .section-btn:hover:not(:disabled) {
     background: var(--color-surface);
     border-color: var(--color-primary);
     color: var(--color-primary);
+  }
+
+  .section-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .section-btn:focus-visible {
@@ -1123,7 +1175,7 @@
       padding: var(--space-4);
     }
 
-    .spec-meta,
+    .spec-progress,
     .spec-activity {
       display: none;
     }
@@ -1131,6 +1183,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .skeleton-row { animation: none; }
-    .inline-btn, .section-btn, .repo-btn, .filter-select { transition: none; }
+    .inline-btn, .section-btn, .repo-btn, .filter-select, .retry-btn { transition: none; }
   }
 </style>
