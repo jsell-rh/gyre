@@ -289,8 +289,6 @@
       nodePositionsMap = columnLayout(ns);
       layoutPending = false;
     });
-
-    return () => { cancelled = true; };
   });
 
   function getPos(id) { return nodePositionsMap[id] ?? { x: 400, y: 300 }; }
