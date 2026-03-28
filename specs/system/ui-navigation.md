@@ -162,7 +162,8 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - If reconciliation is in progress (any required meta-spec was recently updated), shows a reconciliation status bar: "Reconciling: 3/5 repos updated" with a link to the meta-spec management page for details.
 - "Manage rules" opens the meta-spec management surface (§4) for workspace-level editing.
 - "View tenant rules" link navigates to the cross-workspace Agent Rules section for browsing (and editing, if tenant admin).
-- Data source: `GET /api/v1/meta-specs?scope=Workspace&scope_id=:id` merged with `GET /api/v1/meta-specs?scope=Global&required=true` for the inherited tenant rules.
+- Data source: `GET /api/v1/meta-specs?scope=Workspace&scope_id=:id` merged with `GET /api/v1/meta-specs?scope=Global` (ALL tenant meta-specs, not just required — optional tenant meta-specs need to be visible for spec-level binding selection). The spec-level binding editor in the Specs tab detail panel uses the same merged data source.
+- **Stale pins aggregation**: If any specs in any repo have stale meta-spec pins (pinned to an older version than current approved), a warning badge appears: "N specs have stale pins" linking to the workspace-home Specs section filtered to show stale-pinned specs.
 
 ### Workspace Settings
 
@@ -225,9 +226,9 @@ The primary tab. Shows the spec registry for this repo with implementation progr
     - **Stale pins**: If a bound meta-spec has a newer approved version than the pinned one, a warning badge shows "v3 pinned, v5 available" with a one-click "Update pin" action.
     - The binding editor is the spec author's primary tool for directing HOW agents implement this spec (vision §2: "Set direction on how to build it").
   - Preview — inline preview controls for this spec:
-    - "Predict" button → fast ghost overlay (2-5 seconds, structural prediction via `POST /repos/:id/graph/predict`)
-    - "Preview" button → thorough preview (spawns agent on throwaway branch, shows real code diff + architecture delta). Uses the Editor Split layout (ui-layout.md §9).
-    - Preview results shown inline in the detail panel — architecture diff and code diff tabs.
+    - "Predict" button → fast ghost overlay (2-5 seconds, structural prediction via `POST /repos/:id/graph/predict`). Results shown as a mini architecture canvas embedded in the detail panel showing ghost nodes (dotted outlines) on the relevant subgraph. This does NOT require switching to the Architecture tab — the preview canvas is embedded in the detail panel.
+    - "Preview" button → thorough preview (spawns agent on throwaway branch, shows real code diff + architecture delta). Clicking "Preview" **pops the detail panel to full width** (the existing Pop Out mechanism per `ui-layout.md` §2) and switches to the **Editor Split layout** (`ui-layout.md` §9): left panel = spec editor + LLM chat, right panel = live architecture preview canvas with real ghost nodes + code diff tabs. Back/Esc returns to the normal detail panel.
+    - This ensures the edit-predict-observe loop works without tab switching — the preview surfaces are embedded in the spec editing context.
   - Links (cross-workspace spec links)
   - Assertions — executable spec assertions (`<!-- gyre:assert ... -->`) with inline results: ✓ green checkmark for passing, ✗ red X for failing. Per `system-explorer.md` §9.
   - History (approval ledger, version history)
@@ -244,7 +245,7 @@ The system explorer for this repo. This is where **moldable development** lives 
 **Canvas and Controls:**
 - Graph canvas with pan, zoom, C4 progressive drill-down (per `system-explorer.md`)
 - Control bar:
-  - **Lens selector**: Structural (default) / Evaluative / Observable. Each lens overlays different data on the same graph. Structural shows boundaries and dependencies. Evaluative shows test results, gate outcomes, spec coverage, risk metrics. Observable shows production telemetry (future). Lenses compose — you can view the domain model (structural) with test coverage overlay (evaluative).
+  - **Lens selector**: Checkbox group (not a dropdown — checkboxes allow multi-select for composition). Structural (always on) + Evaluative (toggle) + Observable (toggle, future). Structural shows boundaries and dependencies. Evaluative overlays test results, gate outcomes, spec coverage, risk metrics. Observable overlays production telemetry (future). Lenses compose: Structural is always the base layer; Evaluative and Observable are additive overlays toggled independently.
   - **View selector**: Boundary View (default), Spec Realization, Change View, saved views (user-curated), LLM-generated views (ephemeral). The view selector is a dropdown listing built-in views, then user's saved views, then a "Generate view..." option.
   - **Search** (`/`): Canvas-local search, highlights matching nodes.
   - **Ask input**: Natural language → `POST /workspaces/:workspace_id/explorer-views/generate`. LLM translates the question into a view spec (data query + layout + encoding) and renders it immediately. Generated views are ephemeral — the user can save explicitly via the saved views CRUD. Examples: "How does authentication work?", "Show me the payment retry flow", "What has the highest churn in the last 30 days?"
@@ -589,6 +590,8 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 | `ui-layout.md` §1 | Application shell changes: no persistent sidebar, topbar layout updated. Content area layouts (§2-§4 of ui-layout) remain valid. Status bar unchanged. |
 | `ui-layout.md` §2 | Full-Width layout used by workspace home and repo Decisions/Code tabs. Split layout used by repo Specs tab + detail panel. Canvas+Controls used by Architecture tab. Editor Split used by meta-spec management. All layouts preserved; the views that USE them change. |
 | `ui-layout.md` §5 | The Explorer's Code sub-tab (Architecture/Code toggle in the control bar) is moved to a separate repo-mode tab. The Architecture tab no longer has a Code sub-tab — Code is a peer tab. |
+| `system-explorer.md` header note | Ghost overlays are NOT deferred — they are Phase 1 priority (consistent with system-explorer.md §3 body text, which says "more valuable than the thorough preview"). The header deferral note should be removed. |
+| `system-explorer.md` §4, §7, §8, §9 | Concept Views (§4), Risk Map (§7), Conversational Exploration (§8), and Executable Spec Assertions (§9) are all surfaced in the Architecture tab and Specs tab as described in this spec §3. |
 | `human-system-interface.md` §8 | Inbox becomes "Decisions" throughout. Priority types and notification system unchanged — only the UI surface name and location change. |
 | `human-system-interface.md` §9 | Briefing becomes a section in workspace home (not a standalone nav item) and a sub-tab in the Architecture tab at repo scope. Q&A endpoint amended to accept optional `repo_id` in request body. Briefing detail and data sources unchanged. |
 | `repo-lifecycle.md` §1 | Repo management moves from "Admin → Repos tab" to workspace home Repos section (create/import) and repo settings tab (configure/archive/delete). |
