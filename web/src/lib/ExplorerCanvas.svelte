@@ -530,7 +530,7 @@
   {:else if showListFallback}
     <div class="threshold-banner warning">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      Graph too large ({nodes.length} nodes) — showing list view. Drill into a module to view its graph.
+      Graph too large ({nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}) — showing list view. Drill into a module to view its graph.
     </div>
     <div class="list-fallback-wrap">
       <table class="list-table" aria-label="Node list (graph too large for canvas)">
@@ -619,7 +619,7 @@
         </span>
       {/if}
 
-      <span class="node-count">{visibleNodes.length} nodes · {visibleEdges.length} edges</span>
+      <span class="node-count">{visibleNodes.length} {visibleNodes.length === 1 ? 'node' : 'nodes'} · {visibleEdges.length} {visibleEdges.length === 1 ? 'edge' : 'edges'}</span>
 
       {#if !showRiskHeatmap}
         <div class="legend">

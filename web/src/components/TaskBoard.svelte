@@ -70,6 +70,7 @@
         description: taskDesc.trim() || undefined,
         priority: taskPriority,
         status: taskStatus,
+        ...(workspaceId ? { workspace_id: workspaceId } : {}),
       });
       toastSuccess('Task created');
       showNewTask = false;
@@ -154,7 +155,7 @@
   {:else if error}
     <div class="error-msg" role="alert">
       <p>Error: {error}</p>
-      <button class="btn-retry" onclick={() => { error = null; loadTasks(); }}>Retry</button>
+      <button class="btn-retry" onclick={() => { error = null; loading = true; loadTasks(workspaceId); }}>Retry</button>
     </div>
   {:else}
     <div class="board">

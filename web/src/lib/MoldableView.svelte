@@ -327,7 +327,7 @@
               >{label}{sortBy === val ? (sortDir === 'asc' ? ' \u2191' : ' \u2193') : ''}</button>
             {/each}
           </div>
-          <span class="list-count">{filteredNodes.length} nodes</span>
+          <span class="list-count">{filteredNodes.length} {filteredNodes.length === 1 ? 'node' : 'nodes'}</span>
         </div>
 
         <div class="list-table-wrap">
@@ -420,7 +420,7 @@
           {:else if timelineDeltas.length > 0}
             <span class="timeline-meta">
               {timelineDeltas.length} delta{timelineDeltas.length !== 1 ? 's' : ''}
-              · {timelineNodes.length} / {nodes.length} nodes visible
+              · {timelineNodes.length} / {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'} visible
             </span>
           {/if}
           {#if repoId && !timelineLoading && timelineDeltas.length > 0}
