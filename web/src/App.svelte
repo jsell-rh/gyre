@@ -267,6 +267,8 @@
     if (e.key === 'ArrowDown') { e.preventDefault(); arr[(current + 1) % arr.length]?.focus(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); arr[(current - 1 + arr.length) % arr.length]?.focus(); }
     else if (e.key === 'Escape') { e.preventDefault(); wsDropdownOpen = false; document.querySelector('.ws-name-btn')?.focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); arr[0]?.focus(); }
+    else if (e.key === 'End') { e.preventDefault(); arr[arr.length - 1]?.focus(); }
   }
 
   // ── User menu keyboard navigation ────────────────────────────────────
@@ -311,8 +313,8 @@
       return;
     }
 
-    // /: focus search (suppressed in text inputs)
-    if (e.key === '/' && !inInput) {
+    // /: focus search (suppressed in text inputs and when already open)
+    if (e.key === '/' && !inInput && !searchOpen) {
       e.preventDefault();
       searchOpen = true;
       gKeyPending = false;
@@ -733,7 +735,10 @@
         <!-- Decisions badge (🔔) -->
         <button
           class="decisions-badge-btn"
-          onclick={() => { if (mode === 'repo') goToRepoTab('decisions'); else goToWorkspaceHome(currentWorkspace); }}
+          onclick={() => {
+            if (mode === 'repo') { goToRepoTab('decisions'); }
+            else { document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          }}
           aria-label={decisionsCount > 0 ? `${decisionsCount} decisions pending` : 'No decisions pending'}
           title="Decisions"
           data-testid="decisions-badge"

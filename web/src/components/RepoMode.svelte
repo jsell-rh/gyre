@@ -24,26 +24,47 @@
     { id: 'code',         label: 'Code' },
     { id: 'settings',     label: '⚙', title: 'Settings' },
   ];
+
+  function handleTabKeydown(e) {
+    const idx = TABS.findIndex(t => t.id === activeTab);
+    if (idx < 0) return;
+    let next = -1;
+    if (e.key === 'ArrowRight') { next = (idx + 1) % TABS.length; }
+    else if (e.key === 'ArrowLeft') { next = (idx - 1 + TABS.length) % TABS.length; }
+    else if (e.key === 'Home') { next = 0; }
+    else if (e.key === 'End') { next = TABS.length - 1; }
+    if (next >= 0) {
+      e.preventDefault();
+      onTabChange?.(TABS[next].id);
+      // Focus the newly-active tab button
+      const btn = e.currentTarget?.querySelector(`#tab-${TABS[next].id}`);
+      btn?.focus();
+    }
+  }
 </script>
 
 <div class="repo-mode" data-testid="repo-mode">
   <!-- Tab bar -->
-  <nav class="tab-bar" aria-label="Repo navigation" data-testid="repo-tab-bar">
+  <div class="tab-bar" role="tablist" aria-label="Repo navigation" data-testid="repo-tab-bar" onkeydown={handleTabKeydown}>
     {#each TABS as tab}
       <button
         class="tab-btn"
         class:active={activeTab === tab.id}
+        role="tab"
+        id="tab-{tab.id}"
+        aria-selected={activeTab === tab.id}
+        aria-controls="tabpanel-{tab.id}"
+        tabindex={activeTab === tab.id ? 0 : -1}
         onclick={() => onTabChange?.(tab.id)}
-        aria-current={activeTab === tab.id ? 'page' : undefined}
         title={tab.title ?? tab.label}
       >
         {tab.label}
       </button>
     {/each}
-  </nav>
+  </div>
 
   <!-- Tab content -->
-  <div class="tab-content">
+  <div class="tab-content" role="tabpanel" id="tabpanel-{activeTab}" aria-labelledby="tab-{activeTab}" tabindex="0">
     {#if activeTab === 'specs'}
       <SpecDashboard
         workspaceId={workspace?.id ?? null}
@@ -130,6 +151,12 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+
+  .tab-content:focus { outline: none; }
+  .tab-content:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
   }
 
   .tab-placeholder {
