@@ -344,7 +344,7 @@
     glInitialized = true;
   }
 
-  // Persistent WebGL buffers — reused across frames to prevent GPU memory leak
+  // Reusable WebGL buffers (avoid creating new buffers every frame)
   let glPosBuf = $state(null);
   let glColBuf = $state(null);
 
@@ -373,7 +373,6 @@
       return [c.r, c.g, c.b, 1.0];
     }));
 
-    // Reuse buffers instead of creating new ones every frame
     if (!glPosBuf) glPosBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuf);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
@@ -411,9 +410,25 @@
     return { r: 0.23, g: 0.51, b: 0.96, a: 1 };
   }
 
+  // Cache bounding rect to avoid layout thrashing on rapid mouse events
+  let cachedRect = null;
+  let cachedRectTime = 0;
+
+  function getCanvasRect() {
+    const now = performance.now();
+    // Refresh cached rect at most every 200ms
+    if (!cachedRect || now - cachedRectTime > 200) {
+      cachedRect = canvasEl?.getBoundingClientRect() ?? null;
+      cachedRectTime = now;
+    }
+    return cachedRect;
+  }
+
   // Mouse interaction — find nearest particle to click
   function onCanvasClick(e) {
-    const rect = canvasEl?.getBoundingClientRect();
+    // Force-refresh rect on click (infrequent)
+    cachedRect = null;
+    const rect = getCanvasRect();
     if (!rect) return;
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -428,7 +443,7 @@
   }
 
   function onCanvasMouseMove(e) {
-    const rect = canvasEl?.getBoundingClientRect();
+    const rect = getCanvasRect();
     if (!rect) return;
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -438,6 +453,7 @@
 
   function onCanvasMouseLeave() {
     hoveredParticleId = null;
+    cachedRect = null;
   }
 
   function findNearestParticle(mx, my, threshold = 16) {

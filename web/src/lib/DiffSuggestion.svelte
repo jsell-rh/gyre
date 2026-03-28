@@ -35,6 +35,7 @@
     <span class="diff-label">Suggested Change</span>
     <span class="diff-hint">Review before accepting</span>
   </div>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <pre class="diff-content" tabindex="0">{suggestion.content}</pre>
   <div class="diff-actions">
     <Button variant="primary" size="sm" onclick={() => handleAction(onaccept)} disabled={acting}>Accept</Button>
