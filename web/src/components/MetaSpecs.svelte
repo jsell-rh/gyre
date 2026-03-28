@@ -840,7 +840,7 @@
               <div class="form-row">
                 <div class="form-field form-field-grow">
                   <label for="cf-name">Name</label>
-                  <input id="cf-name" type="text" bind:value={createForm.name} placeholder="e.g. backend-engineer, no-mocking-principle" />
+                  <input id="cf-name" type="text" bind:value={createForm.name} placeholder="e.g. backend-engineer, no-mocking-principle" required aria-required="true" />
                 </div>
                 <div class="form-field">
                   <label for="cf-scope">Scope</label>

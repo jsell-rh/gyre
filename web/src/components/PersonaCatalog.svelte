@@ -8,6 +8,7 @@
 
   let personas = $state([]);
   let loading = $state(true);
+  let refreshing = $state(false);
   let createOpen = $state(false);
   let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
@@ -28,13 +29,18 @@
   });
 
   async function load() {
-    loading = true;
+    if (personas.length > 0) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
     try {
       personas = (await api.personas()) ?? [];
     } catch {
       showToast('Failed to load personas', { type: 'error' });
     } finally {
       loading = false;
+      refreshing = false;
     }
   }
 
@@ -182,7 +188,7 @@
 <Modal bind:open={createOpen} title="New Persona" size="md" onsubmit={create}>
   <div class="create-form">
     <label class="field-label">Name *
-      <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Developer" />
+      <input class="field-input" bind:value={form.name} placeholder="e.g. Backend Developer" required aria-required="true" />
     </label>
     <label class="field-label">Slug (auto-generated if blank)
       <input class="field-input" bind:value={form.slug} placeholder="backend-developer" />

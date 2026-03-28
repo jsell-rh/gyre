@@ -127,8 +127,9 @@
         {/each}
       </div>
     {:else if error}
-      <div role="alert">
-        <EmptyState title="Failed to load approvals" description={error} />
+      <div class="error-banner" role="alert">
+        <p>Failed to load approvals: {error}</p>
+        <button class="retry-btn" onclick={() => { error = null; load(); }}>Retry</button>
       </div>
     {:else if approvals.length === 0}
       <EmptyState
@@ -414,9 +415,35 @@
     margin-top: var(--space-2);
   }
 
+  .error-banner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-6);
+    text-align: center;
+    color: var(--color-danger);
+  }
+  .error-banner p { margin: 0; font-size: var(--text-sm); }
+
+  .retry-btn {
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    font-weight: 500;
+    transition: background var(--transition-fast);
+  }
+  .retry-btn:hover { background: color-mix(in srgb, var(--color-primary) 25%, transparent); }
+  .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
-    .revoke-btn, .filter-input { transition: none; }
+    .revoke-btn, .filter-input, .retry-btn { transition: none; }
   }
 </style>
