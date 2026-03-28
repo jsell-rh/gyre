@@ -8,7 +8,7 @@
 
   let personas = $state([]);
   let loading = $state(true);
-  let refreshing = $state(false);
+  let refreshing = false;
   let createOpen = $state(false);
   let form = $state({ name: '', slug: '', description: '', scopeKind: 'Tenant', scopeId: '', capabilities: '', system_prompt: '' });
   let saving = $state(false);
