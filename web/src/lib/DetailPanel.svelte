@@ -135,8 +135,8 @@
   // Reset active tab when entity changes, defaulting to the first tab.
   $effect(() => {
     if (entity) {
-      const first = tabs[0];
-      if (first) activeTab = first.id;
+      const freshTabs = computeTabs(entity);
+      if (freshTabs.length > 0) activeTab = freshTabs[0].id;
     }
   });
 
@@ -165,6 +165,13 @@
 
   function close() {
     expanded = false;
+    // Clean up URL params added by popout
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('detail') || url.searchParams.has('expanded')) {
+      url.searchParams.delete('detail');
+      url.searchParams.delete('expanded');
+      window.history.replaceState({}, '', url.toString());
+    }
     onclose?.();
   }
 
@@ -178,6 +185,7 @@
         url.searchParams.set('detail', `${entity.type}:${entity.id}`);
         url.searchParams.set('expanded', 'true');
       } else {
+        url.searchParams.delete('detail');
         url.searchParams.delete('expanded');
       }
       window.history.replaceState({}, '', url.toString());
