@@ -1,8 +1,5 @@
 <script>
-  function authHeaders() {
-    const token = localStorage.getItem('gyre_auth_token') || 'gyre-dev-token';
-    return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-  }
+  import { api } from './api.js';
 
   /**
    * PresenceAvatars — row of avatars for active workspace users.
@@ -52,9 +49,7 @@
 
     async function fetchPresence() {
       try {
-        const res = await fetch(`/api/v1/workspaces/${workspaceId}/presence`, { headers: authHeaders() });
-        if (!res.ok) throw new Error(`${res.status}`);
-        const data = await res.json();
+        const data = await api.workspacePresence(workspaceId);
         if (!cancelled && Array.isArray(data)) {
           presenceList = data;
         }
