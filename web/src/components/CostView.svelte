@@ -34,11 +34,11 @@
       const until = Math.floor(Date.now() / 1000) + 86400;
 
       // Load summary
-      summary = await api.costSummary(since, until).catch(() => null);
+      summary = await api.costsSummary(since, until).catch(() => null);
 
       // Load costs
       if (agentFilter) {
-        costs = await api.costsByAgent(agentFilter);
+        costs = await api.costs({ agent_id: agentFilter });
       } else {
         // Load all by querying a known set — we'll use the agentTotals workaround:
         // Query with a broad time range via summary, then show agent table from summary
@@ -54,7 +54,7 @@
   async function loadAgent(agentId) {
     agentFilter = agentId;
     try {
-      costs = await api.costsByAgent(agentId);
+      costs = await api.costs({ agent_id: agentId });
     } catch (e) {
       error = e.message;
     }
