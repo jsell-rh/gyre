@@ -616,7 +616,6 @@
     outline-offset: 2px;
   }
 
-
   @media (prefers-reduced-motion: reduce) {
     .mark-read-btn,
     .back-btn,

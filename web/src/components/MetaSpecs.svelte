@@ -676,7 +676,7 @@
               {#if isSimulatedPreview}
                 <div class="sim-banner" role="status">⚠ Preview unavailable — showing example layout only.</div>
               {/if}
-              <div class="impact-tabs" role="tablist" aria-label="Impact view" tabindex="-1"
+              <div class="impact-tabs" role="tablist" aria-label="Impact view" tabindex="0"
                 onkeydown={(e) => {
                   const tabs = ['architecture', 'code-diff'];
                   const ids = ['impact-tab-arch', 'impact-tab-diff'];
@@ -912,7 +912,7 @@
               class="editor-tabs"
               role="tablist"
               aria-label="Meta-spec editor"
-              tabindex="-1"
+              tabindex="0"
               onkeydown={(e) => {
                 const tabs = ['edit', 'impact', 'history', 'approval'];
                 const idx = tabs.indexOf(editorTab);

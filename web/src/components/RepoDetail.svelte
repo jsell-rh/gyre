@@ -14,7 +14,8 @@
   let branches = $state([]);
   let commits = $state([]);
   let mrs = $state([]);
-  let selectedBranch = $state(repo.default_branch || 'main');
+  let selectedBranch = $state(null);
+  $effect(() => { if (!selectedBranch) selectedBranch = repo.default_branch || 'main'; });
   let loading = $state(false);
   let error = $state(null);
   let cloneCopied = $state(false);
@@ -70,7 +71,7 @@
   const GATE_TYPES = ['TestCommand', 'LintCommand', 'AgentReview', 'AgentValidation', 'RequiredApprovals'];
   const BUILTIN_PUSH_GATES = ['conventional-commit', 'task-ref', 'no-em-dash'];
 
-  const cloneUrl = `${window.location.origin}/git/${repo.id}/${repo.name}.git`;
+  const cloneUrl = $derived(`${window.location.origin}/git/${repo.id}/${repo.name}.git`);
 
   const tabs = $derived([
     { id: 'branches', label: 'Branches', count: branches.length || undefined },
@@ -1275,7 +1276,6 @@
   .policy-btn.primary { background: var(--color-primary); color: var(--color-text-inverse); border-color: var(--color-primary); }
   .policy-btn.primary:hover { background: var(--color-primary-hover); }
   .policy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
 
   .abac-list { display: flex; flex-direction: column; gap: var(--space-2); }
 
