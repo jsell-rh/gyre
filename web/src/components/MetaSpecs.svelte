@@ -225,6 +225,7 @@
       const updated = await api.updateMetaSpec(spec.id, { required: !spec.required });
       specs = specs.map(s => s.id === spec.id ? updated : s);
       if (selected?.id === spec.id) selected = updated;
+      toastSuccess(updated.required ? 'Marked as required — all agents must load this' : 'Marked as optional');
     } catch (e) {
       toastError('Update failed: ' + (e?.message ?? 'unknown error'));
     }

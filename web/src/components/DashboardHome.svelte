@@ -344,7 +344,7 @@
 
   /* Page header */
   .page-header {
-    margin-bottom: var(--space-2);
+    margin-bottom: var(--space-6);
   }
 
   .page-title {

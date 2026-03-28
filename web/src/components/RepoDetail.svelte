@@ -185,9 +185,11 @@
     try {
       await api.jjInit(repo.id);
       jjInitMsg = 'jj initialized successfully.';
+      toastSuccess('jj initialized successfully.');
       await loadJjLog();
     } catch (e) {
       jjError = e.message;
+      toastError('jj init failed: ' + e.message);
     } finally {
       jjInitLoading = false;
     }
@@ -268,7 +270,7 @@
       await api.setRepoSpecPolicy(repo.id, specPolicy);
       toastSuccess('Spec policy saved.');
     } catch (e) {
-      policyError = e.message;
+      toastError('Failed to save spec policy: ' + e.message);
     } finally {
       policySaving = false;
     }
@@ -289,7 +291,7 @@
       newPolicyName = ''; newPolicyClaim = ''; newPolicyValue = '';
       toastSuccess('ABAC policy added.');
     } catch (e) {
-      policyError = e.message;
+      toastError('Failed to add policy: ' + e.message);
     } finally {
       policySaving = false;
     }
@@ -301,8 +303,9 @@
     try {
       await api.setRepoAbacPolicy(repo.id, updated);
       abacPolicies = updated;
+      toastSuccess('ABAC policy removed.');
     } catch (e) {
-      policyError = e.message;
+      toastError('Failed to remove policy: ' + e.message);
     } finally {
       policySaving = false;
     }

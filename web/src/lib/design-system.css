@@ -254,3 +254,13 @@ a:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============================================================
+   NARROW VIEWPORT / MOBILE RESPONSIVE
+   ============================================================ */
+
+@media (max-width: 768px) {
+  :root {
+    --sidebar-width: var(--sidebar-collapsed);
+  }
+}

@@ -474,4 +474,11 @@
   @media (prefers-reduced-motion: reduce) {
     .task-card, .form-input, .pr-link { transition: none; }
   }
+
+  @media (max-width: 768px) {
+    .page { padding: var(--space-3); }
+    .page-hdr { flex-wrap: wrap; }
+    .page-actions { flex-wrap: wrap; }
+    .filters { flex-wrap: wrap; }
+  }
 </style>
