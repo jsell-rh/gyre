@@ -530,6 +530,8 @@
 <svelte:window onkeydown={(e) => {
   if (e.key === 'Escape' && previewState === 'running') cancelPreview();
   if (e.key === 'Escape' && createMode) createMode = false;
+}} onbeforeunload={(e) => {
+  if (editDirty) { e.preventDefault(); return ''; }
 }} />
 
 <!-- ─── Repo scope redirect ──────────────────────────────────────────────────── -->
@@ -747,7 +749,7 @@
         <p class="subtitle">Your primary encoding mechanism — personas, principles, standards, and process norms.</p>
       </div>
       <div class="top-bar-actions">
-        <Button variant="primary" onclick={() => { createMode = true; selected = null; }}>+ New Meta-spec</Button>
+        <Button variant="primary" onclick={() => { if (editDirty && !confirm('You have unsaved changes. Discard them?')) return; createMode = true; selected = null; editDirty = false; }}>+ New Meta-spec</Button>
       </div>
     </div>
 

@@ -64,7 +64,9 @@
     wsReposLoading = true;
     wsReposError = null;
     try {
-      wsRepos = await api.allRepos();
+      wsRepos = scope.workspaceId
+        ? await api.repos({ workspaceId: scope.workspaceId })
+        : await api.allRepos();
     } catch (e) {
       wsReposError = e.message ?? 'Failed to load repositories';
       wsRepos = [];
@@ -344,7 +346,7 @@
         {:else if conceptNodes !== null && conceptQuery.trim()}
           {#if conceptNodes.length > 0}
             <span class="concept-chip">
-              {conceptNodes.length} nodes matching '{conceptQuery.trim()}'
+              {conceptNodes.length} {conceptNodes.length === 1 ? 'node' : 'nodes'} matching '{conceptQuery.trim()}'
               <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
             </span>
           {:else}

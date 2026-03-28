@@ -98,7 +98,8 @@
   });
 
   $effect(() => {
-    if (activeTab === 'commits') loadCommits(selectedBranch);
+    const branch = selectedBranch;
+    if (activeTab === 'commits') loadCommits(branch);
   });
 
   $effect(() => {
@@ -479,7 +480,7 @@
       <div class="commits-toolbar">
         <label class="branch-label">
           Branch:
-          <select class="branch-select" bind:value={selectedBranch} onchange={() => loadCommits(selectedBranch)}>
+          <select class="branch-select" bind:value={selectedBranch}>
             {#each branches as b (b.name)}
               <option value={b.name}>{b.name}</option>
             {/each}

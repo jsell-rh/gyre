@@ -310,7 +310,7 @@ describe('ExplorerCanvas — viewSpec grammar', () => {
       props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, viewSpec },
     });
     // Only module nodes should be visible (1 of 3)
-    expect(container.innerHTML).toContain('1 nodes');
+    expect(container.innerHTML).toContain('1 node');
   });
 
   it('applies highlight from viewSpec.highlight.spec_path', () => {

@@ -1,5 +1,5 @@
 <script>
-  import { getContext, tick } from 'svelte';
+  import { getContext, tick, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -53,6 +53,8 @@
       });
     }
   });
+
+  onDestroy(() => { closeTtyWs(); });
 
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 

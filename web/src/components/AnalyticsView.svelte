@@ -18,13 +18,20 @@
     'merge_queue.processed',
   ];
 
+  function authHeaders() {
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${localStorage.getItem('gyre_auth_token') || 'gyre-dev-token'}`,
+    };
+  }
+
   async function load() {
     loading = true;
     error = null;
     try {
       const params = new URLSearchParams({ limit: '200' });
       if (eventFilter) params.set('event_name', eventFilter);
-      const res = await fetch(`/api/v1/analytics/events?${params}`);
+      const res = await fetch(`/api/v1/analytics/events?${params}`, { headers: authHeaders() });
       if (!res.ok) throw new Error(await res.text());
       events = await res.json();
       computeTopEvents();

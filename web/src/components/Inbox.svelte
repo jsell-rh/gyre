@@ -62,9 +62,9 @@
     }
   }
 
-  async function loadNotifications() {
+  async function loadNotifications(isBackground = false) {
     try {
-      loading = true;
+      if (!isBackground) loading = true;
       error = null;
       let data = await api.myNotifications();
 
@@ -83,7 +83,7 @@
       error = e.message || 'Failed to load notifications';
       notifications = [];
     } finally {
-      loading = false;
+      if (!isBackground) loading = false;
     }
   }
 
@@ -234,7 +234,7 @@
   onMount(() => {
     loadWorkspaceNames();
     loadNotifications();
-    refreshInterval = setInterval(loadNotifications, 60000);
+    refreshInterval = setInterval(() => loadNotifications(true), 60000);
   });
 
   onDestroy(() => {
