@@ -96,6 +96,8 @@
 
   $effect(() => {
     void scope; void workspaceId; void repoId;
+    // Clear stale selection from previous scope
+    selectedPath = null;
     load();
   });
 

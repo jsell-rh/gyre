@@ -42,43 +42,49 @@
   }
 
   async function loadEnrichment(wsList) {
-    const results = await Promise.allSettled(
-      wsList.map(async (ws) => {
-        const [budgetResult, reposResult] = await Promise.allSettled([
-          api.workspaceBudget(ws.id),
-          api.workspaceRepos(ws.id),
-        ]);
-
-        const budget = budgetResult.status === 'fulfilled' ? budgetResult.value : null;
-        const repos = reposResult.status === 'fulfilled' ? (reposResult.value ?? []) : [];
-
-        let budgetPct = null;
-        if (budget?.usage != null && budget?.config != null) {
-          const { tokens_used_today, cost_today } = budget.usage;
-          const { max_tokens_per_day, max_cost_per_day } = budget.config;
-          if (max_tokens_per_day && max_tokens_per_day > 0) {
-            budgetPct = Math.min(100, Math.round((tokens_used_today / max_tokens_per_day) * 100));
-          } else if (max_cost_per_day && max_cost_per_day > 0) {
-            budgetPct = Math.min(100, Math.round((cost_today / max_cost_per_day) * 100));
-          }
-        }
-
-        const activeAgents = budget?.usage?.active_agents ?? 0;
-
-        return { id: ws.id, repoCount: repos.length, activeAgents, budgetPct };
-      })
-    );
-
+    // Process in batches of 4 to avoid hammering the server with N*2 parallel requests
+    const BATCH_SIZE = 4;
     const next = {};
-    results.forEach((r, i) => {
-      const id = wsList[i].id;
-      if (r.status === 'fulfilled') {
-        next[id] = r.value;
-      } else {
-        next[id] = { id, repoCount: 0, activeAgents: 0, budgetPct: null, error: true };
-      }
-    });
-    enrichment = next;
+    for (let i = 0; i < wsList.length; i += BATCH_SIZE) {
+      const batch = wsList.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(async (ws) => {
+          const [budgetResult, reposResult] = await Promise.allSettled([
+            api.workspaceBudget(ws.id),
+            api.workspaceRepos(ws.id),
+          ]);
+
+          const budget = budgetResult.status === 'fulfilled' ? budgetResult.value : null;
+          const repos = reposResult.status === 'fulfilled' ? (reposResult.value ?? []) : [];
+
+          let budgetPct = null;
+          if (budget?.usage != null && budget?.config != null) {
+            const { tokens_used_today, cost_today } = budget.usage;
+            const { max_tokens_per_day, max_cost_per_day } = budget.config;
+            if (max_tokens_per_day && max_tokens_per_day > 0) {
+              budgetPct = Math.min(100, Math.round((tokens_used_today / max_tokens_per_day) * 100));
+            } else if (max_cost_per_day && max_cost_per_day > 0) {
+              budgetPct = Math.min(100, Math.round((cost_today / max_cost_per_day) * 100));
+            }
+          }
+
+          const activeAgents = budget?.usage?.active_agents ?? 0;
+
+          return { id: ws.id, repoCount: repos.length, activeAgents, budgetPct };
+        })
+      );
+
+      results.forEach((r, j) => {
+        const id = batch[j].id;
+        if (r.status === 'fulfilled') {
+          next[id] = r.value;
+        } else {
+          next[id] = { id, repoCount: 0, activeAgents: 0, budgetPct: null, error: true };
+        }
+      });
+      // Update incrementally so cards render enrichment as batches complete
+      enrichment = { ...next };
+    }
   }
 
   function budgetBarColor(pct) {
@@ -152,102 +158,110 @@
       <input type="text" bind:value={wsFilter} placeholder="Filter workspaces…" class="ws-filter" aria-label="Filter workspaces" />
       <span class="sr-only" aria-live="polite" role="status">{visibleWs.length} workspace{visibleWs.length === 1 ? '' : 's'} shown</span>
     </div>
-    <div class="cards-grid" role="list" aria-label="Workspaces">
-      {#each visibleWs as ws (ws.id)}
-        {@const info = enrichment[ws.id]}
-        <div class="ws-card" role="listitem">
-          <Card>
-            {#snippet header()}
-              <span class="ws-name" title={ws.name}>{ws.name}</span>
-              {#if ws.trust_level}
-                <Badge value={ws.trust_level} variant={trustVariant(ws.trust_level)} />
-              {:else}
-                <Badge value="Standard" variant="muted" />
-              {/if}
-            {/snippet}
+    {#if visibleWs.length === 0}
+      <div class="empty-wrap">
+        <EmptyState title="No results" description="No workspaces match your filter.">
+          {#snippet action()}
+            <button class="btn-secondary" onclick={() => { wsFilter = ''; }}>Clear filter</button>
+          {/snippet}
+        </EmptyState>
+      </div>
+    {:else}
+      <div class="cards-grid" role="list" aria-label="Workspaces">
+        {#each visibleWs as ws (ws.id)}
+          {@const info = enrichment[ws.id]}
+          <div class="ws-card" role="listitem">
+            <Card>
+              {#snippet header()}
+                <span class="ws-name" title={ws.name}>{ws.name}</span>
+                {#if ws.trust_level}
+                  <Badge value={ws.trust_level} variant={trustVariant(ws.trust_level)} />
+                {:else}
+                  <Badge value="Standard" variant="muted" />
+                {/if}
+              {/snippet}
 
-            <div class="ws-body">
-              {#if ws.description}
-                <p class="ws-desc" title={ws.description}>{ws.description}</p>
-              {/if}
+              <div class="ws-body">
+                {#if ws.description}
+                  <p class="ws-desc" title={ws.description}>{ws.description}</p>
+                {/if}
 
-              <div class="ws-stats">
-                <div class="stat-row">
-                  <span class="stat-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14">
-                      <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
-                    </svg>
-                  </span>
-                  {#if info != null && !info.error}
-                    <span class="stat-val">{info.repoCount}</span>
-                  {:else if info?.error}
-                    <span class="stat-dash">&mdash;</span>
-                  {:else}
-                    <span class="stat-dash">…</span>
-                  {/if}
-                  <span class="stat-label">repos</span>
+                <div class="ws-stats">
+                  <div class="stat-row">
+                    <span class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14">
+                        <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
+                      </svg>
+                    </span>
+                    {#if info != null && !info.error}
+                      <span class="stat-val">{info.repoCount}</span>
+                    {:else if info?.error}
+                      <span class="stat-dash">&mdash;</span>
+                    {:else}
+                      <span class="stat-dash">…</span>
+                    {/if}
+                    <span class="stat-label">repos</span>
+                  </div>
+
+                  <div class="stat-row">
+                    <span class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14">
+                        <rect x="3" y="11" width="18" height="11" rx="2"/>
+                        <path d="M7 11V7a5 5 0 0110 0v4"/>
+                        <circle cx="12" cy="16" r="1" fill="currentColor"/>
+                      </svg>
+                    </span>
+                    {#if info != null && !info.error}
+                      <span class="stat-val">{info.activeAgents}</span>
+                    {:else if info?.error}
+                      <span class="stat-dash">&mdash;</span>
+                    {:else}
+                      <span class="stat-dash">…</span>
+                    {/if}
+                    <span class="stat-label">active agents</span>
+                  </div>
                 </div>
 
-                <div class="stat-row">
-                  <span class="stat-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14">
-                      <rect x="3" y="11" width="18" height="11" rx="2"/>
-                      <path d="M7 11V7a5 5 0 0110 0v4"/>
-                      <circle cx="12" cy="16" r="1" fill="currentColor"/>
-                    </svg>
-                  </span>
-                  {#if info != null && !info.error}
-                    <span class="stat-val">{info.activeAgents}</span>
-                  {:else if info?.error}
-                    <span class="stat-dash">&mdash;</span>
-                  {:else}
-                    <span class="stat-dash">…</span>
-                  {/if}
-                  <span class="stat-label">active agents</span>
+                <!-- Budget bar -->
+                <div class="budget-section">
+                  <div class="budget-label-row">
+                    <span class="budget-label">Budget</span>
+                    {#if info?.budgetPct != null}
+                      <span
+                        class="budget-pct"
+                        style="color: {budgetBarColor(info.budgetPct)}"
+                        aria-label="Budget usage: {info.budgetPct}%{info.budgetPct >= 95 ? ' (critical)' : info.budgetPct >= 80 ? ' (warning)' : ''}"
+                      >{info.budgetPct}%</span>
+                    {:else}
+                      <span class="budget-pct budget-unknown">—</span>
+                    {/if}
+                  </div>
+                  <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-busy={info == null} aria-valuenow={info?.budgetPct ?? 0} aria-valuemin="0" aria-valuemax="100" aria-valuetext="{info?.budgetPct ?? 0}%{(info?.budgetPct ?? 0) >= 95 ? ' critical' : (info?.budgetPct ?? 0) >= 80 ? ' warning' : ''}">
+                    <div
+                      class="budget-bar-fill"
+                      style="width: {info?.budgetPct ?? 0}%; background: {budgetBarColor(info?.budgetPct ?? null)}"
+                    ></div>
+                  </div>
                 </div>
               </div>
 
-              <!-- Budget bar -->
-              <div class="budget-section">
-                <div class="budget-label-row">
-                  <span class="budget-label">Budget</span>
-                  {#if info?.budgetPct != null}
-                    <span
-                      class="budget-pct"
-                      style="color: {budgetBarColor(info.budgetPct)}"
-                      aria-label="Budget usage: {info.budgetPct}%{info.budgetPct >= 95 ? ' (critical)' : info.budgetPct >= 80 ? ' (warning)' : ''}"
-                    >{info.budgetPct}%</span>
-                  {:else}
-                    <span class="budget-pct budget-unknown">—</span>
-                  {/if}
-                </div>
-                <div class="budget-bar-track" role="progressbar" aria-label="Budget usage" aria-busy={info == null} aria-valuenow={info?.budgetPct ?? 0} aria-valuemin="0" aria-valuemax="100" aria-valuetext="{info?.budgetPct ?? 0}%{(info?.budgetPct ?? 0) >= 95 ? ' critical' : (info?.budgetPct ?? 0) >= 80 ? ' warning' : ''}">
-                  <div
-                    class="budget-bar-fill"
-                    style="width: {info?.budgetPct ?? 0}%; background: {budgetBarColor(info?.budgetPct ?? null)}"
-                  ></div>
-                </div>
-              </div>
-            </div>
-
-            {#snippet footer()}
-              <button
-                class="enter-btn"
-                onclick={() => handleEnter(ws)}
-                aria-label="Enter workspace {ws.name}"
-              >
-                Enter Workspace
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                  <path d="M9 18l6-6-6-6"/>
-                </svg>
-              </button>
-            {/snippet}
-          </Card>
-        </div>
-      {:else}
-        <EmptyState title="No results" description="No workspaces match your filter." />
-      {/each}
-    </div>
+              {#snippet footer()}
+                <button
+                  class="enter-btn"
+                  onclick={() => handleEnter(ws)}
+                  aria-label="Enter workspace {ws.name}"
+                >
+                  Enter Workspace
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                    <path d="M9 18l6-6-6-6"/>
+                  </svg>
+                </button>
+              {/snippet}
+            </Card>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 </div>
 
