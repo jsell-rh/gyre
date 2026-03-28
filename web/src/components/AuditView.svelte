@@ -131,7 +131,7 @@
     {/if}
   </div>
 
-  <div class="tab-bar" role="tablist" aria-label="Audit view tabs"
+  <div class="tab-bar" role="tablist" tabindex="0" aria-label="Audit view tabs"
     onkeydown={(e) => {
       const tabs = ['live', 'history'];
       const ids = ['tab-live', 'tab-history'];

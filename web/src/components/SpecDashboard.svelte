@@ -307,6 +307,7 @@
           {@const label = progressLabel(spec.path)}
           <li
             class="spec-row"
+            role="option"
             class:selected={selectedPath === spec.path}
             role="option"
             tabindex="0"

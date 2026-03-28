@@ -80,7 +80,6 @@
     transition: opacity var(--transition-fast);
   }
 
-
   /* Split layout: main compresses to 60% */
   .split .content-main {
     flex: 0 0 60%;

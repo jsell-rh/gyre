@@ -11,7 +11,8 @@
 
   let { mr: initialMr, repo, onBack } = $props();
 
-  let mr = $state(initialMr);
+  let mr = $state(null);
+  $effect(() => { mr = initialMr; });
   let reviews = $state([]);
   let comments = $state([]);
   let gates = $state([]);

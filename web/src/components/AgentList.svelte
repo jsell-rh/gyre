@@ -422,6 +422,7 @@
         <div
           class="detail-tabs"
           role="tablist"
+          tabindex="0"
           aria-label="Agent details tabs"
           onkeydown={(e) => {
             const tabs = ['info', 'logs', 'terminal'];
