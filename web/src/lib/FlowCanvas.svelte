@@ -494,7 +494,6 @@
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}
   tabindex="0"
-  role="img"
   aria-label="Particle flow animation — {activeParticles.length} active traces"
   aria-roledescription="interactive particle animation canvas"
 ></canvas>
