@@ -4,6 +4,7 @@
   import { createWsStore } from './lib/ws.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
+  import WorkspaceSettings from './components/WorkspaceSettings.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import Toast from './lib/Toast.svelte';
@@ -15,7 +16,7 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'repo' | 'profile' | 'cross_workspace'
+  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile'
   let mode = $state('workspace_home');
 
   // ── Workspace / repo state ───────────────────────────────────────────
@@ -169,7 +170,12 @@
         return { mode: 'repo', slug, repoName, tab };
       }
 
-      // /workspaces/:slug  or  /workspaces/:slug/settings  etc.
+      // /workspaces/:slug/settings
+      if (raw[2] === 'settings') {
+        return { mode: 'workspace_settings', slug, repoName: null, tab: null };
+      }
+
+      // /workspaces/:slug  or  /workspaces/:slug/agent-rules  etc.
       return { mode: 'workspace_home', slug, repoName: null, tab: null };
     }
 
@@ -185,6 +191,7 @@
     }
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
+    if (m === 'workspace_settings') return `/workspaces/${encodeURIComponent(slug)}/settings`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
       if (tab && tab !== 'specs') return `${base}/${tab}`;
@@ -245,6 +252,15 @@
   function goToRepoTab(tab) {
     repoTab = tab;
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
+  }
+
+  function goToWorkspaceSettings() {
+    if (!currentWorkspace) return;
+    mode = 'workspace_settings';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'workspace_settings', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
   }
 
   function goToProfile() {
@@ -389,13 +405,7 @@
             return;
           case 's': // g s → workspace settings
             e.preventDefault();
-            if (currentWorkspace) {
-              window.history.pushState(
-                { mode: 'workspace_home', wsId: currentWorkspace.id, repoName: null, repoTab: 'specs' },
-                '',
-                `/workspaces/${encodeURIComponent(wsSlug(currentWorkspace))}/settings`
-              );
-            }
+            goToWorkspaceSettings();
             return;
           case 'a': // g a → agent rules
             e.preventDefault();
@@ -550,6 +560,8 @@
               repoIdCache.set(`${ws.id}:${repo.name}`, repo.id);
             }
           } catch { /* keep name-only ref */ }
+        } else if (parsed.mode === 'workspace_settings') {
+          mode = 'workspace_settings';
         } else {
           mode = 'workspace_home';
         }
@@ -613,7 +625,8 @@
     function handlePopstate(e) {
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt } = e.state;
-        mode = m; // includes 'cross_workspace'
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile')
+          ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
@@ -643,7 +656,9 @@
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = p.mode ?? 'workspace_home';
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo')
+            ? p.mode
+            : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
             const wsId = currentWorkspace?.id;
             const cachedId = wsId ? repoIdCache.get(`${wsId}:${p.repoName}`) : null;
@@ -761,6 +776,18 @@
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
                   <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+              <button
+                class="ws-gear-btn"
+                onclick={() => goToWorkspaceSettings()}
+                aria-label="Workspace settings"
+                title="Workspace settings (g s)"
+                data-testid="ws-gear-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
               </button>
             </div>
@@ -1006,6 +1033,11 @@
             workspace={currentWorkspace}
             {decisionsCount}
             onSelectRepo={(repo) => goToRepo(repo)}
+          />
+        {:else if mode === 'workspace_settings'}
+          <WorkspaceSettings
+            workspace={currentWorkspace}
+            onBack={() => goToWorkspaceHome(currentWorkspace)}
           />
         {:else if mode === 'repo'}
           <RepoMode
@@ -1365,6 +1397,32 @@
   .ws-arrow-btn:hover {
     color: var(--color-text);
     background: var(--color-surface-elevated);
+  }
+
+  .ws-gear-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast), background var(--transition-fast);
+    padding: 0;
+    margin-left: var(--space-1);
+  }
+
+  .ws-gear-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .ws-gear-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .ws-dropdown {

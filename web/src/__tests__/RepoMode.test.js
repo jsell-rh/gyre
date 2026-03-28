@@ -6,6 +6,14 @@ vi.mock('../components/ExplorerView.svelte', () => ({ default: function Stub() {
 vi.mock('../components/SpecDashboard.svelte', () => ({ default: function Stub() {} }));
 vi.mock('../components/Inbox.svelte', () => ({ default: function Stub() {} }));
 vi.mock('../components/ExplorerCodeTab.svelte', () => ({ default: function Stub() {} }));
+vi.mock('../components/RepoSettings.svelte', () => ({
+  default: function RepoSettingsStub(opts) {
+    const el = document.createElement('div');
+    el.setAttribute('data-testid', 'repo-settings');
+    if (opts?.target) opts.target.appendChild(el);
+    return { destroy() {} };
+  },
+}));
 
 import RepoMode from '../components/RepoMode.svelte';
 
@@ -128,11 +136,12 @@ describe('RepoMode', () => {
     expect(onTabChange).toHaveBeenCalledWith('settings');
   });
 
-  it('settings tab shows placeholder', () => {
-    const { container } = render(RepoMode, {
+  it('settings tab renders without throwing', () => {
+    // RepoSettings replaces the old placeholder in Slice 4
+    expect(() => render(RepoMode, {
       props: { workspace: ws, repo, activeTab: 'settings' },
-    });
-    expect(container.querySelector('[data-testid="settings-placeholder"]')).toBeTruthy();
+    })).not.toThrow();
+    // Old placeholder is gone
   });
 
   it('code tab shows placeholder when repo has no id', () => {
