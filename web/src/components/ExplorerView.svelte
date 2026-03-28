@@ -41,8 +41,6 @@
   let conceptEdges = $state(null);
   let debounceTimer = null;
 
-  onDestroy(() => clearTimeout(debounceTimer));
-
   // Load repos when in workspace/repo scope (graph dropdown)
   $effect(() => {
     if (scopeType !== 'tenant') {
@@ -160,8 +158,6 @@
     conceptEdges = null;
     clearTimeout(debounceTimer);
   }
-
-  onDestroy(() => { clearTimeout(debounceTimer); });
 
   let searchInputEl = $state(null);
 
