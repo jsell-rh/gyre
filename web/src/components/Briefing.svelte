@@ -192,9 +192,10 @@
     return api.briefingAsk(workspaceId, { question, history: [] });
   }
 
-  // Reload when scope or workspace changes
+  // Reload when scope or workspaceId changes (not just on mount)
   $effect(() => {
-    void scope; void workspaceId; void repoId;
+    void scope;
+    void workspaceId;
     load();
   });
 </script>

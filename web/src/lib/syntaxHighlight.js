@@ -32,7 +32,7 @@ const HASH_COMMENT_LANGS = new Set(['python','ruby','shell','toml','yaml','nix']
 const SLASH_COMMENT_LANGS = new Set(['rust','javascript','typescript','go','c','cpp','csharp','java','kotlin']);
 
 function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 export function detectLang(filePath) {

@@ -1,6 +1,20 @@
 const API_BASE = '/api/v1';
 const AUTH_TOKEN_KEY = 'gyre_auth_token';
 
+/**
+ * Sanitize an API-derived URL for use in href attributes.
+ * Only allows http: and https: schemes; rejects javascript:, data:, etc.
+ * Returns '#' for unsafe or invalid URLs.
+ */
+export function safeHref(url) {
+  if (!url || typeof url !== 'string') return '#';
+  const trimmed = url.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  // Relative URLs are fine
+  if (trimmed.startsWith('/')) return trimmed;
+  return '#';
+}
+
 function getAuthToken() {
   return localStorage.getItem(AUTH_TOKEN_KEY) || 'gyre-dev-token';
 }

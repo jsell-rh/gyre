@@ -8,6 +8,11 @@
 
   import { getContext } from 'svelte';
 
+  /** Respect prefers-reduced-motion: skip rAF loop, show static frame only */
+  const prefersReducedMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : { matches: false };
+
   let {
     nodes = [],           // positioned nodes [{id, x, y, width, height}]
     edges = [],           // edges [{source, target}]
@@ -191,7 +196,7 @@
   let animFrameId = $state(null);
 
   $effect(() => {
-    if (playing) {
+    if (playing && !prefersReducedMotion.matches) {
       let lastTs = performance.now();
       function frame(ts) {
         const dt = (ts - lastTs) * speed;
@@ -208,7 +213,7 @@
         if (animFrameId) cancelAnimationFrame(animFrameId);
       };
     } else {
-      // Draw static frame when paused
+      // Draw static frame when paused or reduced-motion preferred
       drawFrame();
     }
   });

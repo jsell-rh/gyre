@@ -1,5 +1,5 @@
 <script>
-  import { onMount, onDestroy, getContext } from 'svelte';
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -19,7 +19,6 @@
   let expandedId = $state(null);
   let showDismissed = $state(false);
   let actionStates = $state({});
-  let refreshInterval;
   let workspaceMap = $state({});
 
   // Badge variant per notification type
@@ -231,14 +230,15 @@
     navigate?.('meta-specs');
   }
 
-  onMount(() => {
+  // Reload when scope/workspaceId/repoId changes, and set up auto-refresh
+  $effect(() => {
+    void scope;
+    void workspaceId;
+    void repoId;
     loadWorkspaceNames();
     loadNotifications();
-    refreshInterval = setInterval(() => loadNotifications(true), 60000);
-  });
-
-  onDestroy(() => {
-    if (refreshInterval) clearInterval(refreshInterval);
+    const interval = setInterval(loadNotifications, 60000);
+    return () => clearInterval(interval);
   });
 </script>
 

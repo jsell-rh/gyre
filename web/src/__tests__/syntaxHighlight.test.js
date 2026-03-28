@@ -42,7 +42,7 @@ describe('highlightLine — XSS safety', () => {
 
 describe('highlightLine — Rust', () => {
   it('wraps fn keyword', () => expect(highlightLine('fn main() {','rust')).toContain('<span class="hl-kw">fn</span>'));
-  it('wraps string literals', () => expect(highlightLine('let s = "hello";','rust')).toContain('<span class="hl-str">"hello"</span>'));
+  it('wraps string literals', () => expect(highlightLine('let s = "hello";','rust')).toContain('<span class="hl-str">&quot;hello&quot;</span>'));
   it('wraps // comments', () => expect(highlightLine('// comment','rust')).toContain('<span class="hl-cmt">// comment</span>'));
   it('wraps numbers', () => expect(highlightLine('let x = 42;','rust')).toContain('<span class="hl-num">42</span>'));
   it('wraps hex numbers', () => expect(highlightLine('let x = 0xFF;','rust')).toContain('<span class="hl-num">0xFF</span>'));
@@ -85,7 +85,7 @@ describe('highlightLine — Python', () => {
     expect(out).toContain('<span class="hl-kw">False</span>');
     expect(out).toContain('<span class="hl-kw">None</span>');
   });
-  it('wraps string literals', () => expect(highlightLine("msg = 'hello world'",'python')).toContain("<span class=\"hl-str\">'hello world'</span>"));
+  it('wraps string literals', () => expect(highlightLine("msg = 'hello world'",'python')).toContain("<span class=\"hl-str\">&#39;hello world&#39;</span>"));
 });
 
 describe('highlightLine — Go', () => {
@@ -96,8 +96,8 @@ describe('highlightLine — Go', () => {
 describe('highlightLine — JSON', () => {
   it('wraps string values', () => {
     const out = highlightLine('  "name": "gyre"','json');
-    expect(out).toContain('<span class="hl-str">"name"</span>');
-    expect(out).toContain('<span class="hl-str">"gyre"</span>');
+    expect(out).toContain('<span class="hl-str">&quot;name&quot;</span>');
+    expect(out).toContain('<span class="hl-str">&quot;gyre&quot;</span>');
   });
   it('wraps numbers', () => expect(highlightLine('  "port": 3000','json')).toContain('<span class="hl-num">3000</span>'));
   it('wraps true/false/null', () => {
