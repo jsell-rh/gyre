@@ -13,7 +13,7 @@ The result:
 - Admin is a dumping ground for everything that doesn't fit elsewhere
 - The human feels like a system operator, not a director of agents
 
-The vision (§1-§5) defines what humans do: decide what to build, set direction, maintain understanding, handle exceptions, discover and encode. The navigation should map to these activities, not to database tables.
+The vision ("What Humans Do" §1-§5) defines what humans do: decide what to build, set direction, maintain understanding, handle exceptions, discover and encode. The navigation should map to these activities, not to database tables.
 
 ## Design Principles
 
@@ -98,6 +98,12 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 │  │ merged. Auth refactor 60% complete, 3/5 tasks     │   │
 │  │ done. 1 gate failure in payment-api needs you.    │   │
 │  │                                    [Ask a question]│   │
+│  └──────────────────────────────────────────────────┘   │
+│                                                          │
+│  ┌─ Specs ──────────────────────────────────────────┐   │
+│  │ payment-api  retry-logic.md      ✅ Merged       │   │
+│  │ user-service auth-refactor.md    🔄 60%          │   │
+│  │ billing-api  error-handling.md   📝 Draft        │   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                          │
 │  ┌─ Agent Rules ──────────────────────────────────────┐   │
@@ -381,7 +387,8 @@ This is the **creative surface** for encoding organizational judgment (vision §
 Every state is URL-addressable for deep linking and sharing:
 
 ```
-/                                          → workspace selector (or redirect to default)
+/                                          → workspace selector (or redirect to default workspace)
+/all                                       → cross-workspace view (tenant scope)
 /workspaces/:slug                          → workspace home
 /workspaces/:slug/settings                 → workspace settings
 /workspaces/:slug/agent-rules                → meta-spec management
@@ -400,6 +407,8 @@ Every state is URL-addressable for deep linking and sharing:
 **URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). Repos are nested under a `/r/` segment to avoid collision with reserved workspace paths (`settings`, `standards`, `decisions`). This produces readable URLs: `/workspaces/payments/r/payment-api/specs`.
 
 **Reserved workspace paths:** `settings`, `agent-rules`, `decisions`, `r`. These are workspace-level pages or URL segments and cannot be used as repo names. The server rejects repo creation with these names (400 error).
+
+**Reserved workspace slugs:** `all`, `profile`. The slug `all` is the cross-workspace view. The slug `profile` would collide with `/profile`. The server rejects workspace creation with these slugs (400 error).
 
 **Profile URL:** `/profile` is preserved outside the `/workspaces/...` hierarchy (it is user-scoped, not workspace-scoped).
 
