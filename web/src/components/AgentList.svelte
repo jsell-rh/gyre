@@ -448,7 +448,7 @@
                   {taskLabel(selected.current_task_id)}
                 {/if}
               </dd>
-              <dt>Budget (s)</dt><dd>{selected.lifetime_budget_secs ?? '—'}</dd>
+              <dt>Lifetime Budget</dt><dd>{selected.lifetime_budget_secs != null ? selected.lifetime_budget_secs + ' sec' : '—'}</dd>
               <dt>Spawned</dt><dd>{formatTime(selected.spawned_at)}</dd>
               <dt>Last Heartbeat</dt><dd>{formatTime(selected.last_heartbeat)}</dd>
             </dl>

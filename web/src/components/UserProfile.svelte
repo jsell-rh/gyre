@@ -443,19 +443,21 @@
   .edit-actions { display: flex; gap: var(--space-2); align-items: center; }
 
   .btn-primary {
-    padding: var(--space-2) var(--space-4);
+    padding: var(--space-3) var(--space-4);
     background: var(--color-primary);
     border: none;
     border-radius: var(--radius);
     color: var(--color-text-inverse);
     font-size: var(--text-sm);
+    font-weight: 500;
     cursor: pointer;
+    transition: opacity var(--transition-fast);
   }
   .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .btn-secondary {
-    padding: var(--space-2) var(--space-4);
+    padding: var(--space-3) var(--space-4);
     background: transparent;
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
