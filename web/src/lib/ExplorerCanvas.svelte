@@ -452,7 +452,13 @@
 
   function closeContextMenu() { contextMenu = null; }
 
-  function onKeydown(e) { if (e.key === 'Escape') contextMenu = null; }
+  function onKeydown(e) {
+    if (e.key === 'Escape') contextMenu = null;
+  }
+
+  function onWindowClick() {
+    if (contextMenu) contextMenu = null;
+  }
 
   function ctxViewDetails(node) { closeContextMenu(); selectNode(node); }
 
@@ -587,8 +593,8 @@
 
   function relativeTime(ts) {
     if (!ts) return '';
-    const diff = Date.now() / 1000 - ts;
-    if (diff < 60)    return 'just now';
+    const diff = Math.floor(Date.now() / 1000 - ts);
+    if (diff < 60)    return `${diff}s ago`;
     if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
@@ -599,7 +605,7 @@
   const LAYOUT_LABELS = { column: 'Column', graph: 'Force', hierarchical: 'Hierarchical', layered: 'Layered' };
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onclick={onWindowClick} />
 
 <div class="canvas-wrap">
   {#if !nodes.length}
@@ -611,7 +617,7 @@
     </div>
     <div class="list-fallback-wrap">
       <table class="list-table" aria-label="Node list (graph too large for canvas)">
-        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th>File</th><th>Spec</th><th scope="col">Action</th></tr></thead>
+        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th scope="col">File</th><th scope="col">Spec</th></tr></thead>
         <tbody>
           {#each nodes.slice(0, 1000) as node}
             <tr class="list-row" role="button" tabindex="0" aria-label="Select node {node.name}"

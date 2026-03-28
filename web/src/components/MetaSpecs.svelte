@@ -557,14 +557,12 @@
 {/if}
 
 <!-- ─── Workspace scope — preview loop ───────────────────────────────────────── -->
-{#if scope === 'workspace' || scope === 'repo'}
+{#if scope === 'workspace'}
   <div class="meta-specs-view workspace-view" aria-busy={wsLoading}>
-    {#if scope !== 'repo'}
-      <div class="view-header">
-        <h1 class="page-title">Meta-Specs</h1>
-        <p class="subtitle">Preview how persona and principle changes affect your workspace specs.</p>
-      </div>
-    {/if}
+    <div class="view-header">
+      <h2>Meta-Specs</h2>
+      <p class="subtitle">Preview how persona and principle changes affect your workspace specs.</p>
+    </div>
 
     {#if wsLoading}
       <div class="split-layout"><div class="split-left"><Skeleton /></div><div class="split-right"><Skeleton /></div></div>

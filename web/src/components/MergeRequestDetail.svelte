@@ -659,7 +659,7 @@
     word-break: break-all;
   }
 
-  .meta-link-btn:hover { color: var(--color-link); text-decoration: underline; }
+  .meta-link-btn:hover { color: var(--color-link-hover); text-decoration: underline; }
 
   .branch-ref {
     font-family: var(--font-mono);

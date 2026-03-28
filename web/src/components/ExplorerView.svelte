@@ -172,6 +172,8 @@
     }
   }
 
+  onDestroy(() => clearTimeout(debounceTimer));
+
   let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
   let conceptFilterIds = $derived.by(() =>
     conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
