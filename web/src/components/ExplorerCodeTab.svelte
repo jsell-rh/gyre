@@ -20,17 +20,23 @@
   // Clone URL copy state
   let cloneCopied = $state(false);
   let cloneUrl = $derived(repo?.clone_url ?? '');
+  let copyTimer = null;
 
   async function copyCloneUrl() {
     if (!cloneUrl) return;
     try {
       await navigator.clipboard.writeText(cloneUrl);
       cloneCopied = true;
-      setTimeout(() => { cloneCopied = false; }, 2000);
+      if (copyTimer) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { cloneCopied = false; copyTimer = null; }, 2000);
     } catch {
       // clipboard not available — silently fail
     }
   }
+
+  $effect(() => {
+    return () => { if (copyTimer) clearTimeout(copyTimer); };
+  });
 
   // Per-tab data
   let branches = $state([]);
@@ -75,6 +81,7 @@
 
   function switchSubTab(id) {
     subTab = id;
+    loadTab(id);
   }
 
   function onRowClick(row, type) {

@@ -15,6 +15,7 @@
   let loading = $state(true);
   let error = $state(null);
   let activeTab = $state('info');
+  let loadGeneration = $state(0);
 
   const tabs = [
     { id: 'info',      label: 'Info' },
@@ -34,11 +35,15 @@
   });
 
   async function load() {
+    const gen = ++loadGeneration;
     loading = true;
     error = null;
     try {
-      detail = await api.task(task.id);
+      const result = await api.task(task.id);
+      if (gen !== loadGeneration) return; // stale — a newer load superseded this one
+      detail = result;
     } catch (e) {
+      if (gen !== loadGeneration) return;
       error = e.message;
     }
     loading = false;

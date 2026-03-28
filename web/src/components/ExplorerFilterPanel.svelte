@@ -1,7 +1,7 @@
 <script>
   let {
     visible = false,
-    onFilterChange = null,
+    onfilterchange = null,
   } = $props();
 
   // Category filters matching system-explorer.md categories
@@ -33,7 +33,7 @@
   }
 
   function emitFilter() {
-    onFilterChange?.({
+    onfilterchange?.({
       categories: [...activeCategories],
       visibility: visibility === 'all' ? null : visibility,
       min_churn: minChurn > 0 ? minChurn : null,

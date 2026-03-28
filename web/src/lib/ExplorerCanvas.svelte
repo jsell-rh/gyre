@@ -989,7 +989,7 @@
   .graph-node.dimmed { opacity: 0.3; }
 
   .ctx-menu {
-    position: fixed; z-index: 1000; background: var(--color-surface-elevated);
+    position: fixed; z-index: 1100; background: var(--color-surface-elevated);
     border: 1px solid var(--color-border-strong); border-radius: var(--radius);
     box-shadow: 0 8px 24px color-mix(in srgb, black 40%, transparent); min-width: 160px; padding: var(--space-1) 0;
     font-size: var(--text-sm); font-family: var(--font-body);
