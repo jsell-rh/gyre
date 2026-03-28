@@ -62,9 +62,10 @@
     }
   }
 
-  async function loadNotifications() {
+  async function loadNotifications(isRefresh = false) {
     try {
-      loading = true;
+      // Only show skeleton on initial load, not on background refresh
+      if (!isRefresh) loading = true;
       error = null;
       let data = await api.myNotifications();
 
@@ -234,7 +235,7 @@
   onMount(() => {
     loadWorkspaceNames();
     loadNotifications();
-    refreshInterval = setInterval(loadNotifications, 60000);
+    refreshInterval = setInterval(() => loadNotifications(true), 60000);
   });
 
   onDestroy(() => {

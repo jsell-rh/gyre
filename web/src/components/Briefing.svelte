@@ -133,9 +133,8 @@
       }
     } catch (e) {
       if (e.message && e.message.includes('404')) {
-        // 404: no briefing data yet — show empty state
+        // 404: no briefing data yet — show empty state without error banner
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
-        error = 'Briefing data not yet available';
       } else {
         // Real error — set briefing to null to prevent "All caught up" showing alongside error
         briefing = null;
