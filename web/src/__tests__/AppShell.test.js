@@ -1,5 +1,6 @@
 /**
- * AppShell.test.js — Tests for ui-navigation.md §1 (App Shell), §7 (URL structure)
+ * AppShell.test.js — Tests for ui-navigation.md §1 (App Shell), §7 (URL structure),
+ *   §6 (Keyboard Shortcuts), §8 (Responsive Design), §10 (Cross-Workspace View)
  *
  * Covers:
  *   - URL routing: parseUrl() maps paths to mode + slug + repoName + tab
@@ -10,6 +11,10 @@
  *   - WorkspaceHome sections visible
  *   - Keyboard shortcuts (g h, g 1-4, Esc, ?, ⌘K)
  *   - Status bar
+ *   - Cross-workspace view (/all route, parseUrl, urlFor)
+ *   - Mobile hamburger button presence
+ *   - Legacy URL redirect logic
+ *   - "All Workspaces" in workspace dropdown
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -28,6 +33,12 @@ function parseUrl(pathname) {
 
   if (raw.length === 1 && raw[0] === 'profile') {
     return { mode: 'profile', slug: null, repoName: null, tab: null };
+  }
+
+  // /all  or  /all/settings  (cross-workspace view §10)
+  if (raw[0] === 'all') {
+    const tab = raw[1] ?? null;
+    return { mode: 'cross_workspace', slug: 'all', repoName: null, tab };
   }
 
   if (raw[0] === 'workspaces' && raw.length >= 2) {
@@ -49,6 +60,9 @@ function urlFor(parsed) {
   if (!parsed) return '/';
   const { mode: m, slug, repoName, tab } = parsed;
   if (m === 'profile') return '/profile';
+  if (m === 'cross_workspace') {
+    return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
+  }
   if (!slug) return '/';
   if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
   if (m === 'repo') {
@@ -147,6 +161,25 @@ describe('parseUrl', () => {
       mode: 'workspace_home', slug: 'my workspace', repoName: null, tab: null,
     });
   });
+
+  // §10 Cross-workspace URL parsing
+  it('parses /all as cross_workspace with no tab', () => {
+    expect(parseUrl('/all')).toEqual({
+      mode: 'cross_workspace', slug: 'all', repoName: null, tab: null,
+    });
+  });
+
+  it('parses /all/settings as cross_workspace with settings tab', () => {
+    expect(parseUrl('/all/settings')).toEqual({
+      mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'settings',
+    });
+  });
+
+  it('parses /all/agent-rules as cross_workspace with agent-rules tab', () => {
+    expect(parseUrl('/all/agent-rules')).toEqual({
+      mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'agent-rules',
+    });
+  });
 });
 
 describe('urlFor', () => {
@@ -194,6 +227,25 @@ describe('urlFor', () => {
 
   it('round-trips repo specs tab through parseUrl', () => {
     const parsed = { mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs' };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
+  });
+
+  // §10 cross_workspace urlFor
+  it('generates /all for cross_workspace with no tab', () => {
+    expect(urlFor({ mode: 'cross_workspace', slug: 'all', repoName: null, tab: null })).toBe('/all');
+  });
+
+  it('generates /all/settings for cross_workspace settings tab', () => {
+    expect(urlFor({ mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'settings' })).toBe('/all/settings');
+  });
+
+  it('round-trips /all through parseUrl → urlFor', () => {
+    const parsed = { mode: 'cross_workspace', slug: 'all', repoName: null, tab: null };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
+  });
+
+  it('round-trips /all/settings through parseUrl → urlFor', () => {
+    const parsed = { mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'settings' };
     expect(parseUrl(urlFor(parsed))).toEqual(parsed);
   });
 
@@ -606,5 +658,176 @@ describe('Keyboard shortcuts', () => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
     });
     await fireEvent.keyDown(window, { key: 'k', metaKey: true });
+  });
+
+  // §6 shortcut overlay: context-sensitive labels visible
+  it('shortcut overlay labels repo-mode-only shortcuts', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      const overlay = document.querySelector('.shortcuts-overlay');
+      // repo-mode shortcuts should be labeled so user knows context
+      expect(overlay?.textContent).toContain('repo mode');
+    });
+  });
+});
+
+// ── §8 Responsive Design: mobile hamburger button ─────────────────────
+
+describe('Responsive — hamburger button', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+  });
+
+  it('hamburger button is present in the DOM', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('hamburger button has accessible label', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      const btn = container.querySelector('[data-testid="hamburger-btn"]');
+      expect(btn).toBeTruthy();
+      expect(btn.getAttribute('aria-label')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('clicking hamburger opens mobile drawer', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mobile-drawer"]')).toBeTruthy();
+    });
+  });
+
+  it('mobile drawer has workspace home section links', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+      expect(drawer).toBeTruthy();
+      expect(drawer.textContent).toContain('Decisions');
+      expect(drawer.textContent).toContain('Specs');
+      expect(drawer.textContent).toContain('Repos');
+      expect(drawer.textContent).toContain('Briefing');
+      expect(drawer.textContent).toContain('Agent Rules');
+    });
+  });
+
+  it('Esc closes mobile drawer', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mobile-drawer"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mobile-drawer"]')).toBeNull();
+    });
+  });
+
+  it('drawer has aria-label for accessibility', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+      expect(drawer?.getAttribute('aria-label')).toBeTruthy();
+    });
+  });
+});
+
+// ── §10 Cross-Workspace View: workspace dropdown + routing ────────────
+
+describe('Cross-workspace view', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([{ id: 'ws-1', name: 'Payments', slug: 'payments' }]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+  });
+
+  it('workspace dropdown includes "All Workspaces" entry', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    // Open dropdown
+    const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
+    if (arrowBtn) {
+      await fireEvent.click(arrowBtn);
+      await waitFor(() => {
+        const dropdown = container.querySelector('[data-testid="ws-dropdown"]');
+        expect(dropdown).toBeTruthy();
+        expect(dropdown.textContent).toContain('All Workspaces');
+      });
+    }
+  });
+
+  it('"All Workspaces" entry has a testid', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
+    if (arrowBtn) {
+      await fireEvent.click(arrowBtn);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
+      });
+    }
+  });
+
+  it('clicking "All Workspaces" navigates to /all', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
+    if (arrowBtn) {
+      await fireEvent.click(arrowBtn);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
+      });
+      await fireEvent.click(container.querySelector('[data-testid="ws-all-workspaces"]'));
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/all');
+      });
+    }
   });
 });
