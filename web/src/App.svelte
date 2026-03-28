@@ -92,12 +92,22 @@
   let workspaceBudget = $state(null);
   let decisionsCount = $state(0);
 
+  // ── Repo ID cache ─────────────────────────────────────────────────────
+  // Cache repo name→id mappings so browser back/forward can restore full repo state.
+  // Key: `${workspaceId}:${repoName}`, Value: repo id string
+  const repoIdCache = new Map();
+
   async function loadWorkspaceData(workspaceId) {
     try { workspaceBudget = await api.workspaceBudget(workspaceId); } catch { workspaceBudget = null; }
   }
 
   async function loadDecisionsCount() {
     try {
+      // Note: spec §1 says repo mode badge should show repo-scoped count only.
+      // The server's /count endpoint does not yet support repo_id filtering —
+      // it only supports workspace_id. Until the server adds repo_id support,
+      // we show the workspace-wide count in all modes. This is tracked as a
+      // known limitation of Slice 1.
       decisionsCount = await api.notificationCount(currentWorkspace?.id);
     } catch { /* ignore */ }
   }
@@ -199,6 +209,10 @@
 
   function goToRepo(repo, tab = 'specs') {
     currentRepo = repo;
+    // Cache the repo ID for use by popstate restoration
+    if (repo.id && currentWorkspace?.id) {
+      repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
+    }
     mode = 'repo';
     repoTab = tab;
     fadeContent();
@@ -445,11 +459,14 @@
           mode = 'repo';
           repoTab = parsed.tab ?? 'specs';
           currentRepo = { id: null, name: parsed.repoName };
-          // Try to resolve repo ID
+          // Try to resolve repo ID and populate cache
           try {
             const repos = await api.workspaceRepos(ws.id);
             const repo = (repos ?? []).find(r => r.name === parsed.repoName);
-            if (repo) currentRepo = { id: repo.id, name: repo.name };
+            if (repo) {
+              currentRepo = { id: repo.id, name: repo.name };
+              repoIdCache.set(`${ws.id}:${repo.name}`, repo.id);
+            }
           } catch { /* keep name-only ref */ }
         } else {
           mode = 'workspace_home';
@@ -470,9 +487,23 @@
           loadWorkspaceData(ws.id);
         } else {
           localStorage.removeItem('gyre_workspace_id');
-          mode = 'workspace_home';
-          currentWorkspace = null;
+          // Fall through: auto-select if only one workspace exists
+          if (workspaces.length === 1) {
+            currentWorkspace = workspaces[0];
+            try { localStorage.setItem('gyre_workspace_id', currentWorkspace.id); } catch { /* private browsing */ }
+            mode = 'workspace_home';
+            loadWorkspaceData(currentWorkspace.id);
+          } else {
+            mode = 'workspace_home';
+            currentWorkspace = null;
+          }
         }
+      } else if (workspaces.length === 1) {
+        // Spec §5: "workspace selector (if multiple) or workspace home (if one)"
+        currentWorkspace = workspaces[0];
+        try { localStorage.setItem('gyre_workspace_id', currentWorkspace.id); } catch { /* private browsing */ }
+        mode = 'workspace_home';
+        loadWorkspaceData(currentWorkspace.id);
       } else {
         mode = 'workspace_home';
         currentWorkspace = null;
@@ -507,7 +538,14 @@
         } else if (m === 'workspace_home') {
           // keep currentWorkspace
         }
-        currentRepo = (repoName && m === 'repo') ? { id: null, name: repoName } : null;
+        if (repoName && m === 'repo') {
+          // Restore repo ID from cache if available
+          const wsId = currentWorkspace?.id;
+          const cachedId = wsId ? repoIdCache.get(`${wsId}:${repoName}`) : null;
+          currentRepo = { id: cachedId ?? null, name: repoName };
+        } else {
+          currentRepo = null;
+        }
         fadeContent();
         if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
         loadDecisionsCount();
@@ -522,7 +560,13 @@
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
           mode = p.mode ?? 'workspace_home';
-          currentRepo = (p.repoName && p.mode === 'repo') ? { id: null, name: p.repoName } : null;
+          if (p.repoName && p.mode === 'repo') {
+            const wsId = currentWorkspace?.id;
+            const cachedId = wsId ? repoIdCache.get(`${wsId}:${p.repoName}`) : null;
+            currentRepo = { id: cachedId ?? null, name: p.repoName };
+          } else {
+            currentRepo = null;
+          }
           repoTab = p.tab ?? 'specs';
         }
         fadeContent();
