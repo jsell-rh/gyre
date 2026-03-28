@@ -32,6 +32,15 @@ vi.mock('../components/ExplorerCodeTab.svelte', () => ({
   default: function ExplorerCodeTabStub() {},
 }));
 
+vi.mock('../components/RepoSettings.svelte', () => ({
+  default: function RepoSettingsStub(opts) {
+    const el = document.createElement('div');
+    el.setAttribute('data-testid', 'repo-settings');
+    if (opts?.target) opts.target.appendChild(el);
+    return { destroy() {} };
+  },
+}));
+
 vi.mock('../lib/api.js', () => ({
   api: {
     agents: vi.fn().mockResolvedValue([]),
@@ -337,12 +346,11 @@ describe('Tab bar', () => {
 // ── Tab content wiring ─────────────────────────────────────────────────
 
 describe('Tab content wiring', () => {
-  it('shows settings placeholder on settings tab', () => {
-    const { container } = render(RepoMode, {
+  it('renders settings tab without throwing (Slice 4: RepoSettings replaces placeholder)', () => {
+    // RepoSettings is mocked; we just verify no render error occurs
+    expect(() => render(RepoMode, {
       props: { workspace: mockWorkspace, repo: mockRepo, activeTab: 'settings' },
-    });
-    expect(container.querySelector('[data-testid="settings-placeholder"]')).toBeTruthy();
-    expect(container.textContent).toContain('Repo settings coming in Slice 4');
+    })).not.toThrow();
   });
 
   it('shows no repo placeholder for code tab when repo has no id', () => {

@@ -13,6 +13,7 @@
   import SpecDashboard from './SpecDashboard.svelte';
   import Inbox from './Inbox.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
+  import RepoSettings from './RepoSettings.svelte';
 
   let {
     workspace = null,
@@ -190,9 +191,7 @@
         </div>
       {/if}
     {:else if activeTab === 'settings'}
-      <div class="tab-placeholder" data-testid="settings-placeholder">
-        <p>Repo settings coming in Slice 4.</p>
-      </div>
+      <RepoSettings {workspace} {repo} />
     {/if}
   </div>
 </div>
