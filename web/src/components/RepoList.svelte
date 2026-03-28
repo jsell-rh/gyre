@@ -72,7 +72,7 @@
         name: mirrorName.trim(),
         workspace_id: workspaceId,
         url: mirrorUrl.trim(),
-        interval_secs: mirrorInterval || 300,
+        interval_secs: mirrorInterval ?? 300,
       });
       toastSuccess('Mirror repository created');
       showMirrorRepo = false;
