@@ -480,8 +480,6 @@
   function cancelPreview() { stopPreview(); previewState = 'editing'; previewProgress = []; }
   function iterate()       { stopPreview(); previewState = 'editing'; previewProgress = []; }
 
-  onDestroy(() => { stopPreview(); });
-
   async function publish() {
     if (!selectedMsId || !workspaceId) return;
     publishSaving = true;
