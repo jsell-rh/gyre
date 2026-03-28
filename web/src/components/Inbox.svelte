@@ -657,7 +657,7 @@
   }
 
   .inbox-card.dismissed {
-    opacity: 0.45;
+    opacity: 0.6;
   }
 
   .inbox-card.resolved {
@@ -731,8 +731,9 @@
 
   .card-title {
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: 600;
     color: var(--color-text);
+    line-height: 1.4;
   }
 
   .card-subtitle {
@@ -747,7 +748,7 @@
   .card-header-right {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-3);
     flex-shrink: 0;
   }
 
