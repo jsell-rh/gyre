@@ -176,7 +176,7 @@
     } else if (ctx.scope === 'workspace' && ctx.workspace) {
       const ws = workspaces.find(w => w.id === ctx.workspace.id) || ctx.workspace;
       currentWorkspace = ws;
-      localStorage.setItem('gyre_workspace_id', ws.id);
+      try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
       setScope({ type: 'workspace', workspaceId: ws.id }, view || 'inbox');
     }
   }
@@ -184,7 +184,7 @@
   // ── Workspace switching (breadcrumb dropdown) ─────────────────────────
   function selectWorkspace(ws) {
     currentWorkspace = ws;
-    localStorage.setItem('gyre_workspace_id', ws.id);
+    try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
     setScope({ type: 'workspace', workspaceId: ws.id }, 'inbox');
   }
 
@@ -358,8 +358,7 @@
       if (fromUrl.scope.type === 'workspace') {
         const ws = workspaces.find(w => w.id === fromUrl.scope.workspaceId) ?? null;
         if (ws) {
-          currentWorkspace = ws;
-          localStorage.setItem('gyre_workspace_id', ws.id);
+          try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
           loadWorkspaceData(ws.id);
         } else {
           // Stale workspace URL — fall back to tenant scope
