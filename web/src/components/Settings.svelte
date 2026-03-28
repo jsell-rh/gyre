@@ -176,7 +176,7 @@
         <span class="logo-sub">{$t('settings.about.tagline')}</span>
       </div>
       <p class="about-desc">
-        Gyre is an autonomous software development platform. Agents collaborate to write, review, and deploy code — all coordinated through the Gyre server.
+        {$t('settings.about.description')}
       </p>
       {#if version}
         <div class="version-tag">v{version.version}</div>

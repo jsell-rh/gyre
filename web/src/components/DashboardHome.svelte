@@ -20,14 +20,16 @@
 
   async function fetchAll() {
     loading = true;
-    const [agR, tsR, mqR, acR] = await Promise.allSettled([
+    const [agR, tsR, mrR, mqR, acR] = await Promise.allSettled([
       api.agents(),
       api.tasks(),
+      api.mergeRequests(),
       api.mergeQueue(),
       api.activity(10),
     ]);
     if (agR.status === 'fulfilled') { const r = agR.value; agents = Array.isArray(r?.agents) ? r.agents : Array.isArray(r) ? r : []; }
     if (tsR.status === 'fulfilled') { const r = tsR.value; tasks = Array.isArray(r?.tasks) ? r.tasks : Array.isArray(r) ? r : []; }
+    if (mrR.status === 'fulfilled') { const r = mrR.value; mrs = Array.isArray(r?.merge_requests) ? r.merge_requests : Array.isArray(r) ? r : []; }
     if (mqR.status === 'fulfilled') { const r = mqR.value; queue = Array.isArray(r?.items) ? r.items : Array.isArray(r) ? r : []; }
     if (acR.status === 'fulfilled') { const r = acR.value; activity = Array.isArray(r?.events) ? r.events : Array.isArray(r) ? r : []; }
     loading = false;

@@ -63,7 +63,7 @@
       <Skeleton lines={8} />
     </div>
   {:else if !summary}
-    <EmptyState message="Budget data unavailable. Admin access may be required." />
+    <EmptyState title="Budget data unavailable" description="Admin access may be required." />
   {:else}
     <div class="content">
       <!-- Tenant summary cards -->
