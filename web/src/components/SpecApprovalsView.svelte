@@ -198,8 +198,10 @@
       bind:value={approveSha}
       placeholder="abc123...40 chars"
       maxlength="40"
+      aria-describedby="sha-char-count"
       onkeydown={(e) => e.key === 'Enter' && doApprove()}
     />
+    <span id="sha-char-count" class="char-count" class:at-limit={approveSha.length === 40}>{approveSha.length}/40</span>
     <div class="modal-actions">
       <Button variant="secondary" onclick={() => (showApprove = false)}>Cancel</Button>
       <Button variant="primary" onclick={doApprove} disabled={approveWorking}>
@@ -408,6 +410,15 @@
   .field-textarea:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible,
   .field-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
+
+  .char-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    margin-top: var(--space-1);
+    display: block;
+  }
+  .char-count.at-limit { color: var(--color-success); font-weight: 500; }
 
   .modal-actions {
     display: flex;

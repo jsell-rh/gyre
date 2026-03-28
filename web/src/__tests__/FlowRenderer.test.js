@@ -386,7 +386,7 @@ describe('FlowRenderer', () => {
     });
     const timeLabel = container.querySelector('.time-label');
     expect(timeLabel).toBeTruthy();
-    expect(timeLabel.textContent).toContain('ms');
+    expect(timeLabel.textContent).toContain('s');
   });
 
   it('play button toggles aria-pressed when clicked', async () => {
