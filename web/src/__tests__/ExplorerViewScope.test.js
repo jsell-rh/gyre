@@ -5,6 +5,7 @@ vi.mock('../lib/api.js', () => ({
   api: {
     workspaces: vi.fn().mockResolvedValue([]),
     workspaceBudget: vi.fn().mockResolvedValue(null),
+    repos: vi.fn().mockResolvedValue([]),
     workspaceRepos: vi.fn().mockResolvedValue([]),
     allRepos: vi.fn().mockResolvedValue([]),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
@@ -34,7 +35,7 @@ describe('ExplorerView scope branching', () => {
       props: { scope: { type: 'workspace', workspaceId: 'ws-1' } },
     });
     await waitFor(() => {
-      expect(getByText('Workspace Repositories')).toBeTruthy();
+      expect(getByText('Workspace Architecture')).toBeTruthy();
     });
   });
 

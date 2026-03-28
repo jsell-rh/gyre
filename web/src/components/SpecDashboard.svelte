@@ -309,7 +309,6 @@
             class="spec-row"
             role="option"
             class:selected={selectedPath === spec.path}
-            role="option"
             tabindex="0"
             aria-selected={selectedPath === spec.path}
             onclick={() => handleRowClick(spec)}
