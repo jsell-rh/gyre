@@ -622,28 +622,17 @@
         </span>
       {/if}
 
-      <!-- Keyboard shortcut hint -->
-      <button
-        class="status-item status-shortcuts-hint"
-        onclick={() => (shortcutsOpen = true)}
-        title="Keyboard shortcuts (?)"
-        aria-label="Show keyboard shortcuts"
-      >
-        <kbd aria-hidden="true">?</kbd>
-        <span>Shortcuts</span>
-      </button>
-
-      <!-- WebSocket status -->
+      <!-- Connection status -->
       <span
         class="status-item status-ws"
         class:connected={wsStatus === 'connected'}
         class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
         role="status"
-        aria-label="WebSocket: {wsStatus}"
-        title="WebSocket: {wsStatus}"
+        aria-label={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
+        title={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
       >
         <span class="ws-dot" aria-hidden="true"></span>
-        WS: {wsStatus}
+        {wsStatus === 'connected' ? 'Live' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline' : 'Connecting'}
       </span>
     </footer>
   </div>
@@ -1363,6 +1352,14 @@
   }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (max-width: 768px) {
+    .search-trigger kbd { display: none; }
+    .search-trigger span { display: none; }
+    .topbar { gap: var(--space-2); padding: 0 var(--space-2); }
+    .status-bar { gap: var(--space-2); padding: 0 var(--space-2); }
+    .status-trust, .status-budget { display: none; }
+  }
 
   .user-btn:focus-visible {
     outline: 2px solid var(--color-focus);

@@ -575,8 +575,8 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    height: 100%;
     overflow-y: auto;
+    height: 100%;
   }
 
   .inbox-header {

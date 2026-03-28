@@ -85,7 +85,7 @@
   .split .content-main {
     flex: 0 0 60%;
     max-width: 60%;
-    min-width: 480px;
+    min-width: min(480px, 100%);
   }
 
   /* Editor-split layout: left panel is 60% */
