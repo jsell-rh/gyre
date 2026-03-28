@@ -207,6 +207,16 @@
     loadDecisionsCount();
   }
 
+  async function loadRepoDetail(repoId) {
+    if (!repoId) return;
+    try {
+      const detail = await api.repo(repoId);
+      if (detail && currentRepo?.id === repoId) {
+        currentRepo = { ...currentRepo, ...detail };
+      }
+    } catch { /* keep partial repo data */ }
+  }
+
   function goToRepo(repo, tab = 'specs') {
     currentRepo = repo;
     // Cache the repo ID for use by popstate restoration
@@ -217,6 +227,8 @@
     repoTab = tab;
     fadeContent();
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: repo.name, tab });
+    // Load full repo details (clone URL, etc.) in the background
+    if (repo.id) loadRepoDetail(repo.id);
   }
 
   function goToRepoTab(tab) {
@@ -819,6 +831,7 @@
             repo={currentRepo}
             activeTab={repoTab}
             onTabChange={(tab) => goToRepoTab(tab)}
+            workspaceBudget={workspaceBudget}
           />
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
