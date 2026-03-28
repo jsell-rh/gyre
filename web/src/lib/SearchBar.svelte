@@ -5,7 +5,7 @@
   let query = $state('');
   let inputEl = $state(null);
   let dialogEl = $state(null);
-  let previousFocus = $state(null);
+  let previousFocus = null;
   let apiResults = $state([]);
   let searching = $state(false);
   let searchError = $state(false);

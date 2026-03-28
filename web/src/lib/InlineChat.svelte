@@ -31,7 +31,7 @@
   let error = $state(null);
 
   // Track active SSE reader so we can cancel it on component destroy
-  let activeReader = $state(null);
+  let activeReader = null;
   let destroyed = false;
   onDestroy(() => {
     destroyed = true;
