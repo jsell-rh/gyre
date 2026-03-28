@@ -120,7 +120,15 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - Items include both actionable decisions (gate failures, spec approvals) and informational alerts (trust suggestions, spec assertions). All use the HSI §8 priority system. The name "Decisions" emphasizes that this surface is for human judgment, even when some items are informational — the human decides whether to act on them or dismiss them.
 - When empty: shows "No decisions needed — system is running autonomously." This is the ideal state.
 
-**Repos** (middle — pick where to focus):
+**Specs** (cross-repo spec overview):
+- Shows all specs across all repos in the workspace, with repo attribution on each row.
+- Columns: Repo, Path, Status (draft/pending/approved/implemented), Progress, Last activity.
+- Click a spec → enters the repo that owns it (repo mode, Specs tab, detail panel open for that spec).
+- Filter by status, repo, owner (`?owner=me` toggle).
+- This is the workspace-level spec oversight surface — answers "what's the status of all my directives across repos?"
+- Data source: `GET /api/v1/specs?workspace_id=:id` (existing, returns specs across repos in workspace).
+
+**Repos** (pick where to focus):
 - Lists all repos in the workspace with health indicators.
 - Each row shows: repo name, active spec count, active agent count, health status (● healthy, ⚠ gate failure, ○ idle).
 - Click a repo → enter repo mode (§3).
@@ -308,11 +316,11 @@ This is the **creative surface** for encoding organizational judgment (vision §
 2. Lands on workspace selector (if multiple workspaces) or workspace home (if one workspace)
 3. Workspace home shows repos, decisions, briefing
 4. User clicks a repo → enters repo mode
-5. Subsequent visits restore last workspace + last repo (from `localStorage`)
+5. Subsequent visits restore last workspace (from `localStorage`) and land on workspace home. Last repo is pre-selected in the dropdown but not auto-entered — the user sees the workspace overview first.
 
 ### Daily Flow
 
-1. Open app → workspace home (or last repo if stored)
+1. Open app → **always workspace home first** (even if last repo is stored). This ensures workspace-scoped decisions (with `repo_id: NULL`) are never missed. The last-used repo is remembered and pre-selected in the repo dropdown, one click away. If there are zero unresolved decisions, the user can click their repo immediately.
 2. Glance at Decisions count in top bar — any urgent items?
 3. If decisions exist: handle them (approve specs, retry gates)
 4. Click repo to focus → Specs tab shows implementation progress
@@ -351,7 +359,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 | `?` | Show keyboard shortcut reference (suppressed during text input) | Always |
 | `g h` | Go to workspace home | Always (GitHub-style two-key sequence: press `g`, then within 500ms press the second key. Suppressed during text input.) |
 | `g s` | Go to workspace settings | Always |
-| `g a` | Go to Agent Rules management | Always |
+| `g a` | Go to Agent Rules management (`/workspaces/:slug/agent-rules`) | Always |
 | `g 1` | Go to Specs tab in current repo | Repo mode only (no-op at workspace home) |
 | `g 2` | Go to Architecture tab | Repo mode only |
 | `g 3` | Go to Decisions tab | Repo mode only |
@@ -369,7 +377,7 @@ Every state is URL-addressable for deep linking and sharing:
 /                                          → workspace selector (or redirect to default)
 /workspaces/:slug                          → workspace home
 /workspaces/:slug/settings                 → workspace settings
-/workspaces/:slug/standards                → meta-spec management
+/workspaces/:slug/agent-rules                → meta-spec management
 /workspaces/:slug/decisions                → full decisions list
 /workspaces/:slug/r/:repo                    → repo mode, Specs tab (default)
 /workspaces/:slug/r/:repo/specs              → repo Specs tab
@@ -384,7 +392,7 @@ Every state is URL-addressable for deep linking and sharing:
 
 **URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). Repos are nested under a `/r/` segment to avoid collision with reserved workspace paths (`settings`, `standards`, `decisions`). This produces readable URLs: `/workspaces/payments/r/payment-api/specs`.
 
-**Reserved workspace paths:** `settings`, `standards`, `decisions`. These are workspace-level pages and cannot be used as repo names. The server rejects repo creation with these names (400 error).
+**Reserved workspace paths:** `settings`, `agent-rules`, `decisions`, `r`. These are workspace-level pages or URL segments and cannot be used as repo names. The server rejects repo creation with these names (400 error).
 
 **Profile URL:** `/profile` is preserved outside the `/workspaces/...` hierarchy (it is user-scoped, not workspace-scoped).
 
