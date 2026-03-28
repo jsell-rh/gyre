@@ -40,8 +40,10 @@ export function createWsStore() {
     };
 
     ws.onclose = () => {
-      setStatus('disconnected');
-      scheduleReconnect();
+      if (status !== 'auth-failed') {
+        setStatus('disconnected');
+        scheduleReconnect();
+      }
     };
 
     ws.onerror = () => {

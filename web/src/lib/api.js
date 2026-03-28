@@ -27,13 +27,14 @@ async function request(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
+    const { headers: customHeaders, ...restOptions } = options;
     const res = await fetch(`${API_BASE}${path}`, {
+      ...restOptions,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${getAuthToken()}`,
-        ...options.headers,
+        ...customHeaders,
       },
-      ...options,
       signal: controller.signal,
     });
     if (!res.ok) {
