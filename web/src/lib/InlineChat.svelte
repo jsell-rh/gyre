@@ -21,12 +21,24 @@
     streaming = $bindable(false),
   } = $props();
 
+  import { onDestroy } from 'svelte';
+
   let inputEl = $state(null);
   let historyEl = $state(null);
   let text = $state('');
   let messages = $state([]);
   let streamBuffer = $state('');
   let error = $state(null);
+
+  // Track active SSE reader so we can cancel it on component destroy
+  let activeReader = $state(null);
+  let destroyed = false;
+  onDestroy(() => {
+    destroyed = true;
+    // Cancel any in-flight SSE stream to prevent background reads
+    activeReader?.cancel().catch(() => {});
+    activeReader = null;
+  });
 
   // Scroll chat history to bottom whenever messages or streaming buffer updates.
   $effect(() => {
@@ -94,11 +106,13 @@
       error = 'No response body';
       return;
     }
+    activeReader = reader;
     const decoder = new TextDecoder();
     let partial = '';
     let done = false;
 
     while (!done) {
+      if (destroyed) { reader.cancel().catch(() => {}); return; }
       const { value, done: streamDone } = await reader.read();
       done = streamDone;
       if (value) {
@@ -133,8 +147,10 @@
       }
     }
 
+    activeReader = null;
+
     // If we got partial content but no complete event, commit what we have.
-    if (streamBuffer) {
+    if (!destroyed && streamBuffer) {
       messages = [...messages, { role: 'assistant', content: streamBuffer }];
       streamBuffer = '';
     }

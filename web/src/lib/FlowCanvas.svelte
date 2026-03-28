@@ -234,15 +234,19 @@
     }
   }
 
+  // Cache the 2D context — calling getContext('2d') after getContext('webgl2')
+  // on the same canvas returns null. Caching also avoids repeated context lookups.
+  let ctx2d = $state(null);
+
   function draw2D(particles) {
     if (!canvasEl) return;
-    const ctx = canvasEl.getContext('2d');
-    if (!ctx) return;
+    if (!ctx2d) ctx2d = canvasEl.getContext('2d');
+    if (!ctx2d) return;
 
-    ctx.clearRect(0, 0, width, height);
+    ctx2d.clearRect(0, 0, width, height);
 
     for (const particle of particles) {
-      drawParticle(ctx, particle);
+      drawParticle(ctx2d, particle);
     }
   }
 
@@ -288,6 +292,9 @@
 
   function initWebGL() {
     if (!canvasEl || glInitialized) return;
+    // A canvas can only have one context type. If we already acquired a 2D
+    // context, requesting webgl2 returns null. Skip to avoid silent failure.
+    if (ctx2d) return;
     const gl = canvasEl.getContext('webgl2');
     if (!gl) return; // fallback to 2D handled in drawWebGL
 
@@ -331,6 +338,10 @@
     glInitialized = true;
   }
 
+  // Persistent WebGL buffers — reused each frame to avoid GPU memory leak
+  let glPosBuf = $state(null);
+  let glColBuf = $state(null);
+
   function drawWebGL(particles) {
     if (!glInitialized) initWebGL();
     if (!glCtx || !glProgram) {
@@ -356,14 +367,15 @@
       return [c.r, c.g, c.b, 1.0];
     }));
 
-    const posBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    // Reuse buffers instead of creating new ones each frame
+    if (!glPosBuf) glPosBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuf);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(posLoc);
     gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
 
-    const colBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    if (!glColBuf) glColBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glColBuf);
     gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(colLoc);
     gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);

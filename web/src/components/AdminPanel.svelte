@@ -1919,9 +1919,9 @@
   }
   .filter-input:focus:not(:focus-visible) { outline: none; }
   .filter-input:focus-visible {
-    outline: none;
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
     border-color: var(--color-focus);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 30%, transparent);
   }
   .filter-input.full-width { width: 100%; box-sizing: border-box; }
   .textarea { resize: vertical; min-height: 72px; }

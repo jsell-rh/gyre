@@ -1,5 +1,5 @@
 <script>
-  import { getContext, tick, onDestroy } from 'svelte';
+  import { getContext, onDestroy, tick } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -125,6 +125,8 @@
     ttyConnecting = false;
   }
 
+  onDestroy(() => closeTtyWs());
+
   function selectAgent(a) {
     if (selected?.id === a.id) { selected = null; closeTtyWs(); containerRecord = null; return; }
     closeTtyWs();
@@ -148,14 +150,15 @@
       closeTtyWs();
       ttyConnecting = true;
       ttyError = false;
-      const token = localStorage.getItem('gyre_auth_token') || 'test-token';
+      const token = localStorage.getItem('gyre_auth_token') || 'gyre-dev-token';
       const ws = new WebSocket(api.agentTtyUrl(selected.id));
       ttyWs = ws;
       ws.onopen = () => { ws.send(JSON.stringify({ type: 'Auth', token })); };
       ws.onmessage = (ev) => {
         ttyConnecting = false;
         try { const m = JSON.parse(ev.data); if (m.type === 'AuthResult') return; } catch (_) {}
-        ttyLines = [...ttyLines, ev.data];
+        const next = [...ttyLines, ev.data];
+        ttyLines = next.length > 5000 ? next.slice(-5000) : next;
       };
       ws.onclose = () => { ttyConnecting = false; };
       ws.onerror = () => { ttyConnecting = false; ttyError = true; };
