@@ -170,7 +170,7 @@
             description="eBPF audit events will appear here in real time."
           />
         {:else}
-          {#each liveEvents as evt, idx (evt.id ?? `live-${idx}`)}
+          {#each liveEvents as evt, i (evt.id ?? `live-${i}`)}
             <div class="event-row">
               <Badge value={evt.event_type ?? evt.type ?? 'Unknown'} color={typeColor(evt.event_type ?? evt.type)} />
               <span class="event-agent" title={evt.agent_id ?? ''}>{evt.agent_id ?? '—'}</span>

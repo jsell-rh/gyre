@@ -419,6 +419,14 @@ export const api = {
   setWorkspaceBudget: (id, data) =>
     request(`/workspaces/${id}/budget`, { method: 'PUT', body: JSON.stringify(data) }),
   budgetSummary: () => request('/budget/summary'),
+  costSummary: (since, until) => {
+    const params = new URLSearchParams();
+    if (since != null) params.set('since', since);
+    if (until != null) params.set('until', until);
+    const qs = params.toString();
+    return request(`/costs/summary${qs ? '?' + qs : ''}`);
+  },
+  costsByAgent: (agentId) => request(`/costs?agent_id=${encodeURIComponent(agentId)}`),
   workspaceRepos: (id) => request(`/workspaces/${id}/repos`),
   workspaceMembers: (id) => request(`/workspaces/${id}/members`),
   workspaceTeams: (id) => request(`/workspaces/${id}/teams`),
