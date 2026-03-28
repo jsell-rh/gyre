@@ -93,8 +93,8 @@
   {:else}
     {#if summary}
       <div class="summary-card">
-        <div class="summary-label">Total Cost (all time)</div>
-        <div class="summary-amount">{fmtAmount(summary.total)}</div>
+        <div class="summary-label">Total cost (all time)</div>
+        <div class="summary-amount">${fmtAmount(summary.total)}</div>
       </div>
     {/if}
 
@@ -109,7 +109,7 @@
             <thead>
               <tr>
                 <th scope="col">Agent ID</th>
-                <th class="right">Total</th>
+                <th class="right" scope="col">Total ($)</th>
                 <th scope="col">Bar</th>
                 <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
@@ -206,7 +206,7 @@
   .summary-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     padding: var(--space-4) var(--space-6);
     display: flex;
     align-items: center;
@@ -214,12 +214,12 @@
   }
 
   .summary-label { color: var(--color-text-muted); font-size: var(--text-sm); }
-  .summary-amount { font-size: var(--text-3xl); font-weight: 700; color: var(--color-primary); font-family: var(--font-mono); }
+  .summary-amount { font-size: var(--text-3xl); font-weight: 700; color: var(--color-text); font-family: var(--font-mono); }
 
   .panel {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     padding: var(--space-4);
     overflow: auto;
   }
@@ -237,7 +237,7 @@
 
   .agent-id, .cost-type { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); }
   .right { text-align: right; }
-  .amount { color: var(--color-primary); font-family: var(--font-mono); }
+  .amount { color: var(--color-text); font-family: var(--font-mono); }
   .currency, .task-id, .time { color: var(--color-text-muted); font-size: var(--text-xs); }
 
   .bar-cell { width: 120px; }

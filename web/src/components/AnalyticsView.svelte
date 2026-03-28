@@ -171,7 +171,7 @@
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     color: var(--color-text);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius);
     padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     cursor: pointer;
@@ -196,7 +196,7 @@
   .panel {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     padding: var(--space-4);
     overflow: auto;
   }
@@ -207,7 +207,7 @@
   th { text-align: left; padding: var(--space-1) var(--space-2); color: var(--color-text-muted); font-size: var(--text-xs); border-bottom: 1px solid var(--color-border); }
   td { padding: var(--space-1) var(--space-2); font-size: var(--text-sm); }
 
-  .event-name { font-family: var(--font-mono); color: var(--color-primary); }
+  .event-name { font-family: var(--font-mono); color: var(--color-text); }
   .count { text-align: right; color: var(--color-text-muted); width: 50px; }
 
   .bar-cell { width: 120px; padding-left: var(--space-2); }
@@ -226,7 +226,7 @@
     flex-wrap: wrap;
   }
 
-  .ev-name { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-primary); }
+  .ev-name { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text); }
   .ev-agent { font-size: var(--text-xs); color: var(--color-text-muted); }
   .ev-time { font-size: var(--text-xs); color: var(--color-text-secondary); }
   .ev-detail { font-size: var(--text-xs); padding: var(--space-1); }
@@ -248,7 +248,7 @@
   .retry-btn {
     background: color-mix(in srgb, var(--color-primary) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius);
     color: var(--color-primary);
     cursor: pointer;
     font-size: var(--text-xs);
