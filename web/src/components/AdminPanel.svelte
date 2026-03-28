@@ -624,6 +624,7 @@
     try {
       if (modal.kind === 'policy') {
         await deletePolicy(modal.policyId);
+        deleteInProgress = false;
         return;
       }
 

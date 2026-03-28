@@ -52,6 +52,7 @@
   }
 
   function fmtTime(ts) {
+    if (ts == null) return '—';
     return new Date(ts * 1000).toLocaleString();
   }
 

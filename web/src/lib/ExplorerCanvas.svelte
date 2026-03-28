@@ -61,7 +61,8 @@
   $effect(() => {
     if (showRiskHeatmap && repoId) {
       let cancelled = false;
-      api.repoGraphRisks(repoId).then(data => {
+      const currentRepoId = repoId;
+      api.repoGraphRisks(currentRepoId).then(data => {
         if (!cancelled) riskData = Array.isArray(data) ? data : [];
       }).catch(() => { if (!cancelled) riskData = []; });
       return () => { cancelled = true; };
@@ -268,15 +269,13 @@
     const h = svgEl?.clientHeight ?? 600;
 
     computeLayout(eng, ns, es, w, h).then(pos => {
-      if (!cancelled) {
-        nodePositionsMap = pos;
-        layoutPending = false;
-      }
+      if (cancelled) return;
+      nodePositionsMap = pos;
+      layoutPending = false;
     }).catch(() => {
-      if (!cancelled) {
-        nodePositionsMap = columnLayout(ns);
-        layoutPending = false;
-      }
+      if (cancelled) return;
+      nodePositionsMap = columnLayout(ns);
+      layoutPending = false;
     });
 
     return () => { cancelled = true; };

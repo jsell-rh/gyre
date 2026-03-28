@@ -196,13 +196,14 @@
   let animFrameId = $state(null);
 
   $effect(() => {
-    if (playing && !prefersReducedMotion.matches) {
+    if (playing) {
+      const currentMaxTime = maxTime;
       let lastTs = performance.now();
       function frame(ts) {
         const dt = (ts - lastTs) * speed;
         lastTs = ts;
         currentTime = currentTime + dt * 1000; // ms to microseconds
-        if (currentTime > maxTime) {
+        if (currentTime > currentMaxTime) {
           currentTime = 0; // loop
         }
         drawFrame();
