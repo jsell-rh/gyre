@@ -20,6 +20,7 @@ vi.mock('../lib/api.js', () => ({
     workspaces: vi.fn().mockResolvedValue([]),
     specsForWorkspace: vi.fn().mockResolvedValue([]),
     metaSpecs: vi.fn().mockResolvedValue([]),
+    getWorkspaceBriefing: vi.fn().mockResolvedValue(null),
   },
 }));
 
@@ -33,6 +34,7 @@ describe('CrossWorkspaceHome', () => {
     api.workspaces.mockResolvedValue([]);
     api.specsForWorkspace.mockResolvedValue([]);
     api.metaSpecs.mockResolvedValue([]);
+    api.getWorkspaceBriefing.mockResolvedValue(null);
   });
 
   it('renders without throwing', () => {
@@ -53,16 +55,18 @@ describe('CrossWorkspaceHome', () => {
       expect(text).toContain('Decisions');
       expect(text).toContain('Workspaces');
       expect(text).toContain('Specs');
+      expect(text).toContain('Briefing');
       expect(text).toContain('Agent Rules');
     }, { timeout: 3000 });
   });
 
-  it('has testids for all sections', async () => {
+  it('has testids for all five sections', async () => {
     const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="section-decisions"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="section-workspaces"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="section-specs"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="section-briefing"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="section-agent-rules"]')).toBeTruthy();
     }, { timeout: 3000 });
   });
@@ -298,6 +302,68 @@ describe('CrossWorkspaceHome', () => {
     const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {
       expect(container.querySelector('.cwh-title')?.textContent).toContain('All Workspaces');
+    }, { timeout: 3000 });
+  });
+
+  // §10 Briefing section tests
+  it('briefing section shows empty state when no workspaces have briefing data', async () => {
+    api.workspaces.mockResolvedValue([]);
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      const section = container.querySelector('[data-testid="section-briefing"]');
+      expect(section?.textContent).toContain('No briefing data available');
+    }, { timeout: 3000 });
+  });
+
+  it('briefing section calls getWorkspaceBriefing per workspace', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-1', name: 'Payments' },
+      { id: 'ws-2', name: 'Billing' },
+    ]);
+    api.getWorkspaceBriefing.mockResolvedValue({ summary: 'All is well' });
+    render(CrossWorkspaceHome);
+    await waitFor(() => {
+      expect(api.getWorkspaceBriefing).toHaveBeenCalledWith('ws-1');
+      expect(api.getWorkspaceBriefing).toHaveBeenCalledWith('ws-2');
+    }, { timeout: 3000 });
+  });
+
+  it('briefing section shows workspace-attributed summaries', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-1', name: 'Payments' },
+    ]);
+    api.getWorkspaceBriefing.mockResolvedValue({ summary: 'Payment retry implemented' });
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      const section = container.querySelector('[data-testid="section-briefing"]');
+      expect(section?.textContent).toContain('Payments');
+      expect(section?.textContent).toContain('Payment retry implemented');
+    }, { timeout: 3000 });
+  });
+
+  it('briefing section handles partial workspace briefing failures gracefully', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-1', name: 'Payments' },
+      { id: 'ws-2', name: 'Billing' },
+    ]);
+    // ws-1 succeeds, ws-2 fails
+    api.getWorkspaceBriefing.mockImplementation((id) => {
+      if (id === 'ws-1') return Promise.resolve({ summary: 'Payments: all good' });
+      return Promise.reject(new Error('briefing unavailable'));
+    });
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      const section = container.querySelector('[data-testid="section-briefing"]');
+      // ws-1 summary should be shown; ws-2 failure should be silently skipped
+      expect(section?.textContent).toContain('Payments: all good');
+    }, { timeout: 3000 });
+  });
+
+  it('briefing section shows aggregated scope tag', async () => {
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      const section = container.querySelector('[data-testid="section-briefing"]');
+      expect(section?.textContent).toContain('Aggregated');
     }, { timeout: 3000 });
   });
 });

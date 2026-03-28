@@ -58,6 +58,12 @@
   let specsError = $state(null);
   let specs = $state([]);
 
+  // ── Briefing state ───────────────────────────────────────────────────────
+  // Cross-workspace briefing: aggregate per-workspace briefings (§10)
+  let briefingLoading = $state(true);
+  let briefingError = $state(null);
+  let briefingSummaries = $state([]); // [{ workspaceName, summary }]
+
   // ── Agent Rules state ────────────────────────────────────────────────────
   let rulesLoading = $state(true);
   let rulesError = $state(null);
@@ -66,7 +72,7 @@
   // ── Load all sections ────────────────────────────────────────────────────
   $effect(() => {
     loadDecisions();
-    loadWorkspaces();
+    loadWorkspaces().then(() => loadBriefings());
     loadSpecs();
     loadAgentRules();
   });
@@ -111,6 +117,29 @@
     }
   }
 
+  // loadBriefings is called after loadWorkspaces completes so we have the workspace list
+  async function loadBriefings() {
+    briefingLoading = true;
+    briefingError = null;
+    try {
+      // Spec §10: client-side aggregation — call briefing per workspace, merge sections
+      const results = await Promise.allSettled(
+        workspaces.map(async (ws) => {
+          const data = await api.getWorkspaceBriefing(ws.id);
+          const summary = data?.summary ?? data?.content ?? '';
+          return { workspaceName: ws.name, summary };
+        })
+      );
+      briefingSummaries = results
+        .filter((r) => r.status === 'fulfilled' && r.value.summary)
+        .map((r) => r.value);
+    } catch (e) {
+      briefingError = e?.message ?? 'Failed to load briefing';
+    } finally {
+      briefingLoading = false;
+    }
+  }
+
   async function loadAgentRules() {
     rulesLoading = true;
     rulesError = null;
@@ -139,7 +168,7 @@
 <div class="cross-workspace-home" data-testid="cross-workspace-home">
   <div class="cwh-header">
     <h1 class="cwh-title">All Workspaces</h1>
-    <p class="cwh-subtitle">Tenant-scope overview — decisions, workspaces, specs, and agent rules across your organization.</p>
+    <p class="cwh-subtitle">Tenant-scope overview — decisions, workspaces, specs, briefing, and agent rules across your organization.</p>
   </div>
 
   <!-- ── Decisions ─────────────────────────────────────────────────────── -->
@@ -268,6 +297,31 @@
           <span class="view-all-hint">{specs.length - 10} more specs…</span>
         </div>
       {/if}
+    {/if}
+  </section>
+
+  <!-- ── Briefing ─────────────────────────────────────────────────────── -->
+  <section class="cwh-section" data-testid="section-briefing" aria-labelledby="briefing-heading">
+    <div class="section-header">
+      <h2 class="section-title" id="briefing-heading">Briefing</h2>
+      <span class="section-scope-tag">Aggregated</span>
+    </div>
+
+    {#if briefingLoading}
+      <div class="section-loading" aria-live="polite">Loading briefing…</div>
+    {:else if briefingError}
+      <div class="section-error" role="alert">{briefingError}</div>
+    {:else if briefingSummaries.length === 0}
+      <p class="section-empty">No briefing data available across workspaces.</p>
+    {:else}
+      <ul class="briefing-list" role="list">
+        {#each briefingSummaries as item (item.workspaceName)}
+          <li class="briefing-item">
+            <span class="briefing-ws-badge">{item.workspaceName}</span>
+            <p class="briefing-summary">{item.summary}</p>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </section>
 
@@ -594,6 +648,37 @@
   }
 
   .spec-status { white-space: nowrap; }
+
+  /* ── Briefing ─────────────────────────────────────────────────────────── */
+  .briefing-list {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-2) 0;
+  }
+
+  .briefing-item {
+    padding: var(--space-3) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .briefing-item:last-child { border-bottom: none; }
+
+  .briefing-ws-badge {
+    display: inline-block;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 1px var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+
+  .briefing-summary {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.6;
+    margin: 0;
+  }
 
   /* ── Agent Rules ──────────────────────────────────────────────────────── */
   .rules-group {
