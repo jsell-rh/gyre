@@ -2,34 +2,28 @@
   import './lib/design-system.css';
   import { isLoading } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
-  import Sidebar from './components/Sidebar.svelte';
-  import ContentArea from './lib/ContentArea.svelte';
-  import Inbox from './components/Inbox.svelte';
-  import Briefing from './components/Briefing.svelte';
-  import ExplorerView from './components/ExplorerView.svelte';
-  import SpecDashboard from './components/SpecDashboard.svelte';
-  import MetaSpecs from './components/MetaSpecs.svelte';
-  import AdminPanel from './components/AdminPanel.svelte';
+  import WorkspaceHome from './components/WorkspaceHome.svelte';
+  import RepoMode from './components/RepoMode.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
-  import ScopeBreadcrumb from './lib/ScopeBreadcrumb.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
   import { toast as showToast } from './lib/toast.svelte.js';
 
-  // ── Primary navigation state ─────────────────────────────────────────
-  // One of: 'inbox' | 'briefing' | 'explorer' | 'specs' | 'meta-specs' | 'admin'
-  let currentNav = $state('explorer');
+  // ── Navigation mode ──────────────────────────────────────────────────
+  // 'workspace_home' | 'repo' | 'profile'
+  let mode = $state('workspace_home');
 
-  // ── Scope: which tenant/workspace/repo we're viewing ─────────────────
-  // { type: 'tenant' | 'workspace' | 'repo', tenantId?, workspaceId?, repoId? }
-  let scope = $state({ type: 'tenant' });
+  // ── Workspace / repo state ───────────────────────────────────────────
+  let workspaces = $state([]);
+  let currentWorkspace = $state(null);
+  let currentRepo = $state(null); // { id, name } | null
+  let repoTab = $state('specs'); // 'specs' | 'architecture' | 'decisions' | 'code' | 'settings'
 
   // ── Global detail panel ──────────────────────────────────────────────
-  // Opened by clicking any entity reference (agent, spec, MR, task, node)
   let detailPanel = $state({ open: false, entity: null });
 
   // ── WebSocket ────────────────────────────────────────────────────────
@@ -53,6 +47,8 @@
   let shortcutsModalEl = $state(null);
   let userMenuOpen = $state(false);
   let userMenuEl = $state(null);
+  let wsDropdownOpen = $state(false);
+  let wsDropdownEl = $state(null);
 
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
@@ -76,7 +72,13 @@
     }
   });
 
-  // Content cross-fade key (increment to trigger fade transition)
+  $effect(() => {
+    if (wsDropdownOpen) {
+      tick().then(() => wsDropdownEl?.querySelector('[role="menuitem"]')?.focus());
+    }
+  });
+
+  // Content cross-fade
   let contentVisible = $state(true);
   let fadeTimer = null;
 
@@ -86,107 +88,166 @@
     fadeTimer = setTimeout(() => { contentVisible = true; }, 150);
   }
 
-  // ── Data ─────────────────────────────────────────────────────────────
-  let workspaces = $state([]);
-  let currentWorkspace = $state(null);
+  // ── Budget / decisions ────────────────────────────────────────────────
   let workspaceBudget = $state(null);
-  let inboxBadge = $state(0);
+  let decisionsCount = $state(0);
+
+  // ── Repo ID cache ─────────────────────────────────────────────────────
+  // Cache repo name→id mappings so browser back/forward can restore full repo state.
+  // Key: `${workspaceId}:${repoName}`, Value: repo id string
+  const repoIdCache = new Map();
 
   async function loadWorkspaceData(workspaceId) {
     try { workspaceBudget = await api.workspaceBudget(workspaceId); } catch { workspaceBudget = null; }
   }
 
-  async function loadInboxBadge() {
+  async function loadDecisionsCount() {
     try {
-      inboxBadge = await api.notificationCount(scope?.type === 'workspace' ? scope.workspaceId : undefined);
+      // Note: spec §1 says repo mode badge should show repo-scoped count only.
+      // The server's /count endpoint does not yet support repo_id filtering —
+      // it only supports workspace_id. Until the server adds repo_id support,
+      // we show the workspace-wide count in all modes. This is tracked as a
+      // known limitation of Slice 1.
+      decisionsCount = await api.notificationCount(currentWorkspace?.id);
     } catch { /* ignore */ }
   }
 
-  // ── URL routing ───────────────────────────────────────────────────────
-  const NAV_ITEMS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin', 'profile'];
+  // ── Slug helpers ──────────────────────────────────────────────────────
+  /** Get URL slug for a workspace. Uses ws.slug if present, else ws.id. */
+  function wsSlug(ws) {
+    return ws?.slug ?? ws?.id ?? '';
+  }
+
+  /** Find a workspace by slug (slug field OR id). */
+  function findWorkspaceBySlug(slug) {
+    return workspaces.find(w => w.slug === slug || w.id === slug) ?? null;
+  }
+
+  // ── URL structure (§7 of ui-navigation.md) ────────────────────────────
+  // /                                          → workspace_home (no workspace selected)
+  // /workspaces/:slug                          → workspace home
+  // /workspaces/:slug/settings                 → workspace settings
+  // /workspaces/:slug/agent-rules              → agent rules
+  // /workspaces/:slug/r/:repo                  → repo mode, specs tab
+  // /workspaces/:slug/r/:repo/specs            → specs tab
+  // /workspaces/:slug/r/:repo/architecture     → architecture tab
+  // /workspaces/:slug/r/:repo/decisions        → decisions tab
+  // /workspaces/:slug/r/:repo/code             → code tab
+  // /workspaces/:slug/r/:repo/settings         → settings tab
+  // /profile                                   → user profile
+
+  const REPO_TABS = ['specs', 'architecture', 'decisions', 'code', 'settings'];
 
   export function parseUrl(pathname) {
-    const parts = pathname.split('/').filter(Boolean).map(p => {
+    const raw = pathname.split('/').filter(Boolean).map(p => {
       try { return decodeURIComponent(p); } catch { return p; }
     });
-    if (parts.length === 0) return null;
 
-    if (parts.length === 1) {
-      const [nav] = parts;
-      if (NAV_ITEMS.includes(nav)) return { nav, scope: { type: 'tenant' } };
+    if (raw.length === 0) return { mode: 'workspace_home', slug: null, repoName: null, tab: null };
+
+    // /profile
+    if (raw.length === 1 && raw[0] === 'profile') {
+      return { mode: 'profile', slug: null, repoName: null, tab: null };
     }
 
-    if (parts.length >= 2 && (parts[0] === 'workspaces' || parts[0] === 'repos')) {
-      const [seg, id, navRaw] = parts;
-      const nav = navRaw && NAV_ITEMS.includes(navRaw) ? navRaw : 'explorer';
+    // /workspaces/:slug[/...]
+    if (raw[0] === 'workspaces' && raw.length >= 2) {
+      const slug = raw[1];
 
-      if (seg === 'workspaces') {
-        return { nav, scope: { type: 'workspace', workspaceId: id } };
+      // /workspaces/:slug/r/:repo[/tab]
+      if (raw[2] === 'r' && raw.length >= 4) {
+        const repoName = raw[3];
+        const tab = raw[4] && REPO_TABS.includes(raw[4]) ? raw[4] : 'specs';
+        return { mode: 'repo', slug, repoName, tab };
       }
-      if (seg === 'repos') {
-        return { nav, scope: { type: 'repo', repoId: id } };
-      }
+
+      // /workspaces/:slug  or  /workspaces/:slug/settings  etc.
+      return { mode: 'workspace_home', slug, repoName: null, tab: null };
     }
 
     return null;
   }
 
-  export function urlFor(nav, s) {
-    // Clamp nav to valid items so sub-view names don't leak into URLs
-    const safeNav = NAV_ITEMS.includes(nav) ? nav : 'explorer';
-    if (!s || s.type === 'tenant') return `/${safeNav}`;
-    if (s.type === 'workspace') return `/workspaces/${encodeURIComponent(s.workspaceId)}/${safeNav}`;
-    if (s.type === 'repo') return `/repos/${encodeURIComponent(s.repoId)}/${safeNav}`;
-    return `/${safeNav}`;
+  export function urlFor(parsed) {
+    if (!parsed) return '/';
+    const { mode: m, slug, repoName, tab } = parsed;
+    if (m === 'profile') return '/profile';
+    if (!slug) return '/';
+    if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
+    if (m === 'repo') {
+      const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
+      if (tab && tab !== 'specs') return `${base}/${tab}`;
+      return base;
+    }
+    return '/';
   }
 
-  function pushUrl(nav, s) {
-    window.history.pushState({ nav, scope: { ...s } }, '', urlFor(nav, s));
+  function pushState(parsed) {
+    const stateObj = {
+      mode: parsed.mode,
+      wsId: currentWorkspace?.id ?? null,
+      repoName: parsed.repoName ?? null,
+      repoTab: parsed.tab ?? 'specs',
+    };
+    window.history.pushState(stateObj, '', urlFor(parsed));
   }
 
   // ── Navigation ────────────────────────────────────────────────────────
-  function navigate(nav, scopeOverride) {
-    const newScope = scopeOverride ?? scope;
-    currentNav = nav;
-    if (scopeOverride) {
-      scope = scopeOverride;
-      fadeContent();
-    }
-    pushUrl(nav, newScope);
-    if (newScope.type === 'workspace') loadWorkspaceData(newScope.workspaceId);
-  }
-
-  function setScope(newScope, nav) {
-    scope = newScope;
-    if (nav) currentNav = nav;
-    fadeContent();
-    pushUrl(currentNav, newScope);
-    if (newScope.type === 'workspace') loadWorkspaceData(newScope.workspaceId);
-  }
-
-  // Expose navigate and scope accessor via context (no prop drilling)
-  setContext('navigate', navigate);
-  setContext('getScope', () => scope);
-  setContext('openDetailPanel', openDetailPanel);
-
-  // ── ScopeBreadcrumb onnavigate handler ───────────────────────────────
-  function onBreadcrumbNavigate(view, ctx) {
-    if (ctx.scope === 'tenant') {
-      setScope({ type: 'tenant' }, view || currentNav);
-    } else if (ctx.scope === 'workspace' && ctx.workspace) {
-      const ws = workspaces.find(w => w.id === ctx.workspace.id) || ctx.workspace;
+  function goToWorkspaceHome(ws) {
+    if (ws && ws !== currentWorkspace) {
       currentWorkspace = ws;
       try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
-      setScope({ type: 'workspace', workspaceId: ws.id }, view || 'inbox');
     }
+    mode = 'workspace_home';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'workspace_home', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
+    if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
+    loadDecisionsCount();
   }
 
-  // ── Workspace switching (breadcrumb dropdown) ─────────────────────────
-  function selectWorkspace(ws) {
-    currentWorkspace = ws;
-    try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
-    setScope({ type: 'workspace', workspaceId: ws.id }, 'inbox');
+  function goToRepo(repo, tab = 'specs') {
+    currentRepo = repo;
+    // Cache the repo ID for use by popstate restoration
+    if (repo.id && currentWorkspace?.id) {
+      repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
+    }
+    mode = 'repo';
+    repoTab = tab;
+    fadeContent();
+    pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: repo.name, tab });
   }
+
+  function goToRepoTab(tab) {
+    repoTab = tab;
+    pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
+  }
+
+  function goToProfile() {
+    mode = 'profile';
+    fadeContent();
+    pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
+  }
+
+  function selectWorkspace(ws) {
+    wsDropdownOpen = false;
+    goToWorkspaceHome(ws);
+  }
+
+  // Expose via context
+  setContext('navigate', (view) => {
+    // Legacy compat shim: map old nav items to new navigation
+    if (view === 'profile') { goToProfile(); return; }
+    // Everything else lands on workspace home
+    goToWorkspaceHome(currentWorkspace);
+  });
+  setContext('getScope', () => ({
+    type: mode === 'repo' ? 'repo' : mode === 'workspace_home' ? 'workspace' : 'tenant',
+    workspaceId: currentWorkspace?.id,
+    repoId: currentRepo?.id,
+  }));
+  setContext('openDetailPanel', openDetailPanel);
 
   // ── Detail panel ──────────────────────────────────────────────────────
   function openDetailPanel(entity) {
@@ -197,82 +258,64 @@
     detailPanel = { open: false, entity: null };
   }
 
-  // ── User menu keyboard navigation ───────────────────────────────────
+  // ── Workspace dropdown keyboard navigation ────────────────────────────
+  function onWsDropdownKeydown(e) {
+    const items = wsDropdownEl?.querySelectorAll('[role="menuitem"]');
+    if (!items?.length) return;
+    const arr = Array.from(items);
+    const current = arr.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); arr[(current + 1) % arr.length]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); arr[(current - 1 + arr.length) % arr.length]?.focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); wsDropdownOpen = false; document.querySelector('.ws-name-btn')?.focus(); }
+  }
+
+  // ── User menu keyboard navigation ────────────────────────────────────
   function onUserMenuKeydown(e) {
     const items = userMenuEl?.querySelectorAll('[role="menuitem"]');
     if (!items?.length) return;
     const arr = Array.from(items);
     const current = arr.indexOf(document.activeElement);
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      arr[(current + 1) % arr.length]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      arr[(current - 1 + arr.length) % arr.length]?.focus();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      userMenuOpen = false;
-      document.querySelector('.user-btn')?.focus();
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      arr[0]?.focus();
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      arr[arr.length - 1]?.focus();
-    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); arr[(current + 1) % arr.length]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); arr[(current - 1 + arr.length) % arr.length]?.focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); userMenuOpen = false; document.querySelector('.user-btn')?.focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); arr[0]?.focus(); }
+    else if (e.key === 'End') { e.preventDefault(); arr[arr.length - 1]?.focus(); }
   }
 
-  // ── Keyboard shortcuts ────────────────────────────────────────────────
-  const NAV_SHORTCUTS = {
-    '1': 'inbox', '2': 'briefing', '3': 'explorer',
-    '4': 'specs', '5': 'meta-specs', '6': 'admin',
-  };
+  // ── Keyboard shortcuts (§6 of ui-navigation.md) ──────────────────────
+  // g-key sequence: press g, then within 500ms press the second key
+  let gKeyPending = false;
+  let gKeyTimer = null;
 
   function handleKeydown(e) {
     const inInput = e.target.tagName === 'INPUT'
       || e.target.tagName === 'TEXTAREA'
       || e.target.isContentEditable;
 
-    // Cmd+K: global search
+    // ⌘K: global search
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
       searchOpen = true;
+      gKeyPending = false;
       return;
     }
 
-    // Cmd+1-6: nav shortcuts (check e.key first, fall back to e.code for non-US layouts)
-    const shortcutDigit = NAV_SHORTCUTS[e.key]
-      ? e.key
-      : (e.code?.match(/^Digit([1-6])$/)?.[1] ?? null);
-    if ((e.metaKey || e.ctrlKey) && shortcutDigit && NAV_SHORTCUTS[shortcutDigit]) {
-      e.preventDefault();
-      navigate(NAV_SHORTCUTS[shortcutDigit]);
-      return;
-    }
-
-    // Esc: close detail panel or go up one scope level
+    // Esc: close overlay / panel / return to workspace home
     if (e.key === 'Escape') {
-      if (shortcutsOpen) { shortcutsOpen = false; return; }
-      if (userMenuOpen) { userMenuOpen = false; return; }
-      if (detailPanel.open) { closeDetailPanel(); return; }
-      if (scope.type === 'repo') {
-        // scope.workspaceId may be absent if navigated directly via URL;
-        // fall back to currentWorkspace or tenant scope.
-        if (scope.workspaceId || currentWorkspace) {
-          setScope({ type: 'workspace', workspaceId: scope.workspaceId ?? currentWorkspace?.id });
-        } else {
-          setScope({ type: 'tenant' }, 'explorer');
-        }
-      } else if (scope.type === 'workspace') {
-        setScope({ type: 'tenant' });
-      }
+      if (shortcutsOpen) { shortcutsOpen = false; gKeyPending = false; return; }
+      if (userMenuOpen) { userMenuOpen = false; gKeyPending = false; return; }
+      if (wsDropdownOpen) { wsDropdownOpen = false; gKeyPending = false; return; }
+      if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
+      if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
+      gKeyPending = false;
       return;
     }
 
-    // /: focus search in current view (suppressed in text inputs)
+    // /: focus search (suppressed in text inputs)
     if (e.key === '/' && !inInput) {
       e.preventDefault();
       searchOpen = true;
+      gKeyPending = false;
       return;
     }
 
@@ -280,6 +323,66 @@
     if (e.key === '?' && !inInput) {
       e.preventDefault();
       shortcutsOpen = !shortcutsOpen;
+      gKeyPending = false;
+      return;
+    }
+
+    // g-key sequence (suppressed in text inputs)
+    if (!inInput) {
+      if (e.key === 'g' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        gKeyPending = true;
+        clearTimeout(gKeyTimer);
+        gKeyTimer = setTimeout(() => { gKeyPending = false; }, 500);
+        return;
+      }
+
+      if (gKeyPending) {
+        gKeyPending = false;
+        clearTimeout(gKeyTimer);
+
+        switch (e.key) {
+          case 'h': // g h → workspace home
+            e.preventDefault();
+            goToWorkspaceHome(currentWorkspace);
+            return;
+          case 's': // g s → workspace settings
+            e.preventDefault();
+            if (currentWorkspace) {
+              window.history.pushState(
+                { mode: 'workspace_home', wsId: currentWorkspace.id, repoName: null, repoTab: 'specs' },
+                '',
+                `/workspaces/${encodeURIComponent(wsSlug(currentWorkspace))}/settings`
+              );
+            }
+            return;
+          case 'a': // g a → agent rules
+            e.preventDefault();
+            if (currentWorkspace) {
+              window.history.pushState(
+                { mode: 'workspace_home', wsId: currentWorkspace.id, repoName: null, repoTab: 'specs' },
+                '',
+                `/workspaces/${encodeURIComponent(wsSlug(currentWorkspace))}/agent-rules`
+              );
+            }
+            return;
+          case '1': // g 1 → Specs tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('specs');
+            return;
+          case '2': // g 2 → Architecture tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('architecture');
+            return;
+          case '3': // g 3 → Decisions tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('decisions');
+            return;
+          case '4': // g 4 → Code tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('code');
+            return;
+        }
+      }
     }
   }
 
@@ -319,112 +422,154 @@
 
   let trustLevel = $derived(currentWorkspace?.trust_level ?? null);
 
-  // ── Page title ─────────────────────────────────────────────────────
+  // ── Page title ────────────────────────────────────────────────────────
   $effect(() => {
-    const navLabel = currentNav ? currentNav.charAt(0).toUpperCase() + currentNav.slice(1).replace('-', ' ') : 'Gyre';
-    const wsName = scope?.type !== 'tenant' ? (currentWorkspace?.name ?? '') : '';
-    const repoName = scope?.type === 'repo' ? (scope.repoName ?? '') : '';
-    const parts = [navLabel];
-    if (repoName) parts.push(repoName);
-    else if (wsName) parts.push(wsName);
-    document.title = parts.length > 1 ? `${parts.join(' — ')} | Gyre` : `${parts[0]} | Gyre`;
+    const wsName = currentWorkspace?.name ?? '';
+    const repoName = currentRepo?.name ?? '';
+    if (mode === 'profile') {
+      document.title = 'Profile | Gyre';
+    } else if (mode === 'repo' && repoName) {
+      document.title = wsName ? `${repoName} — ${wsName} | Gyre` : `${repoName} | Gyre`;
+    } else if (mode === 'workspace_home' && wsName) {
+      document.title = `${wsName} | Gyre`;
+    } else {
+      document.title = 'Gyre';
+    }
   });
-
-  let currentLayout = $derived.by(() => {
-    if (detailPanel.open) return 'split';
-    if (currentNav === 'explorer' && scope.type !== 'tenant') return 'canvas-controls';
-    return 'full-width';
-  });
-
-  // Breadcrumb segments
 
   // ── Mount: entrypoint flow + URL routing ──────────────────────────────
   onMount(async () => {
     // 1. Load all workspaces
-    try { workspaces = await api.workspaces(); } catch { /* ignore */ }
+    try { workspaces = await api.workspaces() ?? []; } catch { workspaces = []; }
 
-    // 2. Determine initial scope from URL or entrypoint flow
-    const fromUrl = parseUrl(window.location.pathname);
+    // 2. Determine initial state from URL or entrypoint flow
+    const parsed = parseUrl(window.location.pathname);
 
-    if (!fromUrl && window.location.pathname !== '/') {
-      showToast('Page not found \u2014 redirecting to home', { type: 'info' });
-    }
+    if (parsed?.mode === 'profile') {
+      mode = 'profile';
+    } else if (parsed?.slug) {
+      // URL-driven workspace navigation
+      const ws = findWorkspaceBySlug(parsed.slug);
+      if (ws) {
+        currentWorkspace = ws;
+        try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
+        loadWorkspaceData(ws.id);
 
-    if (fromUrl) {
-      // URL-driven navigation
-      currentNav = fromUrl.nav;
-      scope = fromUrl.scope;
-
-      if (fromUrl.scope.type === 'workspace') {
-        const ws = workspaces.find(w => w.id === fromUrl.scope.workspaceId) ?? null;
-        if (ws) {
-          try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
-          loadWorkspaceData(ws.id);
+        if (parsed.mode === 'repo' && parsed.repoName) {
+          mode = 'repo';
+          repoTab = parsed.tab ?? 'specs';
+          currentRepo = { id: null, name: parsed.repoName };
+          // Try to resolve repo ID and populate cache
+          try {
+            const repos = await api.workspaceRepos(ws.id);
+            const repo = (repos ?? []).find(r => r.name === parsed.repoName);
+            if (repo) {
+              currentRepo = { id: repo.id, name: repo.name };
+              repoIdCache.set(`${ws.id}:${repo.name}`, repo.id);
+            }
+          } catch { /* keep name-only ref */ }
         } else {
-          // Stale workspace URL — fall back to tenant scope
-          showToast('Workspace not found — redirecting to home', { type: 'info' });
-          currentWorkspace = null;
-          scope = { type: 'tenant' };
-          currentNav = 'explorer';
+          mode = 'workspace_home';
         }
+      } else {
+        showToast('Workspace not found — redirecting to home', { type: 'info' });
+        mode = 'workspace_home';
+        currentWorkspace = null;
       }
     } else {
-      // Entrypoint flow
+      // Entrypoint flow: always show workspace home
       const savedWsId = localStorage.getItem('gyre_workspace_id');
       if (savedWsId) {
         const ws = workspaces.find(w => w.id === savedWsId);
         if (ws) {
-          // Subsequent visit: restore workspace, land on inbox
           currentWorkspace = ws;
-          scope = { type: 'workspace', workspaceId: ws.id };
-          currentNav = 'inbox';
+          mode = 'workspace_home';
           loadWorkspaceData(ws.id);
         } else {
-          // Stored workspace not found: fall back to tenant explorer
           localStorage.removeItem('gyre_workspace_id');
-          scope = { type: 'tenant' };
-          currentNav = 'explorer';
+          // Fall through: auto-select if only one workspace exists
+          if (workspaces.length === 1) {
+            currentWorkspace = workspaces[0];
+            try { localStorage.setItem('gyre_workspace_id', currentWorkspace.id); } catch { /* private browsing */ }
+            mode = 'workspace_home';
+            loadWorkspaceData(currentWorkspace.id);
+          } else {
+            mode = 'workspace_home';
+            currentWorkspace = null;
+          }
         }
+      } else if (workspaces.length === 1) {
+        // Spec §5: "workspace selector (if multiple) or workspace home (if one)"
+        currentWorkspace = workspaces[0];
+        try { localStorage.setItem('gyre_workspace_id', currentWorkspace.id); } catch { /* private browsing */ }
+        mode = 'workspace_home';
+        loadWorkspaceData(currentWorkspace.id);
       } else {
-        // First visit: tenant explorer (workspace cards)
-        scope = { type: 'tenant' };
-        currentNav = 'explorer';
+        mode = 'workspace_home';
+        currentWorkspace = null;
       }
     }
 
     // Replace history state with canonical URL
-    window.history.replaceState({ nav: currentNav, scope: { ...scope } }, '', urlFor(currentNav, scope));
+    const canon = urlFor({
+      mode,
+      slug: wsSlug(currentWorkspace),
+      repoName: currentRepo?.name ?? null,
+      tab: repoTab,
+    });
+    window.history.replaceState(
+      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab },
+      '',
+      canon
+    );
 
-    // 3. Load inbox badge, refresh every 60s
-    loadInboxBadge();
-    const inboxInterval = setInterval(loadInboxBadge, 60_000);
+    // 3. Load decisions count, refresh every 60s
+    loadDecisionsCount();
+    const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
-      if (e.state?.nav) {
-        // Clamp restored nav to valid items (guards stale history entries)
-        currentNav = NAV_ITEMS.includes(e.state.nav) ? e.state.nav : 'explorer';
-        scope = e.state.scope ?? { type: 'tenant' };
+      if (e.state?.mode) {
+        const { mode: m, wsId, repoName, repoTab: rt } = e.state;
+        mode = m;
+        repoTab = rt ?? 'specs';
+        if (wsId) {
+          currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
+        } else if (m === 'workspace_home') {
+          // keep currentWorkspace
+        }
+        if (repoName && m === 'repo') {
+          // Restore repo ID from cache if available
+          const wsId = currentWorkspace?.id;
+          const cachedId = wsId ? repoIdCache.get(`${wsId}:${repoName}`) : null;
+          currentRepo = { id: cachedId ?? null, name: repoName };
+        } else {
+          currentRepo = null;
+        }
         fadeContent();
-        if (scope.type === 'workspace') {
-          currentWorkspace = workspaces.find(w => w.id === scope.workspaceId) ?? null;
-          if (currentWorkspace) loadWorkspaceData(scope.workspaceId);
-        } else if (scope.type === 'repo') {
-          // Recover workspace context when returning to repo scope
-          if (scope.workspaceId) {
-            currentWorkspace = workspaces.find(w => w.id === scope.workspaceId) ?? null;
+        if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
+        loadDecisionsCount();
+        return;
+      }
+      // Fallback: re-parse URL
+      const p = parseUrl(window.location.pathname);
+      if (p) {
+        if (p.mode === 'profile') {
+          mode = 'profile';
+        } else if (p.slug) {
+          const ws = findWorkspaceBySlug(p.slug);
+          if (ws) currentWorkspace = ws;
+          mode = p.mode ?? 'workspace_home';
+          if (p.repoName && p.mode === 'repo') {
+            const wsId = currentWorkspace?.id;
+            const cachedId = wsId ? repoIdCache.get(`${wsId}:${p.repoName}`) : null;
+            currentRepo = { id: cachedId ?? null, name: p.repoName };
+          } else {
+            currentRepo = null;
           }
-        } else if (scope.type === 'tenant') {
-          currentWorkspace = null;
+          repoTab = p.tab ?? 'specs';
         }
-      } else {
-        // No state (e.g. initial entry or external link) — re-parse URL
-        const parsed = parseUrl(window.location.pathname);
-        if (parsed) {
-          currentNav = parsed.nav;
-          scope = parsed.scope;
-          fadeContent();
-        }
+        fadeContent();
       }
     }
 
@@ -433,6 +578,7 @@
 
     function handleOutsideClick(e) {
       if (!e.target.closest('.user-menu-wrap')) userMenuOpen = false;
+      if (!e.target.closest('.ws-selector')) wsDropdownOpen = false;
     }
     window.addEventListener('click', handleOutsideClick, true);
 
@@ -440,8 +586,9 @@
       window.removeEventListener('popstate', handlePopstate);
       window.removeEventListener('keydown', handleKeydown);
       window.removeEventListener('click', handleOutsideClick, true);
-      clearInterval(inboxInterval);
+      clearInterval(decisionsInterval);
       clearTimeout(fadeTimer);
+      clearTimeout(gKeyTimer);
     };
   });
 </script>
@@ -450,23 +597,123 @@
 
 {#if !$isLoading}
 <div class="app">
-  <!-- Sidebar: 6 fixed nav items, always present -->
-  <Sidebar bind:currentNav onnavigate={(v) => navigate(v)} {inboxBadge} {wsStatus} />
-
-  <!-- Main area: topbar + content + status bar -->
+  <!-- Main column: topbar + content + status bar (no sidebar) -->
   <div class="main">
-    <!-- Topbar (48px) -->
-    <header class="topbar">
-      <!-- Left: scope breadcrumb (S4.8 ScopeBreadcrumb) -->
-      <ScopeBreadcrumb
-        tenant={{ id: 'default', name: 'Gyre' }}
-        workspace={scope.type !== 'tenant' ? currentWorkspace : null}
-        repo={scope.type === 'repo' && scope.repoId ? { id: scope.repoId, name: scope.repoName ?? scope.repoId } : null}
-        {workspaces}
-        onnavigate={onBreadcrumbNavigate}
-      />
 
-      <!-- Center: Cmd+K search trigger -->
+    <!-- ── Topbar (always visible) ──────────────────────────────────── -->
+    <header class="topbar" data-testid="topbar">
+
+      <!-- Left side: workspace selector or back arrow + breadcrumb -->
+      {#if mode === 'repo'}
+        <!-- Repo mode: back arrow + WorkspaceName / RepoName -->
+        <div class="topbar-left repo-context">
+          <button
+            class="back-btn"
+            onclick={() => goToWorkspaceHome(currentWorkspace)}
+            aria-label="Back to workspace home"
+            data-testid="back-btn"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+              <path d="M19 12H5M12 5l-7 7 7 7"/>
+            </svg>
+          </button>
+          <nav class="breadcrumb" aria-label="Location" data-testid="repo-breadcrumb">
+            <button
+              class="breadcrumb-ws"
+              onclick={() => goToWorkspaceHome(currentWorkspace)}
+              aria-label="Go to {currentWorkspace?.name ?? 'workspace'} home"
+            >
+              {currentWorkspace?.name ?? 'Workspace'}
+            </button>
+            <span class="breadcrumb-sep" aria-hidden="true">/</span>
+            <span class="breadcrumb-repo" aria-current="page">{currentRepo?.name ?? ''}</span>
+          </nav>
+        </div>
+      {:else}
+        <!-- Workspace home / profile: workspace selector -->
+        <div class="topbar-left ws-selector" data-testid="ws-selector">
+          <div class="logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
+              <circle cx="12" cy="12" r="10" stroke="var(--color-primary)" stroke-width="2"/>
+              <path d="M8 12l3 3 5-5" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+
+          {#if currentWorkspace}
+            <div class="ws-name-wrap">
+              <button
+                class="ws-name-btn"
+                onclick={() => goToWorkspaceHome(currentWorkspace)}
+                aria-label="Go to {currentWorkspace.name} workspace home"
+                data-testid="ws-name-btn"
+              >
+                {currentWorkspace.name}
+              </button>
+              <button
+                class="ws-arrow-btn"
+                onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
+                aria-haspopup="menu"
+                aria-expanded={wsDropdownOpen}
+                aria-label="Switch workspace"
+                data-testid="ws-dropdown-toggle"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+            </div>
+          {:else}
+            <button
+              class="ws-name-btn ws-name-empty"
+              onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
+              aria-haspopup="menu"
+              aria-expanded={wsDropdownOpen}
+              aria-label="Select workspace"
+              data-testid="ws-select-prompt"
+            >
+              Select workspace
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
+                <path d="M6 9l6 6 6-6"/>
+              </svg>
+            </button>
+          {/if}
+
+          <!-- Workspace dropdown -->
+          {#if wsDropdownOpen}
+            <div
+              class="ws-dropdown"
+              role="menu"
+              tabindex="-1"
+              aria-label="Workspaces"
+              bind:this={wsDropdownEl}
+              onkeydown={onWsDropdownKeydown}
+              onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) wsDropdownOpen = false; }}
+              data-testid="ws-dropdown"
+            >
+              {#if workspaces.length === 0}
+                <div class="ws-dropdown-empty">No workspaces found</div>
+              {:else}
+                {#each workspaces as ws}
+                  <button
+                    class="ws-dropdown-item"
+                    class:active={ws.id === currentWorkspace?.id}
+                    role="menuitem"
+                    tabindex="-1"
+                    onclick={() => selectWorkspace(ws)}
+                  >
+                    {ws.name}
+                    {#if ws.id === currentWorkspace?.id}
+                      <span class="ws-check" aria-hidden="true">✓</span>
+                    {/if}
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Center: search trigger -->
       <div class="topbar-center">
         <button
           class="search-trigger"
@@ -481,25 +728,27 @@
         </button>
       </div>
 
-      <!-- Right: inbox badge + user avatar -->
+      <!-- Right: decisions badge + user avatar -->
       <div class="topbar-right">
-        <!-- Inbox badge shortcut -->
+        <!-- Decisions badge (🔔) -->
         <button
-          class="inbox-badge-btn"
-          onclick={() => navigate('inbox')}
-          aria-label={inboxBadge > 0 ? `${inboxBadge} unresolved inbox items` : 'Inbox'}
-          aria-current={currentNav === 'inbox' ? 'page' : undefined}
-          title="Inbox"
+          class="decisions-badge-btn"
+          onclick={() => { if (mode === 'repo') goToRepoTab('decisions'); else goToWorkspaceHome(currentWorkspace); }}
+          aria-label={decisionsCount > 0 ? `${decisionsCount} decisions pending` : 'No decisions pending'}
+          title="Decisions"
+          data-testid="decisions-badge"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
-            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
-            <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
+            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 01-3.46 0"/>
           </svg>
-          {#if inboxBadge > 0}
-            <span class="inbox-count" aria-hidden="true">{inboxBadge > 99 ? '99+' : inboxBadge}</span>
+          {#if decisionsCount > 0}
+            <span class="decisions-count" aria-hidden="true">{decisionsCount > 99 ? '99+' : decisionsCount}</span>
           {/if}
         </button>
-        <span class="sr-only" aria-live="polite" aria-atomic="true">{inboxBadge > 0 ? `${inboxBadge} unresolved inbox items` : ''}</span>
+        <span class="sr-only" aria-live="polite" aria-atomic="true">
+          {decisionsCount > 0 ? `${decisionsCount} decisions pending` : ''}
+        </span>
 
         <!-- User avatar dropdown -->
         <div class="user-menu-wrap">
@@ -528,13 +777,9 @@
               aria-label="User menu"
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}
-              onfocusout={(e) => {
-                if (!e.currentTarget.contains(e.relatedTarget)) {
-                  userMenuOpen = false;
-                }
-              }}
+              onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) userMenuOpen = false; }}
             >
-              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { navigate('profile'); userMenuOpen = false; }}>
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
                 Profile
               </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
@@ -550,32 +795,30 @@
       </div>
     </header>
 
-    <!-- Content area (adapts to nav + scope) -->
+    <!-- ── Content area ──────────────────────────────────────────────── -->
     <main class="content" id="main-content" tabindex="-1">
-      <ContentArea layout={currentLayout} {detailPanel} onclosePanel={closeDetailPanel}>
-        <div class="content-inner" class:faded={!contentVisible}>
-          {#if currentNav === 'inbox'}
-            <Inbox workspaceId={scope.workspaceId} scope={scope.type} />
-          {:else if currentNav === 'briefing'}
-            <Briefing workspaceId={scope.workspaceId} workspaceName={currentWorkspace?.name} {trustLevel} scope={scope.type} />
-          {:else if currentNav === 'explorer'}
-            <ExplorerView {scope} workspaceName={currentWorkspace?.name ?? null} />
-          {:else if currentNav === 'specs'}
-            <SpecDashboard workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
-          {:else if currentNav === 'meta-specs'}
-            <MetaSpecs workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
-          {:else if currentNav === 'profile'}
-            <UserProfile workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
-          {:else if currentNav === 'admin'}
-            <AdminPanel workspaceId={scope.workspaceId ?? null} repoId={scope.repoId ?? null} scope={scope.type} />
-          {/if}
-        </div>
-      </ContentArea>
+      <div class="content-inner" class:faded={!contentVisible}>
+        {#if mode === 'workspace_home'}
+          <WorkspaceHome
+            workspace={currentWorkspace}
+            {decisionsCount}
+            onSelectRepo={(repo) => goToRepo(repo)}
+          />
+        {:else if mode === 'repo'}
+          <RepoMode
+            workspace={currentWorkspace}
+            repo={currentRepo}
+            activeTab={repoTab}
+            onTabChange={(tab) => goToRepoTab(tab)}
+          />
+        {:else if mode === 'profile'}
+          <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
+        {/if}
+      </div>
     </main>
 
-    <!-- Status bar (24px) -->
+    <!-- ── Status bar (24px) ─────────────────────────────────────────── -->
     <footer class="status-bar" aria-label="Status bar">
-      <!-- Trust level -->
       {#if trustLevel}
         <span class="status-item status-trust" title="Workspace trust level">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
@@ -585,7 +828,6 @@
         </span>
       {/if}
 
-      <!-- Budget usage -->
       {#if budgetPct !== null}
         <span class="status-item status-budget" title="Budget usage">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
@@ -611,17 +853,14 @@
         </span>
       {/if}
 
-      <!-- Spacer -->
       <span class="status-spacer"></span>
 
-      <!-- Presence avatars (S4.8 PresenceAvatars) -->
-      {#if scope.type === 'workspace' && scope.workspaceId}
+      {#if currentWorkspace?.id}
         <span class="status-item status-presence">
-          <PresenceAvatars workspaceId={scope.workspaceId} wsStore={wsStore} />
+          <PresenceAvatars workspaceId={currentWorkspace.id} wsStore={wsStore} />
         </span>
       {/if}
 
-      <!-- Connection status -->
       <span
         class="status-item status-ws"
         class:connected={wsStatus === 'connected'}
@@ -638,8 +877,8 @@
 </div>
 {/if}
 
-<!-- Global overlays -->
-<SearchBar bind:open={searchOpen} onnavigate={(v) => navigate(v)} />
+<!-- ── Global overlays ────────────────────────────────────────────────── -->
+<SearchBar bind:open={searchOpen} onnavigate={(v) => { if (v === 'profile') goToProfile(); else goToWorkspaceHome(currentWorkspace); }} />
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
@@ -667,13 +906,14 @@
       <div class="shortcuts-body">
         <dl class="shortcuts-list">
           <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>Global search</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘1</kbd></dt><dd>Inbox</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘2</kbd></dt><dd>Briefing</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘3</kbd></dt><dd>Explorer</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘4</kbd></dt><dd>Specs</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘5</kbd></dt><dd>Meta-specs</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘6</kbd></dt><dd>Admin</dd></div>
-          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / go up scope</dd></div>
+          <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>Go to workspace home</dd></div>
+          <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>Workspace settings</dd></div>
+          <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>Agent rules</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>Specs tab (repo mode)</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>Architecture tab (repo mode)</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>Decisions tab (repo mode)</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>Code tab (repo mode)</dd></div>
+          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / return to workspace home</dd></div>
           <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>Focus search</dd></div>
           <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd></div>
         </dl>
@@ -751,7 +991,7 @@
     background: var(--color-bg);
   }
 
-  /* Main column: topbar + content + status bar */
+  /* Main column (full width — no sidebar) */
   .main {
     flex: 1;
     display: flex;
@@ -760,7 +1000,7 @@
     overflow: hidden;
   }
 
-  /* Topbar — height synced with --topbar-height (48px) */
+  /* ── Topbar ─────────────────────────────────────────────────────────── */
   .topbar {
     display: flex;
     align-items: center;
@@ -769,11 +1009,217 @@
     background: var(--color-surface);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
-    gap: var(--space-4);
+    gap: var(--space-3);
   }
 
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+    min-width: 0;
+  }
 
-  /* Center search trigger */
+  /* Repo mode: back arrow + breadcrumb */
+  .repo-context { gap: var(--space-2); }
+
+  .back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    border-radius: var(--radius);
+    flex-shrink: 0;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .back-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .back-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .breadcrumb-ws {
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: 0;
+    white-space: nowrap;
+    transition: color var(--transition-fast);
+  }
+
+  .breadcrumb-ws:hover {
+    color: var(--color-primary);
+    text-decoration: underline;
+  }
+
+  .breadcrumb-ws:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  .breadcrumb-sep {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+  }
+
+  .breadcrumb-repo {
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Workspace selector */
+  .ws-selector { position: relative; }
+
+  .logo-mark {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .ws-name-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  .ws-name-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text);
+    cursor: pointer;
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    padding: var(--space-1) var(--space-1);
+    white-space: nowrap;
+    transition: color var(--transition-fast);
+  }
+
+  .ws-name-btn:hover { color: var(--color-primary); }
+
+  .ws-name-btn.ws-name-empty {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    font-weight: 400;
+  }
+
+  .ws-name-btn:focus-visible,
+  .ws-arrow-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  .ws-arrow-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast), background var(--transition-fast);
+    padding: 0;
+  }
+
+  .ws-arrow-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .ws-dropdown {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    left: 0;
+    z-index: 200;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    min-width: 200px;
+    padding: var(--space-1) 0;
+  }
+
+  .ws-dropdown-empty {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .ws-dropdown-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    text-align: left;
+    transition: background var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .ws-dropdown-item:hover {
+    background: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .ws-dropdown-item.active {
+    color: var(--color-text);
+    font-weight: 500;
+  }
+
+  .ws-dropdown-item:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+    background: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .ws-check {
+    color: var(--color-primary);
+    font-size: var(--text-xs);
+  }
+
+  /* ── Center search ──────────────────────────────────────────────────── */
   .topbar-center {
     flex: 1;
     display: flex;
@@ -813,7 +1259,12 @@
     margin-left: auto;
   }
 
-  /* Topbar right */
+  .search-trigger:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Right side ─────────────────────────────────────────────────────── */
   .topbar-right {
     display: flex;
     align-items: center;
@@ -821,7 +1272,7 @@
     flex-shrink: 0;
   }
 
-  .inbox-badge-btn {
+  .decisions-badge-btn {
     position: relative;
     display: flex;
     align-items: center;
@@ -836,18 +1287,17 @@
     transition: color var(--transition-fast), background var(--transition-fast);
   }
 
-  .inbox-badge-btn:hover {
+  .decisions-badge-btn:hover {
     color: var(--color-text);
     background: var(--color-surface-elevated);
   }
 
-  .search-trigger:focus-visible,
-  .inbox-badge-btn:focus-visible {
+  .decisions-badge-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
-  .inbox-count {
+  .decisions-count {
     position: absolute;
     top: 2px;
     right: 2px;
@@ -885,6 +1335,11 @@
     border-color: var(--color-text-muted);
   }
 
+  .user-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
   .auth-dot {
     position: absolute;
     bottom: 0;
@@ -897,10 +1352,11 @@
     transition: background var(--transition-fast);
   }
 
-  /* User menu dropdown */
-  .user-menu-wrap {
-    position: relative;
+  .user-btn.auth-active .auth-dot {
+    background: var(--color-success);
   }
+
+  .user-menu-wrap { position: relative; }
 
   .user-dropdown {
     position: absolute;
@@ -935,17 +1391,20 @@
     color: var(--color-text);
   }
 
+  .user-dropdown-item:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+    background: var(--color-border);
+    color: var(--color-text);
+  }
+
   .user-dropdown-divider {
     height: 1px;
     background: var(--color-border);
     margin: var(--space-1) 0;
   }
 
-  .user-btn.auth-active .auth-dot {
-    background: var(--color-success);
-  }
-
-  /* Content area */
+  /* ── Content area ───────────────────────────────────────────────────── */
   .content {
     flex: 1;
     overflow: hidden;
@@ -954,9 +1413,7 @@
     min-height: 0;
   }
 
-  main:focus {
-    outline: none;
-  }
+  main:focus { outline: none; }
 
   .content-inner {
     flex: 1;
@@ -967,26 +1424,9 @@
     transition: opacity var(--transition-fast);
   }
 
-  .content-inner.faded {
-    opacity: 0;
-  }
+  .content-inner.faded { opacity: 0; }
 
-  @media (prefers-reduced-motion: reduce) {
-    .content-inner,
-    .search-trigger,
-    .inbox-badge-btn,
-    .user-btn,
-    .auth-dot,
-    .user-dropdown-item,
-    .budget-bar-fill,
-    .ws-dot,
-    .skip-to-content,
-    .btn-primary,
-    .btn-secondary,
-    .status-shortcuts-hint { transition: none; }
-  }
-
-  /* Status bar (24px) */
+  /* ── Status bar ─────────────────────────────────────────────────────── */
   .status-bar {
     display: flex;
     align-items: center;
@@ -1007,11 +1447,8 @@
     white-space: nowrap;
   }
 
-  .status-spacer {
-    flex: 1;
-  }
+  .status-spacer { flex: 1; }
 
-  /* Budget bar */
   .budget-bar-track {
     display: inline-block;
     width: 40px;
@@ -1033,42 +1470,6 @@
   .budget-bar-fill.bar-warn { background: var(--color-warning); }
   .budget-bar-fill.bar-ok { background: var(--color-success); }
 
-  /* Shortcuts hint */
-  .status-shortcuts-hint {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    padding: 0;
-    white-space: nowrap;
-    transition: color var(--transition-fast);
-  }
-
-  .status-shortcuts-hint:hover {
-    color: var(--color-text-secondary);
-  }
-
-  .status-shortcuts-hint:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .status-shortcuts-hint kbd {
-    background: var(--color-border);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0 4px;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: 1.4;
-  }
-
-  /* WebSocket status */
   .ws-dot {
     width: 6px;
     height: 6px;
@@ -1082,11 +1483,9 @@
     box-shadow: 0 0 4px color-mix(in srgb, var(--color-success) 50%, transparent);
   }
 
-  .status-ws.error .ws-dot {
-    background: var(--color-danger);
-  }
+  .status-ws.error .ws-dot { background: var(--color-danger); }
 
-  /* Skip to content */
+  /* ── Skip to content ────────────────────────────────────────────────── */
   .skip-to-content {
     position: fixed;
     top: -100%;
@@ -1101,11 +1500,9 @@
     transition: top var(--transition-fast);
   }
 
-  .skip-to-content:focus {
-    top: 0;
-  }
+  .skip-to-content:focus { top: 0; }
 
-  /* Keyboard shortcuts overlay */
+  /* ── Keyboard shortcuts overlay ─────────────────────────────────────── */
   .shortcuts-overlay {
     position: fixed;
     inset: 0;
@@ -1121,7 +1518,7 @@
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
-    width: 340px;
+    width: 400px;
     max-width: 90vw;
   }
 
@@ -1150,19 +1547,14 @@
     padding: 0;
   }
 
-  .shortcuts-header button:hover {
-    color: var(--color-text);
-    background: color-mix(in srgb, var(--color-focus) 8%, transparent);
-  }
+  .shortcuts-header button:hover { color: var(--color-text); }
 
   .shortcuts-header button:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
-  .shortcuts-body {
-    padding: var(--space-4) var(--space-6);
-  }
+  .shortcuts-body { padding: var(--space-4) var(--space-6); }
 
   .shortcuts-list {
     display: flex;
@@ -1178,9 +1570,7 @@
     gap: var(--space-4);
   }
 
-  .shortcut-row dt {
-    flex-shrink: 0;
-  }
+  .shortcut-row dt { flex-shrink: 0; }
 
   .shortcut-row dd {
     margin: 0;
@@ -1199,7 +1589,7 @@
     color: var(--color-text);
   }
 
-  /* Token modal */
+  /* ── Token modal ────────────────────────────────────────────────────── */
   .token-modal {
     display: flex;
     flex-direction: column;
@@ -1273,9 +1663,7 @@
     box-sizing: border-box;
   }
 
-  .token-input:focus:not(:focus-visible) {
-    outline: none;
-  }
+  .token-input:focus:not(:focus-visible) { outline: none; }
 
   .token-input:focus-visible {
     outline: 2px solid var(--color-focus);
@@ -1299,9 +1687,7 @@
     padding: 0;
   }
 
-  .token-toggle:hover {
-    color: var(--color-text);
-  }
+  .token-toggle:hover { color: var(--color-text); }
 
   .token-toggle:focus-visible {
     outline: 2px solid var(--color-focus);
@@ -1327,6 +1713,7 @@
   }
 
   .btn-primary:hover { background: var(--color-primary-hover); }
+  .btn-primary:active { background: var(--color-primary-hover); }
 
   .btn-secondary {
     padding: var(--space-2) var(--space-4);
@@ -1347,11 +1734,34 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
-  .btn-primary:active {
-    background: var(--color-primary-hover);
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
   }
 
-  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  @media (prefers-reduced-motion: reduce) {
+    .content-inner,
+    .search-trigger,
+    .decisions-badge-btn,
+    .user-btn,
+    .auth-dot,
+    .user-dropdown-item,
+    .ws-dropdown-item,
+    .back-btn,
+    .budget-bar-fill,
+    .ws-dot,
+    .skip-to-content,
+    .btn-primary,
+    .btn-secondary { transition: none; }
+  }
 
   @media (max-width: 768px) {
     .search-trigger kbd { display: none; }
@@ -1359,17 +1769,6 @@
     .topbar { gap: var(--space-2); padding: 0 var(--space-2); }
     .status-bar { gap: var(--space-2); padding: 0 var(--space-2); }
     .status-trust, .status-budget { display: none; }
-  }
-
-  .user-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .user-dropdown-item:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-    background: var(--color-border);
-    color: var(--color-text);
+    .breadcrumb-repo { max-width: 120px; }
   }
 </style>
