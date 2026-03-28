@@ -419,6 +419,7 @@ export const api = {
     return request(`/costs/summary${qs ? '?' + qs : ''}`);
   },
   costsByAgent: (agentId) => request(`/costs?agent_id=${encodeURIComponent(agentId)}`),
+  repoBudget: (id) => request(`/repos/${id}/budget`),
   workspaceRepos: (id) => request(`/workspaces/${id}/repos`),
   workspaceMembers: (id) => request(`/workspaces/${id}/members`),
   workspaceTeams: (id) => request(`/workspaces/${id}/teams`),
