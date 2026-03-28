@@ -19,7 +19,9 @@
       </svg>
     {/if}
   </div>
-  <p class="empty-title">{title}</p>
+  {#if title}
+    <p class="empty-title">{title}</p>
+  {/if}
   {#if description}
     <p class="empty-description">{description}</p>
   {/if}
