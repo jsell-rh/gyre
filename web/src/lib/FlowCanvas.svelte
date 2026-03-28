@@ -344,7 +344,7 @@
     glInitialized = true;
   }
 
-  // Reusable WebGL buffers (avoid creating new buffers every frame)
+  // Reusable GL buffers to avoid per-frame allocation/leak
   let glPosBuf = $state(null);
   let glColBuf = $state(null);
 
@@ -373,6 +373,7 @@
       return [c.r, c.g, c.b, 1.0];
     }));
 
+    // Reuse buffers instead of creating new ones every frame (prevents GPU memory leak)
     if (!glPosBuf) glPosBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuf);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);

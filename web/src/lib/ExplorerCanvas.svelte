@@ -262,6 +262,8 @@
   }
 
   // ── Layout computation ─────────────────────────────────────────────────────
+  let layoutGeneration = 0;
+
   $effect(() => {
     const ns  = visibleNodes;
     const es  = visibleEdges;
@@ -270,21 +272,23 @@
     if (!ns.length) { nodePositionsMap = {}; return; }
 
     if (eng === 'column') {
+      layoutGeneration++;
       nodePositionsMap = columnLayout(ns);
       return;
     }
 
     layoutPending = true;
-    let cancelled = false;
+    const gen = ++layoutGeneration;
     const w = svgEl?.clientWidth  ?? 900;
     const h = svgEl?.clientHeight ?? 600;
 
     computeLayout(eng, ns, es, w, h).then(pos => {
-      if (cancelled) return;
+      // Discard result if a newer layout was requested (prevents race on rapid switches)
+      if (gen !== layoutGeneration) return;
       nodePositionsMap = pos;
       layoutPending = false;
     }).catch(() => {
-      if (cancelled) return;
+      if (gen !== layoutGeneration) return;
       nodePositionsMap = columnLayout(ns);
       layoutPending = false;
     });
@@ -686,9 +690,9 @@
       </button>
       {#if showRiskHeatmap}
         <span class="heatmap-legend">
-          <span class="hm-dot" style="background:#22c55e"></span>low
-          <span class="hm-dot" style="background:#eab308"></span>medium
-          <span class="hm-dot" style="background:#ef4444"></span>high
+          <span class="hm-dot" style="background:var(--color-success)"></span>low
+          <span class="hm-dot" style="background:var(--color-warning)"></span>medium
+          <span class="hm-dot" style="background:var(--color-danger)"></span>high
         </span>
       {/if}
 
@@ -759,6 +763,8 @@
           {@const ring = specLinkageOn ? specRingColor(node) : null}
           {@const scale = getNodeScale(node.id)}
           {@const opacity = encodedNodeOpacity(node)}
+          {@const nodeStroke = isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
+          {@const nodeStrokeWidth = isSelected || isHighlighted ? 2.5 : 1.5}
           <g class="graph-node" class:selected={isSelected} class:highlighted={isHighlighted}
             class:dimmed={isDimmed} class:spec-highlighted={isSpecHighlighted}
             data-node-id={node.id}
@@ -770,20 +776,16 @@
             <title>{getNodeTooltip(node)}</title>
             {#if shape === 'diamond'}
               <path d={diamondPath(0, 0, 22)} fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {:else if shape === 'ellipse'}
               <ellipse rx="28" ry="14" fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {:else if shape === 'hexagon'}
               <path d={hexPath(0, 0, 22)} fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {:else}
               <path d={rectPath(0, 0, 64, 28)} fill={colors.fill}
-                stroke={isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
-                stroke-width={isSelected || isHighlighted ? 2.5 : 1.5} opacity={opacity} />
+                stroke={nodeStroke} stroke-width={nodeStrokeWidth} opacity={opacity} />
             {/if}
             {#if ring}
               <circle class="spec-ring" r="36" fill="none" stroke={ring.color} stroke-width="2.5"
@@ -1046,7 +1048,7 @@
   .graph-area { flex: 1; display: flex; overflow: hidden; position: relative; contain: layout style; }
   .graph-svg { flex: 1; width: 100%; height: 100%; background: var(--color-surface); cursor: grab; display: block; }
   .graph-svg.panning { cursor: grabbing; }
-  .graph-edge { stroke: var(--color-border); stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
+  .graph-edge { stroke: var(--color-border-strong); stroke-width: 1.5; stroke-opacity: 0.7; transition: stroke var(--transition-fast); }
   .graph-node { cursor: pointer; }
   .graph-node:hover path, .graph-node:hover ellipse { filter: brightness(1.3); }
   .graph-node.selected path, .graph-node.selected ellipse { filter: brightness(1.4); }

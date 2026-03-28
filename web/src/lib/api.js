@@ -38,7 +38,7 @@ async function request(path, options = {}) {
     });
     if (!res.ok) {
       if (res.status === 401) {
-        throw new Error('Session expired. Please refresh the page and re-authenticate.');
+        throw new Error('Session expired — please re-authenticate.');
       }
       throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
     }
@@ -47,6 +47,9 @@ async function request(path, options = {}) {
   } catch (e) {
     if (e.name === 'AbortError') {
       throw new Error('Request timed out. Check your connection.');
+    }
+    if (e instanceof TypeError && !navigator.onLine) {
+      throw new Error('You appear to be offline. Check your network connection.');
     }
     throw e;
   } finally {
