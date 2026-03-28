@@ -159,6 +159,7 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
   - **Tenant (inherited)**: Required tenant meta-specs shown with a 🔒 lock icon and "Tenant" badge. These apply to every agent in every workspace. Cannot be edited here (managed by tenant admins via cross-workspace view §10).
   - **Workspace**: Workspace-level meta-specs (both required and optional). Required ones shown with 🔒. Optional ones available for spec-level binding.
   - **Effective set**: Combined view showing what agents in this workspace will actually receive. Required tenant + required workspace = the mandatory prompt set. Optional ones are available for spec authors to select.
+- If reconciliation is in progress (any required meta-spec was recently updated), shows a reconciliation status bar: "Reconciling: 3/5 repos updated" with a link to the meta-spec management page for details.
 - "Manage rules" opens the meta-spec management surface (§4) for workspace-level editing.
 - "View tenant rules" link navigates to the cross-workspace Agent Rules section for browsing (and editing, if tenant admin).
 - Data source: `GET /api/v1/meta-specs?scope=Workspace&scope_id=:id` merged with `GET /api/v1/meta-specs?scope=Global&required=true` for the inherited tenant rules.
@@ -173,7 +174,7 @@ Payments ▾  ⚙
 
 Clicking ⚙ opens workspace settings as a full-page view with tabs:
 - **General**: Workspace name, description, default compute target
-- **Trust & Policies**: Trust level selector (HSI §2), ABAC policy editor (HSI §2a), policies ↔ trust cross-links
+- **Trust & Policies**: Trust level selector (HSI §2), ABAC policy editor (HSI §2a), policies ↔ trust cross-links, meta-spec drift policy (`MetaSpecPolicy` from `meta-spec-reconciliation.md` §9: warn_on_drift, block_on_drift, drift_tolerance toggles)
 - **Teams**: Members, roles, invitations
 - **Budget**: Workspace budget configuration, per-repo breakdown
 - **Compute**: Compute target selection from tenant list
@@ -219,7 +220,7 @@ The primary tab. Shows the spec registry for this repo with implementation progr
   - Content (spec text, editable with LLM assist)
   - Progress (tasks, agents, MRs linked to this spec)
   - Meta-spec bindings — shows the **effective prompt set** for this spec's implementation:
-    - **Required (locked)**: Tenant-required and workspace-required meta-specs, shown with 🔒 icon. Cannot be removed. These are what every agent implementing this spec will receive.
+    - **Required (locked)**: Tenant-required meta-specs shown with 🔒 + "Tenant" badge. Workspace-required shown with 🔒 + "Workspace" badge. Cannot be removed. These are what every agent implementing this spec will receive.
     - **Bound (author's selections)**: Optional meta-specs the spec author explicitly selected from the tenant/workspace registry, with pinned version numbers. The binding editor shows available meta-specs inline (no need to navigate to the Agent Rules page) grouped by kind (Persona, Principle, Standard, Process).
     - **Stale pins**: If a bound meta-spec has a newer approved version than the pinned one, a warning badge shows "v3 pinned, v5 available" with a one-click "Update pin" action.
     - The binding editor is the spec author's primary tool for directing HOW agents implement this spec (vision §2: "Set direction on how to build it").
@@ -228,6 +229,7 @@ The primary tab. Shows the spec registry for this repo with implementation progr
     - "Preview" button → thorough preview (spawns agent on throwaway branch, shows real code diff + architecture delta). Uses the Editor Split layout (ui-layout.md §9).
     - Preview results shown inline in the detail panel — architecture diff and code diff tabs.
   - Links (cross-workspace spec links)
+  - Assertions — executable spec assertions (`<!-- gyre:assert ... -->`) with inline results: ✓ green checkmark for passing, ✗ red X for failing. Per `system-explorer.md` §9.
   - History (approval ledger, version history)
   - Ask Why (interrogation agent for the implementing agent)
 - `+ New Spec` button (opens spec editor with LLM assist)
@@ -259,14 +261,32 @@ Every view (built-in, saved, or generated) is a declarative JSON specification w
 - The view selector dropdown shows: built-in views → user's saved views → "Generate view..." option.
 
 **Ghost Overlays (Phase 1 — structural prediction):**
-When editing a spec (from the Specs tab detail panel → Edit), the Architecture canvas shows **ghost nodes** — predicted structural changes rendered as dotted outlines with color-coded meaning (green = new, yellow = modified, red = removed). These appear within 2-5 seconds of editing via `POST /repos/:id/graph/predict`. Ghost overlays give fast, probabilistic feedback; the full preview loop (spawn agent on throwaway branch) gives certain feedback.
+When editing a spec, ghost overlays show predicted structural changes as dotted outlines (green = new, yellow = modified, red = removed). These appear within 2-5 seconds via `POST /repos/:id/graph/predict`.
+
+**The editing-canvas connection:** The Specs tab and Architecture tab are separate tabs, but the spec editing experience bridges them. When a user opens a spec for editing in the Specs tab detail panel, the detail panel can be **popped out to full width** (per `ui-layout.md` §2 "Pop Out"), which replaces the main content. In this expanded edit mode, the editor uses the **Editor Split layout** (`ui-layout.md` §9): left panel is the spec editor + LLM chat, right panel shows a **live architecture preview canvas** with ghost overlays that update as the user types. This is NOT the Architecture tab — it is an embedded canvas within the expanded spec editor. The user does not need to switch tabs to see ghost predictions.
+
+Alternatively, on wide screens (≥1440px), the Specs tab can show the spec list in the main area with a **split detail panel**: left side shows spec content editor, right side shows a mini architecture preview with ghost overlays. This keeps both visible without popping out.
+
+**Concept Views (per `system-explorer.md` §4):**
+Cross-cutting views pulling related elements from across the codebase. Available via: the view selector ("Concepts" category), the Ask input ("show me everything related to caching"), or ad-hoc by selecting multiple graph nodes and clicking "Create concept view." Predefined concepts (discovered by the knowledge graph extraction) appear in the Concepts section of the filter panel.
+
+**Risk Map (per `system-explorer.md` §7):**
+Available via the Evaluative lens. Heat map overlay colors nodes by churn rate, coupling, complexity, or test coverage. Anomaly callouts surface where attention is most needed (high churn + low test coverage = risk). Toggle via a "Risk" button in the Evaluative lens controls.
+
+**Conversational Exploration (per `system-explorer.md` §8):**
+The Ask input supports both view generation ("How does auth work?" → produces a view) and Q&A ("Why does PaymentService depend on UserService?" → produces a text answer with entity references). Follow-up questions highlight referenced nodes on the canvas. The system distinguishes between questions that produce views and questions that produce answers based on the LLM's judgment.
+
+**View Spec Editor:**
+Each rendered view has an "Edit view spec" button (code icon) that opens a collapsible JSON editor panel alongside the canvas. Users can inspect and hand-edit the view spec grammar (data/layout/encoding/highlight layers) for fine-grained control. Changes apply live to the canvas.
 
 **Flow View:**
-Available via the view selector when trace data exists. Animated particle visualization (Vizceral-inspired) showing how data flows through the system during test execution. Particles travel along edges between graph nodes, colored by test case. Playback controls: play/pause/step/speed/scrub/test-selector. Data from OTel traces captured by `TraceCapture` gate (per HSI §3a). When no trace data exists, the flow view shows an empty state explaining how to enable trace capture.
+Available via the view selector when trace data exists. Requires selecting which MR's trace to animate — a trace picker dropdown appears in the control bar when flow view is active, listing MRs with available trace data (from `TraceCapture` gate). Animated particle visualization (Vizceral-inspired) showing how data flows through the system during test execution. Particles travel along edges between graph nodes, colored by test case. Playback controls: play/pause/step/speed/scrub/test-selector. Data from OTel traces captured by `TraceCapture` gate (per HSI §3a). When no trace data exists, the flow view shows an empty state explaining how to enable trace capture.
+
+**Timeline scrubber (canvas overlay, not a separate tab):**
+A horizontal time scrubber at the bottom of the graph canvas (per `system-explorer.md` §6). Delta markers show when structural changes occurred. Scrubbing backward shows ghost outlines of removed nodes and faded versions of changed nodes — the user sees the architecture at any point in time while maintaining spatial context. This is an overlay ON the graph, not a separate view. Key moments (spec approvals, milestones, reconciliation events) are marked.
 
 **Sub-tabs in the control bar:**
-- **Graph** (default): The moldable graph canvas with all the above features.
-- **Timeline**: Architectural history scrubber. Shows `ArchitecturalDelta` records on a horizontal timeline. Scrub to see how the architecture evolved. Click a delta marker to see commit SHA, agent, spec, and change summary.
+- **Graph** (default): The moldable graph canvas with all the above features including the timeline scrubber overlay.
 - **Briefing**: Full repo-scoped narrative view with time range selector and "Ask a question" Q&A. Same structure as workspace home briefing but scoped to this repo via `?repo_id=` parameter (amends HSI §9: add optional `repo_id` field to `POST /workspaces/:id/briefing/ask` request body).
 
 **Agent discovery:** Active agent count shown per graph node (boundary view shows agent badges). Clicking an agent badge opens the agent detail panel with Pause/Stop/Message controls (HSI §4). Also accessible from the repo header agent count (§3 Repo Header).
@@ -449,7 +469,8 @@ Every state is URL-addressable for deep linking and sharing:
 ```
 /                                          → workspace selector (or redirect to default workspace)
 /all                                       → cross-workspace view (tenant scope)
-/all/settings                              → tenant administration (Users, Compute, Budget, Audit)
+/all/settings                              → tenant administration (Users, Compute, Budget, Audit, Health, Jobs)
+/all/agent-rules                           → tenant-level meta-spec editor
 /workspaces/:slug                          → workspace home
 /workspaces/:slug/settings                 → workspace settings
 /workspaces/:slug/agent-rules                → meta-spec management
