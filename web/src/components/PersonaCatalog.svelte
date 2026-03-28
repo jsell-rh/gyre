@@ -398,12 +398,6 @@
     cursor: pointer;
     transition: background var(--transition-fast);
   }
-  .delete-confirm-text {
-    font-size: var(--text-xs);
-    color: var(--color-danger);
-    font-weight: 500;
-  }
-
   .btn-approve-sm:hover { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .btn-approve-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 

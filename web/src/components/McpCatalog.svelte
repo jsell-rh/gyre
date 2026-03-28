@@ -372,8 +372,6 @@
   }
 
   /* Raw schema collapsible */
-  .raw-schema { }
-
   .raw-schema-toggle {
     font-size: var(--text-xs);
     color: var(--color-text-muted);

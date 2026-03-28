@@ -633,7 +633,7 @@
       }
     }
   }}>
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true" aria-label="Keyboard shortcuts">
       <div class="shortcuts-header">
         <h2>Keyboard Shortcuts</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>

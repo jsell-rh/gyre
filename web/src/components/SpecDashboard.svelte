@@ -373,7 +373,7 @@
               </td>
               <td>
                 <Badge
-                  value="{spec.approval_status ?? 'unknown'}"
+                  value={spec.approval_status ?? 'unknown'}
                   color={statusColor(spec.approval_status)}
                 />
               </td>

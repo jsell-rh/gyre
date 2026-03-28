@@ -96,7 +96,7 @@
   }
 </script>
 
-<div class="spec-graph-view" aria-busy={loading} onkeydown={onGraphKeydown}>
+<div class="spec-graph-view" role="application" aria-label="Spec link graph" aria-busy={loading} onkeydown={onGraphKeydown}>
   <span class="sr-only" aria-live="polite">{loading ? "" : "spec graph loaded"}</span>
   <div class="view-header">
     <div>
