@@ -1,5 +1,22 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, waitFor } from '@testing-library/svelte';
+
+// Mock API — Decisions section now fetches notifications; provide empty defaults
+vi.mock('../lib/api.js', () => ({
+  api: {
+    myNotifications: vi.fn().mockResolvedValue([]),
+    workspaceRepos: vi.fn().mockResolvedValue([]),
+    specsForWorkspace: vi.fn().mockResolvedValue([]),
+    getMetaSpecs: vi.fn().mockResolvedValue([]),
+    getWorkspaceBriefing: vi.fn().mockResolvedValue({ narrative: '' }),
+    briefingAsk: vi.fn(),
+    approveSpec: vi.fn(),
+    revokeSpec: vi.fn(),
+    enqueue: vi.fn(),
+    markNotificationRead: vi.fn(),
+  },
+}));
+
 import WorkspaceHome from '../components/WorkspaceHome.svelte';
 
 describe('WorkspaceHome', () => {
@@ -22,38 +39,22 @@ describe('WorkspaceHome', () => {
     expect(container.querySelector('[data-testid="section-agent-rules"]')).toBeTruthy();
   });
 
-  it('shows decisions badge when decisionsCount > 0', () => {
+  // Decisions badge with real notifications is tested comprehensively in WorkspaceHomeSections.test.js
+
+  it('does not show decisions badge when there are no notifications', async () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { container } = render(WorkspaceHome, {
-      props: { workspace: ws, decisionsCount: 7 },
+    const { container } = render(WorkspaceHome, { props: { workspace: ws } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-decisions"] .section-badge')).toBeNull();
     });
-    const badge = container.querySelector('.section-badge');
-    expect(badge).toBeTruthy();
-    expect(badge.textContent).toBe('7');
   });
 
-  it('does not show decisions badge when decisionsCount is 0', () => {
+  it('shows autonomous message when no notifications', async () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { container } = render(WorkspaceHome, {
-      props: { workspace: ws, decisionsCount: 0 },
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: ws } });
+    await waitFor(() => {
+      expect(getByTestId('decisions-empty').textContent).toContain('running autonomously');
     });
-    expect(container.querySelector('.section-badge')).toBeNull();
-  });
-
-  it('shows autonomous message when decisionsCount is 0', () => {
-    const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { getByText } = render(WorkspaceHome, {
-      props: { workspace: ws, decisionsCount: 0 },
-    });
-    expect(getByText(/running autonomously/)).toBeTruthy();
-  });
-
-  it('shows item count message when decisionsCount > 0', () => {
-    const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { getByText } = render(WorkspaceHome, {
-      props: { workspace: ws, decisionsCount: 3 },
-    });
-    expect(getByText(/3 items require your attention/)).toBeTruthy();
   });
 
   it('each section has correct aria-labelledby', () => {
