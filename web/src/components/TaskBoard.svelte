@@ -410,7 +410,7 @@
   .spec-chip {
     display: inline-block;
     font-size: var(--text-xs);
-    background: var(--color-primary-bg, #1a1a2e);
+    background: color-mix(in srgb, var(--color-link) 12%, transparent);
     border: 1px solid var(--color-link);
     color: var(--color-link);
     border-radius: var(--radius-full);

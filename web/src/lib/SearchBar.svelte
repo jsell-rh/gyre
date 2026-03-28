@@ -342,7 +342,7 @@
 
   .result-type {
     font-size: var(--text-xs);
-    color: var(--color-primary);
+    color: var(--color-primary-text);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-family: var(--font-mono);
