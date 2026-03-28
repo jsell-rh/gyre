@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import Tabs from '../lib/Tabs.svelte';
   import Table from '../lib/Table.svelte';
@@ -90,7 +91,7 @@
     } catch { /* clipboard not available */ }
   }
 
-  $effect(() => {
+  onMount(() => {
     loadBranches();
     loadMrs();
     loadSpeculative();
@@ -681,12 +682,12 @@
           <div class="abac-add-form">
             <h4 class="form-title">Add Policy</h4>
             <div class="abac-form-row">
-              <input class="policy-input" type="text" placeholder="Resource type (e.g. repo, task)" bind:value={newPolicyName} />
+              <input class="policy-input" type="text" placeholder="Resource type (e.g. repo, task)" bind:value={newPolicyName} autocomplete="off" />
             </div>
             <div class="abac-form-row">
-              <input class="policy-input" type="text" placeholder="JWT claim (e.g. sub, role)" bind:value={newPolicyClaim} />
+              <input class="policy-input" type="text" placeholder="JWT claim (e.g. sub, role)" bind:value={newPolicyClaim} autocomplete="off" />
               <span class="policy-op-label">=</span>
-              <input class="policy-input" type="text" placeholder="Value" bind:value={newPolicyValue} />
+              <input class="policy-input" type="text" placeholder="Value" bind:value={newPolicyValue} autocomplete="off" />
               <button class="policy-btn primary" onclick={addAbacPolicy} disabled={policySaving}>Add</button>
             </div>
           </div>
@@ -711,13 +712,13 @@
         </div>
         {#if showGateForm}
           <div class="gate-form" id="gate-form">
-            <input class="branch-select" placeholder="Gate name" bind:value={newGateName} />
+            <input class="branch-select" placeholder="Gate name" bind:value={newGateName} autocomplete="off" />
             <select class="branch-select" bind:value={newGateType} aria-label="Gate type">
               {#each GATE_TYPES as t (t)}
                 <option value={t}>{t}</option>
               {/each}
             </select>
-            <input class="branch-select" placeholder="Command (optional)" bind:value={newGateCmd} />
+            <input class="branch-select" placeholder="Command (optional)" bind:value={newGateCmd} autocomplete="off" />
             <button class="jj-btn primary" onclick={createGate} disabled={creatingGate || !newGateName.trim()}>
               {creatingGate ? 'Creating…' : 'Create'}
             </button>

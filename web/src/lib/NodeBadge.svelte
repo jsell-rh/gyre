@@ -99,10 +99,11 @@
 <style>
   .node-badge {
     cursor: default;
+    pointer-events: auto;
   }
 
-  .node-badge:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
+  .node-badge:focus-visible circle:first-child {
+    stroke: var(--color-focus);
+    stroke-width: 3;
   }
 </style>

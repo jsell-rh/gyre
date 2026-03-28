@@ -169,7 +169,7 @@
             description="eBPF audit events will appear here in real time."
           />
         {:else}
-          {#each liveEvents as evt (evt.id ?? Math.random())}
+          {#each liveEvents as evt, idx (evt.id ?? `live-${idx}`)}
             <div class="event-row">
               <Badge value={evt.event_type ?? evt.type ?? 'Unknown'} color={typeColor(evt.event_type ?? evt.type)} />
               <span class="event-agent">{evt.agent_id ?? '—'}</span>
@@ -198,7 +198,7 @@
           onkeydown={(e) => e.key === 'Enter' && loadHistory()}
           aria-label="Filter by agent ID"
         />
-        <button class="search-btn" onclick={loadHistory}>Search</button>
+        <button class="search-btn" onclick={loadHistory} disabled={loading}>Search</button>
       </div>
 
       <div class="event-feed">
@@ -366,6 +366,7 @@
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
     color: var(--color-text-muted);
+    font-family: var(--font-body);
     font-size: var(--text-xs);
     padding: var(--space-1) var(--space-3);
     cursor: pointer;
@@ -425,9 +426,14 @@
     transition: border-color var(--transition-fast), color var(--transition-fast);
   }
 
-  .search-btn:hover {
+  .search-btn:hover:not(:disabled) {
     border-color: var(--color-text-muted);
     color: var(--color-text);
+  }
+
+  .search-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .event-feed {

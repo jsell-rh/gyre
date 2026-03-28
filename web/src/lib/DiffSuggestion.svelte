@@ -16,6 +16,18 @@
     onedit = undefined,
     ondismiss = undefined,
   } = $props();
+
+  let acting = $state(false);
+
+  async function handleAction(fn) {
+    if (acting || !fn) return;
+    acting = true;
+    try {
+      await fn();
+    } finally {
+      acting = false;
+    }
+  }
 </script>
 
 <div class="diff-suggestion" role="region" aria-label="Suggested change {suggestion.id}" aria-live="polite">
@@ -25,9 +37,9 @@
   </div>
   <pre class="diff-content" tabindex="0">{suggestion.content}</pre>
   <div class="diff-actions">
-    <Button variant="primary" size="sm" onclick={onaccept}>Accept</Button>
-    <Button variant="secondary" size="sm" onclick={onedit}>Edit</Button>
-    <Button variant="secondary" size="sm" onclick={ondismiss}>Dismiss</Button>
+    <Button variant="primary" size="sm" onclick={() => handleAction(onaccept)} disabled={acting}>Accept</Button>
+    <Button variant="secondary" size="sm" onclick={() => handleAction(onedit)} disabled={acting}>Edit</Button>
+    <Button variant="secondary" size="sm" onclick={() => handleAction(ondismiss)} disabled={acting}>Dismiss</Button>
   </div>
 </div>
 
