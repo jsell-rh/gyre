@@ -134,7 +134,7 @@
     ttyConnecting = false;
   }
 
-  onDestroy(() => closeTtyWs());
+  onDestroy(() => { closeTtyWs(); });
 
   function selectAgent(a) {
     if (selected?.id === a.id) { selected = null; closeTtyWs(); containerRecord = null; return; }
