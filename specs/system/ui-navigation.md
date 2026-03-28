@@ -195,6 +195,16 @@ Entering a repo (by clicking it in the workspace home, or via search, or via a d
 └──────────────────────────────────────────────────────────┘
 ```
 
+### Repo Header
+
+Above the tabs, a compact repo header shows at-a-glance status:
+
+```
+payment-api                    2 agents active  Budget: 45%  [Clone URL 📋]
+```
+
+The agent count is **clickable** — opens an agent list panel (slide-in detail panel pattern) showing all agents in this repo with status, task, and Pause/Stop/Message controls (HSI §4). This is the primary agent discovery surface in repo mode — no need to navigate the graph to find agents.
+
 ### Tab: Specs (default, landing tab)
 
 The primary tab. Shows the spec registry for this repo with implementation progress.
@@ -483,11 +493,11 @@ When the workspace selector shows "All Workspaces" (or when a user selects the t
 - **Workspaces**: List of workspaces with health, agent count, budget usage (replaces the Repos section). Click to enter a workspace. "+ New Workspace" button for tenant admins.
 - **Specs**: All specs across all workspaces with workspace/repo attribution. Same columns as workspace-home Specs section. Answers "what's the status of all my directives across the entire org?"
 - **Briefing**: Cross-workspace narrative (client-side aggregation: calls briefing per workspace, merges sections). Each item shows source workspace.
-- **Agent Rules**: Tenant-level meta-spec catalog — browse all personas, principles, standards, process norms across the tenant. Read-only at this level (editing is workspace-scoped). Shows which are marked required at tenant level.
+- **Agent Rules**: Tenant-level meta-spec catalog — browse all personas, principles, standards, process norms across the tenant. Shows which are marked required at tenant level. For tenant admins: "Manage tenant rules" link opens a tenant-level editing surface (same layout as workspace §4, but scoped to tenant — can create/edit tenant-level meta-specs and toggle `required` flag). Non-admin users see read-only view.
 
 This view answers: "What needs me across my entire organization?" It's the zoomed-out orientation page for users who manage multiple workspaces.
 
-**Tenant administration** (user management, compute target management, tenant budget) is accessed via a gear icon on the cross-workspace view header. Only visible to tenant Admin role users. Tabs: Users, Compute Targets, Budget, Audit.
+**Tenant administration** is accessed via a gear icon on the cross-workspace view header. Only visible to tenant Admin role users. Tabs: Users, Compute Targets, Budget, Audit, Health, Jobs. Additional operational tabs from `platform-model.md` §9 (SIEM, Network, Snapshots, Retention, BCP) are deferred to future milestones and not included in this navigation model — amend `platform-model.md` §9 to mark them as deferred.
 
 The workspace selector dropdown shows workspaces the user is a member of. Workspace creation is available in the dropdown as a "+ New Workspace" option (visible to users with tenant Admin role).
 
@@ -498,6 +508,7 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 **Supersedes:**
 - `human-system-interface.md` §1 (Navigation Model) — the six-item sidebar, scope indicator, nav scope table, deep links, keyboard navigation
 - `ui-layout.md` §1 (Application Shell) — sidebar dimensions, topbar layout, entrypoint flow
+- `docs/ui.md` — navigation model, keyboard shortcuts, sidebar description (operational docs, must be rewritten to match this spec)
 
 **Amends:**
 
