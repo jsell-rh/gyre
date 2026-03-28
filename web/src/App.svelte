@@ -5,6 +5,7 @@
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
@@ -14,7 +15,7 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'repo' | 'profile'
+  // 'workspace_home' | 'repo' | 'profile' | 'cross_workspace'
   let mode = $state('workspace_home');
 
   // ── Workspace / repo state ───────────────────────────────────────────
@@ -50,6 +51,7 @@
   let wsDropdownOpen = $state(false);
   let wsDropdownEl = $state(null);
 
+  let mobileDrawerOpen = $state(false);
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(true);
@@ -150,6 +152,12 @@
       return { mode: 'profile', slug: null, repoName: null, tab: null };
     }
 
+    // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
+    if (raw[0] === 'all') {
+      const tab = raw[1] ?? null;
+      return { mode: 'cross_workspace', slug: 'all', repoName: null, tab };
+    }
+
     // /workspaces/:slug[/...]
     if (raw[0] === 'workspaces' && raw.length >= 2) {
       const slug = raw[1];
@@ -172,6 +180,9 @@
     if (!parsed) return '/';
     const { mode: m, slug, repoName, tab } = parsed;
     if (m === 'profile') return '/profile';
+    if (m === 'cross_workspace') {
+      return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
+    }
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
     if (m === 'repo') {
@@ -242,8 +253,24 @@
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
 
+  function goToCrossWorkspace() {
+    mode = 'cross_workspace';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    window.history.pushState(
+      { mode: 'cross_workspace', wsId: null, repoName: null, repoTab: null },
+      '',
+      '/all'
+    );
+  }
+
   function selectWorkspace(ws) {
     wsDropdownOpen = false;
+    if (ws === 'all') {
+      goToCrossWorkspace();
+      return;
+    }
     goToWorkspaceHome(ws);
   }
 
@@ -317,6 +344,7 @@
     // Esc: close overlay / panel / return to workspace home
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; gKeyPending = false; return; }
+      if (mobileDrawerOpen) { mobileDrawerOpen = false; gKeyPending = false; return; }
       if (userMenuOpen) { userMenuOpen = false; gKeyPending = false; return; }
       if (wsDropdownOpen) { wsDropdownOpen = false; gKeyPending = false; return; }
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
@@ -446,6 +474,8 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
+    } else if (mode === 'cross_workspace') {
+      document.title = 'All Workspaces | Gyre';
     } else if (mode === 'repo' && repoName) {
       document.title = wsName ? `${repoName} — ${wsName} | Gyre` : `${repoName} | Gyre`;
     } else if (mode === 'workspace_home' && wsName) {
@@ -455,6 +485,30 @@
     }
   });
 
+  // ── Legacy URL redirect handler (§7 of ui-navigation.md) ────────────────
+  // Returns a new URL string if redirect needed, otherwise null.
+  function handleLegacyUrl(pathname) {
+    const raw = pathname.split('/').filter(Boolean);
+
+    // /workspaces/:uuid/inbox → /workspaces/:slug (workspace home)
+    if (raw[0] === 'workspaces' && raw[2] === 'inbox' && raw.length === 3) {
+      const slug = raw[1];
+      // Try to find the workspace and get its slug
+      const ws = findWorkspaceBySlug(slug);
+      const target = ws ? wsSlug(ws) : slug;
+      return `/workspaces/${encodeURIComponent(target)}`;
+    }
+
+    // /repos/:uuid/explorer → redirect to /all (best-effort; repo UUID lookup not available client-side)
+    // The full redirect (to specific repo's architecture tab) requires a server-side lookup.
+    // Client-side best-effort: navigate to cross-workspace view.
+    if (raw[0] === 'repos' && raw[2] === 'explorer' && raw.length === 3) {
+      return '/all';
+    }
+
+    return null;
+  }
+
   // ── Mount: entrypoint flow + URL routing ──────────────────────────────
   onMount(async () => {
     // 1. Load all workspaces
@@ -463,8 +517,18 @@
     // 2. Determine initial state from URL or entrypoint flow
     const parsed = parseUrl(window.location.pathname);
 
+    // Legacy URL redirects (§7 of ui-navigation.md)
+    // Old HSI-style URLs are redirected to new structure.
+    const legacyRedirect = handleLegacyUrl(window.location.pathname);
+    if (legacyRedirect) {
+      window.history.replaceState({}, '', legacyRedirect);
+      // Re-parse with the new URL
+    }
+
     if (parsed?.mode === 'profile') {
       mode = 'profile';
+    } else if (parsed?.mode === 'cross_workspace') {
+      mode = 'cross_workspace';
     } else if (parsed?.slug) {
       // URL-driven workspace navigation
       const ws = findWorkspaceBySlug(parsed.slug);
@@ -549,7 +613,7 @@
     function handlePopstate(e) {
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt } = e.state;
-        mode = m;
+        mode = m; // includes 'cross_workspace'
         repoTab = rt ?? 'specs';
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
@@ -574,6 +638,8 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
+        } else if (p.mode === 'cross_workspace') {
+          mode = 'cross_workspace';
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
@@ -620,6 +686,24 @@
 
     <!-- ── Topbar (always visible) ──────────────────────────────────── -->
     <header class="topbar" data-testid="topbar">
+
+      <!-- Mobile hamburger (visible only on mobile) -->
+      <button
+        class="hamburger-btn"
+        onclick={() => (mobileDrawerOpen = !mobileDrawerOpen)}
+        aria-label={mobileDrawerOpen ? 'Close navigation drawer' : 'Open navigation drawer'}
+        aria-expanded={mobileDrawerOpen}
+        aria-controls="mobile-drawer"
+        data-testid="hamburger-btn"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
+          {#if mobileDrawerOpen}
+            <path d="M18 6L6 18M6 6l12 12"/>
+          {:else}
+            <path d="M3 12h18M3 6h18M3 18h18"/>
+          {/if}
+        </svg>
+      </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
       {#if mode === 'repo'}
@@ -708,6 +792,22 @@
               onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) wsDropdownOpen = false; }}
               data-testid="ws-dropdown"
             >
+              <!-- "All Workspaces" entry (cross-workspace view, §10) -->
+              <button
+                class="ws-dropdown-item ws-dropdown-all"
+                class:active={mode === 'cross_workspace'}
+                role="menuitem"
+                tabindex="-1"
+                onclick={() => selectWorkspace('all')}
+                data-testid="ws-all-workspaces"
+              >
+                <span class="ws-all-icon" aria-hidden="true">◎</span>
+                All Workspaces
+                {#if mode === 'cross_workspace'}
+                  <span class="ws-check" aria-hidden="true">✓</span>
+                {/if}
+              </button>
+              <div class="ws-dropdown-divider" role="separator"></div>
               {#if workspaces.length === 0}
                 <div class="ws-dropdown-empty">No workspaces found</div>
               {:else}
@@ -816,6 +916,88 @@
       </div>
     </header>
 
+    <!-- ── Mobile navigation drawer ─────────────────────────────────── -->
+    {#if mobileDrawerOpen}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div
+        class="mobile-drawer-backdrop"
+        role="presentation"
+        onclick={() => (mobileDrawerOpen = false)}
+      ></div>
+      <nav
+        id="mobile-drawer"
+        class="mobile-drawer"
+        aria-label="Navigation drawer"
+        data-testid="mobile-drawer"
+      >
+        <div class="drawer-header">
+          <span class="drawer-title">{currentWorkspace?.name ?? 'Navigation'}</span>
+          <button
+            class="drawer-close"
+            onclick={() => (mobileDrawerOpen = false)}
+            aria-label="Close navigation drawer"
+          >✕</button>
+        </div>
+        <ul class="drawer-links" role="list">
+          <li>
+            <a
+              class="drawer-link"
+              href="#section-decisions"
+              onclick={(e) => {
+                e.preventDefault();
+                mobileDrawerOpen = false;
+                document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            >Decisions</a>
+          </li>
+          <li>
+            <a
+              class="drawer-link"
+              href="#section-specs"
+              onclick={(e) => {
+                e.preventDefault();
+                mobileDrawerOpen = false;
+                document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            >Specs</a>
+          </li>
+          <li>
+            <a
+              class="drawer-link"
+              href="#section-repos"
+              onclick={(e) => {
+                e.preventDefault();
+                mobileDrawerOpen = false;
+                document.querySelector('[data-testid="section-repos"]')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            >Repos</a>
+          </li>
+          <li>
+            <a
+              class="drawer-link"
+              href="#section-briefing"
+              onclick={(e) => {
+                e.preventDefault();
+                mobileDrawerOpen = false;
+                document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            >Briefing</a>
+          </li>
+          <li>
+            <a
+              class="drawer-link"
+              href="#section-agent-rules"
+              onclick={(e) => {
+                e.preventDefault();
+                mobileDrawerOpen = false;
+                document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+            >Agent Rules</a>
+          </li>
+        </ul>
+      </nav>
+    {/if}
+
     <!-- ── Content area ──────────────────────────────────────────────── -->
     <main class="content" id="main-content" tabindex="-1">
       <div class="content-inner" class:faded={!contentVisible}>
@@ -833,6 +1015,8 @@
             onTabChange={(tab) => goToRepoTab(tab)}
             workspaceBudget={workspaceBudget}
           />
+        {:else if mode === 'cross_workspace'}
+          <CrossWorkspaceHome onSelectWorkspace={(ws) => goToWorkspaceHome(ws)} />
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
         {/if}
@@ -1786,7 +1970,143 @@
     .btn-secondary { transition: none; }
   }
 
+  /* ── Hamburger button (mobile only) ────────────────────────────────── */
+  .hamburger-btn {
+    display: none; /* hidden on desktop */
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    border-radius: var(--radius);
+    flex-shrink: 0;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .hamburger-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .hamburger-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Mobile navigation drawer ──────────────────────────────────────── */
+  .mobile-drawer-backdrop {
+    display: none; /* shown only on mobile, see @media below */
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    background: color-mix(in srgb, var(--color-bg) 50%, transparent);
+  }
+
+  .mobile-drawer {
+    display: none; /* shown only on mobile */
+    position: fixed;
+    top: var(--topbar-height);
+    left: 0;
+    bottom: 0;
+    width: 260px;
+    z-index: 160;
+    background: var(--color-surface);
+    border-right: 1px solid var(--color-border-strong);
+    box-shadow: var(--shadow-md);
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .drawer-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .drawer-close {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-base);
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+  }
+
+  .drawer-close:hover { color: var(--color-text); }
+
+  .drawer-close:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .drawer-links {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-2) 0;
+  }
+
+  .drawer-links li { border-bottom: 1px solid var(--color-border); }
+  .drawer-links li:last-child { border-bottom: none; }
+
+  .drawer-link {
+    display: block;
+    padding: var(--space-3) var(--space-4);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .drawer-link:hover {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+  }
+
+  .drawer-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* ── Workspace dropdown: All Workspaces entry ─────────────────────── */
+  .ws-dropdown-all {
+    color: var(--color-primary);
+    font-weight: 500;
+  }
+
+  .ws-all-icon {
+    margin-right: var(--space-2);
+    font-size: var(--text-base);
+  }
+
+  .ws-dropdown-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: var(--space-1) 0;
+  }
+
   @media (max-width: 768px) {
+    /* Show hamburger button on mobile */
+    .hamburger-btn { display: flex; }
+
+    /* Show drawer on mobile when open */
+    .mobile-drawer-backdrop { display: block; }
+    .mobile-drawer { display: flex; }
+
     .search-trigger kbd { display: none; }
     .search-trigger span { display: none; }
     .topbar { gap: var(--space-2); padding: 0 var(--space-2); }
