@@ -68,18 +68,20 @@ describe('WorkspaceHome', () => {
     });
   });
 
-  it('Manage rules link has correct href', () => {
+  it('Manage rules link is rendered as a button', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    const link = container.querySelector('.section-action');
-    expect(link).toBeTruthy();
-    expect(link.getAttribute('href')).toBe('/workspaces/test/agent-rules');
+    const btn = container.querySelector('[data-testid="manage-rules-link"]');
+    expect(btn).toBeTruthy();
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.textContent.trim()).toBe('Manage rules');
   });
 
-  it('uses workspace id as fallback when slug is missing', () => {
+  it('renders manage rules button even when slug is missing', () => {
     const ws = { id: 'ws-1', name: 'Test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    const link = container.querySelector('.section-action');
-    expect(link.getAttribute('href')).toBe('/workspaces/ws-1/agent-rules');
+    const btn = container.querySelector('[data-testid="manage-rules-link"]');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent.trim()).toBe('Manage rules');
   });
 });
