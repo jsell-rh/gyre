@@ -28,7 +28,7 @@
   let graph = $state(null);
   let loading = $state(false);
   let reposLoading = $state(true);
-  let selectedNode = $state(null);
+  let selectedNode = null;
   let graphError = $state(null);
 
   // Repo-scope tab: 'architecture' | 'code'
@@ -38,7 +38,7 @@
   let conceptQuery = $state('');
   let conceptLoading = $state(false);
   let conceptNodes = $state(null); // null = no active search
-  let conceptEdges = $state(null);
+  let conceptEdges = null;
   let debounceTimer = null;
 
   // Load repos when in workspace/repo scope (graph dropdown)

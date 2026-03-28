@@ -352,9 +352,9 @@
   let targetSpecs       = $state([]);
   let selectedSpecPaths = $state([]);
 
-  let previewId        = $state(null);
+  let previewId        = null;
   let previewProgress  = $state([]);
-  let previewInterval  = $state(null);
+  let previewInterval  = null;
 
   let impactTab        = $state('architecture');
   let previewApiResult = $state(null);
