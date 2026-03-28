@@ -128,6 +128,12 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - This is the workspace-level spec oversight surface — answers "what's the status of all my directives across repos?"
 - Data source: `GET /api/v1/specs?workspace_id=:id` (existing, returns specs across repos in workspace).
 
+**Architecture** (workspace-level graph — optional, expandable):
+- A collapsible section showing the workspace-scope architectural graph: repos as nodes, cross-repo dependencies as edges (per HSI §3 / ui-layout §5 Boundary View).
+- Collapsed by default — the workspace home is dashboard-first. Click "Show architecture" to expand.
+- When expanded, shows the graph canvas with the same controls as the repo-mode Architecture tab but scoped to workspace (repos as top-level nodes).
+- This preserves the cross-repo dependency visualization from the old Explorer at workspace scope.
+
 **Repos** (pick where to focus):
 - Lists all repos in the workspace with health indicators.
 - Each row shows: repo name, active spec count, active agent count, health status (● healthy, ⚠ gate failure, ○ idle).
@@ -211,7 +217,7 @@ The system explorer for this repo. Shows the realized architecture (knowledge gr
 - Control bar: Lens selector (Structural/Evaluative/Observable), view selector, search (`/`), Ask input
 - Ghost overlays for structural prediction (HSI §3, Phase 1)
 - Flow view available via view selector (when trace data exists)
-- **Briefing sub-tab**: Full repo-scoped narrative view (not a collapsed panel — a full content area) with time range selector and "Ask a question" Q&A capability. Same structure as workspace home briefing but scoped to this repo via `?repo_id=` parameter. This gives the briefing proper space for the narrative + Q&A chat, rather than cramming it above the graph.
+- **Briefing sub-tab**: Full repo-scoped narrative view (not a collapsed panel — a full content area) with time range selector and "Ask a question" Q&A capability. Same structure as workspace home briefing but scoped to this repo via `?repo_id=` parameter on both the briefing endpoint and the Q&A endpoint (amends HSI §9: add optional `repo_id` field to `POST /workspaces/:id/briefing/ask` request body to scope Q&A to a specific repo). This gives the briefing proper space for the narrative + Q&A chat, rather than cramming it above the graph.
 
 **Agent discovery:** The Architecture tab is the primary surface for finding agents. Active agent count is shown per graph node (repo boundary view shows agent badges on nodes). Clicking an agent badge opens the agent detail panel with Pause/Stop/Message controls (HSI §4). The workspace orchestrator is also reachable from the workspace home's Repos section (clicking the agent count on a repo row opens the agent list for that repo in a modal). This ensures agents are always discoverable without a dedicated Agent tab — agents are visible in the context of the architecture they're modifying.
 
@@ -251,6 +257,7 @@ Repo-level configuration. Not labeled "Admin" or "Settings" — just a gear icon
 - **Gates**: Gate chain configuration (test commands, lint, agent review, trace capture)
 - **Policies**: Spec enforcement policies (require spec_ref, require approval, stale spec warning)
 - **Budget**: Repo-level budget allocation (cannot exceed workspace)
+- **Audit**: Repo-scoped activity log — agent activity, MR events, gate results, spec approvals for this repo. Filterable by event type and date range.
 - **Danger Zone**: Archive repo, delete repo (per `repo-lifecycle.md` §4)
 
 ---
@@ -463,7 +470,9 @@ When the workspace selector shows "All Workspaces" (or when a user selects the t
 **Cross-workspace home sections:**
 - **Decisions**: All unresolved items across all workspaces, with workspace attribution badges on each item
 - **Workspaces**: List of workspaces with health, agent count, budget usage (replaces the Repos section). Click to enter a workspace. "+ New Workspace" button for tenant admins.
+- **Specs**: All specs across all workspaces with workspace/repo attribution. Same columns as workspace-home Specs section. Answers "what's the status of all my directives across the entire org?"
 - **Briefing**: Cross-workspace narrative (client-side aggregation: calls briefing per workspace, merges sections). Each item shows source workspace.
+- **Agent Rules**: Tenant-level meta-spec catalog — browse all personas, principles, standards, process norms across the tenant. Read-only at this level (editing is workspace-scoped). Shows which are marked required at tenant level.
 
 This view answers: "What needs me across my entire organization?" It's the zoomed-out orientation page for users who manage multiple workspaces.
 
@@ -487,7 +496,7 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 | `ui-layout.md` §1 | Application shell changes: no persistent sidebar, topbar layout updated. Content area layouts (§2-§4 of ui-layout) remain valid. Status bar unchanged. |
 | `ui-layout.md` §2 | Full-Width layout used by workspace home. Split layout used by repo mode tabs + detail panel. Canvas+Controls used by Architecture tab. Editor Split used by meta-spec management. All layouts preserved; the views that USE them change. |
 | `human-system-interface.md` §8 | Inbox becomes "Decisions" throughout. Priority types and notification system unchanged — only the UI surface name and location change. |
-| `human-system-interface.md` §9 | Briefing becomes a section in workspace home (not a standalone nav item). Briefing detail, Q&A, and data sources unchanged. |
+| `human-system-interface.md` §9 | Briefing becomes a section in workspace home (not a standalone nav item) and a sub-tab in the Architecture tab at repo scope. Q&A endpoint amended to accept optional `repo_id` in request body. Briefing detail and data sources unchanged. |
 | `repo-lifecycle.md` §1 | Repo management moves from "Admin → Repos tab" to workspace home Repos section (create/import) and repo settings tab (configure/archive/delete). |
 
 **Depends on:**
