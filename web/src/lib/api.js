@@ -296,17 +296,6 @@ export const api = {
   // BCP (M23)
   bcpTargets: () => request('/admin/bcp/targets'),
   bcpDrill: () => request('/admin/bcp/drill', { method: 'POST' }),
-  // Cost tracking
-  costSummary: (since, until) => {
-    const qs = new URLSearchParams({ since: String(since), until: String(until) }).toString();
-    return request(`/costs/summary?${qs}`);
-  },
-  costsByAgent: (agentId) => request(`/costs?agent_id=${encodeURIComponent(agentId)}`),
-  // Analytics events
-  analyticsEvents: (params = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    return request(`/analytics/events${qs ? '?' + qs : ''}`);
-  },
   // M23 analytics (usage, compare, top)
   analyticsUsage: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
