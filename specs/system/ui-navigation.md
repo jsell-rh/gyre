@@ -100,7 +100,7 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 │  │                                    [Ask a question]│   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                          │
-│  ┌─ Standards ──────────────────────────────────────┐   │
+│  ┌─ Agent Rules ──────────────────────────────────────┐   │
 │  │ 6 meta-specs active (2 required)                  │   │
 │  │ conventional-commits (principle, required)  ✓ v3  │   │
 │  │ security (persona)                          ✓ v2  │   │
@@ -117,6 +117,7 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - Each item shows: type icon, description, which repo, inline action buttons (Approve/Reject/Retry).
 - "View all" expands to a full-page decisions list with filtering by type, repo, priority.
 - Data source: `GET /api/v1/users/me/notifications` (the notification system, not raw MR/spec queries).
+- Items include both actionable decisions (gate failures, spec approvals) and informational alerts (trust suggestions, spec assertions). All use the HSI §8 priority system. The name "Decisions" emphasizes that this surface is for human judgment, even when some items are informational — the human decides whether to act on them or dismiss them.
 - When empty: shows "No decisions needed — system is running autonomously." This is the ideal state.
 
 **Repos** (middle — pick where to focus):
@@ -132,7 +133,7 @@ The workspace home is a **dashboard**, not a sidebar-driven view. It's the landi
 - "Ask a question" opens the briefing Q&A chat (HSI §9).
 - Data source: `GET /api/v1/workspaces/:id/briefing` (existing).
 
-**Standards** (workspace-level meta-specs):
+**Agent Rules** (workspace-level meta-specs):
 - Summary of active meta-specs (personas, principles, standards, process norms) at the workspace level.
 - Shows required meta-specs prominently (these apply to every agent in every repo).
 - "Manage rules" opens the meta-spec management surface (§4).
@@ -152,6 +153,7 @@ Clicking ⚙ opens workspace settings as a full-page view with tabs:
 - **Teams**: Members, roles, invitations
 - **Budget**: Workspace budget configuration, per-repo breakdown
 - **Compute**: Compute target selection from tenant list
+- **Audit**: Activity log for this workspace — spec approvals, gate overrides, trust level changes, agent activity, policy evaluations. Filterable by entity type, user, date range.
 
 Back arrow returns to workspace home.
 
@@ -182,7 +184,7 @@ The primary tab. Shows the spec registry for this repo with implementation progr
 - Click a spec → detail panel slides in from right (HSI existing detail panel pattern) showing:
   - Content (spec text, editable with LLM assist)
   - Progress (tasks, agents, MRs linked to this spec)
-  - Meta-spec bindings (which meta-specs are bound, pinned versions)
+  - Meta-spec bindings (which meta-specs are bound, pinned versions) — the binding editor shows available meta-specs from the workspace registry inline (no need to navigate to the Agent Rules page). Required meta-specs are shown as locked. The user selects optional meta-specs and pins versions directly in the spec detail panel.
   - Links (cross-workspace spec links)
   - History (approval ledger, version history)
   - Ask Why (interrogation agent for the implementing agent)
@@ -201,7 +203,9 @@ The system explorer for this repo. Shows the realized architecture (knowledge gr
 - Control bar: Lens selector (Structural/Evaluative/Observable), view selector, search (`/`), Ask input
 - Ghost overlays for structural prediction (HSI §3, Phase 1)
 - Flow view available via view selector (when trace data exists)
-- Briefing for this repo (repo-scoped narrative) shown as a collapsible panel above the graph
+- Briefing for this repo (repo-scoped narrative) shown as a collapsible panel above the graph, with "Ask a question" Q&A capability (same as workspace briefing, but scoped to this repo via `?repo_id=` parameter)
+
+**Agent discovery:** The Architecture tab is the primary surface for finding agents. Active agent count is shown per graph node (repo boundary view shows agent badges on nodes). Clicking an agent badge opens the agent detail panel with Pause/Stop/Message controls (HSI §4). The workspace orchestrator is also reachable from the workspace home's Repos section (clicking the agent count on a repo row opens the agent list for that repo in a modal). This ensures agents are always discoverable without a dedicated Agent tab — agents are visible in the context of the architecture they're modifying.
 
 **This tab is "understand what the system IS."** The graph, the timeline, the flow visualization, the LLM-generated views — all here.
 
@@ -245,7 +249,7 @@ Repo-level configuration. Not labeled "Admin" or "Settings" — just a gear icon
 
 ## 4. Meta-Spec Management
 
-Accessed via "Manage rules" in the workspace home's Standards section. Opens as a full-page view (like workspace settings) with back arrow to workspace home.
+Accessed via "Manage rules" in the workspace home's Agent Rules section. Opens as a full-page view (like workspace settings) with back arrow to workspace home.
 
 This is the **creative surface** for encoding organizational judgment (vision §2, §5). It is NOT a read-only catalog.
 
@@ -253,7 +257,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ [←] Payments / Standards        [⌘K Search]  [🔔] [av]  │
+│ [←] Payments / Agent Rules        [⌘K Search]  [🔔] [av]  │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │  ┌─ Registry ────────────┐  ┌─ Editor ──────────────┐   │
@@ -265,7 +269,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 │  │ Principles             │  │                        │   │
 │  │  ● conventional... v3  │  │ Required: [toggle]     │   │
 │  │                        │  │                        │   │
-│  │ Standards              │  │ ┌─ Impact ──────────┐ │   │
+│  │ Agent Rules              │  │ ┌─ Impact ──────────┐ │   │
 │  │  ○ test-coverage  v1  │  │ │ 4 specs affected   │ │   │
 │  │                        │  │ │ 2 repos impacted   │ │   │
 │  │ [+ New Meta-Spec]      │  │ └────────────────────┘ │   │
@@ -277,7 +281,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 ```
 
 **Left panel — Registry:**
-- List of all meta-specs in this workspace + required tenant meta-specs (locked)
+- List of all meta-specs in this workspace + ALL tenant meta-specs (required ones shown as locked, optional ones available for workspace-level binding or spec-level binding)
 - Grouped by kind (Persona, Principle, Standard, Process)
 - Shows name, version, approval status indicator
 - "+ New Meta-Spec" button
@@ -326,7 +330,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 
 ### Meta-Spec Editing Flow
 
-1. Workspace home → Standards section → "Manage rules"
+1. Workspace home → Agent Rules section → "Manage rules"
 2. Select a meta-spec from registry
 3. Edit prompt text
 4. See impact panel update (blast radius)
@@ -342,7 +346,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 | Shortcut | Action |
 |---|---|
 | `⌘K` | Global search (command palette) |
-| `⌘1` | Go to Specs tab (repo mode) or workspace home |
+| `⌘1` | Go to Specs tab (repo mode). If no repo selected, opens workspace home. |
 | `⌘2` | Go to Architecture tab (repo mode) |
 | `⌘3` | Go to Decisions tab (repo mode) |
 | `⌘4` | Go to Code tab (repo mode) |
@@ -377,6 +381,8 @@ Every state is URL-addressable for deep linking and sharing:
 
 **URL convention:** Workspace identified by slug, repo identified by name (unique within workspace per `platform-model.md` §1). This produces readable URLs: `/workspaces/payments/payment-api/specs` instead of `/workspaces/90b1c214/repos/a3f2b1c4/specs`.
 
+**Migration from old URLs:** The server should support legacy URL redirects. Old HSI-style URLs (`/repos/:uuid/explorer`, `/workspaces/:uuid/inbox`) are redirected (301) to the new structure by looking up the workspace slug and repo name from the UUID. The `/profile` URL is preserved as-is (outside the `/workspaces/...` hierarchy). This ensures existing bookmarks and CI integrations continue to work.
+
 ---
 
 ## 8. Responsive Design
@@ -407,7 +413,7 @@ Same layout, detail panels become full-width overlays instead of side panels.
 | Breadcrumb as primary scope control | Workspace dropdown + repo click + back arrow | Breadcrumb scope model was hidden; new model is explicit |
 | Scope: tenant → workspace → repo (content adapts) | Workspace home (overview) → repo (focused tabs) | Three scope levels with adaptive content was unpredictable |
 | Admin nav item (dumping ground) | Gear icons for workspace/repo settings | Settings live in context, not in a nav item |
-| Meta-specs as sidebar nav item | "Standards" section in workspace home + full management page | Meta-specs promoted from "just another view" to workspace-level governance |
+| Meta-specs as sidebar nav item | "Agent Rules" section in workspace home + full management page | Meta-specs promoted from "just another view" to workspace-level governance |
 | Inbox badge counts raw MRs + specs | Decisions badge counts notifications | One data source (notification system), not two |
 
 ### From ui-layout.md §1 (Application Shell)
@@ -435,9 +441,18 @@ Same layout, detail panels become full-width overlays instead of side panels.
 
 ---
 
-## 10. Tenant Scope
+## 10. Cross-Workspace View
 
-For multi-tenant deployments (future), tenant-level administration is accessed via a separate admin panel, not through the workspace navigation. Single-tenant deployments (the default) don't need this.
+When the workspace selector shows "All Workspaces" (or when a user selects the tenant name), the workspace home transforms into a **cross-workspace dashboard**. This is the tenant-scope equivalent — it aggregates data across all workspaces the user has access to.
+
+**Cross-workspace home sections:**
+- **Decisions**: All unresolved items across all workspaces, with workspace attribution badges on each item
+- **Workspaces**: List of workspaces with health, agent count, budget usage (replaces the Repos section). Click to enter a workspace. "+ New Workspace" button for tenant admins.
+- **Briefing**: Cross-workspace narrative (client-side aggregation: calls briefing per workspace, merges sections). Each item shows source workspace.
+
+This view answers: "What needs me across my entire organization?" It's the zoomed-out orientation page for users who manage multiple workspaces.
+
+**Tenant administration** (user management, compute target management, tenant budget) is accessed via a gear icon on the cross-workspace view header. Only visible to tenant Admin role users. Tabs: Users, Compute Targets, Budget, Audit.
 
 The workspace selector dropdown shows workspaces the user is a member of. Workspace creation is available in the dropdown as a "+ New Workspace" option (visible to users with tenant Admin role).
 
@@ -464,5 +479,5 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 - `vision.md` — the five human activities that drive the navigation structure
 - `human-system-interface.md` §2-§12 — feature definitions that this spec arranges into the new navigation
 - `ui-layout.md` §2-§10 — layout patterns used by the new views
-- `agent-runtime.md` §2 — meta-spec registry API used by the Standards section
+- `agent-runtime.md` §2 — meta-spec registry API used by the Agent Rules section
 - `repo-lifecycle.md` — repo CRUD used by workspace home Repos section
