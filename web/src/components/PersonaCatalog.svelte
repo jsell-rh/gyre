@@ -171,13 +171,7 @@
             {#if persona.approval_status !== 'Approved'}
               <button class="btn-approve-sm" onclick={() => approvePersona(persona.id)} aria-label="Approve persona {persona.name}">Approve</button>
             {/if}
-            {#if deleteConfirmId === persona.id}
-              <span class="delete-confirm-label">Delete?</span>
-              <button class="btn-approve-sm" onclick={() => { deleteConfirmId = null; deletePersona(persona.id); }} aria-label="Confirm delete {persona.name}">Yes</button>
-              <button class="btn-secondary-sm" onclick={() => deleteConfirmId = null} aria-label="Cancel delete">No</button>
-            {:else}
-              <button class="btn-danger-sm" onclick={() => deleteConfirmId = persona.id} aria-label="Delete persona {persona.name}">Delete</button>
-            {/if}
+            <button class="btn-danger-sm" onclick={() => (deleteConfirmId = persona.id)} aria-label="Delete persona {persona.name}">Delete</button>
           </div>
         </div>
       {/each}
@@ -233,6 +227,16 @@
     </div>
   </div>
 </Modal>
+
+{#if deleteConfirmId}
+  <Modal open={true} title="Delete Persona" onclose={() => (deleteConfirmId = null)}>
+    <p>Delete this persona? This cannot be undone.</p>
+    {#snippet footer()}
+      <button class="btn-secondary" onclick={() => (deleteConfirmId = null)}>Cancel</button>
+      <button class="btn-danger-sm" onclick={() => { deletePersona(deleteConfirmId); deleteConfirmId = null; }}>Delete</button>
+    {/snippet}
+  </Modal>
+{/if}
 
 <style>
   .persona-catalog {
