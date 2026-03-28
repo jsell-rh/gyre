@@ -1,6 +1,6 @@
 <script>
   import { getContext } from 'svelte';
-  import { api } from '../lib/api.js';
+  import { api, safeHref } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -173,7 +173,7 @@
               <span class="artifact-icon" aria-hidden="true">↗</span>
               <div class="artifact-body">
                 <span class="artifact-label">Pull Request</span>
-                <a class="artifact-link" href={/^https?:\/\//i.test(detail.pr_link) ? detail.pr_link : '#'} target="_blank" rel="noreferrer">
+                <a class="artifact-link" href={safeHref(detail.pr_link)} target="_blank" rel="noreferrer">
                   {detail.pr_link}
                   <span class="sr-only">(opens in new tab)</span>
                 </a>

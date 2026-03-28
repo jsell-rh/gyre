@@ -1,6 +1,6 @@
 <script>
   import { t } from 'svelte-i18n';
-  import { api } from '../lib/api.js';
+  import { api, safeHref } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -193,7 +193,7 @@
                   </div>
                 {/if}
                 {#if task.pr_link}
-                  <a class="pr-link" href={/^https?:\/\//i.test(task.pr_link) ? task.pr_link : '#'} target="_blank" rel="noreferrer">PR ↗<span class="sr-only"> (opens in new tab)</span></a>
+                  <a class="pr-link" href={safeHref(task.pr_link)} target="_blank" rel="noreferrer">PR ↗<span class="sr-only"> (opens in new tab)</span></a>
                 {/if}
                 {#if task.spec_path}
                   <span class="spec-chip" title={task.spec_path}><span aria-hidden="true">📋</span> spec</span>

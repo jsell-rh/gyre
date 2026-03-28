@@ -161,6 +161,8 @@
     clearTimeout(debounceTimer);
   }
 
+  onDestroy(() => { clearTimeout(debounceTimer); });
+
   let searchInputEl = $state(null);
 
   function onWindowKeydown(e) {

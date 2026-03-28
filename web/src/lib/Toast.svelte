@@ -2,12 +2,19 @@
   import { fly } from 'svelte/transition';
   import { getToasts, dismiss } from './toast.svelte.js';
 
+  const prefersReducedMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    : false;
+
+  /** Svelte JS transitions bypass CSS reduced-motion rules — apply duration 0 manually */
+  const flyDuration = prefersReducedMotion ? 0 : 200;
+
   let toasts = $derived(getToasts());
 </script>
 
 <div class="toast-container" aria-live="polite" aria-atomic="false">
   {#each toasts as t (t.id)}
-    <div class="toast toast-{t.type}" role={t.type === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: 200 }}>
+    <div class="toast toast-{t.type}" role={t.type === 'error' ? 'alert' : undefined} transition:fly={{ y: 8, duration: flyDuration }}>
       <span class="toast-icon" aria-hidden="true">
         {#if t.type === 'success'}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
