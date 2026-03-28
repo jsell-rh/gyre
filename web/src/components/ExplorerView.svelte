@@ -13,7 +13,7 @@
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
-  let { scope = { type: 'tenant' }, onSelectWorkspace = null } = $props();
+  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
 
@@ -182,8 +182,8 @@
   <!-- Workspace scope: repo list for graph exploration — S4.4b -->
   <div class="ws-repo-list" aria-busy={wsReposLoading}>
     <div class="ws-repo-header">
-      <h2>Workspace Architecture</h2>
-      <p class="ws-repo-desc">Select a workspace repository to explore its knowledge graph</p>
+      <h2>{workspaceName ? `${workspaceName} — Repositories` : 'Workspace Repositories'}</h2>
+      <p class="ws-repo-desc">Select a repository to explore its knowledge graph</p>
     </div>
     {#if wsReposLoading}
       <div class="ws-repo-grid">

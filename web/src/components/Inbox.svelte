@@ -254,7 +254,6 @@
             >{unresolvedCount}</span
           >
         {/if}
-        <span class="scope-hint">{scope === 'tenant' ? 'All workspaces' : scope === 'repo' ? 'Repository' : 'Workspace'}</span>
       </div>
       <div class="inbox-header-actions">
         <label class="dismissed-toggle">
@@ -279,14 +278,7 @@
         {/each}
       </div>
     {:else if visibleNotifications.length === 0}
-      <EmptyState
-        title={scope === 'tenant' ? 'No notifications across workspaces' : 'All caught up!'}
-        description={scope === 'tenant'
-          ? 'There are no pending notifications in any workspace. Enter a workspace for a focused view.'
-          : scope === 'repo'
-            ? 'No pending notifications for this repository.'
-            : 'No pending notifications in this workspace.'}
-      />
+      <EmptyState title="All caught up!" description="No pending notifications." />
     {:else}
       <div class="inbox-list" role="list" aria-label="Notifications">
         {#each visibleNotifications as n (n.id)}
@@ -345,9 +337,7 @@
                   variant={TYPE_VARIANTS[n.notification_type] || 'default'}
                 />
                 <span class="card-age">{relativeTime(n.created_at)}</span>
-                <svg class="expand-icon" class:expanded={isExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                  <polyline points="6 9 12 15 18 9"/>
-                </svg>
+                <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
               </div>
             </button>
 
@@ -579,7 +569,7 @@
     flex-direction: column;
     gap: var(--space-4);
     overflow-y: auto;
-    height: 100%;
+    flex: 1;
   }
 
   .inbox-header {
@@ -615,16 +605,6 @@
     border-radius: var(--radius-full);
     font-size: var(--text-xs);
     font-weight: 700;
-  }
-
-  .scope-hint {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 400;
-    padding: var(--space-1) var(--space-2);
-    background: var(--color-surface-elevated);
-    border-radius: var(--radius);
-    border: 1px solid var(--color-border);
   }
 
   .inbox-header-actions {
@@ -670,12 +650,7 @@
   }
 
   .inbox-card.dismissed {
-    opacity: 0.6;
-  }
-
-  .inbox-card.dismissed .card-header {
-    text-decoration: line-through;
-    text-decoration-color: var(--color-text-muted);
+    opacity: 0.45;
   }
 
   .card-header {
@@ -771,13 +746,8 @@
   }
 
   .expand-icon {
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
-    flex-shrink: 0;
-    transition: transform var(--transition-fast);
-  }
-
-  .expand-icon.expanded {
-    transform: rotate(180deg);
   }
 
   .card-body {
@@ -924,7 +894,6 @@
     .inbox-card,
     .card-header,
     .ref-link,
-    .retry-btn,
-    .expand-icon { transition: none; }
+    .retry-btn { transition: none; }
   }
 </style>

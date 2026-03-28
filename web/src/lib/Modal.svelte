@@ -55,6 +55,7 @@
   $effect(() => {
     if (open) {
       previousFocus = document.activeElement;
+      document.body.style.overflow = 'hidden';
       // Focus the modal close button (first focusable element) after render
       tick().then(() => {
         const focusable = modalEl?.querySelector(
@@ -63,9 +64,13 @@
         focusable?.focus();
       });
     } else {
+      document.body.style.overflow = '';
       previousFocus?.focus();
       previousFocus = null;
     }
+    return () => {
+      document.body.style.overflow = '';
+    };
   });
 </script>
 

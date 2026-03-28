@@ -87,9 +87,16 @@
     const parts = path.split('/');
     return parts[parts.length - 1]?.replace('.md', '') ?? path;
   }
+
+  function onGraphKeydown(e) {
+    if (e.key === 'Escape' && selected) {
+      selected = null;
+      e.stopPropagation();
+    }
+  }
 </script>
 
-<div class="spec-graph-view" aria-busy={loading}>
+<div class="spec-graph-view" aria-busy={loading} onkeydown={onGraphKeydown}>
   <span class="sr-only" aria-live="polite">{loading ? "" : "spec graph loaded"}</span>
   <div class="view-header">
     <div>

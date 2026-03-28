@@ -561,6 +561,7 @@
     max-width: 1000px;
     min-height: 100%;
     overflow-y: auto;
+    flex: 1;
   }
 
   .briefing-header {

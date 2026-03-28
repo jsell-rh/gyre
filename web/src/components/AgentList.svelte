@@ -423,7 +423,7 @@
         {#if detailTab === 'info'}
           <div class="detail-body" role="tabpanel" id="dtabpanel-info" aria-labelledby="dtab-info">
             <dl class="detail-dl">
-              <dt>ID</dt><dd class="mono">{selected.id}</dd>
+              <dt>ID</dt><dd class="mono id-cell">{selected.id}<button class="copy-id-btn" onclick={() => navigator.clipboard.writeText(selected.id)} title="Copy agent ID" aria-label="Copy agent ID"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button></dd>
               <dt>Status</dt><dd><Badge value={selected.status} /></dd>
               <dt>Parent</dt><dd class="mono">{selected.parent_id ?? '—'}</dd>
               <dt>Current Task</dt><dd title={selected.current_task_id ?? ''}>
@@ -775,6 +775,38 @@
 
   .detail-dl dt { color: var(--color-text-muted); }
   .detail-dl dd { margin: 0; color: var(--color-text-secondary); }
+
+  .id-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .copy-id-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .copy-id-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .copy-id-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
 
   .container-section {
     border-top: 1px solid var(--color-border);

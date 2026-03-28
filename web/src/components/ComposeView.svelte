@@ -111,13 +111,14 @@
         rows="10"
         spellcheck="false"
         aria-label="Spec content editor"
-        aria-describedby="compose-spec-hint"
+        aria-describedby="compose-spec-hint{jsonStatus === 'invalid' ? ' compose-json-error' : ''}"
+        aria-invalid={jsonStatus === 'invalid' ? 'true' : undefined}
       ></textarea>
 
       {#if jsonStatus === 'valid'}
-        <p class="json-hint valid">Valid JSON</p>
+        <p class="json-hint valid" role="status">Valid JSON</p>
       {:else if jsonStatus === 'invalid'}
-        <p class="json-hint invalid">{jsonError}</p>
+        <p class="json-hint invalid" role="alert" id="compose-json-error">{jsonError}</p>
       {/if}
 
       {#if applyError}
@@ -291,6 +292,7 @@
   /* Editor */
   .spec-editor {
     width: 100%;
+    box-sizing: border-box;
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
@@ -302,6 +304,10 @@
     min-height: 160px;
     line-height: 1.6;
     transition: border-color var(--transition-fast);
+  }
+
+  .spec-editor[aria-invalid="true"] {
+    border-color: var(--color-danger);
   }
   .spec-editor:focus:not(:focus-visible) {
     outline: none;

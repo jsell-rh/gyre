@@ -169,6 +169,9 @@
               <span class="repo-date">{formatDate(r.created_at)}</span>
             </div>
             <div class="repo-meta">
+              {#if r.status && r.status !== 'active'}
+                <span class="badge status-badge status-{r.status}">{r.status}</span>
+              {/if}
               {#if r.is_mirror}
                 <span class="badge mirror-badge" title={r.mirror_url}>mirror</span>
               {/if}
@@ -286,6 +289,12 @@
     border-radius: var(--radius-sm);
     padding: var(--space-1) var(--space-1);
     font-weight: 500;
+  }
+
+  .status-badge.status-archived {
+    color: var(--color-text-muted);
+    border-color: var(--color-border-strong);
+    opacity: 0.8;
   }
 
   .branch-pill {
