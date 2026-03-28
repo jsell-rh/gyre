@@ -222,7 +222,7 @@ The primary tab. Shows the spec registry for this repo with implementation progr
   - Progress (tasks, agents, MRs linked to this spec)
   - Meta-spec bindings — shows the **effective prompt set** for this spec's implementation:
     - **Required (locked)**: Tenant-required meta-specs shown with 🔒 + "Tenant" badge. Workspace-required shown with 🔒 + "Workspace" badge. Cannot be removed. These are what every agent implementing this spec will receive.
-    - **Bound (author's selections)**: Optional meta-specs the spec author explicitly selected from the tenant/workspace registry, with pinned version numbers. The binding editor shows available meta-specs inline (no need to navigate to the Agent Rules page) grouped by kind (Persona, Principle, Standard, Process).
+    - **Bound (author's selections)**: Optional meta-specs the spec author explicitly selected from the tenant/workspace registry, with pinned version numbers and scope badges (Tenant/Workspace) so the author knows the governance context. The binding editor shows available meta-specs inline (no need to navigate to the Agent Rules page) grouped by kind (Persona, Principle, Standard, Process), with scope attribution on each item. Version picker defaults to latest approved version.
     - **Stale pins**: If a bound meta-spec has a newer approved version than the pinned one, a warning badge shows "v3 pinned, v5 available" with a one-click "Update pin" action.
     - The binding editor is the spec author's primary tool for directing HOW agents implement this spec (vision §2: "Set direction on how to build it").
   - Preview — inline preview controls for this spec:
@@ -249,7 +249,7 @@ The system explorer for this repo. This is where **moldable development** lives 
   - **View selector**: Boundary View (default), Spec Realization, Change View, saved views (user-curated), LLM-generated views (ephemeral). The view selector is a dropdown listing built-in views, then user's saved views, then a "Generate view..." option.
   - **Search** (`/`): Canvas-local search, highlights matching nodes.
   - **Ask input**: Natural language → `POST /workspaces/:workspace_id/explorer-views/generate`. LLM translates the question into a view spec (data query + layout + encoding) and renders it immediately. Generated views are ephemeral — the user can save explicitly via the saved views CRUD. Examples: "How does authentication work?", "Show me the payment retry flow", "What has the highest churn in the last 30 days?"
-- **In-view filter panel** (200px, collapsible left panel): Category filters — Boundaries, Interfaces, Data, Specs. Toggle via filter icon in the control bar. Not part of the sidebar — inside the Architecture content area.
+- **In-view filter panel** (200px, collapsible left panel): Category filters — Boundaries, Interfaces, Data, Specs, Concepts (predefined concepts discovered by knowledge graph extraction). Toggle via filter icon in the control bar. Not part of the sidebar — inside the Architecture content area.
 
 **View Spec Grammar (per `ui-layout.md` §4):**
 Every view (built-in, saved, or generated) is a declarative JSON specification with four layers: Data (what to query), Layout (how to arrange — graph, hierarchical, layered, list, timeline, side-by-side, diff, flow), Encoding (how to visualize — color, size, border, opacity, labels), and Highlight (what to emphasize). The grammar is the shared language between the user, saved views, and the LLM. Users can inspect and edit the view spec directly if they want fine-grained control.
@@ -275,7 +275,7 @@ Cross-cutting views pulling related elements from across the codebase. Available
 Available via the Evaluative lens. Heat map overlay colors nodes by churn rate, coupling, complexity, or test coverage. Anomaly callouts surface where attention is most needed (high churn + low test coverage = risk). Toggle via a "Risk" button in the Evaluative lens controls.
 
 **Conversational Exploration (per `system-explorer.md` §8):**
-The Ask input supports both view generation ("How does auth work?" → produces a view) and Q&A ("Why does PaymentService depend on UserService?" → produces a text answer with entity references). Follow-up questions highlight referenced nodes on the canvas. The system distinguishes between questions that produce views and questions that produce answers based on the LLM's judgment.
+The Ask input supports both view generation ("How does auth work?" → produces a view) and Q&A ("Why does PaymentService depend on UserService?" → produces a text answer with entity references). Follow-up questions highlight referenced nodes on the canvas. The system distinguishes between questions that produce views and questions that produce answers based on the LLM's judgment. **Repo scoping:** In repo mode, the Architecture tab automatically passes `repo_id` to the `POST /workspaces/:workspace_id/explorer-views/generate` endpoint (per `ui-layout.md` §2's optional `repo_id` field) so all questions and generated views are scoped to the current repo. The user does not need to specify repo context explicitly.
 
 **View Spec Editor:**
 Each rendered view has an "Edit view spec" button (code icon) that opens a collapsible JSON editor panel alongside the canvas. Users can inspect and hand-edit the view spec grammar (data/layout/encoding/highlight layers) for fine-grained control. Changes apply live to the canvas.
@@ -396,6 +396,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
   7. Click "Publish" → commits the meta-spec change, triggers approval workflow
   8. Preview branches are ephemeral (auto-deleted after 24 hours)
 - Inline LLM chat for editing assistance ("make this stricter about null handling", "add error retry guidance")
+- **Drift policy link**: Below the impact panel, a link to "Configure drift policy" navigates to workspace settings → Trust & Policies → MetaSpecPolicy section. This puts the policy controls one click from the context where drift is visible.
 - **Reconciliation status**: After publishing and approving a required meta-spec change, shows reconciliation progress — which repos have been re-implemented, which are pending, which are in progress.
 
 **This is the "power tool" for encoding judgment** (vision §2: "Set direction on how to build it" and §5: "Discover and encode"). Impact and drift are always visible. The preview loop is the primary interaction — edit, preview, iterate, publish. The approval workflow is inline. The reconciliation progress shows the cascade propagating through the system.
@@ -590,7 +591,7 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 | `ui-layout.md` §1 | Application shell changes: no persistent sidebar, topbar layout updated. Content area layouts (§2-§4 of ui-layout) remain valid. Status bar unchanged. |
 | `ui-layout.md` §2 | Full-Width layout used by workspace home and repo Decisions/Code tabs. Split layout used by repo Specs tab + detail panel. Canvas+Controls used by Architecture tab. Editor Split used by meta-spec management. All layouts preserved; the views that USE them change. |
 | `ui-layout.md` §5 | The Explorer's Code sub-tab (Architecture/Code toggle in the control bar) is moved to a separate repo-mode tab. The Architecture tab no longer has a Code sub-tab — Code is a peer tab. |
-| `system-explorer.md` header note | Ghost overlays are NOT deferred — they are Phase 1 priority (consistent with system-explorer.md §3 body text, which says "more valuable than the thorough preview"). The header deferral note should be removed. |
+| `system-explorer.md` header note | Ghost overlays are NOT deferred — they are Phase 1 priority (consistent with system-explorer.md §3 body text, which says "more valuable than the thorough preview"). The header deferral note should be removed. The header's reference to the "6-item app sidebar" should be updated to reference the new horizontal tab model from this spec. |
 | `system-explorer.md` §4, §7, §8, §9 | Concept Views (§4), Risk Map (§7), Conversational Exploration (§8), and Executable Spec Assertions (§9) are all surfaced in the Architecture tab and Specs tab as described in this spec §3. |
 | `human-system-interface.md` §8 | Inbox becomes "Decisions" throughout. Priority types and notification system unchanged — only the UI surface name and location change. |
 | `human-system-interface.md` §9 | Briefing becomes a section in workspace home (not a standalone nav item) and a sub-tab in the Architecture tab at repo scope. Q&A endpoint amended to accept optional `repo_id` in request body. Briefing detail and data sources unchanged. |
