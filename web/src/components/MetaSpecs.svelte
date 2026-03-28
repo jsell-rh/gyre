@@ -100,6 +100,9 @@
   let createForm = $state({ kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false });
   let createSaving = $state(false);
 
+  // Discard-changes confirmation
+  let discardConfirmSpec = $state(null);
+
   // Delete
   let deleteTarget = $state(null);
   let deleteSaving = $state(false);
@@ -130,7 +133,8 @@
 
   function selectSpec(spec, force = false) {
     if (!force && editDirty && selected && selected.id !== spec.id) {
-      if (!confirm('You have unsaved changes. Discard them?')) return;
+      discardConfirmSpec = spec;
+      return;
     }
     selected = spec;
     editContent = spec.prompt || '';
@@ -1169,6 +1173,16 @@
         <Button variant="danger" onclick={handleDelete} disabled={deleteSaving}>
           {deleteSaving ? 'Deleting…' : 'Delete'}
         </Button>
+      </div>
+    </Modal>
+  {/if}
+
+  {#if discardConfirmSpec}
+    <Modal open={true} title="Unsaved Changes" onclose={() => discardConfirmSpec = null}>
+      <p>You have unsaved changes. Discard them?</p>
+      <div class="form-actions">
+        <Button variant="secondary" onclick={() => discardConfirmSpec = null}>Keep Editing</Button>
+        <Button variant="danger" onclick={() => { const spec = discardConfirmSpec; discardConfirmSpec = null; selectSpec(spec, true); }}>Discard</Button>
       </div>
     </Modal>
   {/if}

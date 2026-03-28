@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../lib/api.js';
+  import { api, getAuthToken } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -54,12 +54,11 @@
 
   async function connectSSE() {
     disconnectSSE();
-    const token = localStorage.getItem('gyre_auth_token') || 'gyre-dev-token';
     const ctrl = new AbortController();
     abortCtrl = ctrl;
     try {
       const resp = await fetch('/api/v1/audit/stream', {
-        headers: { 'Authorization': `Bearer ${token}` },
+        headers: { 'Authorization': `Bearer ${getAuthToken()}` },
         signal: ctrl.signal,
       });
       if (!resp.ok) { sseConnected = false; return; }
