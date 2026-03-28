@@ -55,8 +55,6 @@
     }
   });
 
-  onDestroy(() => { closeTtyWs(); });
-
   const statuses = ['Active', 'Idle', 'Blocked', 'Error', 'Dead'];
 
   const filtered = $derived(
@@ -93,9 +91,6 @@
     if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
     return `${Math.floor(secs / 86400)}d`;
   }
-
-  // Clean up TTY WebSocket on destroy
-  onDestroy(() => { closeTtyWs(); });
 
   $effect(() => {
     const wsId = workspaceId;
