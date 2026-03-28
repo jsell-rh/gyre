@@ -107,17 +107,6 @@
   --shadow-md: 0 4px 12px color-mix(in srgb, #000000 50%, transparent);
   --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 60%, transparent);
 
-  /* Legacy aliases for existing components */
-  --bg:            var(--color-bg);
-  --surface:       var(--color-surface);
-  --surface-hover: var(--color-surface-elevated);
-  --border:        var(--color-border);
-  --border-subtle: var(--color-border);
-  --text:          var(--color-text);
-  --text-muted:    var(--color-text-secondary);
-  --text-dim:      var(--color-text-muted);
-  --accent:        var(--color-link);
-  --accent-muted:  color-mix(in srgb, var(--color-focus) 10%, transparent);
   --color-text-inverse: #ffffff;
 }
 
