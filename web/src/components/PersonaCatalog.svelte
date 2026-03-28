@@ -417,8 +417,8 @@
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
   .field-input {
     padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius);
     color: var(--color-text);
     font-family: var(--font-body);

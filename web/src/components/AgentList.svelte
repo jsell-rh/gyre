@@ -611,13 +611,13 @@
   .agent-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: var(--space-6);
+    gap: var(--space-4);
   }
 
   .agent-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     padding: var(--space-4);
     display: flex;
     flex-direction: column;
