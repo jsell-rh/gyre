@@ -16,7 +16,7 @@
    *   repoId      — string | null
    *   scope       — 'tenant' | 'workspace' | 'repo'
    */
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -395,6 +395,8 @@
   const canPreview = $derived.by(() => selectedSpecPaths.length > 0 && previewState === 'editing');
 
   async function startPreview() {
+    // Clear any lingering interval from a prior preview run
+    stopPreview();
     previewState = 'running';
     previewProgress = selectedSpecPaths.map(path => ({ path, status: 'running' }));
     previewApiResult = null;
@@ -516,6 +518,10 @@
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+  // onDestroy guarantees cleanup even if the $effect cleanup is skipped
+  // (e.g. parent unmounts this component while a preview interval is active).
+  onDestroy(() => stopPreview());
 
   $effect(() => {
     if (scope === 'workspace' || scope === 'repo') {

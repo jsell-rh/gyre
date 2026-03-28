@@ -743,6 +743,12 @@
     color: var(--color-text-muted);
   }
 
+  .concept-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
   /* Remove browser default search cancel button */
   .concept-input::-webkit-search-cancel-button { display: none; }
 

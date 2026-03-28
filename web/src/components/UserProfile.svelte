@@ -38,11 +38,20 @@
   ];
 
   function loadPrefs() {
+    const defaults = Object.fromEntries(NOTIF_TYPES.map(t => [t.id, true]));
     try {
       const raw = localStorage.getItem('gyre_notif_prefs');
-      if (raw) return JSON.parse(raw);
-    } catch { /* ignore */ }
-    return Object.fromEntries(NOTIF_TYPES.map(t => [t.id, true]));
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // Only accept known keys with boolean values
+          for (const t of NOTIF_TYPES) {
+            if (typeof parsed[t.id] === 'boolean') defaults[t.id] = parsed[t.id];
+          }
+        }
+      }
+    } catch { /* ignore corrupt data */ }
+    return defaults;
   }
 
   let notifPrefs = $state(loadPrefs());
@@ -426,9 +435,9 @@
   }
   .field-input:focus:not(:focus-visible) { outline: none; }
   .field-input:focus-visible {
-    outline: none;
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
     border-color: var(--color-focus);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 30%, transparent);
   }
 
   .edit-actions { display: flex; gap: var(--space-2); align-items: center; }

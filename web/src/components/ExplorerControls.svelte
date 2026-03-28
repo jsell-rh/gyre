@@ -619,6 +619,7 @@
   }
 
   .ctrl-search::placeholder { color: var(--color-text-muted); }
+  .ctrl-search:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
   .ctrl-search::-webkit-search-cancel-button { display: none; }
 
   .search-clear {
@@ -673,6 +674,7 @@
   }
 
   .ctrl-ask::placeholder { color: var(--color-text-muted); }
+  .ctrl-ask:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
   .ctrl-ask:disabled { opacity: 0.6; cursor: not-allowed; }
 
   .ask-btn {
