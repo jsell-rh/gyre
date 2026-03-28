@@ -52,9 +52,9 @@ export function columnLayout(nodes) {
 export async function forceLayout(nodes, edges, width = 900, height = 600, ticks = 300) {
   if (!nodes.length) return {};
 
-  // Dynamic import so build can tree-shake if not used
+  // Dynamic import — use d3-force directly instead of the full d3 umbrella
   const { forceSimulation, forceLink, forceManyBody, forceCollide, forceCenter } =
-    await import('d3');
+    await import('d3-force');
 
   // d3-force mutates node objects — clone to avoid side effects
   const ns = nodes.map(n => ({ id: n.id, x: width / 2, y: height / 2 }));
