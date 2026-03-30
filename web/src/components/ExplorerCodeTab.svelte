@@ -229,7 +229,7 @@
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('name')}>Name {sortIcon('name')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('last_commit')}>Last Commit {sortIcon('last_commit')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>Author {sortIcon('author')}</button></th>
-              <th scope="col">Status</th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
             </tr>
           </thead>
           <tbody>
@@ -260,7 +260,7 @@
           </thead>
           <tbody>
             {#each filteredCommits as commit}
-              <tr class="table-row" aria-label="Commit {commit.sha ?? commit.id ?? ''}">
+              <tr class="table-row" onclick={() => onRowClick(commit, 'commit')} tabindex="0" role="button" aria-label="Commit {commit.sha ?? commit.id ?? ''}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(commit, 'commit'); } }}>
                 <td class="mono">{(commit.sha ?? commit.id ?? '').slice(0, 7)}</td>
                 <td class="commit-msg" title={commit.message ?? commit.summary ?? ''}>{commit.message ?? commit.summary ?? '—'}</td>
                 <td class="secondary">{commit.author ?? commit.author_name ?? '—'}</td>
