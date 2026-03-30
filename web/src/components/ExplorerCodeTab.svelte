@@ -129,9 +129,31 @@
     return rows;
   });
 
-  let filteredCommits = $derived.by(() => commits.filter(matchesFilter));
+  let filteredCommits = $derived.by(() => {
+    let rows = commits.filter(matchesFilter);
+    rows.sort((a, b) => {
+      let av, bv;
+      if (sortField === 'sha') { av = a.sha ?? a.id ?? ''; bv = b.sha ?? b.id ?? ''; }
+      else if (sortField === 'message') { av = a.message ?? a.summary ?? ''; bv = b.message ?? b.summary ?? ''; }
+      else if (sortField === 'author') { av = a.author ?? a.author_name ?? ''; bv = b.author ?? b.author_name ?? ''; }
+      else if (sortField === 'date') { av = a.timestamp ?? a.authored_at ?? a.date ?? ''; bv = b.timestamp ?? b.authored_at ?? b.date ?? ''; }
+      else { av = a[sortField] ?? ''; bv = b[sortField] ?? ''; }
+      return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    });
+    return rows;
+  });
 
-  let filteredQueue = $derived.by(() => queue.filter(matchesFilter));
+  let filteredQueue = $derived.by(() => {
+    let rows = queue.filter(matchesFilter);
+    rows.sort((a, b) => {
+      let av, bv;
+      if (sortField === 'mr') { av = a.merge_request_id ?? a.mr_id ?? ''; bv = b.merge_request_id ?? b.mr_id ?? ''; }
+      else if (sortField === 'priority') { av = a.priority ?? 0; bv = b.priority ?? 0; return sortDir === 'asc' ? av - bv : bv - av; }
+      else { av = a[sortField] ?? ''; bv = b[sortField] ?? ''; }
+      return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    });
+    return rows;
+  });
 
   function relativeTime(ts) {
     if (!ts) return '';
@@ -230,10 +252,10 @@
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col">SHA</th>
-              <th scope="col">Message</th>
-              <th scope="col">Author</th>
-              <th scope="col">Date</th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('sha')}>SHA {sortIcon('sha')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('message')}>Message {sortIcon('message')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>Author {sortIcon('author')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('date')}>Date {sortIcon('date')}</button></th>
             </tr>
           </thead>
           <tbody>
@@ -282,9 +304,9 @@
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col">MR</th>
-              <th scope="col">Priority</th>
-              <th scope="col">Status</th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>MR {sortIcon('mr')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>Priority {sortIcon('priority')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
             </tr>
           </thead>
           <tbody>
