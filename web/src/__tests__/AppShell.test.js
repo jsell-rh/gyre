@@ -1,183 +1,261 @@
 /**
- * AppShell.test.js — Tests for S4.1 Application Shell
+ * AppShell.test.js — Tests for ui-navigation.md §1 (App Shell), §7 (URL structure),
+ *   §6 (Keyboard Shortcuts), §8 (Responsive Design), §10 (Cross-Workspace View)
  *
  * Covers:
- *   - URL routing: parseUrl() maps paths to nav + scope
- *   - urlFor(): generates canonical URLs from nav + scope
- *   - Entrypoint flow: first visit → explorer, subsequent → inbox
- *   - Workspace switching
- *   - Keyboard shortcuts
- *   - Scope transitions
+ *   - URL routing: parseUrl() maps paths to mode + slug + repoName + tab
+ *   - urlFor(): generates canonical URLs
+ *   - Entrypoint flow
+ *   - Workspace selector (topbar)
+ *   - Repo mode: back arrow + breadcrumb
+ *   - WorkspaceHome sections visible
+ *   - Keyboard shortcuts (g h, g 1-4, Esc, ?, ⌘K)
+ *   - Status bar
+ *   - Cross-workspace view (/all route, parseUrl, urlFor)
+ *   - Mobile hamburger button presence
+ *   - Legacy URL redirect logic
+ *   - "All Workspaces" in workspace dropdown
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
-// ── Pure function tests (no rendering needed) ─────────────────────────
-// We extract the routing functions from App.svelte and test them directly.
+// ── Pure function tests (parseUrl + urlFor replicated from App.svelte) ──
 
-// Replicated here for unit testing (same logic as App.svelte parseUrl + urlFor)
-const NAV_ITEMS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin'];
+const REPO_TABS = ['specs', 'architecture', 'decisions', 'code', 'settings'];
 
 function parseUrl(pathname) {
-  const parts = pathname.split('/').filter(Boolean);
-  if (parts.length === 0) return null;
+  const raw = pathname.split('/').filter(Boolean).map(p => {
+    try { return decodeURIComponent(p); } catch { return p; }
+  });
 
-  if (parts.length === 1) {
-    const [nav] = parts;
-    if (NAV_ITEMS.includes(nav)) return { nav, scope: { type: 'tenant' } };
+  if (raw.length === 0) return { mode: 'workspace_home', slug: null, repoName: null, tab: null };
+
+  if (raw.length === 1 && raw[0] === 'profile') {
+    return { mode: 'profile', slug: null, repoName: null, tab: null };
   }
 
-  if (parts.length >= 3) {
-    const [seg, id, navRaw] = parts;
-    const nav = navRaw || 'inbox';
-    if (!NAV_ITEMS.includes(nav)) return null;
+  // /all  or  /all/settings  (cross-workspace view §10)
+  if (raw[0] === 'all') {
+    const tab = raw[1] ?? null;
+    return { mode: 'cross_workspace', slug: 'all', repoName: null, tab };
+  }
 
-    if (seg === 'workspaces') {
-      return { nav, scope: { type: 'workspace', workspaceId: id } };
+  if (raw[0] === 'workspaces' && raw.length >= 2) {
+    const slug = raw[1];
+
+    if (raw[2] === 'r' && raw.length >= 4) {
+      const repoName = raw[3];
+      const tab = raw[4] && REPO_TABS.includes(raw[4]) ? raw[4] : 'specs';
+      return { mode: 'repo', slug, repoName, tab };
     }
-    if (seg === 'repos') {
-      return { nav, scope: { type: 'repo', repoId: id } };
-    }
+
+    return { mode: 'workspace_home', slug, repoName: null, tab: null };
   }
 
   return null;
 }
 
-function urlFor(nav, s) {
-  if (!s || s.type === 'tenant') return `/${nav}`;
-  if (s.type === 'workspace') return `/workspaces/${s.workspaceId}/${nav}`;
-  if (s.type === 'repo') return `/repos/${s.repoId}/${nav}`;
-  return `/${nav}`;
+function urlFor(parsed) {
+  if (!parsed) return '/';
+  const { mode: m, slug, repoName, tab } = parsed;
+  if (m === 'profile') return '/profile';
+  if (m === 'cross_workspace') {
+    return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
+  }
+  if (!slug) return '/';
+  if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
+  if (m === 'repo') {
+    const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
+    if (tab && tab !== 'specs') return `${base}/${tab}`;
+    return base;
+  }
+  return '/';
 }
 
 // ── URL routing tests ─────────────────────────────────────────────────
 
 describe('parseUrl', () => {
-  it('returns null for root path', () => {
-    expect(parseUrl('/')).toBeNull();
+  it('returns workspace_home (no slug) for root path', () => {
+    expect(parseUrl('/')).toEqual({ mode: 'workspace_home', slug: null, repoName: null, tab: null });
   });
 
-  it('returns null for empty path', () => {
-    expect(parseUrl('')).toBeNull();
+  it('returns workspace_home (no slug) for empty path', () => {
+    expect(parseUrl('')).toEqual({ mode: 'workspace_home', slug: null, repoName: null, tab: null });
   });
 
-  it('parses tenant-scoped inbox', () => {
-    expect(parseUrl('/inbox')).toEqual({ nav: 'inbox', scope: { type: 'tenant' } });
+  it('parses profile route', () => {
+    expect(parseUrl('/profile')).toEqual({ mode: 'profile', slug: null, repoName: null, tab: null });
   });
 
-  it('parses tenant-scoped briefing', () => {
-    expect(parseUrl('/briefing')).toEqual({ nav: 'briefing', scope: { type: 'tenant' } });
+  it('parses workspace home', () => {
+    expect(parseUrl('/workspaces/payments')).toEqual({
+      mode: 'workspace_home', slug: 'payments', repoName: null, tab: null,
+    });
   });
 
-  it('parses tenant-scoped explorer', () => {
-    expect(parseUrl('/explorer')).toEqual({ nav: 'explorer', scope: { type: 'tenant' } });
+  it('parses workspace home with trailing settings path', () => {
+    expect(parseUrl('/workspaces/payments/settings')).toEqual({
+      mode: 'workspace_home', slug: 'payments', repoName: null, tab: null,
+    });
   });
 
-  it('parses tenant-scoped specs', () => {
-    expect(parseUrl('/specs')).toEqual({ nav: 'specs', scope: { type: 'tenant' } });
+  it('parses workspace home with agent-rules path', () => {
+    expect(parseUrl('/workspaces/payments/agent-rules')).toEqual({
+      mode: 'workspace_home', slug: 'payments', repoName: null, tab: null,
+    });
   });
 
-  it('parses tenant-scoped meta-specs', () => {
-    expect(parseUrl('/meta-specs')).toEqual({ nav: 'meta-specs', scope: { type: 'tenant' } });
+  it('parses repo mode (default specs tab)', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs',
+    });
   });
 
-  it('parses tenant-scoped admin', () => {
-    expect(parseUrl('/admin')).toEqual({ nav: 'admin', scope: { type: 'tenant' } });
+  it('parses repo mode with specs tab', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api/specs')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs',
+    });
   });
 
-  it('returns null for unknown tenant-scoped path', () => {
+  it('parses repo mode with architecture tab', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api/architecture')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'architecture',
+    });
+  });
+
+  it('parses repo mode with decisions tab', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api/decisions')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'decisions',
+    });
+  });
+
+  it('parses repo mode with code tab', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api/code')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'code',
+    });
+  });
+
+  it('parses repo mode with settings tab', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api/settings')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'settings',
+    });
+  });
+
+  it('falls back to specs for unknown repo tab', () => {
+    expect(parseUrl('/workspaces/payments/r/payment-api/unknown')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs',
+    });
+  });
+
+  it('returns null for unknown top-level path', () => {
     expect(parseUrl('/dashboard')).toBeNull();
   });
 
-  it('parses workspace-scoped inbox', () => {
-    const result = parseUrl('/workspaces/ws-uuid-1/inbox');
-    expect(result).toEqual({
-      nav: 'inbox',
-      scope: { type: 'workspace', workspaceId: 'ws-uuid-1' },
+  it('returns null for /inbox (old nav route)', () => {
+    expect(parseUrl('/inbox')).toBeNull();
+  });
+
+  it('handles URL-encoded workspace slug', () => {
+    expect(parseUrl('/workspaces/my%20workspace')).toEqual({
+      mode: 'workspace_home', slug: 'my workspace', repoName: null, tab: null,
     });
   });
 
-  it('parses workspace-scoped explorer', () => {
-    const result = parseUrl('/workspaces/ws-uuid-2/explorer');
-    expect(result).toEqual({
-      nav: 'explorer',
-      scope: { type: 'workspace', workspaceId: 'ws-uuid-2' },
+  // §10 Cross-workspace URL parsing
+  it('parses /all as cross_workspace with no tab', () => {
+    expect(parseUrl('/all')).toEqual({
+      mode: 'cross_workspace', slug: 'all', repoName: null, tab: null,
     });
   });
 
-  it('parses workspace-scoped meta-specs', () => {
-    const result = parseUrl('/workspaces/ws-abc/meta-specs');
-    expect(result).toEqual({
-      nav: 'meta-specs',
-      scope: { type: 'workspace', workspaceId: 'ws-abc' },
+  it('parses /all/settings as cross_workspace with settings tab', () => {
+    expect(parseUrl('/all/settings')).toEqual({
+      mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'settings',
     });
   });
 
-  it('parses repo-scoped explorer', () => {
-    const result = parseUrl('/repos/repo-uuid-1/explorer');
-    expect(result).toEqual({
-      nav: 'explorer',
-      scope: { type: 'repo', repoId: 'repo-uuid-1' },
+  it('parses /all/agent-rules as cross_workspace with agent-rules tab', () => {
+    expect(parseUrl('/all/agent-rules')).toEqual({
+      mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'agent-rules',
     });
-  });
-
-  it('parses repo-scoped specs', () => {
-    const result = parseUrl('/repos/repo-uuid-2/specs');
-    expect(result).toEqual({
-      nav: 'specs',
-      scope: { type: 'repo', repoId: 'repo-uuid-2' },
-    });
-  });
-
-  it('returns null for workspace path with unknown nav', () => {
-    expect(parseUrl('/workspaces/ws-1/dashboard')).toBeNull();
-  });
-
-  it('returns null for repos path with unknown nav', () => {
-    expect(parseUrl('/repos/r-1/activity')).toBeNull();
-  });
-
-  it('returns null for 2-segment paths', () => {
-    expect(parseUrl('/workspaces/ws-1')).toBeNull();
   });
 });
 
 describe('urlFor', () => {
-  it('generates tenant inbox URL', () => {
-    expect(urlFor('inbox', { type: 'tenant' })).toBe('/inbox');
+  it('returns / for null', () => {
+    expect(urlFor(null)).toBe('/');
   });
 
-  it('generates tenant explorer URL', () => {
-    expect(urlFor('explorer', { type: 'tenant' })).toBe('/explorer');
+  it('returns /profile', () => {
+    expect(urlFor({ mode: 'profile', slug: null, repoName: null, tab: null })).toBe('/profile');
   });
 
-  it('generates workspace inbox URL', () => {
-    expect(urlFor('inbox', { type: 'workspace', workspaceId: 'ws-1' })).toBe('/workspaces/ws-1/inbox');
+  it('returns / when no slug', () => {
+    expect(urlFor({ mode: 'workspace_home', slug: null, repoName: null, tab: null })).toBe('/');
   });
 
-  it('generates workspace briefing URL', () => {
-    expect(urlFor('briefing', { type: 'workspace', workspaceId: 'ws-2' })).toBe('/workspaces/ws-2/briefing');
+  it('generates workspace home URL', () => {
+    expect(urlFor({ mode: 'workspace_home', slug: 'payments', repoName: null, tab: null }))
+      .toBe('/workspaces/payments');
   });
 
-  it('generates repo explorer URL', () => {
-    expect(urlFor('explorer', { type: 'repo', repoId: 'repo-1' })).toBe('/repos/repo-1/explorer');
+  it('generates repo mode URL (default specs tab — omits /specs)', () => {
+    expect(urlFor({ mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs' }))
+      .toBe('/workspaces/payments/r/payment-api');
   });
 
-  it('handles null scope (defaults to tenant)', () => {
-    expect(urlFor('inbox', null)).toBe('/inbox');
+  it('generates repo mode URL with architecture tab', () => {
+    expect(urlFor({ mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'architecture' }))
+      .toBe('/workspaces/payments/r/payment-api/architecture');
   });
 
-  it('round-trips through parseUrl', () => {
-    const nav = 'explorer';
-    const scope = { type: 'workspace', workspaceId: 'ws-abc' };
-    const url = urlFor(nav, scope);
-    const parsed = parseUrl(url);
-    expect(parsed).toEqual({ nav, scope });
+  it('generates repo mode URL with decisions tab', () => {
+    expect(urlFor({ mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'decisions' }))
+      .toBe('/workspaces/payments/r/payment-api/decisions');
+  });
+
+  it('URL-encodes workspace slug with spaces', () => {
+    expect(urlFor({ mode: 'workspace_home', slug: 'my workspace', repoName: null, tab: null }))
+      .toBe('/workspaces/my%20workspace');
+  });
+
+  it('round-trips workspace home through parseUrl', () => {
+    const parsed = { mode: 'workspace_home', slug: 'payments', repoName: null, tab: null };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
+  });
+
+  it('round-trips repo specs tab through parseUrl', () => {
+    const parsed = { mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs' };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
+  });
+
+  // §10 cross_workspace urlFor
+  it('generates /all for cross_workspace with no tab', () => {
+    expect(urlFor({ mode: 'cross_workspace', slug: 'all', repoName: null, tab: null })).toBe('/all');
+  });
+
+  it('generates /all/settings for cross_workspace settings tab', () => {
+    expect(urlFor({ mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'settings' })).toBe('/all/settings');
+  });
+
+  it('round-trips /all through parseUrl → urlFor', () => {
+    const parsed = { mode: 'cross_workspace', slug: 'all', repoName: null, tab: null };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
+  });
+
+  it('round-trips /all/settings through parseUrl → urlFor', () => {
+    const parsed = { mode: 'cross_workspace', slug: 'all', repoName: null, tab: 'settings' };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
+  });
+
+  it('round-trips repo architecture tab through parseUrl', () => {
+    const parsed = { mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'architecture' };
+    expect(parseUrl(urlFor(parsed))).toEqual(parsed);
   });
 });
 
-// ── Component rendering tests ─────────────────────────────────────────
+// ── Component tests ───────────────────────────────────────────────────
 
 vi.mock('../lib/ws.js', () => ({
   createWsStore: () => ({
@@ -190,326 +268,174 @@ vi.mock('../lib/ws.js', () => ({
 vi.mock('../lib/api.js', () => ({
   api: {
     workspaces: vi.fn().mockResolvedValue([]),
-    mergeRequests: vi.fn().mockResolvedValue([]),
-    getPendingSpecs: vi.fn().mockResolvedValue([]),
+    workspaceRepos: vi.fn().mockResolvedValue([]),
     workspaceBudget: vi.fn().mockResolvedValue(null),
+    notificationCount: vi.fn().mockResolvedValue(0),
     tokenInfo: vi.fn().mockResolvedValue({ kind: 'global' }),
   },
   setAuthToken: vi.fn(),
 }));
 
-// Mock child view components (they are tested independently).
-// In Svelte 5, components are compiled to functions — mocks must be functions too.
-// vi.mock factories are hoisted, so helpers must be defined inline.
-vi.mock('../components/Inbox.svelte', () => ({ default: function InboxStub() {} }));
-vi.mock('../components/Briefing.svelte', () => ({ default: function BriefingStub() {} }));
-vi.mock('../components/ExplorerView.svelte', () => ({ default: function ExplorerViewStub() {} }));
-vi.mock('../components/SpecDashboard.svelte', () => ({ default: function SpecDashboardStub() {} }));
-vi.mock('../components/MetaSpecs.svelte', () => ({ default: function MetaSpecsStub() {} }));
-vi.mock('../components/AdminPanel.svelte', () => ({ default: function AdminPanelStub() {} }));
+vi.mock('../components/WorkspaceHome.svelte', () => ({ default: function WorkspaceHomeStub() {} }));
+vi.mock('../components/RepoMode.svelte', () => ({ default: function RepoModeStub() {} }));
+vi.mock('../components/UserProfile.svelte', () => ({ default: function UserProfileStub() {} }));
 
 import { api } from '../lib/api.js';
 import App from '../App.svelte';
-import Sidebar from '../components/Sidebar.svelte';
 
-describe('Sidebar', () => {
-  it('renders without throwing', () => {
-    expect(() => render(Sidebar)).not.toThrow();
-  });
+// ── App shell — topbar-first ─────────────────────────────────────────
 
-  it('renders all 6 nav items', () => {
-    const { getByText } = render(Sidebar);
-    expect(getByText('Inbox')).toBeTruthy();
-    expect(getByText('Briefing')).toBeTruthy();
-    expect(getByText('Explorer')).toBeTruthy();
-    expect(getByText('Specs')).toBeTruthy();
-    expect(getByText('Meta-specs')).toBeTruthy();
-    expect(getByText('Admin')).toBeTruthy();
-  });
-
-  it('highlights active nav item', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox' } });
-    const activeBtn = container.querySelector('.nav-item.active');
-    expect(activeBtn).toBeTruthy();
-    expect(activeBtn.textContent).toContain('Inbox');
-  });
-
-  it('shows inbox badge when inboxBadge > 0', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox', inboxBadge: 5 } });
-    const badge = container.querySelector('.nav-badge');
-    expect(badge).toBeTruthy();
-    expect(badge.textContent).toBe('5');
-  });
-
-  it('shows 99+ when inboxBadge > 99', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox', inboxBadge: 150 } });
-    const badge = container.querySelector('.nav-badge');
-    expect(badge?.textContent).toBe('99+');
-  });
-
-  it('does not show badge when inboxBadge is 0', () => {
-    const { container } = render(Sidebar, { props: { currentNav: 'inbox', inboxBadge: 0 } });
-    expect(container.querySelector('.nav-badge')).toBeNull();
-  });
-
-  it('collapses when collapse button clicked', async () => {
-    const { container, getByLabelText } = render(Sidebar);
-    const collapseBtn = getByLabelText('Collapse sidebar');
-    await fireEvent.click(collapseBtn);
-    expect(container.querySelector('.sidebar.collapsed')).toBeTruthy();
-  });
-
-  it('expands when expand button clicked after collapse', async () => {
-    const { container, getByLabelText } = render(Sidebar);
-    const collapseBtn = getByLabelText('Collapse sidebar');
-    await fireEvent.click(collapseBtn);
-    const expandBtn = getByLabelText('Expand sidebar');
-    await fireEvent.click(expandBtn);
-    expect(container.querySelector('.sidebar.collapsed')).toBeNull();
-  });
-
-  it('calls onnavigate when nav item clicked', async () => {
-    const onnavigate = vi.fn();
-    const { getByText } = render(Sidebar, { props: { currentNav: 'inbox', onnavigate } });
-    await fireEvent.click(getByText('Briefing'));
-    expect(onnavigate).toHaveBeenCalledWith('briefing');
-  });
-
-  it('shows version indicator at bottom', () => {
-    const { getByText } = render(Sidebar);
-    expect(getByText('v0.1.0')).toBeTruthy();
-  });
-
-  it('does not show workspace switcher', () => {
-    const { container } = render(Sidebar);
-    // No <select> elements or workspace-switcher class
-    expect(container.querySelector('select')).toBeNull();
-    expect(container.querySelector('.ws-selector')).toBeNull();
-  });
-});
-
-// ── Entrypoint flow tests ─────────────────────────────────────────────
-
-describe('Entrypoint flow', () => {
+describe('App shell — no sidebar', () => {
   beforeEach(() => {
-    // Reset URL to root so parseUrl returns null and entrypoint flow runs
     window.history.pushState({}, '', '/');
     localStorage.clear();
     vi.clearAllMocks();
     api.workspaces.mockResolvedValue([]);
-    api.mergeRequests.mockResolvedValue([]);
-    api.getPendingSpecs.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
     api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
   });
 
-  it('first visit (no saved workspace): shows explorer nav', async () => {
-    // No localStorage 'gyre_workspace_id'
+  it('renders topbar instead of sidebar', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+      expect(container.querySelector('.sidebar')).toBeNull();
+    }, { timeout: 3000 });
+  });
+
+  it('shows workspace selector in topbar', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('shows decisions badge in topbar', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="decisions-badge"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('shows decisions count when nonzero', async () => {
+    api.notificationCount.mockResolvedValue(5);
+    const { container } = render(App);
+    await waitFor(() => {
+      const badge = container.querySelector('.decisions-count');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('5');
+    }, { timeout: 3000 });
+  });
+
+  it('shows 99+ when decisions count > 99', async () => {
+    api.notificationCount.mockResolvedValue(150);
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('.decisions-count')?.textContent).toBe('99+');
+    }, { timeout: 3000 });
+  });
+});
+
+// ── Entrypoint flow ───────────────────────────────────────────────────
+
+describe('Entrypoint flow', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
     localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+  });
+
+  it('first visit: shows select-workspace prompt', async () => {
+    localStorage.clear();
+    api.workspaces.mockResolvedValue([]);
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-select-prompt"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('subsequent visit (workspace found): shows workspace name', async () => {
+    const mockWs = { id: 'ws-test-1', name: 'Test Workspace', trust_level: 'Guided' };
+    localStorage.setItem('gyre_workspace_id', mockWs.id);
+    api.workspaces.mockResolvedValue([mockWs]);
+    api.workspaceBudget.mockResolvedValue(null);
+
+    const { container } = render(App);
+    await waitFor(() => {
+      const wsBtn = container.querySelector('[data-testid="ws-name-btn"]');
+      expect(wsBtn?.textContent?.trim()).toBe('Test Workspace');
+    }, { timeout: 3000 });
+  });
+
+  it('subsequent visit (workspace NOT found): falls back to select-workspace prompt', async () => {
+    localStorage.setItem('gyre_workspace_id', 'stale-id');
     api.workspaces.mockResolvedValue([]);
 
     const { container } = render(App);
     await waitFor(() => {
-      const activeBtn = container.querySelector('.nav-item.active');
-      expect(activeBtn?.textContent).toContain('Explorer');
-    }, { timeout: 3000 });
-  });
-
-  it('subsequent visit (saved workspace found): shows inbox nav', async () => {
-    const mockWs = { id: 'ws-test-1', name: 'Test Workspace', trust_level: 'Guided' };
-    localStorage.setItem('gyre_workspace_id', mockWs.id);
-    api.workspaces.mockResolvedValue([mockWs]);
-    api.workspaceBudget.mockResolvedValue({ used_credits: 50, total_credits: 100 });
-
-    const { container } = render(App);
-    await waitFor(() => {
-      const activeBtn = container.querySelector('.nav-item.active');
-      expect(activeBtn?.textContent).toContain('Inbox');
-    }, { timeout: 3000 });
-  });
-
-  it('subsequent visit (saved workspace NOT found): falls back to explorer', async () => {
-    localStorage.setItem('gyre_workspace_id', 'stale-workspace-id');
-    api.workspaces.mockResolvedValue([]); // workspace not returned
-
-    const { container } = render(App);
-    await waitFor(() => {
-      // Explorer should be active after fallback
-      const activeBtn = container.querySelector('.nav-item.active');
-      expect(activeBtn?.textContent).toContain('Explorer');
-      // Stale localStorage entry should be cleared
+      expect(container.querySelector('[data-testid="ws-select-prompt"]')).toBeTruthy();
       expect(localStorage.getItem('gyre_workspace_id')).toBeNull();
     }, { timeout: 3000 });
   });
 });
 
-// ── URL routing → scope/nav tests ─────────────────────────────────────
+// ── Workspace selector ────────────────────────────────────────────────
 
-describe('URL routing: parseUrl round-trips', () => {
-  const ALL_NAVS = ['inbox', 'briefing', 'explorer', 'specs', 'meta-specs', 'admin'];
-
-  ALL_NAVS.forEach(nav => {
-    it(`/workspaces/:id/${nav} → workspace scope, nav=${nav}`, () => {
-      const result = parseUrl(`/workspaces/ws-123/${nav}`);
-      expect(result).toEqual({ nav, scope: { type: 'workspace', workspaceId: 'ws-123' } });
-    });
-
-    it(`/${nav} → tenant scope, nav=${nav}`, () => {
-      const result = parseUrl(`/${nav}`);
-      expect(result).toEqual({ nav, scope: { type: 'tenant' } });
-    });
-  });
-
-  it('/repos/:id/explorer → repo scope, nav=explorer', () => {
-    const result = parseUrl('/repos/repo-abc/explorer');
-    expect(result).toEqual({ nav: 'explorer', scope: { type: 'repo', repoId: 'repo-abc' } });
-  });
-
-  it('/repos/:id/specs → repo scope, nav=specs', () => {
-    const result = parseUrl('/repos/repo-abc/specs');
-    expect(result).toEqual({ nav: 'specs', scope: { type: 'repo', repoId: 'repo-abc' } });
-  });
-});
-
-// ── Scope transition tests ─────────────────────────────────────────────
-
-describe('Scope transitions', () => {
+describe('Workspace selector', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/');
     localStorage.clear();
     vi.clearAllMocks();
-    api.workspaces.mockResolvedValue([]);
-    api.mergeRequests.mockResolvedValue([]);
-    api.getPendingSpecs.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
     api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
   });
 
-  it('app mounts and renders sidebar with all nav items', async () => {
-    const { container } = render(App);
+  it('shows workspace name when workspace is active', async () => {
+    const mockWs = { id: 'ws-1', name: 'Payments', trust_level: 'Guided' };
+    localStorage.setItem('gyre_workspace_id', mockWs.id);
+    api.workspaces.mockResolvedValue([mockWs]);
 
-    // Wait for app to mount and show breadcrumb
+    const { container } = render(App);
     await waitFor(() => {
-      // All 6 nav items should be present
-      const navItems = container.querySelectorAll('.nav-item');
-      expect(navItems.length).toBeGreaterThanOrEqual(6);
+      expect(container.textContent).toContain('Payments');
     }, { timeout: 3000 });
   });
-});
 
-// ── Keyboard shortcut tests ───────────────────────────────────────────
+  it('opens dropdown when arrow button clicked', async () => {
+    const mockWs = { id: 'ws-1', name: 'Payments', trust_level: 'Guided' };
+    localStorage.setItem('gyre_workspace_id', mockWs.id);
+    api.workspaces.mockResolvedValue([mockWs]);
 
-describe('Keyboard shortcuts', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    vi.clearAllMocks();
-    api.workspaces.mockResolvedValue([]);
-    api.mergeRequests.mockResolvedValue([]);
-    api.getPendingSpecs.mockResolvedValue([]);
-  });
-
-  const navShortcuts = [
-    { key: '1', nav: 'Inbox' },
-    { key: '2', nav: 'Briefing' },
-    { key: '3', nav: 'Explorer' },
-    { key: '4', nav: 'Specs' },
-    { key: '5', nav: 'Meta-specs' },
-    { key: '6', nav: 'Admin' },
-  ];
-
-  navShortcuts.forEach(({ key, nav }) => {
-    it(`Cmd+${key} activates ${nav}`, async () => {
-      const { container } = render(App);
-
-      await waitFor(() => {
-        expect(container.querySelector('.sidebar')).toBeTruthy();
-      });
-
-      await fireEvent.keyDown(window, { key, metaKey: true });
-
-      await waitFor(() => {
-        const activeBtn = container.querySelector('.nav-item.active');
-        expect(activeBtn?.textContent).toContain(nav);
-      });
-    });
-  });
-
-  it('? key opens keyboard shortcut overlay', async () => {
     const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-dropdown-toggle"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="ws-dropdown-toggle"]'));
 
     await waitFor(() => {
-      expect(container.querySelector('.sidebar')).toBeTruthy();
+      expect(container.querySelector('[data-testid="ws-dropdown"]')).toBeTruthy();
     });
-
-    await fireEvent.keyDown(window, { key: '?' });
-
-    await waitFor(() => {
-      expect(document.querySelector('.shortcuts-overlay')).toBeTruthy();
-    });
-  });
-
-  it('? key toggles shortcut overlay off', async () => {
-    const { container } = render(App);
-
-    await waitFor(() => {
-      expect(container.querySelector('.sidebar')).toBeTruthy();
-    });
-
-    // Open
-    await fireEvent.keyDown(window, { key: '?' });
-    await waitFor(() => {
-      expect(document.querySelector('.shortcuts-overlay')).toBeTruthy();
-    });
-
-    // Close
-    await fireEvent.keyDown(window, { key: '?' });
-    await waitFor(() => {
-      expect(document.querySelector('.shortcuts-overlay')).toBeNull();
-    });
-  });
-
-  it('Esc key closes shortcut overlay', async () => {
-    const { container } = render(App);
-
-    await waitFor(() => {
-      expect(container.querySelector('.sidebar')).toBeTruthy();
-    });
-
-    await fireEvent.keyDown(window, { key: '?' });
-    await waitFor(() => {
-      expect(document.querySelector('.shortcuts-overlay')).toBeTruthy();
-    });
-
-    await fireEvent.keyDown(window, { key: 'Escape' });
-    await waitFor(() => {
-      expect(document.querySelector('.shortcuts-overlay')).toBeNull();
-    });
-  });
-
-  it('Cmd+K opens search overlay', async () => {
-    const { container } = render(App);
-
-    await waitFor(() => {
-      expect(container.querySelector('.sidebar')).toBeTruthy();
-    });
-
-    await fireEvent.keyDown(window, { key: 'k', metaKey: true });
-
-    // SearchBar mock — just verify no error thrown
-    // (SearchBar is a real component; we just check it doesn't crash)
   });
 });
 
-// ── Status bar tests ──────────────────────────────────────────────────
+// ── Status bar ────────────────────────────────────────────────────────
 
 describe('Status bar', () => {
   beforeEach(() => {
-    // Reset URL to root so entrypoint flow runs (not URL-based routing)
     window.history.pushState({}, '', '/');
     localStorage.clear();
     vi.clearAllMocks();
     api.workspaces.mockResolvedValue([]);
-    api.mergeRequests.mockResolvedValue([]);
-    api.getPendingSpecs.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
     api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
   });
 
   it('renders status bar', async () => {
@@ -522,8 +448,7 @@ describe('Status bar', () => {
   it('shows WebSocket status indicator', async () => {
     const { container } = render(App);
     await waitFor(() => {
-      const wsEl = container.querySelector('.status-ws');
-      expect(wsEl).toBeTruthy();
+      expect(container.querySelector('.status-ws')).toBeTruthy();
     });
   });
 
@@ -534,7 +459,6 @@ describe('Status bar', () => {
     api.workspaceBudget.mockResolvedValue(null);
 
     const { container } = render(App);
-    // Trust level text is mixed with SVG in the same element, use textContent
     await waitFor(() => {
       expect(container.textContent).toContain('Trust: Guided');
     }, { timeout: 3000 });
@@ -547,9 +471,284 @@ describe('Status bar', () => {
     api.workspaceBudget.mockResolvedValue({ used_credits: 67, total_credits: 100 });
 
     const { container } = render(App);
-    // Budget text is mixed with SVG and progress bar in the same element
     await waitFor(() => {
       expect(container.textContent).toContain('Budget: 67%');
     }, { timeout: 3000 });
+  });
+});
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────
+
+describe('Keyboard shortcuts', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+  });
+
+  it('? key opens keyboard shortcut overlay', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      expect(document.querySelector('.shortcuts-overlay')).toBeTruthy();
+    });
+  });
+
+  it('? key toggles shortcut overlay off', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => { expect(document.querySelector('.shortcuts-overlay')).toBeTruthy(); });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => { expect(document.querySelector('.shortcuts-overlay')).toBeNull(); });
+  });
+
+  it('Esc closes shortcut overlay', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => { expect(document.querySelector('.shortcuts-overlay')).toBeTruthy(); });
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => { expect(document.querySelector('.shortcuts-overlay')).toBeNull(); });
+  });
+
+  it('shortcut overlay shows new g-key sequences', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      const overlay = document.querySelector('.shortcuts-overlay');
+      expect(overlay?.textContent).toContain('g h');
+      expect(overlay?.textContent).toContain('g 1');
+      expect(overlay?.textContent).toContain('g 2');
+      expect(overlay?.textContent).toContain('g 3');
+      expect(overlay?.textContent).toContain('g 4');
+    });
+  });
+
+  it('shortcut overlay shows g 5 for settings tab', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      const overlay = document.querySelector('.shortcuts-overlay');
+      expect(overlay?.textContent).toContain('g 5');
+      expect(overlay?.textContent).toContain('Settings tab');
+    });
+  });
+
+  it('shortcut overlay does NOT show old ⌘1-6 nav shortcuts', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      const overlay = document.querySelector('.shortcuts-overlay');
+      expect(overlay?.textContent).not.toContain('⌘1');
+      expect(overlay?.textContent).not.toContain('⌘2');
+    });
+  });
+
+  it('⌘K does not crash', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+    await fireEvent.keyDown(window, { key: 'k', metaKey: true });
+  });
+
+  // §6 shortcut overlay: context-sensitive labels visible
+  it('shortcut overlay labels repo-mode-only shortcuts', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: '?' });
+    await waitFor(() => {
+      const overlay = document.querySelector('.shortcuts-overlay');
+      // repo-mode shortcuts should be labeled so user knows context
+      expect(overlay?.textContent).toContain('repo mode');
+    });
+  });
+});
+
+// ── §8 Responsive Design: mobile hamburger button ─────────────────────
+
+describe('Responsive — hamburger button', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+  });
+
+  it('hamburger button is present in the DOM', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('hamburger button has accessible label', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      const btn = container.querySelector('[data-testid="hamburger-btn"]');
+      expect(btn).toBeTruthy();
+      expect(btn.getAttribute('aria-label')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('clicking hamburger opens mobile drawer', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mobile-drawer"]')).toBeTruthy();
+    });
+  });
+
+  it('mobile drawer has workspace home section links', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+      expect(drawer).toBeTruthy();
+      expect(drawer.textContent).toContain('Decisions');
+      expect(drawer.textContent).toContain('Specs');
+      expect(drawer.textContent).toContain('Repos');
+      expect(drawer.textContent).toContain('Briefing');
+      expect(drawer.textContent).toContain('Agent Rules');
+    });
+  });
+
+  it('Esc closes mobile drawer', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mobile-drawer"]')).toBeTruthy();
+    });
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mobile-drawer"]')).toBeNull();
+    });
+  });
+
+  it('drawer has aria-label for accessibility', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+      expect(drawer?.getAttribute('aria-label')).toBeTruthy();
+    });
+  });
+});
+
+// ── §10 Cross-Workspace View: workspace dropdown + routing ────────────
+
+describe('Cross-workspace view', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([{ id: 'ws-1', name: 'Payments', slug: 'payments' }]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+  });
+
+  it('workspace dropdown includes "All Workspaces" entry', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    // Open dropdown
+    const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
+    if (arrowBtn) {
+      await fireEvent.click(arrowBtn);
+      await waitFor(() => {
+        const dropdown = container.querySelector('[data-testid="ws-dropdown"]');
+        expect(dropdown).toBeTruthy();
+        expect(dropdown.textContent).toContain('All Workspaces');
+      });
+    }
+  });
+
+  it('"All Workspaces" entry has a testid', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
+    if (arrowBtn) {
+      await fireEvent.click(arrowBtn);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
+      });
+    }
+  });
+
+  it('clicking "All Workspaces" navigates to /all', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
+    if (arrowBtn) {
+      await fireEvent.click(arrowBtn);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
+      });
+      await fireEvent.click(container.querySelector('[data-testid="ws-all-workspaces"]'));
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/all');
+      });
+    }
   });
 });

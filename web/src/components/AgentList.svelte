@@ -560,21 +560,6 @@
     color: var(--color-text);
   }
 
-  .spawn-btn {
-    background: var(--color-primary);
-    color: var(--color-text-inverse);
-    border: none;
-    border-radius: var(--radius);
-    padding: var(--space-2) var(--space-4);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    cursor: pointer;
-    transition: background var(--transition-fast);
-  }
-
-  .spawn-btn:hover { background: var(--color-primary-hover); }
-
   .filter-bar { display: flex; flex-wrap: wrap; gap: var(--space-2); flex-shrink: 0; }
 
   .pill {
@@ -975,7 +960,6 @@
   .link-btn:hover { color: var(--color-link-hover); }
 
   .toggle-btn:focus-visible,
-  .spawn-btn:focus-visible,
   .pill:focus-visible,
   .modal-btn:focus-visible,
   .link-btn:focus-visible,
@@ -998,7 +982,6 @@
     .pill,
     .agent-card,
     .toggle-btn,
-    .spawn-btn,
     .dtab,
     .close-btn,
     .modal-btn,

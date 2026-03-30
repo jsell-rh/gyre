@@ -61,14 +61,16 @@ async function request(path, options = {}) {
 export const api = {
   version: () => request('/version'),
   activity: (limit = 100) => request(`/activity?limit=${limit}`),
-  agents: ({ workspaceId, status } = {}) => {
+  agents: ({ workspaceId, repoId, status } = {}) => {
     const p = new URLSearchParams();
     if (status) p.set('status', status);
     if (workspaceId) p.set('workspace_id', workspaceId);
+    if (repoId) p.set('repo_id', repoId);
     const qs = p.toString();
     return request(`/agents${qs ? '?' + qs : ''}`);
   },
   agent: (id) => request(`/agents/${id}`),
+  repo: (id) => request(`/repos/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
   tasks: ({ workspaceId, status, assigned_to, parent_task_id } = {}) => {
@@ -417,6 +419,7 @@ export const api = {
     return request(`/costs/summary${qs ? '?' + qs : ''}`);
   },
   costsByAgent: (agentId) => request(`/costs?agent_id=${encodeURIComponent(agentId)}`),
+  repoBudget: (id) => request(`/repos/${id}/budget`),
   workspaceRepos: (id) => request(`/workspaces/${id}/repos`),
   workspaceMembers: (id) => request(`/workspaces/${id}/members`),
   workspaceTeams: (id) => request(`/workspaces/${id}/teams`),

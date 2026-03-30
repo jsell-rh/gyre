@@ -166,36 +166,6 @@
 
   .chevron { color: var(--color-text-muted); flex-shrink: 0; }
 
-  .btn-primary {
-    padding: var(--space-2) var(--space-4);
-    background: var(--color-primary);
-    border: none;
-    border-radius: var(--radius);
-    color: var(--color-text-inverse);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background var(--transition-fast);
-  }
-  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  .btn-secondary {
-    padding: var(--space-2) var(--space-4);
-    background: transparent;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text-secondary);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
-  }
-  .btn-secondary:hover { background: var(--color-surface-elevated); color: var(--color-text); }
-  .btn-secondary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
   .create-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; color: var(--color-text); }
   .field-input {
@@ -214,6 +184,6 @@
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
   @media (prefers-reduced-motion: reduce) {
-    .ws-card, .btn-primary, .btn-secondary, .field-input { transition: none; }
+    .ws-card, .field-input { transition: none; }
   }
 </style>
