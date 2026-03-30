@@ -10,6 +10,7 @@
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
 
   const navigate = getContext('navigate');
+  const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
@@ -371,7 +372,7 @@
           />
           {#if repos.length === 0 && !reposLoading}
             <p class="hint">No repositories found. Create a project and repository to get started.</p>
-            <button class="go-admin-btn" onclick={() => navigate?.('admin')}>Go to Admin</button>
+            <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>Go to Settings</button>
           {/if}
         </div>
 

@@ -342,6 +342,8 @@
   }));
   setContext('openDetailPanel', openDetailPanel);
   setContext('goToAgentRules', () => goToAgentRules());
+  setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
+  setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
     if (params) {

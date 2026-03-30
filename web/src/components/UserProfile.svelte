@@ -8,6 +8,7 @@
   import { getContext } from 'svelte';
 
   const navigate = getContext('navigate');
+  const goToWorkspaceHome = getContext('goToWorkspaceHome');
 
   // ── State ──────────────────────────────────────────────────────────────────
   let me = $state(null);
@@ -37,32 +38,38 @@
     { id: 'AgentNeedsClarification', label: 'Agent Clarification Requests' },
   ];
 
-  function loadPrefs() {
-    const defaults = Object.fromEntries(NOTIF_TYPES.map(t => [t.id, true]));
-    try {
-      const raw = localStorage.getItem('gyre_notif_prefs');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          // Only accept known keys with boolean values
-          for (const t of NOTIF_TYPES) {
-            if (typeof parsed[t.id] === 'boolean') defaults[t.id] = parsed[t.id];
-          }
-        }
-      }
-    } catch { /* ignore corrupt data */ }
-    return defaults;
+  function defaultPrefs() {
+    return Object.fromEntries(NOTIF_TYPES.map(t => [t.id, true]));
   }
 
-  let notifPrefs = $state(loadPrefs());
+  let notifPrefs = $state(defaultPrefs());
   let prefsSaving = $state(false);
+  let prefsLoaded = $state(false);
+
+  async function loadPrefs() {
+    try {
+      const serverPrefs = await api.getNotificationPreferences();
+      if (serverPrefs && typeof serverPrefs === 'object' && !Array.isArray(serverPrefs)) {
+        const defaults = defaultPrefs();
+        for (const t of NOTIF_TYPES) {
+          if (typeof serverPrefs[t.id] === 'boolean') defaults[t.id] = serverPrefs[t.id];
+        }
+        notifPrefs = defaults;
+      }
+    } catch {
+      // Server may not support this yet — fall back to defaults
+    }
+    prefsLoaded = true;
+  }
 
   async function savePrefs() {
     prefsSaving = true;
     try {
-      localStorage.setItem('gyre_notif_prefs', JSON.stringify(notifPrefs));
+      await api.updateNotificationPreferences(notifPrefs);
       showToast('Notification preferences saved', { type: 'success' });
-    } catch { /* ignore */ }
+    } catch {
+      showToast('Failed to save preferences', { type: 'error' });
+    }
     prefsSaving = false;
   }
 
@@ -106,6 +113,7 @@
         const raw = wsR.value;
         workspaces = Array.isArray(raw?.workspaces) ? raw.workspaces : Array.isArray(raw) ? raw : [];
       }
+      loadPrefs();
     } catch (e) {
       showToast('Failed to load profile: ' + e.message, { type: 'error' });
     } finally {
@@ -177,13 +185,13 @@
   }
 
   function switchWorkspace(ws) {
-    navigate?.('inbox', { type: 'workspace', workspaceId: ws.id });
+    goToWorkspaceHome?.(ws);
   }
 </script>
 
 <div class="user-profile">
   <div class="profile-header">
-    <button class="back-btn" onclick={() => navigate?.('explorer')} aria-label="Back to Explorer" title="Back">
+    <button class="back-btn" onclick={() => navigate?.('home')} aria-label="Back to workspace" title="Back">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
         <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
       </svg>
@@ -352,7 +360,7 @@
                 {/if}
               </div>
               <p class="notif-msg">{notif.message ?? notif.title ?? ''}</p>
-              <button class="notif-view-btn" onclick={() => navigate?.('inbox')} aria-label="View in Inbox">
+              <button class="notif-view-btn" onclick={() => { goToWorkspaceHome?.(); }} aria-label="View in Inbox">
                 View in Inbox
               </button>
             </div>

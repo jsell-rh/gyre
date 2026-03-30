@@ -12,6 +12,7 @@
   let { onSelectWorkspace = null } = $props();
 
   const navigate = getContext('navigate');
+  const goToWorkspaceHome = getContext('goToWorkspaceHome');
 
   let workspaces = $state([]);
   let wsFilter = $state('');
@@ -115,7 +116,7 @@
       onSelectWorkspace(ws);
     } else {
       // New shell: navigate directly via context
-      navigate?.('inbox', { type: 'workspace', workspaceId: ws.id });
+      goToWorkspaceHome?.(ws);
     }
   }
 </script>
@@ -146,7 +147,7 @@
         description="Create a workspace in Admin to get started."
       >
         {#snippet action()}
-          <button class="btn-secondary" onclick={() => navigate?.('admin')}>
+          <button class="btn-secondary" onclick={() => navigate?.('home')}>
             Go to Admin
           </button>
         {/snippet}
