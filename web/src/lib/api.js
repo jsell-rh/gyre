@@ -457,7 +457,7 @@ export const api = {
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
   markNotificationRead: (id) =>
-    request(`/users/me/notifications/${id}/read`, { method: 'PUT' }),
+    request(`/notifications/${id}/dismiss`, { method: 'POST' }),
   myJudgments: (params) => {
     const qs = params ? new URLSearchParams(params).toString() : '';
     return request(`/users/me/judgments${qs ? '?' + qs : ''}`);
