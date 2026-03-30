@@ -255,7 +255,7 @@
     void repoId;
     loadWorkspaceNames();
     loadNotifications();
-    const interval = setInterval(loadNotifications, 60000);
+    const interval = setInterval(() => loadNotifications(true), 60000);
     return () => clearInterval(interval);
   });
 </script>
