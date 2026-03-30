@@ -19,7 +19,7 @@ vi.mock('../lib/api.js', () => ({
     myNotifications: vi.fn().mockResolvedValue([]),
     workspaces: vi.fn().mockResolvedValue([]),
     specsForWorkspace: vi.fn().mockResolvedValue([]),
-    metaSpecs: vi.fn().mockResolvedValue([]),
+    getMetaSpecs: vi.fn().mockResolvedValue([]),
     getWorkspaceBriefing: vi.fn().mockResolvedValue(null),
   },
 }));
@@ -33,7 +33,7 @@ describe('CrossWorkspaceHome', () => {
     api.myNotifications.mockResolvedValue([]);
     api.workspaces.mockResolvedValue([]);
     api.specsForWorkspace.mockResolvedValue([]);
-    api.metaSpecs.mockResolvedValue([]);
+    api.getMetaSpecs.mockResolvedValue([]);
     api.getWorkspaceBriefing.mockResolvedValue(null);
   });
 
@@ -92,10 +92,10 @@ describe('CrossWorkspaceHome', () => {
     }, { timeout: 3000 });
   });
 
-  it('calls api.metaSpecs with scope=Global for tenant rules', async () => {
+  it('calls api.getMetaSpecs with scope=Global for tenant rules', async () => {
     render(CrossWorkspaceHome);
     await waitFor(() => {
-      expect(api.metaSpecs).toHaveBeenCalledWith(expect.objectContaining({ scope: 'Global' }));
+      expect(api.getMetaSpecs).toHaveBeenCalledWith(expect.objectContaining({ scope: 'Global' }));
     }, { timeout: 3000 });
   });
 
@@ -127,7 +127,7 @@ describe('CrossWorkspaceHome', () => {
   });
 
   it('shows empty state when no global meta-specs', async () => {
-    api.metaSpecs.mockResolvedValue([]);
+    api.getMetaSpecs.mockResolvedValue([]);
     const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {
       const section = container.querySelector('[data-testid="section-agent-rules"]');
@@ -216,7 +216,7 @@ describe('CrossWorkspaceHome', () => {
   });
 
   it('shows global meta-specs in agent rules section', async () => {
-    api.metaSpecs.mockResolvedValue([
+    api.getMetaSpecs.mockResolvedValue([
       { id: 'ms-1', name: 'security', kind: 'Persona', version: 2, required: true, status: 'Approved' },
       { id: 'ms-2', name: 'conventional-commits', kind: 'Principle', version: 3, required: false, status: 'Approved' },
     ]);
@@ -278,7 +278,7 @@ describe('CrossWorkspaceHome', () => {
   });
 
   it('handles api error for agent rules gracefully', async () => {
-    api.metaSpecs.mockRejectedValue(new Error('Rules error'));
+    api.getMetaSpecs.mockRejectedValue(new Error('Rules error'));
     const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {
       const section = container.querySelector('[data-testid="section-agent-rules"]');
