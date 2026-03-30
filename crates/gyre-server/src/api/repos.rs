@@ -105,7 +105,7 @@ fn build_clone_url(base_url: &str, ws_slug: &str, repo_name: &str) -> String {
 }
 
 /// Build a RepoResponse with clone_url populated by resolving the workspace slug.
-async fn repo_response_with_clone_url(state: &Arc<AppState>, repo: Repository) -> RepoResponse {
+pub async fn repo_response_with_clone_url(state: &Arc<AppState>, repo: Repository) -> RepoResponse {
     let ws_slug = state
         .workspaces
         .find_by_id(&repo.workspace_id)
