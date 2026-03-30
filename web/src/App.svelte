@@ -303,6 +303,15 @@
     repoId: currentRepo?.id,
   }));
   setContext('openDetailPanel', openDetailPanel);
+  setContext('goToRepoTab', (tab, params) => {
+    if (mode !== 'repo') return;
+    if (params) {
+      const url = new URL(window.location.href);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+      window.history.pushState({}, '', url.toString());
+    }
+    goToRepoTab(tab);
+  });
 
   // ── Detail panel ──────────────────────────────────────────────────────
   function openDetailPanel(entity) {
