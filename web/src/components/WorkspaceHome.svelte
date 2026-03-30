@@ -2,8 +2,8 @@
   /**
    * WorkspaceHome — workspace dashboard (§2 of ui-navigation.md)
    *
-   * Sections: Decisions, Repos, Briefing, Specs, Agent Rules.
-   * Implements real data loading for all five sections.
+   * Sections: Decisions, Repos, Architecture, Briefing, Specs, Agent Rules.
+   * Implements real data loading for all six sections.
    *
    * Spec refs:
    *   ui-navigation.md §2 (Workspace Home sections)
@@ -12,6 +12,7 @@
    */
   import { api } from '../lib/api.js';
   import Briefing from './Briefing.svelte';
+  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 
   let {
     workspace = null,
@@ -70,6 +71,33 @@
   let specsError = $state(null);
   let specs = $state([]);
   let specsStatusFilter = $state('');
+
+  // ── Architecture state ─────────────────────────────────────────────────
+  let archExpanded = $state(false);
+  let archLoading = $state(false);
+  let archError = $state(null);
+  let archGraph = $state(null); // { nodes: [], edges: [] }
+
+  async function loadArchGraph() {
+    if (!workspace?.id) return;
+    archLoading = true;
+    archError = null;
+    try {
+      archGraph = await api.workspaceGraph(workspace.id);
+    } catch (e) {
+      archError = e.message || 'Failed to load workspace graph';
+      archGraph = { nodes: [], edges: [] };
+    } finally {
+      archLoading = false;
+    }
+  }
+
+  function toggleArch() {
+    archExpanded = !archExpanded;
+    if (archExpanded && !archGraph && !archLoading) {
+      loadArchGraph();
+    }
+  }
 
   // ── Agent Rules state ──────────────────────────────────────────────────
   let rulesLoading = $state(true);
@@ -574,6 +602,44 @@
             </form>
           {/if}
         </div>
+      </section>
+
+      <!-- ── Architecture ────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
+        <button
+          class="arch-toggle-header"
+          onclick={toggleArch}
+          aria-expanded={archExpanded}
+          aria-controls="arch-body"
+          data-testid="arch-toggle"
+        >
+          <h2 class="section-title" id="section-architecture">Architecture</h2>
+          <span class="arch-toggle-label" aria-hidden="true">
+            {archExpanded ? '▾ Hide workspace graph' : '▸ Show workspace graph'}
+          </span>
+        </button>
+        {#if archExpanded}
+          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
+            {#if archLoading}
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            {:else if archError}
+              <div class="error-row" role="alert">
+                <p class="error-text">{archError}</p>
+                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
+              </div>
+            {:else if archGraph}
+              <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                <ExplorerCanvas
+                  nodes={archGraph.nodes ?? []}
+                  edges={archGraph.edges ?? []}
+                  workspaceId={workspace.id}
+                  scope="workspace"
+                />
+              </div>
+            {/if}
+          </div>
+        {/if}
       </section>
 
       <!-- ── Briefing ──────────────────────────────────────────────────── -->
@@ -1225,6 +1291,54 @@
     font-size: var(--text-xs);
     font-family: var(--font-mono);
     color: var(--color-text-muted);
+  }
+
+  /* ── Architecture ──────────────────────────────────────────────────── */
+  .arch-toggle-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: var(--font-body);
+    text-align: left;
+    gap: var(--space-2);
+    transition: background var(--transition-fast);
+  }
+
+  .arch-toggle-header:hover {
+    background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-border));
+  }
+
+  .arch-toggle-header:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* When not expanded, remove bottom border (section has no body) */
+  .arch-toggle-header[aria-expanded="false"] {
+    border-bottom: none;
+  }
+
+  .arch-toggle-label {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    flex-shrink: 0;
+    font-family: var(--font-body);
+  }
+
+  .arch-body {
+    padding: 0;
+  }
+
+  .arch-canvas-wrap {
+    height: 320px;
+    position: relative;
+    overflow: hidden;
   }
 
   /* ── Buttons ────────────────────────────────────────────────────────── */

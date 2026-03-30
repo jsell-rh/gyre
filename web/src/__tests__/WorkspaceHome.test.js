@@ -8,6 +8,7 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn().mockResolvedValue([]),
     specsForWorkspace: vi.fn().mockResolvedValue([]),
     getMetaSpecs: vi.fn().mockResolvedValue([]),
+    workspaceGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     getWorkspaceBriefing: vi.fn().mockResolvedValue({ narrative: '' }),
     briefingAsk: vi.fn(),
     approveSpec: vi.fn(),
@@ -15,6 +16,11 @@ vi.mock('../lib/api.js', () => ({
     enqueue: vi.fn(),
     markNotificationRead: vi.fn(),
   },
+}));
+
+// ExplorerCanvas is complex — stub it out
+vi.mock('../lib/ExplorerCanvas.svelte', () => ({
+  default: function ExplorerCanvasStub() {},
 }));
 
 import WorkspaceHome from '../components/WorkspaceHome.svelte';
@@ -29,11 +35,12 @@ describe('WorkspaceHome', () => {
     expect(getByText('Select a workspace')).toBeTruthy();
   });
 
-  it('shows all five sections when workspace is provided', () => {
+  it('shows all six sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
     expect(container.querySelector('[data-testid="section-decisions"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="section-architecture"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-briefing"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-specs"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-agent-rules"]')).toBeTruthy();
