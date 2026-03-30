@@ -560,4 +560,18 @@ export const api = {
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),
+  // Graph predict — LLM-powered structural predictions (TASK-358)
+  graphPredict: async (repoId, body) => {
+    try {
+      return await request(`/repos/${repoId}/graph/predict`, {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      });
+    } catch (e) {
+      if (e.message?.includes('503')) {
+        throw new Error('LLM unavailable — graph predictions require an LLM to be configured.');
+      }
+      throw e;
+    }
+  },
 };

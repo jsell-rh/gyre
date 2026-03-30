@@ -55,7 +55,7 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 | **Running the server**, env vars, OIDC, database, WireGuard config | [docs/server-config.md](docs/server-config.md) |
 | **Agent spawn/complete**, container env vars, gate protocol, spec lifecycle automation | [docs/agent-protocol.md](docs/agent-protocol.md) |
 | **Building, testing**, branching, commit conventions, pre-commit hooks, architecture decisions | [docs/development.md](docs/development.md) |
-| **Dashboard UI** -- all views, navigation, keyboard shortcuts, sidebar structure | [docs/ui.md](docs/ui.md) |
+| **Dashboard UI** -- workspace home, repo mode tabs, keyboard shortcuts, components | [docs/ui.md](docs/ui.md) |
 | **CLI usage** -- init, clone, push, tasks, MRs, diagnostics | [docs/cli.md](docs/cli.md) |
 | **Product specs** (vision, architecture, milestones) | [specs/index.md](specs/index.md) |
 
@@ -71,7 +71,7 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 | Vision (7 principles: judgment not generation, right context, specs as artifact...) | [specs/system/vision.md](specs/system/vision.md) |
 | Realized Model (knowledge graph extracted from code) | [specs/system/realized-model.md](specs/system/realized-model.md) |
 | Meta-Spec Reconciliation (safe iteration on personas, principles, standards) | [specs/system/meta-spec-reconciliation.md](specs/system/meta-spec-reconciliation.md) |
-| UI Journeys (Inbox/Briefing/Explorer/Meta-specs navigation) | [specs/system/ui-journeys.md](specs/system/ui-journeys.md) |
+| UI Navigation (workspace home, repo mode, no-sidebar model) | [specs/system/ui-navigation.md](specs/system/ui-navigation.md) |
 | Agent Gates & Spec Binding | [specs/system/agent-gates.md](specs/system/agent-gates.md) |
 | Spec Lifecycle Automation | [specs/system/spec-lifecycle.md](specs/system/spec-lifecycle.md) |
 | ABAC policy engine | [specs/system/abac-policy-engine.md](specs/system/abac-policy-engine.md) |

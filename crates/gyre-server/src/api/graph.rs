@@ -670,13 +670,13 @@ pub async fn get_workspace_graph(
     require_workspace(&state, &id).await?;
 
     let repo_ids: Vec<String> = state
-        .kv_store
-        .kv_get("workspace_repos", &id)
+        .repos
+        .list_by_workspace(&Id::new(&id))
         .await
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.id.to_string())
+        .collect();
 
     let mut all_nodes = Vec::new();
     let mut all_edges = Vec::new();
@@ -1022,13 +1022,13 @@ pub async fn get_workspace_graph_concept(
     let pattern = concept_name.to_lowercase();
 
     let repo_ids: Vec<String> = state
-        .kv_store
-        .kv_get("workspace_repos", &id)
+        .repos
+        .list_by_workspace(&Id::new(&id))
         .await
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.id.to_string())
+        .collect();
 
     let mut matched_nodes = Vec::new();
     let mut matched_edges = Vec::new();

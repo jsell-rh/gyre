@@ -7,6 +7,7 @@
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
+  import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
@@ -24,6 +25,8 @@
   let currentWorkspace = $state(null);
   let currentRepo = $state(null); // { id, name } | null
   let repoTab = $state('specs'); // 'specs' | 'architecture' | 'decisions' | 'code' | 'settings'
+  // Cross-workspace sub-page: null = dashboard, 'settings' = /all/settings tenant admin
+  let crossWorkspaceTab = $state(null);
 
   // ── Global detail panel ──────────────────────────────────────────────
   let detailPanel = $state({ open: false, entity: null });
@@ -271,6 +274,7 @@
 
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
+    crossWorkspaceTab = null;
     currentRepo = null;
     repoTab = 'specs';
     fadeContent();
@@ -278,6 +282,19 @@
       { mode: 'cross_workspace', wsId: null, repoName: null, repoTab: null },
       '',
       '/all'
+    );
+  }
+
+  function goToTenantSettings() {
+    mode = 'cross_workspace';
+    crossWorkspaceTab = 'settings';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    window.history.pushState(
+      { mode: 'cross_workspace', crossWorkspaceTab: 'settings', wsId: null, repoName: null, repoTab: null },
+      '',
+      '/all/settings'
     );
   }
 
@@ -303,6 +320,15 @@
     repoId: currentRepo?.id,
   }));
   setContext('openDetailPanel', openDetailPanel);
+  setContext('goToRepoTab', (tab, params) => {
+    if (mode !== 'repo') return;
+    if (params) {
+      const url = new URL(window.location.href);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+      window.history.pushState({}, '', url.toString());
+    }
+    goToRepoTab(tab);
+  });
 
   // ── Detail panel ──────────────────────────────────────────────────────
   function openDetailPanel(entity) {
@@ -442,6 +468,11 @@
     }
   }
 
+  // ── User role ─────────────────────────────────────────────────────────
+  // Track whether the current user is a tenant admin (for gear icon visibility).
+  // Loaded once on mount; false by default (fail closed for security).
+  let userIsAdmin = $state(false);
+
   // ── Token modal ───────────────────────────────────────────────────────
   const TOKEN_KIND_LABELS = {
     global:     'Global admin token',
@@ -539,6 +570,7 @@
       mode = 'profile';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
+      crossWorkspaceTab = parsed.tab === 'settings' ? 'settings' : null;
     } else if (parsed?.slug) {
       // URL-driven workspace navigation
       const ws = findWorkspaceBySlug(parsed.slug);
@@ -609,25 +641,30 @@
       mode,
       slug: wsSlug(currentWorkspace),
       repoName: currentRepo?.name ?? null,
-      tab: repoTab,
+      tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
     });
     window.history.replaceState(
-      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab },
+      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab },
       '',
       canon
     );
 
-    // 3. Load decisions count, refresh every 60s
+    // 3. Load user role (for tenant admin gear icon) + decisions count
+    try {
+      const me = await api.me();
+      userIsAdmin = me?.role === 'Admin' || me?.is_admin === true;
+    } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
+        crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
         } else if (m === 'workspace_home') {
@@ -653,6 +690,7 @@
           mode = 'profile';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
+          crossWorkspaceTab = p.tab === 'settings' ? 'settings' : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
@@ -791,6 +829,36 @@
                 </svg>
               </button>
             </div>
+          {:else if mode === 'cross_workspace'}
+            <div class="ws-name-wrap">
+              <button
+                class="ws-name-btn"
+                onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
+                aria-haspopup="menu"
+                aria-expanded={wsDropdownOpen}
+                aria-label="All Workspaces — switch workspace"
+                data-testid="ws-all-workspaces-btn"
+              >
+                All Workspaces
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+              {#if userIsAdmin}
+                <button
+                  class="ws-gear-btn"
+                  onclick={() => goToTenantSettings()}
+                  aria-label="Tenant settings"
+                  title="Tenant settings"
+                  data-testid="all-settings-gear-btn"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                  </svg>
+                </button>
+              {/if}
+            </div>
           {:else}
             <button
               class="ws-name-btn ws-name-empty"
@@ -878,9 +946,17 @@
         <!-- Decisions badge (🔔) -->
         <button
           class="decisions-badge-btn"
-          onclick={() => {
-            if (mode === 'repo') { goToRepoTab('decisions'); }
-            else { document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          onclick={async () => {
+            if (mode === 'repo') {
+              goToRepoTab('decisions');
+            } else {
+              // Ensure workspace home is rendered before attempting scroll
+              if (mode !== 'workspace_home') {
+                goToWorkspaceHome(currentWorkspace);
+                await tick();
+              }
+              document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
           }}
           aria-label={decisionsCount > 0 ? `${decisionsCount} decisions pending` : 'No decisions pending'}
           title="Decisions"
@@ -1048,7 +1124,14 @@
             workspaceBudget={workspaceBudget}
           />
         {:else if mode === 'cross_workspace'}
-          <CrossWorkspaceHome onSelectWorkspace={(ws) => goToWorkspaceHome(ws)} />
+          {#if crossWorkspaceTab === 'settings'}
+            <TenantSettings onBack={() => goToCrossWorkspace()} />
+          {:else}
+            <CrossWorkspaceHome
+              onSelectWorkspace={(ws) => goToWorkspaceHome(ws)}
+              onSettings={userIsAdmin ? () => goToTenantSettings() : undefined}
+            />
+          {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
         {/if}
