@@ -686,7 +686,7 @@
                   const ids = ['impact-tab-arch', 'impact-tab-diff'];
                   const idx = tabs.indexOf(impactTab);
                   if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
+                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx - 1 + 2) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
                 }}
               >
                 <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>Architecture</button>
@@ -1119,7 +1119,7 @@
               <div class="editor-panel" role="tabpanel" id="epanel-approval" aria-labelledby="etab-approval">
                 <!-- Approval flow visualization -->
                 <div class="approval-flow" aria-label="Approval workflow">
-                  <div class="flow-step" class:flow-done={selected.approval_status !== 'Pending' || true} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
+                  <div class="flow-step" class:flow-done={selected.approval_status !== 'Pending'} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
                     <div class="flow-step-icon flow-icon-done">✓</div>
                     <div class="flow-step-label">Draft</div>
                   </div>
