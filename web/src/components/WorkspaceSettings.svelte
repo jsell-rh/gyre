@@ -58,6 +58,37 @@
   let members = $state([]);
   let membersLoading = $state(false);
   let membersError = $state(null);
+  let membersSortCol = $state('name');
+  let membersSortDir = $state('asc');
+
+  function toggleMembersSort(col) {
+    if (membersSortCol === col) {
+      membersSortDir = membersSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      membersSortCol = col;
+      membersSortDir = 'asc';
+    }
+  }
+
+  function membersSortArrow(col) {
+    if (membersSortCol !== col) return '↕';
+    return membersSortDir === 'asc' ? '↑' : '↓';
+  }
+
+  let sortedMembers = $derived.by(() => {
+    return [...members].sort((a, b) => {
+      let av, bv;
+      if (membersSortCol === 'name') {
+        av = a.name ?? a.username ?? '';
+        bv = b.name ?? b.username ?? '';
+      } else {
+        av = String(a[membersSortCol] ?? '');
+        bv = String(b[membersSortCol] ?? '');
+      }
+      const cmp = av.localeCompare(bv);
+      return membersSortDir === 'asc' ? cmp : -cmp;
+    });
+  });
 
   // ── Budget ────────────────────────────────────────────────────────────
   let budget = $state(null);
@@ -488,13 +519,19 @@
           <table class="members-table" data-testid="members-table">
             <thead>
               <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Email</th>
-                <th scope="col">Role</th>
+                <th scope="col" aria-sort={membersSortCol === 'name' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button class="sort-btn" onclick={() => toggleMembersSort('name')}>Name <span class="sort-arrow" aria-hidden="true">{membersSortArrow('name')}</span></button>
+                </th>
+                <th scope="col" aria-sort={membersSortCol === 'email' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button class="sort-btn" onclick={() => toggleMembersSort('email')}>Email <span class="sort-arrow" aria-hidden="true">{membersSortArrow('email')}</span></button>
+                </th>
+                <th scope="col" aria-sort={membersSortCol === 'role' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button class="sort-btn" onclick={() => toggleMembersSort('role')}>Role <span class="sort-arrow" aria-hidden="true">{membersSortArrow('role')}</span></button>
+                </th>
               </tr>
             </thead>
             <tbody>
-              {#each members as member}
+              {#each sortedMembers as member}
                 <tr data-testid="member-row">
                   <td class="member-name">{member.name ?? member.username ?? '—'}</td>
                   <td class="member-email">{member.email ?? '—'}</td>
@@ -1063,9 +1100,40 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: var(--space-3) var(--space-4);
+    padding: 0;
     background: var(--color-surface-elevated);
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-3) var(--space-4);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
   }
 
   .members-table tbody tr {

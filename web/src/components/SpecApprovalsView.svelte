@@ -13,6 +13,42 @@
   let error = $state(null);
   let filterPath = $state('');
 
+  // Sort state
+  let sortCol = $state('approved_at');
+  let sortDir = $state('desc');
+
+  function toggleSort(col) {
+    if (sortCol === col) {
+      sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortCol = col;
+      sortDir = 'asc';
+    }
+  }
+
+  function sortArrowFn(col) {
+    if (sortCol !== col) return '↕';
+    return sortDir === 'asc' ? '↑' : '↓';
+  }
+
+  let sortedApprovals = $derived.by(() => {
+    return [...approvals].sort((a, b) => {
+      let av, bv;
+      if (sortCol === 'approved_at') {
+        av = a.approved_at ?? a.created_at ?? '';
+        bv = b.approved_at ?? b.created_at ?? '';
+      } else if (sortCol === 'status') {
+        av = a.revoked_at ? 'revoked' : 'active';
+        bv = b.revoked_at ? 'revoked' : 'active';
+      } else {
+        av = String(a[sortCol] ?? '');
+        bv = String(b[sortCol] ?? '');
+      }
+      const cmp = String(av).localeCompare(String(bv));
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  });
+
   // Approve modal
   let showApprove = $state(false);
   let approvePath = $state('');
@@ -46,7 +82,7 @@
     }
     approveWorking = true;
     try {
-      await api.specsApprove({ path: approvePath.trim(), sha: approveSha.trim() });
+      await api.approveSpec(approvePath.trim(), approveSha.trim());
       toastSuccess('Spec approved');
       showApprove = false;
       approvePath = '';
@@ -71,7 +107,7 @@
     }
     revokeWorking = true;
     try {
-      await api.specsRevoke({ approval_id: revokeId, reason: revokeReason.trim() });
+      await api.revokeSpec(revokeId, revokeReason.trim());
       toastSuccess('Approval revoked');
       showRevoke = false;
       await load();
@@ -142,16 +178,24 @@
         <caption class="sr-only">Spec approval ledger</caption>
         <thead>
           <tr>
-            <th scope="col">Spec Path</th>
+            <th scope="col" aria-sort={sortCol === 'path' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('path')}>Spec Path <span class="sort-arrow" aria-hidden="true">{sortArrowFn('path')}</span></button>
+            </th>
             <th scope="col">SHA</th>
-            <th scope="col">Approver</th>
-            <th scope="col">Approved At</th>
-            <th scope="col">Status</th>
+            <th scope="col" aria-sort={sortCol === 'approver_id' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('approver_id')}>Approver <span class="sort-arrow" aria-hidden="true">{sortArrowFn('approver_id')}</span></button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'approved_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('approved_at')}>Approved At <span class="sort-arrow" aria-hidden="true">{sortArrowFn('approved_at')}</span></button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'status' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{sortArrowFn('status')}</span></button>
+            </th>
             <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
-          {#each approvals as a (a.id)}
+          {#each sortedApprovals as a (a.id)}
             <tr class:revoked={!!a.revoked_at}>
               <td class="path-cell">
                 <span class="spec-path">{a.path}</span>
@@ -316,13 +360,44 @@
 
   .approvals-table th {
     text-align: left;
-    padding: var(--space-4) var(--space-4);
+    padding: 0;
     font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--color-text-muted);
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-4) var(--space-4);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
   }
 
   .approvals-table td {

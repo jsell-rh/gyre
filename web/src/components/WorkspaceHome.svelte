@@ -331,13 +331,46 @@
     }
   }
 
-  // ── Derived: filtered specs ────────────────────────────────────────────
-  let filteredSpecs = $derived(
-    specs.filter(s => {
+  // ── Specs sort state ────────────────────────────────────────────────────
+  let specsSortCol = $state('path');
+  let specsSortDir = $state('asc');
+
+  function toggleSpecsSort(col) {
+    if (specsSortCol === col) {
+      specsSortDir = specsSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      specsSortCol = col;
+      specsSortDir = 'asc';
+    }
+  }
+
+  function specsSortArrow(col) {
+    if (specsSortCol !== col) return '↕';
+    return specsSortDir === 'asc' ? '↑' : '↓';
+  }
+
+  // ── Derived: filtered + sorted specs ──────────────────────────────────
+  let filteredSpecs = $derived.by(() => {
+    let result = specs.filter(s => {
       if (specsStatusFilter && s.status !== specsStatusFilter) return false;
       return true;
-    })
-  );
+    });
+    return [...result].sort((a, b) => {
+      let av, bv;
+      if (specsSortCol === 'repo') {
+        av = repoMap[a.repo_id]?.name ?? a.repo_id ?? '';
+        bv = repoMap[b.repo_id]?.name ?? b.repo_id ?? '';
+      } else if (specsSortCol === 'updated_at') {
+        av = a.updated_at ?? '';
+        bv = b.updated_at ?? '';
+      } else {
+        av = String(a[specsSortCol] ?? '');
+        bv = String(b[specsSortCol] ?? '');
+      }
+      const cmp = String(av).localeCompare(String(bv));
+      return specsSortDir === 'asc' ? cmp : -cmp;
+    });
+  });
 
   // ── Derived: meta-spec aggregates ─────────────────────────────────────
   let allMetaSpecs = $derived([...globalMetaSpecs, ...workspaceMetaSpecs]);
@@ -703,11 +736,19 @@
             <table class="specs-table" data-testid="specs-table">
               <thead>
                 <tr>
-                  <th>Repo</th>
-                  <th>Path</th>
-                  <th>Status</th>
-                  <th>Progress</th>
-                  <th>Last activity</th>
+                  <th scope="col" aria-sort={specsSortCol === 'repo' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>Repo <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+                  </th>
+                  <th scope="col">Progress</th>
+                  <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Last activity <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -1157,7 +1198,7 @@
 
   .specs-table th {
     text-align: left;
-    padding: var(--space-2) var(--space-2);
+    padding: 0;
     font-size: var(--text-xs);
     font-weight: 600;
     color: var(--color-text-muted);
@@ -1165,6 +1206,37 @@
     letter-spacing: 0.05em;
     border-bottom: 1px solid var(--color-border);
     white-space: nowrap;
+  }
+
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-2) var(--space-2);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
   }
 
   .spec-row {
