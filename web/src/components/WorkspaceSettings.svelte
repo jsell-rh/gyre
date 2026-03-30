@@ -142,7 +142,7 @@
     budgetError = null;
     try {
       budget = await api.workspaceBudget(wsId);
-      budgetEditCredits = String(budget?.total_credits ?? '');
+      budgetEditCredits = String(budget?.config?.max_tokens_per_day ?? '');
     } catch (e) {
       budgetError = e.message;
       budget = null;
@@ -162,8 +162,8 @@
     budgetSaved = false;
     budgetSaveError = null;
     try {
-      budget = await api.setWorkspaceBudget(wsId, { total_credits: total });
-      budgetEditCredits = String(budget?.total_credits ?? total);
+      budget = await api.setWorkspaceBudget(wsId, { max_tokens_per_day: total });
+      budgetEditCredits = String(budget?.config?.max_tokens_per_day ?? total);
       budgetSaved = true;
       setTimeout(() => { budgetSaved = false; }, 2000);
     } catch (e) {
@@ -261,8 +261,8 @@
 
   const budgetPct = $derived.by(() => {
     if (!budget) return null;
-    const used = budget.used_credits ?? 0;
-    const total = budget.total_credits ?? 0;
+    const used = budget.usage?.tokens_used_today ?? 0;
+    const total = budget.config?.max_tokens_per_day ?? 0;
     if (!total) return null;
     return Math.round((used / total) * 100);
   });
@@ -521,19 +521,17 @@
           <div class="budget-overview" data-testid="budget-overview">
             <div class="budget-stat-row">
               <div class="budget-stat">
-                <span class="budget-stat-label">Total Credits</span>
-                <span class="budget-stat-value">{budget.total_credits ?? '—'}</span>
+                <span class="budget-stat-label">Token Limit / Day</span>
+                <span class="budget-stat-value">{budget.config?.max_tokens_per_day ?? 'Unlimited'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Used Credits</span>
-                <span class="budget-stat-value">{budget.used_credits ?? '—'}</span>
+                <span class="budget-stat-label">Tokens Used Today</span>
+                <span class="budget-stat-value">{budget.usage?.tokens_used_today ?? '—'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Remaining</span>
+                <span class="budget-stat-label">Cost Today</span>
                 <span class="budget-stat-value">
-                  {budget.total_credits != null && budget.used_credits != null
-                    ? budget.total_credits - budget.used_credits
-                    : '—'}
+                  {budget.usage?.cost_today != null ? `$${budget.usage.cost_today.toFixed(4)}` : '—'}
                 </span>
               </div>
             </div>
@@ -564,14 +562,14 @@
               </div>
             {/if}
 
-            {#if budget.reset_at}
-              <p class="budget-reset">Resets: {fmtDate(budget.reset_at)}</p>
+            {#if budget.usage?.period_start}
+              <p class="budget-reset">Period started: {fmtDate(budget.usage.period_start)}</p>
             {/if}
 
             <div class="budget-edit" data-testid="budget-edit">
-              <h3 class="budget-edit-title">Set Total Credits</h3>
+              <h3 class="budget-edit-title">Set Daily Token Limit</h3>
               <div class="budget-edit-row">
-                <label for="budget-credits-input" class="budget-edit-label">Total Credits</label>
+                <label for="budget-credits-input" class="budget-edit-label">Max Tokens / Day</label>
                 <input
                   id="budget-credits-input"
                   class="budget-edit-input"
