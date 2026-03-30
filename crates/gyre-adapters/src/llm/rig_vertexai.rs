@@ -11,8 +11,11 @@
 //! - `GYRE_VERTEX_PROJECT` (required): GCP project ID.
 //! - `GYRE_VERTEX_LOCATION` (optional, default: "us-central1"): region.
 //! - Auth: uses Google Application Default Credentials (ADC).
-//!   Set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file, or
-//!   run on GCP with Workload Identity / metadata server.
+//!   Set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file or an
+//!   ADC user credentials file (produced by `gcloud auth application-default login`).
+//!   If the env var is unset, falls back to
+//!   `~/.config/gcloud/application_default_credentials.json`.
+//!   Also works on GCP with Workload Identity / metadata server.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,6 +32,14 @@ use tokio::sync::RwLock;
 struct ServiceAccountKey {
     client_email: String,
     private_key: String,
+}
+
+/// Parsed Google ADC user credentials (from `gcloud auth application-default login`).
+#[derive(Debug, Deserialize)]
+struct UserCredentials {
+    client_id: String,
+    client_secret: String,
+    refresh_token: String,
 }
 
 // ── Token cache ──────────────────────────────────────────────────────────────
@@ -296,21 +307,85 @@ async fn fetch_metadata_token() -> Result<(String, u64)> {
     Ok((token, now + expires_in))
 }
 
-/// Fetch a token using a service account key file (GOOGLE_APPLICATION_CREDENTIALS).
+/// Resolve the credentials file path.
+///
+/// Priority:
+/// 1. `GOOGLE_APPLICATION_CREDENTIALS` env var
+/// 2. `~/.config/gcloud/application_default_credentials.json` (ADC default)
+fn resolve_credentials_path() -> Result<String> {
+    if let Ok(path) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        return Ok(path);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let default_path = format!("{home}/.config/gcloud/application_default_credentials.json");
+    Ok(default_path)
+}
+
+/// Fetch a token using a credentials file.
+///
+/// Supports both service account key files and ADC user credentials
+/// (produced by `gcloud auth application-default login`).
 async fn fetch_service_account_token() -> Result<(String, u64)> {
-    let creds_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
-        .context("GOOGLE_APPLICATION_CREDENTIALS is not set and metadata server is unavailable")?;
+    let creds_path = resolve_credentials_path()
+        .context("Cannot resolve credentials path: GOOGLE_APPLICATION_CREDENTIALS is not set and metadata server is unavailable")?;
 
     let creds_json = tokio::fs::read_to_string(&creds_path)
         .await
         .with_context(|| format!("Cannot read credentials file: {creds_path}"))?;
 
-    let creds: ServiceAccountKey =
+    let parsed: serde_json::Value =
         serde_json::from_str(&creds_json).context("Invalid credentials JSON")?;
 
-    // Build a self-signed JWT and exchange it for an access token.
-    let (token, expires_at) = exchange_service_account_jwt(&creds).await?;
-    Ok((token, expires_at))
+    if parsed.get("client_email").is_some() {
+        // Service account key file.
+        let creds: ServiceAccountKey =
+            serde_json::from_value(parsed).context("Failed to parse service account key fields")?;
+        exchange_service_account_jwt(&creds).await
+    } else if parsed.get("refresh_token").is_some() {
+        // ADC user credentials (gcloud auth application-default login).
+        let creds: UserCredentials =
+            serde_json::from_value(parsed).context("Failed to parse ADC user credential fields")?;
+        exchange_refresh_token(&creds).await
+    } else {
+        anyhow::bail!(
+            "Unrecognized credentials format in {creds_path}: \
+             expected 'client_email' (service account) or 'refresh_token' (user ADC)"
+        )
+    }
+}
+
+/// Exchange an OAuth2 refresh token for an access token.
+async fn exchange_refresh_token(creds: &UserCredentials) -> Result<(String, u64)> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("client_id", creds.client_id.as_str()),
+            ("client_secret", creds.client_secret.as_str()),
+            ("refresh_token", creds.refresh_token.as_str()),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await
+        .context("Google token endpoint request failed (refresh_token)")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Google token endpoint returned {status}: {text}");
+    }
+
+    let json: Value = resp.json().await?;
+    let token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No access_token in refresh token response"))?
+        .to_string();
+    let expires_in = json["expires_in"].as_u64().unwrap_or(3600);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok((token, now + expires_in))
 }
 
 /// Sign a JWT with the service account private key and exchange it for an
@@ -451,5 +526,65 @@ mod tests {
         assert!(url.contains("us-central1"));
         assert!(url.contains("gemini-2.0-flash-001"));
         assert!(url.contains("generateContent"));
+    }
+
+    #[test]
+    fn detect_service_account_credentials() {
+        let json = serde_json::json!({
+            "type": "service_account",
+            "client_email": "test@project.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n",
+        });
+        assert!(json.get("client_email").is_some());
+        assert!(json.get("refresh_token").is_none());
+        let creds: Result<ServiceAccountKey, _> = serde_json::from_value(json);
+        assert!(creds.is_ok());
+    }
+
+    #[test]
+    fn detect_user_adc_credentials() {
+        let json = serde_json::json!({
+            "type": "authorized_user",
+            "client_id": "123456789.apps.googleusercontent.com",
+            "client_secret": "GOCSPX-fake-secret",
+            "refresh_token": "1//fake-refresh-token",
+        });
+        assert!(json.get("client_email").is_none());
+        assert!(json.get("refresh_token").is_some());
+        let creds: Result<UserCredentials, _> = serde_json::from_value(json);
+        assert!(creds.is_ok());
+        let creds = creds.unwrap();
+        assert_eq!(creds.client_id, "123456789.apps.googleusercontent.com");
+        assert_eq!(creds.refresh_token, "1//fake-refresh-token");
+    }
+
+    #[test]
+    fn resolve_credentials_path_uses_env_var() {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/test-creds.json");
+        let path = resolve_credentials_path().unwrap();
+        assert_eq!(path, "/tmp/test-creds.json");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+    }
+
+    #[test]
+    fn resolve_credentials_path_falls_back_to_gcloud_default() {
+        let saved = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok();
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let path = resolve_credentials_path().unwrap();
+        assert!(
+            path.ends_with("/.config/gcloud/application_default_credentials.json"),
+            "Expected gcloud default path, got: {path}"
+        );
+        if let Some(v) = saved {
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
+        }
+    }
+
+    #[test]
+    fn unrecognized_credentials_format_detected() {
+        // A JSON blob with neither client_email nor refresh_token.
+        let json = serde_json::json!({"some_field": "some_value"});
+        assert!(json.get("client_email").is_none());
+        assert!(json.get("refresh_token").is_none());
     }
 }
