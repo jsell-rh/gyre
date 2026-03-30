@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen } from '@testing-library/svelte';
+import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import DetailPanel from '../lib/DetailPanel.svelte';
 
 const mrEntity = {
@@ -228,6 +228,114 @@ describe('DetailPanel', () => {
       const btn = screen.getByRole('button', { name: /ask why.*spawn review/i });
       await fireEvent.click(btn);
       expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Editor Split pop-out', () => {
+    const specEntityWithRepo = {
+      type: 'spec',
+      id: 'specs/system/auth.md',
+      data: {
+        name: 'auth.md',
+        repo_id: 'repo-abc',
+        title: 'Auth Spec',
+      },
+    };
+
+    it('shows Preview button in Edit tab when entity has repo_id', async () => {
+      global.fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: '# Auth\nSpec content' }),
+      });
+      render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      const editTab = screen.getByRole('tab', { name: /edit/i });
+      await fireEvent.click(editTab);
+      // Wait for spec content to load (async fetch)
+      const previewBtn = await screen.findByRole('button', { name: /preview/i });
+      expect(previewBtn).toBeTruthy();
+    });
+
+    it('Preview button click expands panel and shows EditorSplit', async () => {
+      global.fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: '# Auth' }),
+      });
+      const { container } = render(DetailPanel, {
+        props: { entity: specEntityWithRepo, expanded: false },
+      });
+      const editTab = screen.getByRole('tab', { name: /edit/i });
+      await fireEvent.click(editTab);
+      const previewBtn = await screen.findByRole('button', { name: /preview/i });
+      await fireEvent.click(previewBtn);
+      // Panel should now be expanded
+      await waitFor(() => {
+        expect(container.querySelector('.detail-panel.expanded')).toBeTruthy();
+      });
+    });
+
+    it('Back button in EditorSplit collapses panel', async () => {
+      global.fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: '# Auth' }),
+      });
+      const { container } = render(DetailPanel, {
+        props: { entity: specEntityWithRepo },
+      });
+      // Open edit tab and click Preview
+      const editTab = screen.getByRole('tab', { name: /edit/i });
+      await fireEvent.click(editTab);
+      const previewBtn = await screen.findByRole('button', { name: /preview/i });
+      await fireEvent.click(previewBtn);
+      // Now in EditorSplit — click Back
+      const backBtn = await screen.findByRole('button', { name: /close editor split/i });
+      await fireEvent.click(backBtn);
+      // Panel should collapse
+      await waitFor(() => {
+        expect(container.querySelector('.detail-panel.expanded')).toBeNull();
+      });
+    });
+
+    it('Esc key closes EditorSplit and collapses panel', async () => {
+      global.fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: '# Auth' }),
+      });
+      const { container } = render(DetailPanel, {
+        props: { entity: specEntityWithRepo },
+      });
+      const editTab = screen.getByRole('tab', { name: /edit/i });
+      await fireEvent.click(editTab);
+      const previewBtn = await screen.findByRole('button', { name: /preview/i });
+      await fireEvent.click(previewBtn);
+      // Wait for EditorSplit to be showing
+      await screen.findByRole('button', { name: /close editor split/i });
+      // Fire Escape on window
+      await fireEvent.keyDown(window, { key: 'Escape' });
+      await waitFor(() => {
+        expect(container.querySelector('.detail-panel.expanded')).toBeNull();
+      });
+    });
+
+    it('EditorSplit renders editor and arch preview side by side', async () => {
+      global.fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: '# Auth', nodes: [], edges: [] }),
+      });
+      render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      const editTab = screen.getByRole('tab', { name: /edit/i });
+      await fireEvent.click(editTab);
+      const previewBtn = await screen.findByRole('button', { name: /preview/i });
+      await fireEvent.click(previewBtn);
+      // Both panes should be visible
+      await waitFor(() => {
+        expect(screen.getByTestId('editor-split-textarea')).toBeTruthy();
+        expect(screen.getByTestId('arch-preview-pane')).toBeTruthy();
+      });
     });
   });
 });

@@ -1268,3 +1268,96 @@ describe('MetaSpecs -- accessibility', () => {
     expect(cards[1].getAttribute('aria-pressed')).toBe('false');
   });
 });
+
+// ─── Agent Rules → Architecture navigation ────────────────────────────────────
+
+describe('MetaSpecs -- Agent Rules → Architecture navigation', () => {
+  const metaSpecWithBlast = {
+    id: 'ms-arch-1',
+    kind: 'meta:principle',
+    name: 'No Mocking Principle',
+    prompt: 'Never mock databases in tests.',
+    approval_status: 'Approved',
+    required: false,
+    version: 2,
+    scope: 'Global',
+    created_by: 'human',
+  };
+
+  const blastWithRepos = {
+    affected_workspaces: [{ id: 'ws-alpha' }],
+    affected_repos: [
+      { id: 'repo-a', reason: 'direct', workspace_id: 'ws-alpha' },
+      { id: 'repo-b', reason: 'transitive', workspace_id: 'ws-alpha' },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.getMetaSpecs.mockResolvedValue([metaSpecWithBlast]);
+    api.getMetaSpecBlastRadius.mockResolvedValue(blastWithRepos);
+  });
+
+  it('renders arch-nav-links for each affected repo in Impact tab', async () => {
+    const { findByRole, findAllByTestId } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    // Click Impact tab
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    // Wait for blast radius to load
+    const links = await findAllByTestId('arch-nav-link');
+    expect(links).toHaveLength(2);
+  });
+
+  it('arch-nav-link href contains workspace_id and repo id', async () => {
+    const { findByRole, findAllByTestId } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    const links = await findAllByTestId('arch-nav-link');
+    const href = links[0].getAttribute('href');
+    expect(href).toContain('/workspaces/ws-alpha/r/repo-a/architecture');
+  });
+
+  it('arch-nav-link href includes show_overlays param with metaspec id', async () => {
+    const { findByRole, findAllByTestId } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    const links = await findAllByTestId('arch-nav-link');
+    const href = links[0].getAttribute('href');
+    expect(href).toContain('show_overlays=metaspec:ms-arch-1');
+  });
+
+  it('arch-nav-link has accessible aria-label', async () => {
+    const { findByRole, findAllByTestId } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    const links = await findAllByTestId('arch-nav-link');
+    expect(links[0].getAttribute('aria-label')).toContain('Architecture');
+  });
+
+  it('does not render arch-nav-links when no affected_repos', async () => {
+    api.getMetaSpecBlastRadius.mockResolvedValue({ affected_workspaces: [], affected_repos: [] });
+    const { findByRole, queryAllByTestId } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    // Wait for blast radius to resolve
+    await waitFor(() => expect(api.getMetaSpecBlastRadius).toHaveBeenCalled());
+    const links = queryAllByTestId('arch-nav-link');
+    expect(links).toHaveLength(0);
+  });
+
+  it('shows "View in Architecture" section heading when repos exist', async () => {
+    const { findByRole, findByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    const heading = await findByText('View in Architecture');
+    expect(heading).toBeTruthy();
+  });
+
+  it('shows explanatory subtitle for arch navigation', async () => {
+    const { findByRole, findByText } = render(MetaSpecs, { props: { scope: 'tenant' } });
+    const impactTab = await findByRole('tab', { name: /impact/i });
+    await fireEvent.click(impactTab);
+    const text = await findByText(/Click a repo to see governed nodes/i);
+    expect(text).toBeTruthy();
+  });
+});
