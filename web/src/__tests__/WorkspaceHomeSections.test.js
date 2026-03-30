@@ -20,6 +20,7 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn(),
     specsForWorkspace: vi.fn(),
     getMetaSpecs: vi.fn(),
+    workspaceGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     approveSpec: vi.fn(),
     revokeSpec: vi.fn(),
     enqueue: vi.fn(),
@@ -29,6 +30,10 @@ vi.mock('../lib/api.js', () => ({
     createRepo: vi.fn(),
     createMirrorRepo: vi.fn(),
   },
+}));
+
+vi.mock('../lib/ExplorerCanvas.svelte', () => ({
+  default: function ExplorerCanvasStub() {},
 }));
 
 vi.mock('../lib/toast.svelte.js', () => ({
