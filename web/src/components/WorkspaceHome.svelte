@@ -293,10 +293,10 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.markNotificationRead(n.id);
+      notifications = notifications.filter(item => item.id !== n.id);
     } catch {
-      // best-effort dismiss
+      toastError('Dismiss failed — please try again.');
     }
-    notifications = notifications.filter(item => item.id !== n.id);
     actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
 
