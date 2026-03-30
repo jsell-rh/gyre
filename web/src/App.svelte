@@ -1148,7 +1148,15 @@
           <WorkspaceHome
             workspace={currentWorkspace}
             {decisionsCount}
-            onSelectRepo={(repo) => goToRepo(repo)}
+            onSelectRepo={(repo, tab, specPath) => {
+              goToRepo(repo, tab);
+              if (specPath) {
+                // Open the spec's detail panel after navigation
+                tick().then(() => {
+                  openDetailPanel({ type: 'spec', id: specPath, data: { repo_id: repo.id } });
+                });
+              }
+            }}
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings
