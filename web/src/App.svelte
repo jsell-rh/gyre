@@ -7,6 +7,7 @@
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
+  import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
@@ -24,6 +25,8 @@
   let currentWorkspace = $state(null);
   let currentRepo = $state(null); // { id, name } | null
   let repoTab = $state('specs'); // 'specs' | 'architecture' | 'decisions' | 'code' | 'settings'
+  // Cross-workspace sub-page: null = dashboard, 'settings' = /all/settings tenant admin
+  let crossWorkspaceTab = $state(null);
 
   // ── Global detail panel ──────────────────────────────────────────────
   let detailPanel = $state({ open: false, entity: null });
@@ -271,6 +274,7 @@
 
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
+    crossWorkspaceTab = null;
     currentRepo = null;
     repoTab = 'specs';
     fadeContent();
@@ -278,6 +282,19 @@
       { mode: 'cross_workspace', wsId: null, repoName: null, repoTab: null },
       '',
       '/all'
+    );
+  }
+
+  function goToTenantSettings() {
+    mode = 'cross_workspace';
+    crossWorkspaceTab = 'settings';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    window.history.pushState(
+      { mode: 'cross_workspace', crossWorkspaceTab: 'settings', wsId: null, repoName: null, repoTab: null },
+      '',
+      '/all/settings'
     );
   }
 
@@ -548,6 +565,7 @@
       mode = 'profile';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
+      crossWorkspaceTab = parsed.tab === 'settings' ? 'settings' : null;
     } else if (parsed?.slug) {
       // URL-driven workspace navigation
       const ws = findWorkspaceBySlug(parsed.slug);
@@ -633,10 +651,11 @@
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
+        crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
         } else if (m === 'workspace_home') {
@@ -662,6 +681,7 @@
           mode = 'profile';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
+          crossWorkspaceTab = p.tab === 'settings' ? 'settings' : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
@@ -1057,7 +1077,14 @@
             workspaceBudget={workspaceBudget}
           />
         {:else if mode === 'cross_workspace'}
-          <CrossWorkspaceHome onSelectWorkspace={(ws) => goToWorkspaceHome(ws)} />
+          {#if crossWorkspaceTab === 'settings'}
+            <TenantSettings onBack={() => goToCrossWorkspace()} />
+          {:else}
+            <CrossWorkspaceHome
+              onSelectWorkspace={(ws) => goToWorkspaceHome(ws)}
+              onSettings={() => goToTenantSettings()}
+            />
+          {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
         {/if}
