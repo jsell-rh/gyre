@@ -272,6 +272,7 @@ vi.mock('../lib/api.js', () => ({
     workspaceBudget: vi.fn().mockResolvedValue(null),
     notificationCount: vi.fn().mockResolvedValue(0),
     tokenInfo: vi.fn().mockResolvedValue({ kind: 'global' }),
+    me: vi.fn().mockResolvedValue(null),
   },
   setAuthToken: vi.fn(),
 }));
@@ -750,5 +751,37 @@ describe('Cross-workspace view', () => {
         expect(window.location.pathname).toBe('/all');
       });
     }
+  });
+
+  // ── Cross-workspace topbar (Bug 7 fix) ──────────────────────────────
+  describe('cross-workspace topbar', () => {
+    it('shows "All Workspaces" topbar button when starting at /all', async () => {
+      window.history.pushState({}, '', '/all');
+      const { container } = render(App);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="ws-all-workspaces-btn"]')).toBeTruthy();
+      }, { timeout: 3000 });
+    });
+
+    it('shows admin gear icon when user is Admin and starting at /all', async () => {
+      window.history.pushState({}, '', '/all');
+      api.me.mockResolvedValue({ role: 'Admin' });
+      const { container } = render(App);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="all-settings-gear-btn"]')).toBeTruthy();
+      }, { timeout: 3000 });
+    });
+
+    it('hides admin gear icon when user is Member and starting at /all', async () => {
+      window.history.pushState({}, '', '/all');
+      api.me.mockResolvedValue({ role: 'Member' });
+      const { container } = render(App);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="ws-all-workspaces-btn"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      // Give time for api.me to resolve
+      await new Promise(r => setTimeout(r, 50));
+      expect(container.querySelector('[data-testid="all-settings-gear-btn"]')).toBeNull();
+    });
   });
 });

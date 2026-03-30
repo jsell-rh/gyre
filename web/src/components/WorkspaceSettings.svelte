@@ -63,6 +63,10 @@
   let budget = $state(null);
   let budgetLoading = $state(false);
   let budgetError = $state(null);
+  let budgetEditCredits = $state('');
+  let budgetSaving = $state(false);
+  let budgetSaved = $state(false);
+  let budgetSaveError = $state(null);
 
   // ── Compute ───────────────────────────────────────────────────────────
   let allCompute = $state([]);
@@ -138,11 +142,35 @@
     budgetError = null;
     try {
       budget = await api.workspaceBudget(wsId);
+      budgetEditCredits = String(budget?.config?.max_tokens_per_day ?? '');
     } catch (e) {
       budgetError = e.message;
       budget = null;
     }
     finally { budgetLoading = false; }
+  }
+
+  async function saveBudget() {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    const total = Number(budgetEditCredits);
+    if (!Number.isFinite(total) || total < 0) {
+      budgetSaveError = 'Enter a valid non-negative number.';
+      return;
+    }
+    budgetSaving = true;
+    budgetSaved = false;
+    budgetSaveError = null;
+    try {
+      budget = await api.setWorkspaceBudget(wsId, { max_tokens_per_day: total });
+      budgetEditCredits = String(budget?.config?.max_tokens_per_day ?? total);
+      budgetSaved = true;
+      setTimeout(() => { budgetSaved = false; }, 2000);
+    } catch (e) {
+      budgetSaveError = e?.message ?? 'Failed to save budget.';
+    } finally {
+      budgetSaving = false;
+    }
   }
 
   async function loadAllCompute() {
@@ -233,8 +261,8 @@
 
   const budgetPct = $derived.by(() => {
     if (!budget) return null;
-    const used = budget.used_credits ?? 0;
-    const total = budget.total_credits ?? 0;
+    const used = budget.usage?.tokens_used_today ?? 0;
+    const total = budget.config?.max_tokens_per_day ?? 0;
     if (!total) return null;
     return Math.round((used / total) * 100);
   });
@@ -493,19 +521,17 @@
           <div class="budget-overview" data-testid="budget-overview">
             <div class="budget-stat-row">
               <div class="budget-stat">
-                <span class="budget-stat-label">Total Credits</span>
-                <span class="budget-stat-value">{budget.total_credits ?? '—'}</span>
+                <span class="budget-stat-label">Token Limit / Day</span>
+                <span class="budget-stat-value">{budget.config?.max_tokens_per_day ?? 'Unlimited'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Used Credits</span>
-                <span class="budget-stat-value">{budget.used_credits ?? '—'}</span>
+                <span class="budget-stat-label">Tokens Used Today</span>
+                <span class="budget-stat-value">{budget.usage?.tokens_used_today ?? '—'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Remaining</span>
+                <span class="budget-stat-label">Cost Today</span>
                 <span class="budget-stat-value">
-                  {budget.total_credits != null && budget.used_credits != null
-                    ? budget.total_credits - budget.used_credits
-                    : '—'}
+                  {budget.usage?.cost_today != null ? `$${budget.usage.cost_today.toFixed(4)}` : '—'}
                 </span>
               </div>
             </div>
@@ -536,9 +562,38 @@
               </div>
             {/if}
 
-            {#if budget.reset_at}
-              <p class="budget-reset">Resets: {fmtDate(budget.reset_at)}</p>
+            {#if budget.usage?.period_start}
+              <p class="budget-reset">Period started: {fmtDate(budget.usage.period_start)}</p>
             {/if}
+
+            <div class="budget-edit" data-testid="budget-edit">
+              <h3 class="budget-edit-title">Set Daily Token Limit</h3>
+              <div class="budget-edit-row">
+                <label for="budget-credits-input" class="budget-edit-label">Max Tokens / Day</label>
+                <input
+                  id="budget-credits-input"
+                  class="budget-edit-input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  bind:value={budgetEditCredits}
+                  placeholder="e.g. 10000"
+                  data-testid="budget-credits-input"
+                  disabled={budgetSaving}
+                />
+                <button
+                  class="btn-primary budget-save-btn"
+                  onclick={saveBudget}
+                  disabled={budgetSaving}
+                  data-testid="budget-save-btn"
+                >
+                  {budgetSaving ? 'Saving…' : budgetSaved ? 'Saved ✓' : 'Save'}
+                </button>
+              </div>
+              {#if budgetSaveError}
+                <p class="error-text" role="alert" data-testid="budget-save-error">{budgetSaveError}</p>
+              {/if}
+            </div>
           </div>
         {/if}
       </div>
@@ -1105,6 +1160,56 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin: 0;
+  }
+
+  .budget-edit {
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-4);
+    margin-top: var(--space-4);
+  }
+
+  .budget-edit-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-3) 0;
+  }
+
+  .budget-edit-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .budget-edit-label {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .budget-edit-input {
+    flex: 1;
+    min-width: 120px;
+    max-width: 220px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+  }
+
+  .budget-edit-input:focus {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+  }
+
+  .budget-save-btn {
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-sm);
+    white-space: nowrap;
   }
 
   /* ── Compute list ─────────────────────────────────────────────────── */
