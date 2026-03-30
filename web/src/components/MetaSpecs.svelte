@@ -1031,6 +1031,28 @@
                     {/if}
                   </div>
 
+                  <!-- Affected repos — clickable to Architecture tab with meta-spec overlays -->
+                  {#if blastResult.affected_repos?.length}
+                    <div class="binding-section">
+                      <h4 class="binding-title">View in Architecture</h4>
+                      <p class="impact-sub">Click a repo to see governed nodes highlighted with predicted changes.</p>
+                      <div class="binding-list">
+                        {#each blastResult.affected_repos as repo}
+                          {@const archUrl = `/workspaces/${repo.workspace_id}/r/${repo.id}/architecture?show_overlays=metaspec:${selected.id}`}
+                          <a
+                            class="arch-nav-row"
+                            href={archUrl}
+                            data-testid="arch-nav-link"
+                            aria-label="View {repo.id} in Architecture tab with meta-spec overlays"
+                          >
+                            <span class="mono">{repo.id}</span>
+                            <span class="arch-nav-hint">Architecture ↗</span>
+                          </a>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+
                   <!-- Drift section -->
                   <div class="binding-section">
                     <h4 class="binding-title">Version Drift</h4>
@@ -1356,6 +1378,22 @@
   .impact-empty { font-size: var(--text-sm); color: var(--color-text-muted); margin: 0; }
   .impact-error { color: var(--color-danger); font-size: var(--text-sm); }
   .impact-cta { padding: var(--space-4); text-align: center; }
+  .impact-sub { font-size: var(--text-xs); color: var(--color-text-muted); margin: 0; }
+
+  .arch-nav-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+    font-size: var(--text-sm); color: var(--color-text); text-decoration: none;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  .arch-nav-row:hover {
+    background: color-mix(in srgb, var(--color-link) 8%, var(--color-surface-elevated));
+    border-color: var(--color-link);
+  }
+  .arch-nav-row:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .arch-nav-hint { font-size: var(--text-xs); color: var(--color-link); white-space: nowrap; }
 
   .drift-notice {
     padding: var(--space-3);

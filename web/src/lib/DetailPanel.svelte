@@ -4,6 +4,7 @@
   import Badge from './Badge.svelte';
   import Skeleton from './Skeleton.svelte';
   import EmptyState from './EmptyState.svelte';
+  import EditorSplit from './EditorSplit.svelte';
   import { api } from './api.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
 
@@ -31,6 +32,31 @@
   let previousFocus = null;
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
+
+  // Editor Split pop-out (spec entities only)
+  let showEditorSplit = $state(false);
+
+  function openEditorSplit() {
+    expanded = true;
+    showEditorSplit = true;
+    onpopout?.();
+  }
+
+  function closeEditorSplit() {
+    showEditorSplit = false;
+    expanded = false;
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('detail') || url.searchParams.has('expanded')) {
+      url.searchParams.delete('detail');
+      url.searchParams.delete('expanded');
+      window.history.replaceState({}, '', url.toString());
+    }
+  }
+
+  // Reset editor split when entity changes
+  $effect(() => {
+    if (entity) showEditorSplit = false;
+  });
 
   // Compute which tabs to show based on entity type.
   // Spec: ui-layout.md §2 "Detail panel tabs (contextual)"
@@ -448,7 +474,17 @@
   onkeydown={handleKeydown}
   bind:this={panelEl}
 >
-  {#if entity}
+  {#if entity && expanded && showEditorSplit}
+    <EditorSplit
+      bind:content={editContent}
+      onChange={(v) => { editContent = v; }}
+      repoId={entity.data?.repo_id ?? null}
+      specPath={entity.id}
+      ghostOverlays={[]}
+      onClose={closeEditorSplit}
+      context="spec"
+    />
+  {:else if entity}
     <div class="panel-header">
       <div class="panel-entity">
         <span class="entity-type">{entity.type}</span>
@@ -650,6 +686,9 @@
 
             {#if entity.data?.repo_id}
               <div class="save-bar">
+                <Button variant="secondary" onclick={openEditorSplit} aria-label="Open editor split view with architecture preview">
+                  Preview
+                </Button>
                 <Button variant="primary" onclick={saveSpec} disabled={saving || !editContent.trim()}>
                   {saving ? 'Saving…' : 'Save & Create MR'}
                 </Button>
