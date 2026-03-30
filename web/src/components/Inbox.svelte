@@ -115,9 +115,19 @@
     openDetailPanel?.(entity);
   }
 
-  let visibleNotifications = $derived(
+  // Pagination
+  const PAGE_SIZE = 20;
+  let displayLimit = $state(PAGE_SIZE);
+
+  let allVisibleNotifications = $derived(
     notifications.filter(n => showDismissed || !n.dismissed_at)
   );
+
+  let visibleNotifications = $derived(
+    allVisibleNotifications.slice(0, displayLimit)
+  );
+
+  let hasMore = $derived(allVisibleNotifications.length > displayLimit);
 
   let unresolvedCount = $derived(
     notifications.filter(n => !n.resolved_at && !n.dismissed_at).length
@@ -193,6 +203,10 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
+      api.resolveNotification(n.id).catch(() => {});
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
       actionStates = {
         ...actionStates,
         [n.id]: { loading: false, success: true, message: 'Re-queued' },
@@ -549,9 +563,20 @@
                         variant="primary"
                         size="sm"
                         disabled={state?.loading}
-                        onclick={() => handleDismiss(n)}
+                        onclick={async () => {
+                          actionStates = { ...actionStates, [n.id]: { loading: true } };
+                          try {
+                            await api.resolveNotification(n.id);
+                            notifications = notifications.map(item =>
+                              item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+                            );
+                            actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Accepted' } };
+                          } catch {
+                            actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: 'Accept failed' } };
+                          }
+                        }}
                       >
-                        Accept &amp; Dismiss
+                        Accept
                       </Button>
                       <Button
                         variant="ghost"
@@ -569,6 +594,17 @@
           </div>
         {/each}
       </div>
+      {#if hasMore}
+        <div class="show-more-wrap">
+          <button
+            class="show-more-btn"
+            onclick={() => { displayLimit += PAGE_SIZE; }}
+            aria-label="Show more notifications"
+          >
+            Show more ({allVisibleNotifications.length - displayLimit} remaining)
+          </button>
+        </div>
+      {/if}
     {/if}
   </div>
 
@@ -934,5 +970,35 @@
     .card-header,
     .ref-link,
     .retry-btn { transition: none; }
+  }
+
+  /* ── Show more ─────────────────────────────────────────────────────── */
+  .show-more-wrap {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-4) 0;
+  }
+
+  .show-more-btn {
+    padding: var(--space-2) var(--space-6);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .show-more-btn:hover {
+    background: var(--color-surface);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .show-more-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 </style>
