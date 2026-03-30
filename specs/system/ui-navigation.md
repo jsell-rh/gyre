@@ -218,7 +218,7 @@ The primary tab. Shows the spec registry for this repo with implementation progr
 **Content:**
 - Spec list with columns: Path, Status (draft/pending/approved/implemented), Progress (0/5 tasks), Last activity
 - Click a spec → detail panel slides in from right (HSI existing detail panel pattern) showing:
-  - Content (spec text, editable with LLM assist)
+  - Content (spec text, editable with LLM assist). Alongside the editor, a **mini architecture canvas** shows the subgraph of nodes governed by this spec. Ghost overlays update as the user types. "Expand to canvas" button opens the full Architecture tab with this spec's nodes highlighted.
   - Progress (tasks, agents, MRs linked to this spec)
   - Meta-spec bindings — shows the **effective prompt set** for this spec's implementation:
     - **Required (locked)**: Tenant-required meta-specs shown with 🔒 + "Tenant" badge. Workspace-required shown with 🔒 + "Workspace" badge. Cannot be removed. These are what every agent implementing this spec will receive.
@@ -261,12 +261,30 @@ Every view (built-in, saved, or generated) is a declarative JSON specification w
 - Built-in saved views shipped with every workspace: API Surface, Domain Model, Security Boundary, Test Coverage.
 - The view selector dropdown shows: built-in views → user's saved views → "Generate view..." option.
 
+**Bidirectional Spec ↔ Architecture Navigation:**
+The architecture canvas and spec editing are one continuous surface, not separate tabs that happen to coexist. The key interactions:
+
+- **Architecture → Spec:** Double-click any graph node → detail panel shows which spec(s) govern this node (via `spec_path` on the node). Click a spec → spec content appears inline in the detail panel, editable with LLM assist. Edit the spec → ghost overlays update on the canvas behind the panel in real-time. This is the primary discovery-to-direction flow: see something in the architecture, understand which spec created it, change the spec, see the predicted impact — all without leaving the canvas view.
+
+- **Spec → Architecture:** From the Specs tab, clicking a spec opens the detail panel. The detail panel includes a mini architecture preview canvas showing the subgraph of nodes governed by this spec. Editing the spec updates ghost overlays on this mini canvas. Clicking "Expand to canvas" opens the full Architecture tab with the relevant nodes highlighted and ghost overlays active.
+
+- **Agent Rules → Architecture:** From the meta-spec management surface (§4), the impact panel shows blast radius. Clicking an affected spec in the impact panel navigates to the Architecture tab with that spec's governed nodes highlighted and the meta-spec's predicted changes shown as ghost overlays.
+
 **Ghost Overlays (Phase 1 — structural prediction):**
-When editing a spec, ghost overlays show predicted structural changes as dotted outlines (green = new, yellow = modified, red = removed). These appear within 2-5 seconds via `POST /repos/:id/graph/predict`.
+Ghost overlays show predicted structural changes as dotted outlines (green = new, yellow = modified, red = removed). These appear within 2-5 seconds via `POST /repos/:id/graph/predict`. They work in any context where a spec or meta-spec is being edited — the architecture canvas, the spec detail panel mini canvas, or the Editor Split layout. The mechanism is the same everywhere.
 
-**The editing-canvas connection:** The Specs tab and Architecture tab are separate tabs, but the spec editing experience bridges them. When a user opens a spec for editing in the Specs tab detail panel, the detail panel can be **popped out to full width** (per `ui-layout.md` §2 "Pop Out"), which replaces the main content. In this expanded edit mode, the editor uses the **Editor Split layout** (`ui-layout.md` §9): left panel is the spec editor + LLM chat, right panel shows a **live architecture preview canvas** with ghost overlays that update as the user types. This is NOT the Architecture tab — it is an embedded canvas within the expanded spec editor. The user does not need to switch tabs to see ghost predictions.
+**The Unified Edit → Predict → Preview Loop:**
+The same editing workflow applies to both specs and meta-specs (agent rules):
 
-Alternatively, on wide screens (≥1440px), the Specs tab can show the spec list in the main area with a **split detail panel**: left side shows spec content editor, right side shows a mini architecture preview with ghost overlays. This keeps both visible without popping out.
+1. **Edit** content (spec text or meta-spec prompt) in any editing surface
+2. **Predict** (2-5 seconds) → ghost overlays appear on the nearest canvas showing structural predictions
+3. **Preview** (minutes, on-demand) → agent spawns on throwaway branch, produces real code → architecture delta + code diff shown
+4. **Iterate** → edit again, predict again, preview again until satisfied
+5. **Publish** → commit the change, trigger approval workflow
+
+For specs, this loop runs within the spec detail panel (with mini canvas) or popped out to Editor Split. For meta-specs, this loop runs in the §4 management surface (which is already Editor Split). The **same component** handles both — the difference is scope (one spec vs. all bound specs) and data source (spec content vs. meta-spec prompt).
+
+**Editor Split mode:** When the user clicks "Preview" or wants the full editing experience, the detail panel **pops out to full width** (per `ui-layout.md` §2 "Pop Out") and switches to the **Editor Split layout** (`ui-layout.md` §9): left panel = editor + LLM chat, right panel = live architecture preview canvas with ghost overlays + code diff tabs. Back/Esc returns to the normal view.
 
 **Concept Views (per `system-explorer.md` §4):**
 Cross-cutting views pulling related elements from across the codebase. Available via: the view selector ("Concepts" category), the Ask input ("show me everything related to caching"), or ad-hoc by selecting multiple graph nodes and clicking "Create concept view." Predefined concepts (discovered by the knowledge graph extraction) appear in the Concepts section of the filter panel.
