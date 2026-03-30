@@ -468,6 +468,11 @@
     }
   }
 
+  // ── User role ─────────────────────────────────────────────────────────
+  // Track whether the current user is a tenant admin (for gear icon visibility).
+  // Loaded once on mount; false by default (fail closed for security).
+  let userIsAdmin = $state(false);
+
   // ── Token modal ───────────────────────────────────────────────────────
   const TOKEN_KIND_LABELS = {
     global:     'Global admin token',
@@ -636,15 +641,19 @@
       mode,
       slug: wsSlug(currentWorkspace),
       repoName: currentRepo?.name ?? null,
-      tab: repoTab,
+      tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
     });
     window.history.replaceState(
-      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab },
+      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab },
       '',
       canon
     );
 
-    // 3. Load decisions count, refresh every 60s
+    // 3. Load user role (for tenant admin gear icon) + decisions count
+    try {
+      const me = await api.me();
+      userIsAdmin = me?.role === 'Admin' || me?.is_admin === true;
+    } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
 
@@ -1082,7 +1091,7 @@
           {:else}
             <CrossWorkspaceHome
               onSelectWorkspace={(ws) => goToWorkspaceHome(ws)}
-              onSettings={() => goToTenantSettings()}
+              onSettings={userIsAdmin ? () => goToTenantSettings() : undefined}
             />
           {/if}
         {:else if mode === 'profile'}
