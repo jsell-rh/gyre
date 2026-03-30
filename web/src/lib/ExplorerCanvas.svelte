@@ -35,6 +35,7 @@
   // Shell context API (S4.1)
   const navigate = getContext('navigate');
   const openDetailPanel = getContext('openDetailPanel');
+  const goToRepoTab = getContext('goToRepoTab');
 
   // ── Layout engine ──────────────────────────────────────────────────────────
   let layoutEngine = $state('column');
@@ -1077,7 +1078,7 @@
             {/if}
             {#if selectedNode.spec_path}
               <div class="panel-row"><span class="panel-label">Spec</span>
-                <button class="spec-link-btn" onclick={() => navigate?.('specs')} title="Navigate to spec">{selectedNode.spec_path}</button>
+                <button class="spec-link-btn" onclick={() => openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path })} title="Navigate to spec">{selectedNode.spec_path}</button>
               </div>
             {/if}
             {#if selectedNode.spec_confidence}
@@ -1127,7 +1128,7 @@
               <div class="no-spec-state" data-testid="no-governing-spec">
                 <p class="no-spec-text">No governing spec</p>
                 <p class="no-spec-hint">This node has no spec_path set. Create a spec to document and govern its behavior.</p>
-                <button class="create-spec-btn" onclick={() => navigate?.('specs')} data-testid="create-spec-btn">
+                <button class="create-spec-btn" onclick={() => goToRepoTab?.('specs')} data-testid="create-spec-btn">
                   Create spec
                 </button>
               </div>
