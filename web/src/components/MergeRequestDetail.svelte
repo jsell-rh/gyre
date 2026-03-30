@@ -402,7 +402,7 @@
               {#each reviews as r (r.id)}
                 <div class="review-card">
                   <div class="review-header">
-                    <span class="reviewer-name">{r.reviewer_agent_id}</span>
+                    <span class="reviewer-name">{r.reviewer_agent_id ?? 'Unknown'}</span>
                     <Badge value={r.decision} />
                     <span class="review-time">{relativeTime(r.created_at)}</span>
                   </div>
@@ -437,7 +437,7 @@
               {#each comments as c (c.id)}
                 <div class="comment-card">
                   <div class="comment-header">
-                    <span class="commenter-name">{c.author_agent_id}</span>
+                    <span class="commenter-name">{c.author_agent_id ?? 'Unknown'}</span>
                     {#if c.file_path}
                       <code class="file-ref">{c.file_path}{c.line_number != null ? `:${c.line_number}` : ''}</code>
                     {/if}
