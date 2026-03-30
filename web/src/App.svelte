@@ -57,6 +57,9 @@
   let wsDropdownEl = $state(null);
 
   let mobileDrawerOpen = $state(false);
+  let createWsModalOpen = $state(false);
+  let createWsForm = $state({ name: '', description: '' });
+  let createWsSaving = $state(false);
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(true);
@@ -498,6 +501,27 @@
     tokenVisible = false;
     tokenInfo = null;
     try { tokenInfo = await api.tokenInfo(); } catch { /* ignore */ }
+  }
+
+  async function handleCreateWorkspaceFromDropdown() {
+    const name = createWsForm.name.trim();
+    if (!name) return;
+    createWsSaving = true;
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
+      showToast(`Workspace "${name}" created.`, { type: 'success' });
+      createWsModalOpen = false;
+      createWsForm = { name: '', description: '' };
+      // Refresh workspace list and navigate
+      try { workspaces = await api.workspaces() ?? []; } catch { /* keep existing */ }
+      const ws = workspaces.find(w => w.id === newWs?.id) ?? newWs;
+      if (ws) goToWorkspaceHome(ws);
+    } catch (e) {
+      showToast('Failed to create workspace: ' + (e.message || e), { type: 'error' });
+    } finally {
+      createWsSaving = false;
+    }
   }
 
   function saveToken() {
@@ -944,7 +968,7 @@
               </button>
               <div class="ws-dropdown-divider" role="separator"></div>
               {#if workspaces.length === 0}
-                <div class="ws-dropdown-empty">No workspaces found</div>
+                <div class="ws-dropdown-empty">No workspaces yet</div>
               {:else}
                 {#each workspaces as ws}
                   <button
@@ -961,6 +985,16 @@
                   </button>
                 {/each}
               {/if}
+              <div class="ws-dropdown-divider" role="separator"></div>
+              <button
+                class="ws-dropdown-item ws-dropdown-create"
+                role="menuitem"
+                tabindex="-1"
+                onclick={() => { wsDropdownOpen = false; createWsForm = { name: '', description: '' }; createWsModalOpen = true; }}
+                data-testid="ws-dropdown-create"
+              >
+                + New Workspace
+              </button>
             </div>
           {/if}
         </div>
@@ -1157,6 +1191,12 @@
                 });
               }
             }}
+            onWorkspaceCreated={async (newWs) => {
+              // Refresh workspace list and navigate to the new workspace
+              try { workspaces = await api.workspaces() ?? []; } catch { /* keep existing */ }
+              const ws = workspaces.find(w => w.id === newWs?.id) ?? newWs;
+              if (ws) goToWorkspaceHome(ws);
+            }}
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings
@@ -1296,6 +1336,36 @@
     </div>
   </div>
 {/if}
+
+<!-- Create Workspace modal (from dropdown) -->
+<Modal bind:open={createWsModalOpen} title="New Workspace" size="sm">
+  <div class="token-modal">
+    <label class="token-label" for="ws-name-input">Name *</label>
+    <input
+      id="ws-name-input"
+      class="token-input"
+      type="text"
+      bind:value={createWsForm.name}
+      placeholder="e.g. Backend Team"
+      onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
+    />
+    <label class="token-label" for="ws-desc-input">Description</label>
+    <input
+      id="ws-desc-input"
+      class="token-input"
+      type="text"
+      bind:value={createWsForm.description}
+      placeholder="What is this workspace for?"
+      onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
+    />
+    <div class="token-actions">
+      <button class="btn-secondary" onclick={() => (createWsModalOpen = false)}>Cancel</button>
+      <button class="btn-primary" onclick={handleCreateWorkspaceFromDropdown} disabled={createWsSaving || !createWsForm.name?.trim()}>
+        {createWsSaving ? 'Creating…' : 'Create Workspace'}
+      </button>
+    </div>
+  </div>
+</Modal>
 
 <!-- Token configuration modal -->
 <Modal bind:open={tokenModalOpen} title="API Token" size="sm">
@@ -2285,6 +2355,11 @@
   .ws-all-icon {
     margin-right: var(--space-2);
     font-size: var(--text-base);
+  }
+
+  .ws-dropdown-create {
+    color: var(--color-primary);
+    font-weight: 500;
   }
 
   .ws-dropdown-divider {
