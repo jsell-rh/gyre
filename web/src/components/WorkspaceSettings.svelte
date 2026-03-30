@@ -51,6 +51,17 @@
   let warnOnDrift = $state(workspace?.meta_spec_policy?.warn_on_drift ?? true);
   let blockOnDrift = $state(workspace?.meta_spec_policy?.block_on_drift ?? false);
   let driftTolerance = $state(workspace?.meta_spec_policy?.drift_tolerance ?? 0);
+
+  // Sync form values when workspace prop changes
+  $effect(() => {
+    if (workspace) {
+      defaultComputeTarget = workspace.default_compute_target ?? '';
+      trustLevel = workspace.trust_level ?? 'Autonomous';
+      warnOnDrift = workspace.meta_spec_policy?.warn_on_drift ?? true;
+      blockOnDrift = workspace.meta_spec_policy?.block_on_drift ?? false;
+      driftTolerance = workspace.meta_spec_policy?.drift_tolerance ?? 0;
+    }
+  });
   let policyDriftSaving = $state(false);
   let policyDriftSaved = $state(false);
 
@@ -346,13 +357,13 @@
 
         <div class="field-group">
           <div class="field">
-            <label class="field-label">Workspace Name</label>
+            <span class="field-label">Workspace Name</span>
             <div class="field-value" data-testid="ws-name">{workspace?.name ?? '—'}</div>
             <p class="field-hint">Contact your administrator to rename the workspace.</p>
           </div>
 
           <div class="field">
-            <label class="field-label">Description</label>
+            <span class="field-label">Description</span>
             <div class="field-value">{workspace?.description ?? '—'}</div>
           </div>
 
