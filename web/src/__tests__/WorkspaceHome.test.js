@@ -56,11 +56,11 @@ describe('WorkspaceHome', () => {
     });
   });
 
-  it('shows autonomous message when no notifications', async () => {
+  it('shows empty state message when no notifications', async () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { getByTestId } = render(WorkspaceHome, { props: { workspace: ws } });
     await waitFor(() => {
-      expect(getByTestId('decisions-empty').textContent).toContain('running autonomously');
+      expect(getByTestId('decisions-empty').textContent).toContain('No pending decisions');
     });
   });
 

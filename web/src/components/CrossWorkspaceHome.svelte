@@ -127,7 +127,14 @@
       const results = await Promise.allSettled(
         workspaces.map(async (ws) => {
           const data = await api.getWorkspaceBriefing(ws.id);
-          const summary = data?.summary ?? data?.content ?? '';
+          let rawSummary = data?.summary ?? data?.content ?? '';
+          // Handle Rust SystemTime serialized as { tv_sec, tv_nsec }
+          let summary;
+          if (typeof rawSummary === 'object' && rawSummary !== null && rawSummary.tv_sec != null) {
+            summary = new Date(rawSummary.tv_sec * 1000).toLocaleString();
+          } else {
+            summary = typeof rawSummary === 'string' ? rawSummary : String(rawSummary || '');
+          }
           return { workspaceName: ws.name, summary };
         })
       );
@@ -145,7 +152,7 @@
     rulesLoading = true;
     rulesError = null;
     try {
-      const data = await api.metaSpecs({ scope: 'Global' });
+      const data = await api.getMetaSpecs({ scope: 'Global' });
       globalMetaSpecs = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
       rulesError = e?.message ?? 'Failed to load agent rules';
