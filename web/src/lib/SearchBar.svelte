@@ -14,12 +14,10 @@
   const ENTITY_ICONS = { task: 'T', agent: 'G', mr: 'M', spec: 'S' };
 
   const SHORTCUTS = [
-    { label: 'Inbox', view: 'inbox', icon: '1' },
+    { label: 'Decisions', view: 'inbox', icon: '1' },
     { label: 'Briefing', view: 'briefing', icon: '2' },
-    { label: 'Explorer', view: 'explorer', icon: '3' },
-    { label: 'Specs', view: 'specs', icon: '4' },
-    { label: 'Meta-specs', view: 'meta-specs', icon: '5' },
-    { label: 'Admin', view: 'admin', icon: '6' },
+    { label: 'Specs', view: 'specs', icon: '3' },
+    { label: 'Agent Rules', view: 'meta-specs', icon: '4' },
     { label: 'My Profile', view: 'profile', icon: 'P' },
   ];
 

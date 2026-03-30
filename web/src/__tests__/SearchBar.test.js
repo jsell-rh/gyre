@@ -84,22 +84,22 @@ describe('SearchBar', () => {
   it('shows shortcut list when query is empty', () => {
     render(SearchBar, { props: { open: true, onnavigate: navigateSpy } });
     const items = screen.getAllByRole('option');
-    // SHORTCUTS array has 7 entries: Inbox, Briefing, Explorer, Specs, Meta-specs, Admin, My Profile
-    expect(items.length).toBe(7);
-    expect(items[0].textContent).toContain('Inbox');
-    expect(items[6].textContent).toContain('My Profile');
+    // SHORTCUTS array has 5 entries: Decisions, Briefing, Specs, Agent Rules, My Profile
+    expect(items.length).toBe(5);
+    expect(items[0].textContent).toContain('Decisions');
+    expect(items[4].textContent).toContain('My Profile');
   });
 
   it('filters shortcuts when query matches a shortcut label', async () => {
     render(SearchBar, { props: { open: true, onnavigate: navigateSpy } });
     const input = screen.getByRole('combobox');
     // Type a query shorter than 2 chars — should filter shortcuts only
-    await fireEvent.input(input, { target: { value: 'I' } });
+    await fireEvent.input(input, { target: { value: 'B' } });
     await vi.advanceTimersByTimeAsync(0);
     const items = screen.getAllByRole('option');
-    // "I" matches "Inbox" and "Briefing" and "My Profile" (all contain 'i' case-insensitive)
+    // "B" matches "Briefing" (case-insensitive)
     const labels = items.map(i => i.textContent);
-    expect(labels.some(l => l.includes('Inbox'))).toBe(true);
+    expect(labels.some(l => l.includes('Briefing'))).toBe(true);
   });
 
   it('keyboard ArrowDown/ArrowUp cycles through results', async () => {

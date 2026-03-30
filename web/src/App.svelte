@@ -1303,7 +1303,16 @@
 {/if}
 
 <!-- ── Global overlays ────────────────────────────────────────────────── -->
-<SearchBar bind:open={searchOpen} onnavigate={(v) => { if (v === 'profile') goToProfile(); else goToWorkspaceHome(currentWorkspace); }} />
+<SearchBar bind:open={searchOpen} onnavigate={(v) => {
+  if (v === 'profile') { goToProfile(); return; }
+  if (v === 'meta-specs') { goToAgentRules(); return; }
+  // For section-based views, navigate to workspace home and scroll to the section
+  if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
+  if (v === 'inbox') tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  else if (v === 'briefing') tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  else if (v === 'specs') tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  else goToWorkspaceHome(currentWorkspace);
+}} />
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
