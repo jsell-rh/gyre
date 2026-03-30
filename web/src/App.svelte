@@ -13,6 +13,7 @@
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
+  import DetailPanel from './lib/DetailPanel.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
   import { toast as showToast } from './lib/toast.svelte.js';
@@ -31,6 +32,7 @@
 
   // ── Global detail panel ──────────────────────────────────────────────
   let detailPanel = $state({ open: false, entity: null });
+  let detailExpanded = $state(false);
 
   // ── WebSocket ────────────────────────────────────────────────────────
   let wsStore = $state(null);
@@ -357,6 +359,7 @@
 
   function closeDetailPanel() {
     detailPanel = { open: false, entity: null };
+    detailExpanded = false;
   }
 
   // ── Workspace dropdown keyboard navigation ────────────────────────────
@@ -1175,7 +1178,8 @@
       </nav>
     {/if}
 
-    <!-- ── Content area ──────────────────────────────────────────────── -->
+    <!-- ── Content area + detail panel ──────────────────────────────── -->
+    <div class="content-split">
     <main class="content" id="main-content" tabindex="-1">
       <div class="content-inner" class:faded={!contentVisible}>
         {#if mode === 'workspace_home'}
@@ -1230,6 +1234,13 @@
         {/if}
       </div>
     </main>
+
+    <DetailPanel
+      entity={detailPanel.open ? detailPanel.entity : null}
+      bind:expanded={detailExpanded}
+      onclose={closeDetailPanel}
+    />
+    </div>
 
     <!-- ── Status bar (24px) ─────────────────────────────────────────── -->
     <footer class="status-bar" aria-label="Status bar">
@@ -1875,13 +1886,21 @@
     margin: var(--space-1) 0;
   }
 
-  /* ── Content area ───────────────────────────────────────────────────── */
+  /* ── Content area + detail panel split ────────────────────────────── */
+  .content-split {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+  }
+
   .content {
     flex: 1;
     overflow: hidden;
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
   }
 
   main:focus { outline: none; }
