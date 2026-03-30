@@ -12,6 +12,8 @@
   // Use shell context API for detail panel — S4.1 app shell manages the split layout
   const openDetailPanel = getContext('openDetailPanel');
   const navigate = getContext('navigate');
+  const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
+  const goToAgentRules = getContext('goToAgentRules');
 
   let notifications = $state([]);
   let loading = $state(true);
@@ -222,12 +224,12 @@
   }
 
   async function handleIncreaseTrust(n) {
-    navigate?.('admin');
+    goToWorkspaceSettings?.();
     await handleDismiss(n);
   }
 
   function handleAdjustMetaSpec(n) {
-    navigate?.('meta-specs');
+    goToAgentRules?.();
   }
 
   // Reload when scope/workspaceId/repoId changes, and set up auto-refresh
@@ -420,8 +422,8 @@
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         View Spec
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => { navigate?.('explorer'); handleDismiss(n); }}>
-                        Open in Explorer
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
+                        View in Explorer
                       </Button>
                       <Button
                         variant="ghost"
@@ -509,7 +511,7 @@
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
                     {:else if n.notification_type === 'budget_warning'}
-                      <Button variant="primary" size="sm" onclick={() => navigate?.('admin')}>Increase Limit</Button>
+                      <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>Increase Limit</Button>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
