@@ -460,6 +460,8 @@ export const api = {
   },
   markNotificationRead: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
+  resolveNotification: (id) =>
+    request(`/notifications/${id}/resolve`, { method: 'POST' }),
   // Notification preferences (HSI §12)
   getNotificationPreferences: () => request('/users/me/notification-preferences'),
   updateNotificationPreferences: (prefs) =>
