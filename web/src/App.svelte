@@ -311,6 +311,8 @@
   setContext('navigate', (view) => {
     // Legacy compat shim: map old nav items to new navigation
     if (view === 'profile') { goToProfile(); return; }
+    // In repo mode, tab names switch the active tab instead of navigating away
+    if (mode === 'repo' && REPO_TABS.includes(view)) { goToRepoTab(view); return; }
     // Everything else lands on workspace home
     goToWorkspaceHome(currentWorkspace);
   });
@@ -652,7 +654,7 @@
     // 3. Load user role (for tenant admin gear icon) + decisions count
     try {
       const me = await api.me();
-      userIsAdmin = me?.role === 'Admin' || me?.is_admin === true;
+      userIsAdmin = me?.global_role === 'Admin' || me?.role === 'Admin' || me?.is_admin === true;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
@@ -1108,7 +1110,7 @@
           <WorkspaceHome
             workspace={currentWorkspace}
             {decisionsCount}
-            onSelectRepo={(repo) => goToRepo(repo)}
+            onSelectRepo={(repo, tab) => goToRepo(repo, tab ?? 'specs')}
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings

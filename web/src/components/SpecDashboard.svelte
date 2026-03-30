@@ -14,7 +14,7 @@
    *   openDetailPanel({type, id, data}) — opens detail panel at 40%, compresses list to 60%
    */
 
-  import { getContext } from 'svelte';
+  import { getContext, onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -69,9 +69,12 @@
     loading = true;
     error = null;
     try {
-      specs = await api.specsForWorkspace(workspaceId);
+      const allSpecs = await api.specsForWorkspace(workspaceId);
       if (scope === 'repo' && repoId) {
+        specs = allSpecs.filter(s => s.repo_id === repoId);
         loadProgressMap().catch(e => console.error('Progress load failed:', e));
+      } else {
+        specs = allSpecs;
       }
     } catch (e) {
       error = e.message;
@@ -99,6 +102,16 @@
     // Clear stale selection from previous scope
     selectedPath = null;
     load();
+  });
+
+  // Open "New Spec" modal when navigated here with ?create=true (e.g. from ExplorerCanvas)
+  onMount(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('create') === 'true') {
+      showNewSpec = true;
+      url.searchParams.delete('create');
+      window.history.replaceState({}, '', url.toString());
+    }
   });
 
   // ── Derived: filtered + sorted ──────────────────────────────────────────────
