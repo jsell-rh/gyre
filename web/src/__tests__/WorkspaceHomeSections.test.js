@@ -26,6 +26,8 @@ vi.mock('../lib/api.js', () => ({
     markNotificationRead: vi.fn(),
     getWorkspaceBriefing: vi.fn(),
     briefingAsk: vi.fn(),
+    createRepo: vi.fn(),
+    createMirrorRepo: vi.fn(),
   },
 }));
 
@@ -144,6 +146,8 @@ function setupDefaultMocks() {
   api.revokeSpec.mockResolvedValue({});
   api.enqueue.mockResolvedValue({});
   api.markNotificationRead.mockResolvedValue({});
+  api.createRepo.mockResolvedValue({ id: 'repo-new', name: 'new-repo' });
+  api.createMirrorRepo.mockResolvedValue({ id: 'repo-mirror', name: 'mirror-repo' });
 }
 
 beforeEach(() => {
@@ -454,17 +458,154 @@ describe('Repos section', () => {
     });
   });
 
-  it('renders + New Repo button', async () => {
+  it('renders + New Repo button (enabled)', async () => {
     const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
-      expect(getByTestId('btn-new-repo')).toBeTruthy();
+      const btn = getByTestId('btn-new-repo');
+      expect(btn).toBeTruthy();
+      expect(btn.disabled).toBe(false);
     });
   });
 
-  it('renders Import button', async () => {
+  it('renders Import button (enabled)', async () => {
     const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
-      expect(getByTestId('btn-import-repo')).toBeTruthy();
+      const btn = getByTestId('btn-import-repo');
+      expect(btn).toBeTruthy();
+      expect(btn.disabled).toBe(false);
+    });
+  });
+
+  it('shows new repo form when + New Repo is clicked', async () => {
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => {
+      expect(getByTestId('new-repo-form')).toBeTruthy();
+    });
+  });
+
+  it('shows import form when Import is clicked', async () => {
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-import-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-import-repo'));
+    await waitFor(() => {
+      expect(getByTestId('import-repo-form')).toBeTruthy();
+    });
+  });
+
+  it('hides new repo form after clicking Import (mutual exclusion)', async () => {
+    const { getByTestId, container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => expect(getByTestId('new-repo-form')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-import-repo'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="new-repo-form"]')).toBeFalsy();
+      expect(getByTestId('import-repo-form')).toBeTruthy();
+    });
+  });
+
+  it('calls api.createRepo with name and workspace_id on submit', async () => {
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => expect(getByTestId('new-repo-name-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('new-repo-name-input'), { target: { value: 'my-new-repo' } });
+    await fireEvent.submit(getByTestId('new-repo-form'));
+    await waitFor(() => {
+      expect(api.createRepo).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'my-new-repo', workspace_id: 'ws-1' })
+      );
+    });
+  });
+
+  it('refreshes repo list after successful creation', async () => {
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => expect(getByTestId('new-repo-name-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('new-repo-name-input'), { target: { value: 'new-repo' } });
+    const callsBefore = api.workspaceRepos.mock.calls.length;
+    await fireEvent.submit(getByTestId('new-repo-form'));
+    await waitFor(() => {
+      expect(api.workspaceRepos.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+  });
+
+  it('closes new repo form after successful creation', async () => {
+    const { getByTestId, container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => expect(getByTestId('new-repo-name-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('new-repo-name-input'), { target: { value: 'new-repo' } });
+    await fireEvent.submit(getByTestId('new-repo-form'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="new-repo-form"]')).toBeFalsy();
+    });
+  });
+
+  it('shows error when createRepo fails', async () => {
+    api.createRepo.mockRejectedValue(new Error('Name already taken'));
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => expect(getByTestId('new-repo-name-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('new-repo-name-input'), { target: { value: 'bad-repo' } });
+    await fireEvent.submit(getByTestId('new-repo-form'));
+    await waitFor(() => {
+      expect(getByTestId('new-repo-error').textContent).toContain('Name already taken');
+    });
+  });
+
+  it('calls api.createMirrorRepo with url and workspace_id on submit', async () => {
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-import-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-import-repo'));
+    await waitFor(() => expect(getByTestId('import-url-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('import-url-input'), { target: { value: 'https://github.com/org/repo' } });
+    await fireEvent.submit(getByTestId('import-repo-form'));
+    await waitFor(() => {
+      expect(api.createMirrorRepo).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'https://github.com/org/repo', workspace_id: 'ws-1' })
+      );
+    });
+  });
+
+  it('closes import form after successful import', async () => {
+    const { getByTestId, container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-import-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-import-repo'));
+    await waitFor(() => expect(getByTestId('import-url-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('import-url-input'), { target: { value: 'https://github.com/org/repo' } });
+    await fireEvent.submit(getByTestId('import-repo-form'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="import-repo-form"]')).toBeFalsy();
+    });
+  });
+
+  it('shows error when createMirrorRepo fails', async () => {
+    api.createMirrorRepo.mockRejectedValue(new Error('Invalid URL'));
+    const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-import-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-import-repo'));
+    await waitFor(() => expect(getByTestId('import-url-input')).toBeTruthy());
+    await fireEvent.input(getByTestId('import-url-input'), { target: { value: 'https://github.com/org/repo' } });
+    await fireEvent.submit(getByTestId('import-repo-form'));
+    await waitFor(() => {
+      expect(getByTestId('import-error').textContent).toContain('Invalid URL');
+    });
+  });
+
+  it('Cancel button closes new repo form', async () => {
+    const { getByTestId, container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(getByTestId('btn-new-repo')).toBeTruthy());
+    await fireEvent.click(getByTestId('btn-new-repo'));
+    await waitFor(() => expect(getByTestId('new-repo-form')).toBeTruthy());
+    const cancelBtn = getByTestId('new-repo-form').querySelector('button[type="button"]:last-of-type');
+    await fireEvent.click(cancelBtn);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="new-repo-form"]')).toBeFalsy();
     });
   });
 });
