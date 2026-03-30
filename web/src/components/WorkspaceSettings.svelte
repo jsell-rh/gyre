@@ -63,6 +63,10 @@
   let budget = $state(null);
   let budgetLoading = $state(false);
   let budgetError = $state(null);
+  let budgetEditCredits = $state('');
+  let budgetSaving = $state(false);
+  let budgetSaved = $state(false);
+  let budgetSaveError = $state(null);
 
   // ── Compute ───────────────────────────────────────────────────────────
   let allCompute = $state([]);
@@ -138,11 +142,35 @@
     budgetError = null;
     try {
       budget = await api.workspaceBudget(wsId);
+      budgetEditCredits = String(budget?.total_credits ?? '');
     } catch (e) {
       budgetError = e.message;
       budget = null;
     }
     finally { budgetLoading = false; }
+  }
+
+  async function saveBudget() {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    const total = Number(budgetEditCredits);
+    if (!Number.isFinite(total) || total < 0) {
+      budgetSaveError = 'Enter a valid non-negative number.';
+      return;
+    }
+    budgetSaving = true;
+    budgetSaved = false;
+    budgetSaveError = null;
+    try {
+      budget = await api.setWorkspaceBudget(wsId, { total_credits: total });
+      budgetEditCredits = String(budget?.total_credits ?? total);
+      budgetSaved = true;
+      setTimeout(() => { budgetSaved = false; }, 2000);
+    } catch (e) {
+      budgetSaveError = e?.message ?? 'Failed to save budget.';
+    } finally {
+      budgetSaving = false;
+    }
   }
 
   async function loadAllCompute() {
@@ -539,6 +567,35 @@
             {#if budget.reset_at}
               <p class="budget-reset">Resets: {fmtDate(budget.reset_at)}</p>
             {/if}
+
+            <div class="budget-edit" data-testid="budget-edit">
+              <h3 class="budget-edit-title">Set Total Credits</h3>
+              <div class="budget-edit-row">
+                <label for="budget-credits-input" class="budget-edit-label">Total Credits</label>
+                <input
+                  id="budget-credits-input"
+                  class="budget-edit-input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  bind:value={budgetEditCredits}
+                  placeholder="e.g. 10000"
+                  data-testid="budget-credits-input"
+                  disabled={budgetSaving}
+                />
+                <button
+                  class="btn-primary budget-save-btn"
+                  onclick={saveBudget}
+                  disabled={budgetSaving}
+                  data-testid="budget-save-btn"
+                >
+                  {budgetSaving ? 'Saving…' : budgetSaved ? 'Saved ✓' : 'Save'}
+                </button>
+              </div>
+              {#if budgetSaveError}
+                <p class="error-text" role="alert" data-testid="budget-save-error">{budgetSaveError}</p>
+              {/if}
+            </div>
           </div>
         {/if}
       </div>
@@ -1105,6 +1162,56 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin: 0;
+  }
+
+  .budget-edit {
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-4);
+    margin-top: var(--space-4);
+  }
+
+  .budget-edit-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-3) 0;
+  }
+
+  .budget-edit-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .budget-edit-label {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .budget-edit-input {
+    flex: 1;
+    min-width: 120px;
+    max-width: 220px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+  }
+
+  .budget-edit-input:focus {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+  }
+
+  .budget-save-btn {
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-sm);
+    white-space: nowrap;
   }
 
   /* ── Compute list ─────────────────────────────────────────────────── */

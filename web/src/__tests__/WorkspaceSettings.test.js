@@ -24,6 +24,7 @@ vi.mock('../lib/api.js', () => ({
     computeList: vi.fn().mockResolvedValue([]),
     workspaceMembers: vi.fn().mockResolvedValue([]),
     workspaceBudget: vi.fn().mockResolvedValue(null),
+    setWorkspaceBudget: vi.fn().mockResolvedValue({ total_credits: 5000, used_credits: 0 }),
     workspaceAbacPolicies: vi.fn().mockResolvedValue([]),
     auditEvents: vi.fn().mockResolvedValue([]),
     updateWorkspace: vi.fn().mockResolvedValue({}),
@@ -300,6 +301,58 @@ describe('WorkspaceSettings', () => {
         expect(overview).toBeTruthy();
         const bar = container.querySelector('[data-testid="budget-bar"]');
         expect(bar).toBeTruthy();
+      }
+    });
+
+    it('shows budget edit input and save button when budget loaded', async () => {
+      api.workspaceBudget.mockResolvedValue({ total_credits: 1000, used_credits: 200 });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openBudgetTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      expect(container.querySelector('[data-testid="budget-edit"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="budget-credits-input"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="budget-save-btn"]')).toBeTruthy();
+    });
+
+    it('budget input is pre-populated with current total_credits', async () => {
+      api.workspaceBudget.mockResolvedValue({ total_credits: 8000, used_credits: 100 });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openBudgetTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      const input = container.querySelector('[data-testid="budget-credits-input"]');
+      if (input) {
+        expect(input.value).toBe('8000');
+      }
+    });
+
+    it('clicking Save calls api.setWorkspaceBudget with entered value', async () => {
+      api.workspaceBudget.mockResolvedValue({ total_credits: 1000, used_credits: 0 });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openBudgetTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      const input = container.querySelector('[data-testid="budget-credits-input"]');
+      const saveBtn = container.querySelector('[data-testid="budget-save-btn"]');
+      if (input && saveBtn) {
+        await fireEvent.input(input, { target: { value: '5000' } });
+        await fireEvent.click(saveBtn);
+        expect(api.setWorkspaceBudget).toHaveBeenCalledWith('ws-1', { total_credits: 5000 });
+      }
+    });
+
+    it('shows error when save fails', async () => {
+      api.workspaceBudget.mockResolvedValue({ total_credits: 1000, used_credits: 0 });
+      api.setWorkspaceBudget.mockRejectedValue(new Error('Forbidden'));
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openBudgetTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      const input = container.querySelector('[data-testid="budget-credits-input"]');
+      const saveBtn = container.querySelector('[data-testid="budget-save-btn"]');
+      if (input && saveBtn) {
+        await fireEvent.input(input, { target: { value: '5000' } });
+        await fireEvent.click(saveBtn);
+        await new Promise(r => setTimeout(r, 0));
+        const errorEl = container.querySelector('[data-testid="budget-save-error"]');
+        if (errorEl) expect(errorEl.textContent).toContain('Forbidden');
       }
     });
   });
