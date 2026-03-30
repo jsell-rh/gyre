@@ -291,8 +291,8 @@ export const api = {
   networkPeerDelete: (id) =>
     request(`/network/peers/${id}`, { method: 'DELETE' }),
   networkDerpMap: () => request('/network/derp-map'),
-  // Agent spawn log
-  agentSpawnLog: (id) => request(`/admin/agents/${id}/spawn-log`),
+  // Agent spawn log — endpoint removed; agent logs are available via /agents/:id/logs
+  agentSpawnLog: (id) => request(`/agents/${id}/logs?limit=50&offset=0`),
   // Container audit record (M19.3) — 404 if agent was not container-spawned
   agentContainer: (id) => request(`/agents/${id}/container`),
   // BCP (M23)
@@ -415,7 +415,9 @@ export const api = {
     return request(`/costs/summary${qs ? '?' + qs : ''}`);
   },
   costsByAgent: (agentId) => request(`/costs?agent_id=${encodeURIComponent(agentId)}`),
-  repoBudget: (id) => request(`/repos/${id}/budget`),
+  // Per-repo budget endpoint does not exist; use workspace budget instead.
+  // Components should prefer workspaceBudget(workspaceId) when a workspace ID is available.
+  repoBudget: (_id) => Promise.resolve(null),
   workspaceRepos: (id) => request(`/workspaces/${id}/repos`),
   workspaceMembers: (id) => request(`/workspaces/${id}/members`),
   workspaceTeams: (id) => request(`/workspaces/${id}/teams`),
@@ -458,6 +460,10 @@ export const api = {
   },
   markNotificationRead: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
+  // Notification preferences (HSI §12)
+  getNotificationPreferences: () => request('/users/me/notification-preferences'),
+  updateNotificationPreferences: (prefs) =>
+    request('/users/me/notification-preferences', { method: 'PUT', body: JSON.stringify(prefs) }),
   myJudgments: (params) => {
     const qs = params ? new URLSearchParams(params).toString() : '';
     return request(`/users/me/judgments${qs ? '?' + qs : ''}`);

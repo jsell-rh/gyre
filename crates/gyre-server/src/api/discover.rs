@@ -43,6 +43,26 @@ pub async fn discover_agents(
     Ok(Json(result))
 }
 
+/// GET /api/v1/agents/{id}/card -- retrieve an agent's Agent Card.
+pub async fn get_agent_card(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<AgentCard>>, ApiError> {
+    state
+        .agents
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    let card = if let Ok(Some(json)) = state.kv_store.kv_get("agent_cards", &id).await {
+        serde_json::from_str::<AgentCard>(&json).ok()
+    } else {
+        None
+    };
+
+    Ok(Json(card))
+}
+
 /// PUT /api/v1/agents/{id}/card -- update an agent's own Agent Card.
 pub async fn update_agent_card(
     State(state): State<Arc<AppState>>,

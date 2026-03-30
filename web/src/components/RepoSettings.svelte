@@ -128,12 +128,16 @@
     finally { specPolicyLoading = false; }
   }
 
-  async function loadRepoBudget(repoId) {
+  async function loadRepoBudget(_repoId) {
     repoBudgetLoading = true;
     repoBudgetError = null;
     try {
-      // GET /api/v1/repos/:id/budget
-      repoBudget = await api.repoBudget(repoId);
+      // Per-repo budget endpoint does not exist; show workspace-level budget instead
+      if (workspace?.id) {
+        repoBudget = await api.workspaceBudget(workspace.id);
+      } else {
+        repoBudget = null;
+      }
     } catch (e) {
       repoBudgetError = e.message;
       repoBudget = null;

@@ -12,32 +12,22 @@
   let saving = $state(false);
   let saveError = $state(null);
 
-  // Load agent card whenever agentId changes
-  $effect(() => {
-    const id = agentId;
-    if (!id) { card = null; return; }
-    cardLoading = true;
-    editing = false;
-    api.getAgentCard(id)
-      .then((data) => { card = data ?? null; })
-      .catch(() => { card = null; })
-      .finally(() => { cardLoading = false; });
-  });
-
   // Editable fields
   let capInput = $state('');
   let protocols = $state('');
   let endpoint = $state('');
   let description = $state('');
 
+  // Load agent card whenever agentId changes
   $effect(() => {
-    if (agentId) {
-      cardLoading = true;
-      api.agentCard(agentId)
-        .then((data) => { card = data; })
-        .catch(() => { card = null; })
-        .finally(() => { cardLoading = false; });
-    }
+    const id = agentId;
+    if (!id) { card = null; cardLoading = false; return; }
+    cardLoading = true;
+    editing = false;
+    api.agentCard(id)
+      .then((data) => { card = data ?? null; })
+      .catch(() => { card = null; })
+      .finally(() => { cardLoading = false; });
   });
 
   function startEdit() {
