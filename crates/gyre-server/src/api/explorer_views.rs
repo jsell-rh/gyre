@@ -512,23 +512,20 @@ async fn validate_repo_ownership(
         .and_then(|d| d.get("repo_id"))
         .and_then(|r| r.as_str())
     {
-        // Load workspace repos from kv_store.
-        let workspace_repos_ns = "workspace_repos";
-        let raw = state
-            .kv_store
-            .kv_get(workspace_repos_ns, workspace_id)
+        // Verify ownership via the database.
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(repo_id))
             .await
             .map_err(ApiError::Internal)?;
-
-        if let Some(raw) = raw {
-            let repo_ids: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
-            if !repo_ids.contains(&repo_id.to_string()) {
+        match repo {
+            Some(r) if r.workspace_id.to_string() == workspace_id => {}
+            _ => {
                 return Err(ApiError::BadRequest(format!(
                     "repo {repo_id} does not belong to workspace {workspace_id}"
                 )));
             }
         }
-        // If no workspace_repos entry exists, allow (permissive until repos are registered).
     }
     Ok(())
 }
