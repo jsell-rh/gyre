@@ -68,6 +68,7 @@ vi.mock('../lib/api.js', () => ({
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
+    resolveNotification: vi.fn().mockResolvedValue({}),
   },
 }));
 
