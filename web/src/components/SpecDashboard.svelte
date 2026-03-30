@@ -55,7 +55,7 @@
   let pathTouched = $state(false);
 
   // ── Constants ───────────────────────────────────────────────────────────────
-  const STATUS_FILTERS = ['all', 'approved', 'pending', 'deprecated'];
+  const STATUS_FILTERS = ['all', 'draft', 'pending', 'approved', 'deprecated'];
   const TABLE_COLS = [
     ['path',            'Path'],
     ['approval_status', 'Status'],
@@ -195,6 +195,7 @@
   function statusColor(s) {
     if (s === 'approved')   return 'success';
     if (s === 'pending')    return 'warning';
+    if (s === 'draft')      return 'info';
     if (s === 'deprecated') return 'neutral';
     return 'neutral';
   }
@@ -202,6 +203,7 @@
   function statusIcon(s) {
     if (s === 'approved')   return '✓';
     if (s === 'pending')    return '◐';
+    if (s === 'draft')      return '✎';
     if (s === 'deprecated') return '✗';
     return '?';
   }
