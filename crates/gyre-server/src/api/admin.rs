@@ -403,7 +403,7 @@ pub async fn admin_seed(
 ) -> Result<Json<SeedResponse>, ApiError> {
     use gyre_domain::{
         Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
-        TaskPriority, TaskStatus,
+        TaskPriority, TaskStatus, Tenant, Workspace,
     };
 
     // Idempotency: if seed repo already exists, return early.
@@ -422,6 +422,26 @@ pub async fn admin_seed(
     }
 
     let now = now_secs();
+
+    // ── Tenant + Workspace ────────────────────────────────────────────────────
+    // Repos below reference workspace_id: "default". Upsert the tenant and
+    // workspace records so the frontend can resolve them (e.g. GET /workspaces/default).
+    let tenant = Tenant::new(
+        Id::new("default-tenant"),
+        "Default Tenant",
+        "default-tenant",
+        now,
+    );
+    let _ = state.tenants.create(&tenant).await;
+
+    let workspace = Workspace::new(
+        Id::new("default"),
+        Id::new("default-tenant"),
+        "Default Workspace",
+        "default",
+        now,
+    );
+    let _ = state.workspaces.create(&workspace).await;
 
     // ── Repos ─────────────────────────────────────────────────────────────────
     let repo1 = Repository::new(
