@@ -86,6 +86,7 @@
   let specs = $state([]);
   let specsSortCol = $state('path');
   let specsSortDir = $state('asc');
+  let specsShowAll = $state(false);
 
   function toggleSpecsSort(col) {
     if (specsSortCol === col) {
@@ -360,7 +361,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each sortedSpecs.slice(0, 10) as spec (spec.path ?? spec.id)}
+          {#each (specsShowAll ? sortedSpecs : sortedSpecs.slice(0, 10)) as spec (spec.path ?? spec.id)}
             <tr class="spec-row">
               <td class="spec-path">{spec.path ?? spec.name ?? '—'}</td>
               <td class="spec-attribution">
@@ -378,9 +379,11 @@
           {/each}
         </tbody>
       </table>
-      {#if specs.length > 10}
+      {#if sortedSpecs.length > 10}
         <div class="section-footer">
-          <span class="view-all-hint">{specs.length - 10} more specs…</span>
+          <button class="view-all-btn" onclick={() => { specsShowAll = !specsShowAll; }}>
+            {specsShowAll ? 'Show fewer' : `Show all ${sortedSpecs.length} specs`}
+          </button>
         </div>
       {/if}
     {/if}
@@ -616,9 +619,23 @@
     border-top: 1px solid var(--color-border);
   }
 
-  .view-all-hint {
+  .view-all-btn {
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    color: var(--color-primary);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    padding: 0;
+  }
+
+  .view-all-btn:hover {
+    text-decoration: underline;
+  }
+
+  .view-all-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Decisions ────────────────────────────────────────────────────────── */
