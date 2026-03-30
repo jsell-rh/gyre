@@ -1305,9 +1305,15 @@
 {/if}
 
 <!-- ── Global overlays ────────────────────────────────────────────────── -->
-<SearchBar bind:open={searchOpen} onnavigate={(v) => {
+<SearchBar bind:open={searchOpen} onnavigate={(v, opts) => {
   if (v === 'profile') { goToProfile(); return; }
   if (v === 'meta-specs') { goToAgentRules(); return; }
+  // Entity search results: open detail panel for the matched entity
+  if (opts?.entityType && opts?.entityId) {
+    if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
+    tick().then(() => openDetailPanel({ type: opts.entityType, id: opts.entityId }));
+    return;
+  }
   // For section-based views, navigate to workspace home and scroll to the section
   if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
   if (v === 'inbox') tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
