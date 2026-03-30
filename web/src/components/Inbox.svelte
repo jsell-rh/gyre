@@ -248,7 +248,7 @@
   </span>
   <div class="inbox-header">
       <div class="inbox-title-row">
-        <h1 class="inbox-title">Inbox</h1>
+        <h1 class="inbox-title">Decisions</h1>
         {#if unresolvedCount > 0}
           <span class="inbox-badge" aria-label="{unresolvedCount} unresolved items"
             >{unresolvedCount}</span

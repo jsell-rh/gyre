@@ -58,6 +58,31 @@
   let specsLoading = $state(true);
   let specsError = $state(null);
   let specs = $state([]);
+  let specsSortCol = $state('path');
+  let specsSortDir = $state('asc');
+
+  function toggleSpecsSort(col) {
+    if (specsSortCol === col) {
+      specsSortDir = specsSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      specsSortCol = col;
+      specsSortDir = 'asc';
+    }
+  }
+
+  function specsSortArrow(col) {
+    if (specsSortCol !== col) return '↕';
+    return specsSortDir === 'asc' ? '↑' : '↓';
+  }
+
+  let sortedSpecs = $derived.by(() => {
+    return [...specs].sort((a, b) => {
+      const av = String(a[specsSortCol] ?? '');
+      const bv = String(b[specsSortCol] ?? '');
+      const cmp = av.localeCompare(bv);
+      return specsSortDir === 'asc' ? cmp : -cmp;
+    });
+  });
 
   // ── Briefing state ───────────────────────────────────────────────────────
   // Cross-workspace briefing: aggregate per-workspace briefings (§10)
@@ -292,13 +317,17 @@
       <table class="specs-table" data-testid="specs-table">
         <thead>
           <tr>
-            <th scope="col">Path</th>
+            <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+            </th>
             <th scope="col">Workspace / Repo</th>
-            <th scope="col">Status</th>
+            <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+            </th>
           </tr>
         </thead>
         <tbody>
-          {#each specs.slice(0, 10) as spec (spec.path ?? spec.id)}
+          {#each sortedSpecs.slice(0, 10) as spec (spec.path ?? spec.id)}
             <tr class="spec-row">
               <td class="spec-path">{spec.path ?? spec.name ?? '—'}</td>
               <td class="spec-attribution">
@@ -643,7 +672,7 @@
   }
 
   .specs-table th {
-    padding: var(--space-2) var(--space-6);
+    padding: 0;
     text-align: left;
     font-size: var(--text-xs);
     font-weight: 600;
@@ -652,6 +681,37 @@
     letter-spacing: 0.05em;
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface-elevated);
+  }
+
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-2) var(--space-6);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
   }
 
   .spec-row {
