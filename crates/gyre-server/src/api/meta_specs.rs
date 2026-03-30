@@ -283,18 +283,15 @@ pub async fn get_meta_spec_blast_radius(
                     id: ws_id.to_string(),
                 });
 
-                // Collect repos bound to this workspace via kv_store.
-                let repo_ids: Vec<String> = state
-                    .kv_store
-                    .kv_get("workspace_repos", ws_id)
+                // Collect repos bound to this workspace via the database.
+                let repos = state
+                    .repos
+                    .list_by_workspace(&Id::new(ws_id))
                     .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                     .unwrap_or_default();
-                for repo_id in &repo_ids {
+                for repo in &repos {
                     affected_repos.push(AffectedRepo {
-                        id: repo_id.clone(),
+                        id: repo.id.to_string(),
                         workspace_id: ws_id.to_string(),
                         reason: "workspace_binding".to_string(),
                     });
@@ -512,18 +509,15 @@ async fn compute_preview_blast_radius(
                     id: ws_id.to_string(),
                 });
 
-                let repo_ids: Vec<String> = state
-                    .kv_store
-                    .kv_get("workspace_repos", ws_id)
+                let repos = state
+                    .repos
+                    .list_by_workspace(&Id::new(ws_id))
                     .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                     .unwrap_or_default();
 
-                for repo_id in &repo_ids {
+                for repo in &repos {
                     affected_repos.push(AffectedRepo {
-                        id: repo_id.clone(),
+                        id: repo.id.to_string(),
                         workspace_id: ws_id.to_string(),
                         reason: "workspace_binding".to_string(),
                     });

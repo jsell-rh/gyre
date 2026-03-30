@@ -152,12 +152,12 @@ fn make_edge(repo_id: &str, src: &Id, tgt: &Id, edge_type: EdgeType) -> GraphEdg
     }
 }
 
-/// Create a repo via REST and return its ID string.
-async fn create_repo(ctx: &Ctx, _ws_id: &str) -> String {
+/// Create a repo via REST in the given workspace and return its ID string.
+async fn create_repo(ctx: &Ctx, ws_id: &str) -> String {
     let r = ctx
         .post_json(
             "/api/v1/repos",
-            json!({"workspace_id": format!("ws-{}", uuid::Uuid::new_v4()), "name": format!("repo-{}", uuid::Uuid::new_v4())}),
+            json!({"workspace_id": ws_id, "name": format!("repo-{}", uuid::Uuid::new_v4())}),
         )
         .await;
     let repo: Value = r.json().await.unwrap();
@@ -880,17 +880,9 @@ async fn test_workspace_graph_concept() {
     let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), &slug, &slug, 0);
     ctx.state.workspaces.create(&ws).await.unwrap();
 
-    // Create two repos and populate nodes.
-    let repo1_id = create_repo(&ctx, "ws-concept-proj-1").await;
-    let repo2_id = create_repo(&ctx, "ws-concept-proj-2").await;
-
-    // Register both repos in the workspace kv store.
-    let repos_json = serde_json::to_string(&[&repo1_id, &repo2_id]).unwrap();
-    ctx.state
-        .kv_store
-        .kv_set("workspace_repos", ws_id.as_str(), repos_json)
-        .await
-        .ok();
+    // Create two repos in this workspace.
+    let repo1_id = create_repo(&ctx, ws_id.as_str()).await;
+    let repo2_id = create_repo(&ctx, ws_id.as_str()).await;
 
     let n1 = make_node(&repo1_id, "AuthToken", NodeType::Type);
     let n2 = make_node(&repo2_id, "AuthMiddleware", NodeType::Function);
