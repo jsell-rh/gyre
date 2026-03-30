@@ -10,9 +10,12 @@
    *   HSI §8 (notification types + priority table)
    *   HSI §2 (trust-level filtering)
    */
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Briefing from './Briefing.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+
+  const goToAgentRules = getContext('goToAgentRules');
 
   let {
     workspace = null,
@@ -791,17 +794,7 @@
           <button
             class="section-action-btn"
             data-testid="manage-rules-link"
-            onclick={() => {
-              const slug = workspace?.slug ?? workspace?.id;
-              if (slug) {
-                window.history.pushState(
-                  { mode: 'workspace_home', wsId: workspace.id, repoName: null, repoTab: 'specs' },
-                  '',
-                  `/workspaces/${encodeURIComponent(slug)}/agent-rules`
-                );
-              }
-              document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }}
+            onclick={() => goToAgentRules?.()}
           >Manage rules</button>
         </div>
         <div class="section-body">

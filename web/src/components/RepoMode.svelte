@@ -184,7 +184,7 @@
       <Inbox workspaceId={workspace?.id} repoId={repo?.id} scope="repo" />
     {:else if activeTab === 'code'}
       {#if repo?.id}
-        <ExplorerCodeTab repoId={repo.id} />
+        <ExplorerCodeTab repoId={repo.id} {repo} />
       {:else}
         <div class="tab-placeholder">
           <p>No repo selected.</p>
