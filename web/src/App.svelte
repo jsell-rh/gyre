@@ -916,9 +916,17 @@
         <!-- Decisions badge (🔔) -->
         <button
           class="decisions-badge-btn"
-          onclick={() => {
-            if (mode === 'repo') { goToRepoTab('decisions'); }
-            else { document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          onclick={async () => {
+            if (mode === 'repo') {
+              goToRepoTab('decisions');
+            } else {
+              // Ensure workspace home is rendered before attempting scroll
+              if (mode !== 'workspace_home') {
+                goToWorkspaceHome(currentWorkspace);
+                await tick();
+              }
+              document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
           }}
           aria-label={decisionsCount > 0 ? `${decisionsCount} decisions pending` : 'No decisions pending'}
           title="Decisions"

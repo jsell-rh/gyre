@@ -289,6 +289,7 @@
   // ── Import Repo form state ─────────────────────────────────────────────
   let importOpen = $state(false);
   let importUrl = $state('');
+  let importName = $state('');
   let importLoading = $state(false);
   let importError = $state(null);
 
@@ -313,12 +314,15 @@
   async function handleImportRepo() {
     const url = importUrl.trim();
     if (!url) return;
+    // Derive name from URL if not provided (strip .git suffix, take last path segment)
+    const name = importName.trim() || url.split('/').pop()?.replace(/\.git$/, '') || '';
     importLoading = true;
     importError = null;
     try {
-      await api.createMirrorRepo({ url, workspace_id: workspace.id });
+      await api.createMirrorRepo({ url, workspace_id: workspace.id, name });
       importOpen = false;
       importUrl = '';
+      importName = '';
       await loadRepos();
     } catch (e) {
       importError = e.message || 'Failed to import repository';
@@ -407,7 +411,7 @@
               <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">Retry</button>
             </div>
           {:else if notifications.length === 0}
-            <p class="empty-text" data-testid="decisions-empty">No decisions needed — system is running autonomously.</p>
+            <p class="empty-text" data-testid="decisions-empty">No pending decisions. At Supervised trust, decisions appear when agents need guidance, specs need approval, or gates fail.</p>
           {:else}
             <ul class="decision-list" role="list">
               {#each notifications.slice(0, 5) as n (n.id)}
@@ -521,7 +525,7 @@
             <button
               class="section-btn"
               data-testid="btn-import-repo"
-              onclick={() => { importOpen = !importOpen; newRepoOpen = false; }}
+              onclick={() => { importOpen = !importOpen; importName = ''; newRepoOpen = false; }}
               aria-expanded={importOpen}
             >Import</button>
           </div>
@@ -577,7 +581,7 @@
             >
               <div class="inline-form-header">
                 <span class="inline-form-title">Import Repository</span>
-                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }} aria-label="Cancel">✕</button>
+                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; importName = ''; }} aria-label="Cancel">✕</button>
               </div>
               <label class="inline-form-label" for="import-url">Repository URL <span class="required" aria-hidden="true">*</span></label>
               <input
@@ -590,6 +594,16 @@
                 required
                 disabled={importLoading}
               />
+              <label class="inline-form-label" for="import-name">Name</label>
+              <input
+                id="import-name"
+                class="inline-form-input"
+                data-testid="import-name-input"
+                type="text"
+                placeholder="Auto-derived from URL"
+                bind:value={importName}
+                disabled={importLoading}
+              />
               {#if importError}
                 <p class="inline-form-error" role="alert" data-testid="import-error">{importError}</p>
               {/if}
@@ -597,7 +611,7 @@
                 <button type="submit" class="section-btn primary" data-testid="import-submit" disabled={importLoading || !importUrl.trim()}>
                   {importLoading ? 'Importing…' : 'Import'}
                 </button>
-                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>Cancel</button>
+                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; importName = ''; }}>Cancel</button>
               </div>
             </form>
           {/if}
@@ -733,7 +747,21 @@
       <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
         <div class="section-header">
           <h2 class="section-title" id="section-agent-rules">Agent Rules</h2>
-          <button class="section-action-btn" data-testid="manage-rules-link">Manage rules</button>
+          <button
+            class="section-action-btn"
+            data-testid="manage-rules-link"
+            onclick={() => {
+              const slug = workspace?.slug ?? workspace?.id;
+              if (slug) {
+                window.history.pushState(
+                  { mode: 'workspace_home', wsId: workspace.id, repoName: null, repoTab: 'specs' },
+                  '',
+                  `/workspaces/${encodeURIComponent(slug)}/agent-rules`
+                );
+              }
+              document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}
+          >Manage rules</button>
         </div>
         <div class="section-body">
           {#if rulesLoading}

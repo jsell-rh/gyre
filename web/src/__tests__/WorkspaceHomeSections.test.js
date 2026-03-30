@@ -195,15 +195,15 @@ describe('Decisions section', () => {
     const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
       expect(getByTestId('decisions-empty')).toBeTruthy();
-      expect(getByTestId('decisions-empty').textContent).toContain('No decisions needed');
+      expect(getByTestId('decisions-empty').textContent).toContain('No pending decisions');
     });
   });
 
-  it('shows empty state text: "system is running autonomously"', async () => {
+  it('shows empty state text with Supervised trust guidance', async () => {
     api.myNotifications.mockResolvedValue([]);
     const { getByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
-      expect(getByTestId('decisions-empty').textContent).toContain('system is running autonomously');
+      expect(getByTestId('decisions-empty').textContent).toContain('Supervised trust');
     });
   });
 
