@@ -366,4 +366,40 @@ describe('CrossWorkspaceHome', () => {
       expect(section?.textContent).toContain('Aggregated');
     }, { timeout: 3000 });
   });
+
+  // ── Gear icon (tenant admin, §10) ─────────────────────────────────────
+  it('does not show gear icon when onSettings prop is not provided', async () => {
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="cross-workspace-home"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    expect(container.querySelector('[data-testid="tenant-gear-btn"]')).toBeNull();
+  });
+
+  it('shows gear icon when onSettings prop is provided', async () => {
+    const onSettings = vi.fn();
+    const { container } = render(CrossWorkspaceHome, { props: { onSettings } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="tenant-gear-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('clicking gear icon calls onSettings', async () => {
+    const onSettings = vi.fn();
+    const { container } = render(CrossWorkspaceHome, { props: { onSettings } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="tenant-gear-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    container.querySelector('[data-testid="tenant-gear-btn"]').click();
+    expect(onSettings).toHaveBeenCalled();
+  });
+
+  it('gear icon has correct aria-label', async () => {
+    const onSettings = vi.fn();
+    const { container } = render(CrossWorkspaceHome, { props: { onSettings } });
+    await waitFor(() => {
+      const btn = container.querySelector('[data-testid="tenant-gear-btn"]');
+      expect(btn?.getAttribute('aria-label')).toContain('Tenant administration');
+    }, { timeout: 3000 });
+  });
 });

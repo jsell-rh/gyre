@@ -12,6 +12,7 @@
 
   let {
     onSelectWorkspace = undefined,
+    onSettings = undefined,
   } = $props();
 
   // ── Notification type icons (HSI §8) ────────────────────────────────────
@@ -167,8 +168,24 @@
 
 <div class="cross-workspace-home" data-testid="cross-workspace-home">
   <div class="cwh-header">
-    <h1 class="cwh-title">All Workspaces</h1>
-    <p class="cwh-subtitle">Tenant-scope overview — decisions, workspaces, specs, briefing, and agent rules across your organization.</p>
+    <div class="cwh-header-text">
+      <h1 class="cwh-title">All Workspaces</h1>
+      <p class="cwh-subtitle">Tenant-scope overview — decisions, workspaces, specs, briefing, and agent rules across your organization.</p>
+    </div>
+    {#if onSettings}
+      <button
+        class="tenant-gear-btn"
+        onclick={() => onSettings?.()}
+        aria-label="Tenant administration"
+        title="Tenant administration (/all/settings)"
+        data-testid="tenant-gear-btn"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    {/if}
   </div>
 
   <!-- ── Decisions ─────────────────────────────────────────────────────── -->
@@ -376,7 +393,38 @@
   }
 
   .cwh-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
     margin-bottom: var(--space-2);
+  }
+
+  .cwh-header-text { flex: 1; min-width: 0; }
+
+  .tenant-gear-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .tenant-gear-btn:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .tenant-gear-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .cwh-title {
