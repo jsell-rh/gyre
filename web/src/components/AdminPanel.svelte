@@ -85,6 +85,50 @@
   let repoDeleteConfirm = $state('');
   let repoDeleting = $state(false);
 
+  // ---- TABLE SORT STATE ----
+  let wsSortKey = $state('name');
+  let wsSortDir = $state('asc');
+  let computeSortKey = $state('name');
+  let computeSortDir = $state('asc');
+  let auditSortKey = $state(null);
+  let auditSortDir = $state('asc');
+  let memberSortKey = $state('name');
+  let memberSortDir = $state('asc');
+  let repoSortKey = $state('name');
+  let repoSortDir = $state('asc');
+  let gateSortKey = $state('name');
+  let gateSortDir = $state('asc');
+
+  function sortWs(key) { if (wsSortKey === key) { wsSortDir = wsSortDir === 'asc' ? 'desc' : 'asc'; } else { wsSortKey = key; wsSortDir = 'asc'; } }
+  function sortCompute(key) { if (computeSortKey === key) { computeSortDir = computeSortDir === 'asc' ? 'desc' : 'asc'; } else { computeSortKey = key; computeSortDir = 'asc'; } }
+  function sortAudit(key) { if (auditSortKey === key) { auditSortDir = auditSortDir === 'asc' ? 'desc' : 'asc'; } else { auditSortKey = key; auditSortDir = 'asc'; } }
+  function sortMember(key) { if (memberSortKey === key) { memberSortDir = memberSortDir === 'asc' ? 'desc' : 'asc'; } else { memberSortKey = key; memberSortDir = 'asc'; } }
+  function sortRepo(key) { if (repoSortKey === key) { repoSortDir = repoSortDir === 'asc' ? 'desc' : 'asc'; } else { repoSortKey = key; repoSortDir = 'asc'; } }
+  function sortGate(key) { if (gateSortKey === key) { gateSortDir = gateSortDir === 'asc' ? 'desc' : 'asc'; } else { gateSortKey = key; gateSortDir = 'asc'; } }
+
+  function sortIcon(activeKey, key, dir) { return activeKey === key ? (dir === 'asc' ? '↑' : '↓') : '↕'; }
+
+  function sortedBy(arr, key, dir) {
+    if (!key || !arr.length) return arr;
+    return [...arr].sort((a, b) => {
+      let av = a[key] ?? '';
+      let bv = b[key] ?? '';
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return dir === 'asc' ? -1 : 1;
+      if (av > bv) return dir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }
+
+  // Sorted derived data
+  let sortedTenantWorkspaces = $derived(sortedBy(tenantWorkspaces, wsSortKey, wsSortDir));
+  let sortedTenantCompute = $derived(sortedBy(tenantCompute, computeSortKey, computeSortDir));
+  let sortedTenantAudit = $derived(sortedBy(tenantAudit, auditSortKey, auditSortDir));
+  let sortedWsMembers = $derived(sortedBy(wsMembers, memberSortKey, memberSortDir));
+  let sortedWsRepos = $derived(sortedBy(wsRepos, repoSortKey, repoSortDir));
+  let sortedRepoGates = $derived(sortedBy(repoGates, gateSortKey, gateSortDir));
+
   // ---- SHARED ----
   let loading = $state(true);
   let refreshing = $state(false);
@@ -722,10 +766,14 @@
           <div class="table-scroll">
             <table class="data-table">
               <thead>
-                <tr><th scope="col">Name</th><th scope="col">Trust Level</th><th scope="col">Description</th></tr>
+                <tr>
+                  <th scope="col" class="sortable" class:sorted={wsSortKey === 'name'} tabindex="0" aria-sort={wsSortKey === 'name' ? (wsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortWs('name')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortWs('name'); } }}>Name <span class="sort-icon">{sortIcon(wsSortKey, 'name', wsSortDir)}</span></th>
+                  <th scope="col" class="sortable" class:sorted={wsSortKey === 'trust_level'} tabindex="0" aria-sort={wsSortKey === 'trust_level' ? (wsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortWs('trust_level')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortWs('trust_level'); } }}>Trust Level <span class="sort-icon">{sortIcon(wsSortKey, 'trust_level', wsSortDir)}</span></th>
+                  <th scope="col">Description</th>
+                </tr>
               </thead>
               <tbody>
-                {#each tenantWorkspaces as ws}
+                {#each sortedTenantWorkspaces as ws}
                   <tr tabindex="0" class="ws-row" onclick={() => navigate('workspace-detail', { workspace: ws })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('workspace-detail', { workspace: ws }); } }}>
                     <td class="agent-name">{ws.name}</td>
                     <td>
@@ -755,9 +803,15 @@
         {:else}
           <div class="table-scroll">
             <table class="data-table">
-              <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Host</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+              <thead><tr>
+                <th scope="col" class="sortable" class:sorted={computeSortKey === 'name'} tabindex="0" aria-sort={computeSortKey === 'name' ? (computeSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortCompute('name')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortCompute('name'); } }}>Name <span class="sort-icon">{sortIcon(computeSortKey, 'name', computeSortDir)}</span></th>
+                <th scope="col" class="sortable" class:sorted={computeSortKey === 'target_type'} tabindex="0" aria-sort={computeSortKey === 'target_type' ? (computeSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortCompute('target_type')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortCompute('target_type'); } }}>Type <span class="sort-icon">{sortIcon(computeSortKey, 'target_type', computeSortDir)}</span></th>
+                <th scope="col">Host</th>
+                <th scope="col" class="sortable" class:sorted={computeSortKey === 'status'} tabindex="0" aria-sort={computeSortKey === 'status' ? (computeSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortCompute('status')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortCompute('status'); } }}>Status <span class="sort-icon">{sortIcon(computeSortKey, 'status', computeSortDir)}</span></th>
+                <th scope="col">Actions</th>
+              </tr></thead>
               <tbody>
-                {#each tenantCompute as ct}
+                {#each sortedTenantCompute as ct}
                   <tr>
                     <td class="agent-name">{ct.name ?? ct.id}</td>
                     <td><Badge value={ct.target_type ?? ct.type ?? 'local'} /></td>
@@ -800,9 +854,14 @@
           <div class="table-scroll">
             <table class="data-table">
               <caption class="sr-only">Audit log</caption>
-              <thead><tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Event</th><th scope="col">Description</th></tr></thead>
+              <thead><tr>
+                <th scope="col" class="sortable" class:sorted={auditSortKey === 'timestamp'} tabindex="0" aria-sort={auditSortKey === 'timestamp' ? (auditSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortAudit('timestamp')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortAudit('timestamp'); } }}>Time <span class="sort-icon">{sortIcon(auditSortKey, 'timestamp', auditSortDir)}</span></th>
+                <th scope="col" class="sortable" class:sorted={auditSortKey === 'actor_id'} tabindex="0" aria-sort={auditSortKey === 'actor_id' ? (auditSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortAudit('actor_id')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortAudit('actor_id'); } }}>Actor <span class="sort-icon">{sortIcon(auditSortKey, 'actor_id', auditSortDir)}</span></th>
+                <th scope="col" class="sortable" class:sorted={auditSortKey === 'event_type'} tabindex="0" aria-sort={auditSortKey === 'event_type' ? (auditSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortAudit('event_type')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortAudit('event_type'); } }}>Event <span class="sort-icon">{sortIcon(auditSortKey, 'event_type', auditSortDir)}</span></th>
+                <th scope="col">Description</th>
+              </tr></thead>
               <tbody>
-                {#each tenantAudit as evt}
+                {#each sortedTenantAudit as evt}
                   <tr>
                     <td class="dim" title={absoluteTime(evt.timestamp)}>{relativeTime(evt.timestamp)}</td>
                     <td class="mono dim">{evt.actor_id ?? evt.agent_id ?? '—'}</td>
@@ -960,9 +1019,14 @@
         {:else}
           <div class="table-scroll">
             <table class="data-table">
-              <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Last Active</th><th scope="col">Actions</th></tr></thead>
+              <thead><tr>
+                <th scope="col" class="sortable" class:sorted={memberSortKey === 'name'} tabindex="0" aria-sort={memberSortKey === 'name' ? (memberSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortMember('name')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortMember('name'); } }}>User <span class="sort-icon">{sortIcon(memberSortKey, 'name', memberSortDir)}</span></th>
+                <th scope="col" class="sortable" class:sorted={memberSortKey === 'role'} tabindex="0" aria-sort={memberSortKey === 'role' ? (memberSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortMember('role')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortMember('role'); } }}>Role <span class="sort-icon">{sortIcon(memberSortKey, 'role', memberSortDir)}</span></th>
+                <th scope="col" class="sortable" class:sorted={memberSortKey === 'last_active'} tabindex="0" aria-sort={memberSortKey === 'last_active' ? (memberSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortMember('last_active')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortMember('last_active'); } }}>Last Active <span class="sort-icon">{sortIcon(memberSortKey, 'last_active', memberSortDir)}</span></th>
+                <th scope="col">Actions</th>
+              </tr></thead>
               <tbody>
-                {#each wsMembers as member}
+                {#each sortedWsMembers as member}
                   <tr>
                     <td>
                       <div class="member-row">
@@ -1142,14 +1206,14 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Name</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Default Branch</th>
-                  <th scope="col">Last Activity</th>
+                  <th scope="col" class="sortable" class:sorted={repoSortKey === 'name'} tabindex="0" aria-sort={repoSortKey === 'name' ? (repoSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortRepo('name')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortRepo('name'); } }}>Name <span class="sort-icon">{sortIcon(repoSortKey, 'name', repoSortDir)}</span></th>
+                  <th scope="col" class="sortable" class:sorted={repoSortKey === 'status'} tabindex="0" aria-sort={repoSortKey === 'status' ? (repoSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortRepo('status')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortRepo('status'); } }}>Status <span class="sort-icon">{sortIcon(repoSortKey, 'status', repoSortDir)}</span></th>
+                  <th scope="col" class="sortable" class:sorted={repoSortKey === 'default_branch'} tabindex="0" aria-sort={repoSortKey === 'default_branch' ? (repoSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortRepo('default_branch')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortRepo('default_branch'); } }}>Default Branch <span class="sort-icon">{sortIcon(repoSortKey, 'default_branch', repoSortDir)}</span></th>
+                  <th scope="col" class="sortable" class:sorted={repoSortKey === 'updated_at'} tabindex="0" aria-sort={repoSortKey === 'updated_at' ? (repoSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortRepo('updated_at')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortRepo('updated_at'); } }}>Last Activity <span class="sort-icon">{sortIcon(repoSortKey, 'updated_at', repoSortDir)}</span></th>
                 </tr>
               </thead>
               <tbody>
-                {#each wsRepos as repo}
+                {#each sortedWsRepos as repo}
                   {@const isArchived = (repo.status ?? '').toLowerCase() === 'archived'}
                   <tr
                     tabindex="0"
@@ -1223,9 +1287,15 @@
         {:else}
           <div class="table-scroll">
             <table class="data-table">
-              <thead><tr><th scope="col">Name</th><th scope="col">Command</th><th scope="col">Timeout</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+              <thead><tr>
+                <th scope="col" class="sortable" class:sorted={gateSortKey === 'name'} tabindex="0" aria-sort={gateSortKey === 'name' ? (gateSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortGate('name')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortGate('name'); } }}>Name <span class="sort-icon">{sortIcon(gateSortKey, 'name', gateSortDir)}</span></th>
+                <th scope="col">Command</th>
+                <th scope="col" class="sortable" class:sorted={gateSortKey === 'timeout_secs'} tabindex="0" aria-sort={gateSortKey === 'timeout_secs' ? (gateSortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onclick={() => sortGate('timeout_secs')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortGate('timeout_secs'); } }}>Timeout <span class="sort-icon">{sortIcon(gateSortKey, 'timeout_secs', gateSortDir)}</span></th>
+                <th scope="col">Status</th>
+                <th scope="col">Actions</th>
+              </tr></thead>
               <tbody>
-                {#each repoGates as gate}
+                {#each sortedRepoGates as gate}
                   <tr>
                     <td class="agent-name">{gate.name}</td>
                     <td class="mono dim">{gate.command ?? '—'}</td>
@@ -1863,6 +1933,13 @@
   .data-table tbody tr:hover { background: var(--color-surface-elevated); }
   .data-table td { padding: var(--space-3) var(--space-4); vertical-align: middle; color: var(--color-text); }
   .table-scroll { overflow-x: auto; }
+
+  /* Sortable column headers */
+  .data-table th.sortable { cursor: pointer; user-select: none; transition: color var(--transition-fast); }
+  .data-table th.sortable:hover { color: var(--color-text); }
+  .data-table th.sorted { color: var(--color-text); }
+  .data-table th.sortable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+  .sort-icon { margin-left: var(--space-1); font-size: 0.7em; }
 
   .ws-row { cursor: pointer; }
   .ws-row:focus-visible {
