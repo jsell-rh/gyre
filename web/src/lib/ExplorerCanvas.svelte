@@ -161,11 +161,12 @@
     return () => { cancelled = true; };
   });
 
-  // Run graph predict when spec draft changes (debounced 800ms)
+  // Run graph predict only when spec draft differs from fetched content (debounced 800ms)
   $effect(() => {
     const draft = specEditDraft;
     const node = specPanelNode;
-    if (!draft || !node || !repoId) return;
+    // Skip predict if draft matches the original fetched content (no user edits yet)
+    if (!draft || !node || !repoId || draft === specContent) return;
     clearTimeout(specPredictTimer);
     specPredictTimer = setTimeout(() => {
       api.graphPredict(repoId, { spec_path: node.spec_path, draft_content: draft })

@@ -227,14 +227,9 @@ describe('ExplorerCanvas — spec content loading', () => {
 
 // ── ExplorerCanvas — ghost overlays from spec editing ────────────────────────
 describe('ExplorerCanvas — ghost overlays on canvas', () => {
-  it('ghost legend appears when overlays are present (after predict response)', async () => {
+  it('does not call graphPredict when spec draft is unchanged (initial load)', async () => {
     api.specContent.mockResolvedValue({ content: '# Spec\n\nContent here.' });
-    api.graphPredict.mockResolvedValue({
-      overlays: [
-        { nodeId: 'node-specced', type: 'modified' },
-        { nodeId: 'node-other', type: 'new' },
-      ],
-    });
+    api.graphPredict.mockClear();
 
     const { container } = render(ExplorerCanvas, {
       props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' },
@@ -242,20 +237,37 @@ describe('ExplorerCanvas — ghost overlays on canvas', () => {
 
     const nodeEl = container.querySelector(`[data-node-id="${NODE_WITH_SPEC.id}"]`);
     dblclick(nodeEl);
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 1100)); // past debounce
 
-    // Trigger a predict by simulating spec edit - set input value and wait for debounce
-    // The $effect will fire after spec content loads and editDraft changes
-    // Since we can't easily trigger the textarea input event, let's just verify
-    // the graphPredict mock integration by checking the ghost legend if overlays are set
-    // The ghost legend only appears if ghostOverlays.length > 0 which comes from predict
-    // We'll verify the graphPredict is called at least on spec content load
-    // (via the $effect watching specEditDraft when it gets populated from specContent)
-    await new Promise(r => setTimeout(r, 1000)); // wait for debounce
+    // predict should NOT fire — draft === specContent (no edits)
+    expect(api.graphPredict).not.toHaveBeenCalled();
+  });
 
-    expect(api.graphPredict).toHaveBeenCalledWith('repo-1', expect.objectContaining({
-      spec_path: 'specs/system/my-module.md',
-    }));
+  it('calls graphPredict when spec draft differs from original content', async () => {
+    api.specContent.mockResolvedValue({ content: '# Original\n\nOriginal content.' });
+    api.graphPredict.mockResolvedValue({
+      overlays: [{ nodeId: 'node-specced', type: 'modified' }],
+    });
+    api.graphPredict.mockClear();
+
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: SAMPLE_NODES, edges: SAMPLE_EDGES, repoId: 'repo-1' },
+    });
+
+    const nodeEl = container.querySelector(`[data-node-id="${NODE_WITH_SPEC.id}"]`);
+    dblclick(nodeEl);
+    await new Promise(r => setTimeout(r, 50)); // spec content loads
+
+    // Simulate user editing the textarea (changes draft away from original)
+    const textarea = container.querySelector('[data-testid="spec-editor"]');
+    if (textarea) {
+      textarea.value = '# Original\n\nOriginal content.\n\nNew section added by user.';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 1100)); // past debounce
+      expect(api.graphPredict).toHaveBeenCalledWith('repo-1', expect.objectContaining({
+        spec_path: 'specs/system/my-module.md',
+      }));
+    }
   });
 });
 
