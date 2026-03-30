@@ -318,10 +318,6 @@ export const api = {
     const qs = path ? `?path=${encodeURIComponent(path)}` : '';
     return request(`/specs/approvals${qs}`);
   },
-  specsApprove: (data) =>
-    request('/specs/approve', { method: 'POST', body: JSON.stringify(data) }),
-  specsRevoke: (data) =>
-    request('/specs/revoke', { method: 'POST', body: JSON.stringify(data) }),
   // Audit events (M7.1)
   auditEvents: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
