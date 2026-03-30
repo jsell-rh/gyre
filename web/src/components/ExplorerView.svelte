@@ -8,6 +8,8 @@
   import { toast as showToast } from '../lib/toast.svelte.js';
   import WorkspaceCards from './WorkspaceCards.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
+  import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
+  import Briefing from './Briefing.svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -32,8 +34,85 @@
   let selectedNode = null;
   let graphError = $state(null);
 
-  // Repo-scope tab: 'architecture' | 'code'
+  // Repo-scope tab: 'architecture' | 'code' | 'briefing'
   let explorerTab = $state('architecture');
+
+  // Filter panel state
+  let filterVisible = $state(false);
+  let activeFilters = $state(null);
+
+  function onFilterChange(filters) {
+    activeFilters = filters;
+  }
+
+  // Ask input state (conversational exploration, §3 Architecture tab)
+  let askQuery = $state('');
+  let askLoading = $state(false);
+  let askExplanation = $state('');
+  let askError = $state('');
+  let askAbortController = null;
+
+  async function submitAsk() {
+    const wid = scope.workspaceId;
+    if (!askQuery.trim() || !wid || askLoading) return;
+    askAbortController?.abort();
+    const controller = new AbortController();
+    askAbortController = controller;
+    askLoading = true;
+    askExplanation = '';
+    askError = '';
+    try {
+      const res = await api.generateExplorerView(wid, {
+        question: askQuery.trim(),
+        ...(selectedRepoId ? { repo_id: selectedRepoId } : {}),
+      });
+      if (!res.ok) {
+        askError = `Request failed: ${res.status}`;
+        askLoading = false;
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() ?? '';
+        for (const block of blocks) {
+          if (!block.trim()) continue;
+          const lines = block.split('\n');
+          let eventType = 'message';
+          let dataPayload = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+            else if (line.startsWith('data: ')) dataPayload += (dataPayload ? '\n' : '') + line.slice(6);
+          }
+          if (eventType === 'error') {
+            askError = dataPayload || 'LLM connection failed';
+          } else if (eventType === 'partial') {
+            askExplanation += dataPayload;
+          } else if (eventType === 'complete' || eventType === 'message') {
+            try {
+              const parsed = JSON.parse(dataPayload);
+              if (parsed.explanation) askExplanation = parsed.explanation;
+            } catch {
+              if (dataPayload) askExplanation = dataPayload;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      askError = 'LLM connection failed';
+    } finally {
+      if (!controller.signal.aborted) {
+        askLoading = false;
+        askAbortController = null;
+      }
+    }
+  }
 
   // Concept search state
   let conceptQuery = $state('');
@@ -170,7 +249,10 @@
     }
   }
 
-  onDestroy(() => clearTimeout(debounceTimer));
+  onDestroy(() => {
+    clearTimeout(debounceTimer);
+    askAbortController?.abort();
+  });
 
   let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
   let conceptFilterIds = $derived.by(() =>
@@ -280,7 +362,7 @@
       <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div class="explorer-tabs" role="tablist" aria-label="Explorer view"
         onkeydown={(e) => {
-          const tabs = ['architecture', 'code'];
+          const tabs = ['architecture', 'briefing', 'code'];
           const idx = tabs.indexOf(explorerTab);
           if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
             e.preventDefault();
@@ -300,6 +382,15 @@
           type="button"
         >Architecture</button>
         <button
+          class="explorer-tab-btn {explorerTab === 'briefing' ? 'active' : ''}"
+          role="tab"
+          id="explorer-tab-briefing"
+          aria-selected={explorerTab === 'briefing'}
+          tabindex={explorerTab === 'briefing' ? 0 : -1}
+          onclick={() => { explorerTab = 'briefing'; }}
+          type="button"
+        >Briefing</button>
+        <button
           class="explorer-tab-btn {explorerTab === 'code' ? 'active' : ''}"
           role="tab"
           id="explorer-tab-code"
@@ -311,9 +402,25 @@
       </div>
     {/if}
 
-    <!-- Concept search bar — shown when architecture tab is active + repo loaded -->
+    <!-- Control bar — shown when architecture tab is active + repo loaded -->
     {#if selectedRepoId && explorerTab === 'architecture'}
       <div class="concept-search-bar">
+        <!-- Filter toggle -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={filterVisible}
+          onclick={() => { filterVisible = !filterVisible; }}
+          title="Toggle filter panel"
+          aria-label="Toggle filter panel"
+          aria-pressed={filterVisible}
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+          </svg>
+        </button>
+
+        <!-- Concept search -->
         <div class="search-input-wrap">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="search-icon" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -360,48 +467,100 @@
             </span>
           {/if}
         {/if}
+
+        <span class="control-spacer"></span>
+
+        <!-- Ask input (conversational exploration, §8 of system-explorer.md) -->
+        <div class="ask-wrap">
+          <input
+            type="text"
+            class="ask-input"
+            placeholder="Ask: How does auth work?"
+            bind:value={askQuery}
+            onkeydown={(e) => { if (e.key === 'Enter') submitAsk(); }}
+            disabled={askLoading}
+            aria-label="Ask about architecture"
+            aria-busy={askLoading}
+          />
+          <button
+            class="ctrl-btn ask-btn"
+            onclick={submitAsk}
+            disabled={askLoading || !askQuery.trim()}
+            type="button"
+            aria-label="Submit question"
+          >
+            {#if askLoading}
+              <span class="spinner" aria-hidden="true"></span>
+            {:else}
+              Ask
+            {/if}
+          </button>
+        </div>
       </div>
+
+      <!-- Ask explanation/error feedback -->
+      {#if askExplanation || askError}
+        <div class="ask-feedback" role="status" aria-live="polite">
+          {#if askError}
+            <span class="ask-error">{askError}</span>
+          {:else}
+            <span class="ask-explanation">{askExplanation}</span>
+          {/if}
+        </div>
+      {/if}
     {/if}
 
     <!-- Main content -->
     <div class="explorer-body">
-      {#if !selectedRepoId}
-        <div class="empty-state-wrap">
-          <EmptyState
-            title="Select a repository"
-            description="Choose a repository above to explore its realized architecture — types, traits, functions, endpoints, and their relationships."
-          />
-          {#if repos.length === 0 && !reposLoading}
-            <p class="hint">No repositories found. Create a project and repository to get started.</p>
-            <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>Go to Settings</button>
-          {/if}
-        </div>
-
-      {:else if explorerTab === 'code'}
-        <ExplorerCodeTab repoId={selectedRepoId} repo={selectedRepo} />
-
-      {:else if loading}
-        <div class="loading-wrap">
-          <Skeleton lines={8} />
-          <p class="loading-msg">Fetching knowledge graph…</p>
-        </div>
-
-      {:else if graphError}
-        <div class="graph-error" role="alert">
-          <p>Failed to load graph: {graphError}</p>
-          <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">Retry</button>
-        </div>
-
-      {:else if graph}
-        <MoldableView
-          nodes={graph.nodes ?? []}
-          edges={graph.edges ?? []}
-          repoId={selectedRepoId}
-          onSelectNode={onSelectNode}
-          conceptFilterIds={conceptFilterIds}
-          conceptQuery={conceptQuery.trim()}
-        />
+      <!-- Filter panel (collapsible left panel, per ui-navigation.md §3) -->
+      {#if explorerTab === 'architecture'}
+        <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} />
       {/if}
+
+      <div class="explorer-body-main">
+        {#if !selectedRepoId}
+          <div class="empty-state-wrap">
+            <EmptyState
+              title="Select a repository"
+              description="Choose a repository above to explore its realized architecture — types, traits, functions, endpoints, and their relationships."
+            />
+            {#if repos.length === 0 && !reposLoading}
+              <p class="hint">No repositories found. Create a project and repository to get started.</p>
+              <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>Go to Settings</button>
+            {/if}
+          </div>
+
+        {:else if explorerTab === 'briefing'}
+          <div class="briefing-wrap">
+            <Briefing workspaceId={scope.workspaceId} repoId={selectedRepoId} scope="workspace" workspaceName={workspaceName} />
+          </div>
+
+        {:else if explorerTab === 'code'}
+          <ExplorerCodeTab repoId={selectedRepoId} repo={selectedRepo} />
+
+        {:else if loading}
+          <div class="loading-wrap">
+            <Skeleton lines={8} />
+            <p class="loading-msg">Fetching knowledge graph…</p>
+          </div>
+
+        {:else if graphError}
+          <div class="graph-error" role="alert">
+            <p>Failed to load graph: {graphError}</p>
+            <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">Retry</button>
+          </div>
+
+        {:else if graph}
+          <MoldableView
+            nodes={graph.nodes ?? []}
+            edges={graph.edges ?? []}
+            repoId={selectedRepoId}
+            onSelectNode={onSelectNode}
+            conceptFilterIds={conceptFilterIds}
+            conceptQuery={conceptQuery.trim()}
+          />
+        {/if}
+      </div>
     </div>
   </div>
 {/if}
@@ -614,7 +773,20 @@
     flex: 1;
     overflow: hidden;
     display: flex;
+    flex-direction: row;
+  }
+
+  .explorer-body-main {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
     flex-direction: column;
+    min-width: 0;
+  }
+
+  .briefing-wrap {
+    flex: 1;
+    overflow-y: auto;
   }
 
   .empty-state-wrap {
@@ -897,6 +1069,96 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
+
+  /* ── Filter toggle button ──────────────────────────────────────────── */
+  .ctrl-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .ctrl-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .ctrl-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .ctrl-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .icon-btn.active {
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .control-spacer {
+    flex: 1;
+  }
+
+  /* ── Ask input ─────────────────────────────────────────────────────── */
+  .ask-wrap {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .ask-input {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    min-width: 180px;
+    max-width: 260px;
+    outline: none;
+    transition: border-color var(--transition-fast);
+  }
+
+  .ask-input::placeholder { color: var(--color-text-muted); }
+
+  .ask-input:focus {
+    border-color: var(--color-focus);
+    box-shadow: 0 0 0 2px var(--color-focus);
+  }
+
+  .ask-btn {
+    padding: var(--space-1) var(--space-3);
+  }
+
+  /* ── Ask feedback ──────────────────────────────────────────────────── */
+  .ask-feedback {
+    padding: var(--space-2) var(--space-6);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    max-height: 100px;
+    overflow-y: auto;
+  }
+
+  .ask-explanation { color: var(--color-text-secondary); }
+  .ask-error { color: var(--color-danger); }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
