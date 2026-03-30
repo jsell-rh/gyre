@@ -14,14 +14,40 @@
   import { api } from '../lib/api.js';
   import Briefing from './Briefing.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import Modal from '../lib/Modal.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   const goToAgentRules = getContext('goToAgentRules');
 
   let {
     workspace = null,
     onSelectRepo = undefined,
+    onWorkspaceCreated = undefined,
     decisionsCount = 0,
   } = $props();
+
+  // ── Create Workspace form state ───────────────────────────────────────
+  let createWsOpen = $state(false);
+  let createWsForm = $state({ name: '', description: '' });
+  let createWsSaving = $state(false);
+
+  async function handleCreateWorkspace() {
+    const name = createWsForm.name.trim();
+    if (!name) return;
+    createWsSaving = true;
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
+      toastSuccess(`Workspace "${name}" created.`);
+      createWsOpen = false;
+      createWsForm = { name: '', description: '' };
+      onWorkspaceCreated?.(newWs);
+    } catch (e) {
+      toastError('Failed to create workspace: ' + (e.message || e));
+    } finally {
+      createWsSaving = false;
+    }
+  }
 
   // ── Notification type icons + labels (HSI §8) ─────────────────────────
   const TYPE_ICONS = {
@@ -410,7 +436,7 @@
 
 <div class="workspace-home" data-testid="workspace-home">
   {#if !workspace}
-    <!-- No workspace selected — prompt user to select one -->
+    <!-- No workspace selected — prompt user to select or create one -->
     <div class="no-workspace">
       <div class="no-workspace-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
@@ -419,7 +445,14 @@
         </svg>
       </div>
       <h2 class="no-workspace-title">Select a workspace</h2>
-      <p class="no-workspace-desc">Choose a workspace from the selector above to get started.</p>
+      <p class="no-workspace-desc">Choose a workspace from the selector above, or create a new one.</p>
+      <button
+        class="create-ws-btn"
+        onclick={() => { createWsForm = { name: '', description: '' }; createWsOpen = true; }}
+        data-testid="create-workspace-btn"
+      >
+        + New Workspace
+      </button>
     </div>
   {:else}
     <div class="sections">
@@ -845,6 +878,38 @@
   {/if}
 </div>
 
+<!-- Create Workspace modal -->
+<Modal bind:open={createWsOpen} title="New Workspace" size="sm">
+  <div class="create-ws-form">
+    <label class="create-ws-label">Name *
+      <input
+        class="create-ws-input"
+        bind:value={createWsForm.name}
+        placeholder="e.g. Backend Team"
+        onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+      />
+    </label>
+    <label class="create-ws-label">Description
+      <input
+        class="create-ws-input"
+        bind:value={createWsForm.description}
+        placeholder="What is this workspace for?"
+        onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+      />
+    </label>
+    <div class="create-ws-actions">
+      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>Cancel</button>
+      <button
+        class="create-ws-submit"
+        onclick={handleCreateWorkspace}
+        disabled={createWsSaving || !createWsForm.name?.trim()}
+      >
+        {createWsSaving ? 'Creating…' : 'Create Workspace'}
+      </button>
+    </div>
+  </div>
+</Modal>
+
 <style>
   .workspace-home {
     flex: 1;
@@ -882,6 +947,102 @@
   .no-workspace-desc {
     font-size: var(--text-sm);
     margin: 0;
+  }
+
+  .create-ws-btn {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    margin-top: var(--space-2);
+  }
+
+  .create-ws-btn:hover { background: var(--color-primary-hover); }
+
+  .create-ws-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Create Workspace modal form ───────────────────────────────────── */
+  .create-ws-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .create-ws-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .create-ws-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
+  }
+
+  .create-ws-input:focus:not(:focus-visible) { outline: none; }
+
+  .create-ws-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-color: var(--color-focus);
+  }
+
+  .create-ws-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .create-ws-cancel {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+
+  .create-ws-cancel:hover { border-color: var(--color-text-muted); }
+
+  .create-ws-submit {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .create-ws-submit:hover { background: var(--color-primary-hover); }
+  .create-ws-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .create-ws-cancel:focus-visible,
+  .create-ws-submit:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Sections layout ────────────────────────────────────────────────── */
