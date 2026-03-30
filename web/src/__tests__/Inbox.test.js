@@ -94,9 +94,9 @@ describe('Inbox', () => {
     expect(container.innerHTML.length).toBeGreaterThan(0);
   });
 
-  it('shows the inbox title', () => {
+  it('shows the decisions title', () => {
     const { getByText } = render(Inbox);
-    expect(getByText('Inbox')).toBeTruthy();
+    expect(getByText('Decisions')).toBeTruthy();
   });
 
   it('shows Show Dismissed toggle', () => {
