@@ -2,8 +2,8 @@
   /**
    * WorkspaceHome — workspace dashboard (§2 of ui-navigation.md)
    *
-   * Sections: Decisions, Repos, Briefing, Specs, Agent Rules.
-   * Implements real data loading for all five sections.
+   * Sections: Decisions, Repos, Architecture, Briefing, Specs, Agent Rules.
+   * Implements real data loading for all six sections.
    *
    * Spec refs:
    *   ui-navigation.md §2 (Workspace Home sections)
@@ -12,6 +12,7 @@
    */
   import { api } from '../lib/api.js';
   import Briefing from './Briefing.svelte';
+  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 
   let {
     workspace = null,
@@ -70,6 +71,33 @@
   let specsError = $state(null);
   let specs = $state([]);
   let specsStatusFilter = $state('');
+
+  // ── Architecture state ─────────────────────────────────────────────────
+  let archExpanded = $state(false);
+  let archLoading = $state(false);
+  let archError = $state(null);
+  let archGraph = $state(null); // { nodes: [], edges: [] }
+
+  async function loadArchGraph() {
+    if (!workspace?.id) return;
+    archLoading = true;
+    archError = null;
+    try {
+      archGraph = await api.workspaceGraph(workspace.id);
+    } catch (e) {
+      archError = e.message || 'Failed to load workspace graph';
+      archGraph = { nodes: [], edges: [] };
+    } finally {
+      archLoading = false;
+    }
+  }
+
+  function toggleArch() {
+    archExpanded = !archExpanded;
+    if (archExpanded && !archGraph && !archLoading) {
+      loadArchGraph();
+    }
+  }
 
   // ── Agent Rules state ──────────────────────────────────────────────────
   let rulesLoading = $state(true);
@@ -248,6 +276,54 @@
     const repo = repoMap[spec.repo_id];
     if (repo && onSelectRepo) {
       onSelectRepo(repo, 'specs', spec.path);
+    }
+  }
+
+  // ── New Repo form state ────────────────────────────────────────────────
+  let newRepoOpen = $state(false);
+  let newRepoName = $state('');
+  let newRepoDescription = $state('');
+  let newRepoLoading = $state(false);
+  let newRepoError = $state(null);
+
+  // ── Import Repo form state ─────────────────────────────────────────────
+  let importOpen = $state(false);
+  let importUrl = $state('');
+  let importLoading = $state(false);
+  let importError = $state(null);
+
+  async function handleCreateRepo() {
+    const name = newRepoName.trim();
+    if (!name) return;
+    newRepoLoading = true;
+    newRepoError = null;
+    try {
+      await api.createRepo({ name, description: newRepoDescription.trim() || undefined, workspace_id: workspace.id });
+      newRepoOpen = false;
+      newRepoName = '';
+      newRepoDescription = '';
+      await loadRepos();
+    } catch (e) {
+      newRepoError = e.message || 'Failed to create repository';
+    } finally {
+      newRepoLoading = false;
+    }
+  }
+
+  async function handleImportRepo() {
+    const url = importUrl.trim();
+    if (!url) return;
+    importLoading = true;
+    importError = null;
+    try {
+      await api.createMirrorRepo({ url, workspace_id: workspace.id });
+      importOpen = false;
+      importUrl = '';
+      await loadRepos();
+    } catch (e) {
+      importError = e.message || 'Failed to import repository';
+    } finally {
+      importLoading = false;
     }
   }
 
@@ -436,10 +512,134 @@
             </ul>
           {/if}
           <div class="repo-actions">
-            <button class="section-btn" data-testid="btn-new-repo" disabled title="Coming soon">+ New Repo</button>
-            <button class="section-btn" data-testid="btn-import-repo" disabled title="Coming soon">Import</button>
+            <button
+              class="section-btn"
+              data-testid="btn-new-repo"
+              onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }}
+              aria-expanded={newRepoOpen}
+            >+ New Repo</button>
+            <button
+              class="section-btn"
+              data-testid="btn-import-repo"
+              onclick={() => { importOpen = !importOpen; newRepoOpen = false; }}
+              aria-expanded={importOpen}
+            >Import</button>
           </div>
+
+          {#if newRepoOpen}
+            <form
+              class="inline-form"
+              data-testid="new-repo-form"
+              onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}
+            >
+              <div class="inline-form-header">
+                <span class="inline-form-title">New Repository</span>
+                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }} aria-label="Cancel">✕</button>
+              </div>
+              <label class="inline-form-label" for="new-repo-name">Name <span class="required" aria-hidden="true">*</span></label>
+              <input
+                id="new-repo-name"
+                class="inline-form-input"
+                data-testid="new-repo-name-input"
+                type="text"
+                placeholder="my-repo"
+                bind:value={newRepoName}
+                required
+                disabled={newRepoLoading}
+              />
+              <label class="inline-form-label" for="new-repo-desc">Description</label>
+              <input
+                id="new-repo-desc"
+                class="inline-form-input"
+                data-testid="new-repo-description-input"
+                type="text"
+                placeholder="Optional description"
+                bind:value={newRepoDescription}
+                disabled={newRepoLoading}
+              />
+              {#if newRepoError}
+                <p class="inline-form-error" role="alert" data-testid="new-repo-error">{newRepoError}</p>
+              {/if}
+              <div class="inline-form-actions">
+                <button type="submit" class="section-btn primary" data-testid="new-repo-submit" disabled={newRepoLoading || !newRepoName.trim()}>
+                  {newRepoLoading ? 'Creating…' : 'Create'}
+                </button>
+                <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>Cancel</button>
+              </div>
+            </form>
+          {/if}
+
+          {#if importOpen}
+            <form
+              class="inline-form"
+              data-testid="import-repo-form"
+              onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}
+            >
+              <div class="inline-form-header">
+                <span class="inline-form-title">Import Repository</span>
+                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }} aria-label="Cancel">✕</button>
+              </div>
+              <label class="inline-form-label" for="import-url">Repository URL <span class="required" aria-hidden="true">*</span></label>
+              <input
+                id="import-url"
+                class="inline-form-input"
+                data-testid="import-url-input"
+                type="url"
+                placeholder="https://github.com/org/repo"
+                bind:value={importUrl}
+                required
+                disabled={importLoading}
+              />
+              {#if importError}
+                <p class="inline-form-error" role="alert" data-testid="import-error">{importError}</p>
+              {/if}
+              <div class="inline-form-actions">
+                <button type="submit" class="section-btn primary" data-testid="import-submit" disabled={importLoading || !importUrl.trim()}>
+                  {importLoading ? 'Importing…' : 'Import'}
+                </button>
+                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>Cancel</button>
+              </div>
+            </form>
+          {/if}
         </div>
+      </section>
+
+      <!-- ── Architecture ────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
+        <button
+          class="arch-toggle-header"
+          onclick={toggleArch}
+          aria-expanded={archExpanded}
+          aria-controls="arch-body"
+          data-testid="arch-toggle"
+        >
+          <h2 class="section-title" id="section-architecture">Architecture</h2>
+          <span class="arch-toggle-label" aria-hidden="true">
+            {archExpanded ? '▾ Hide workspace graph' : '▸ Show workspace graph'}
+          </span>
+        </button>
+        {#if archExpanded}
+          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
+            {#if archLoading}
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            {:else if archError}
+              <div class="error-row" role="alert">
+                <p class="error-text">{archError}</p>
+                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
+              </div>
+            {:else if archGraph}
+              <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                <ExplorerCanvas
+                  nodes={archGraph.nodes ?? []}
+                  edges={archGraph.edges ?? []}
+                  workspaceId={workspace.id}
+                  scope="workspace"
+                />
+              </div>
+            {/if}
+          </div>
+        {/if}
       </section>
 
       <!-- ── Briefing ──────────────────────────────────────────────────── -->
@@ -1093,6 +1293,54 @@
     color: var(--color-text-muted);
   }
 
+  /* ── Architecture ──────────────────────────────────────────────────── */
+  .arch-toggle-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: var(--font-body);
+    text-align: left;
+    gap: var(--space-2);
+    transition: background var(--transition-fast);
+  }
+
+  .arch-toggle-header:hover {
+    background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-border));
+  }
+
+  .arch-toggle-header:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* When not expanded, remove bottom border (section has no body) */
+  .arch-toggle-header[aria-expanded="false"] {
+    border-bottom: none;
+  }
+
+  .arch-toggle-label {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    flex-shrink: 0;
+    font-family: var(--font-body);
+  }
+
+  .arch-body {
+    padding: 0;
+  }
+
+  .arch-canvas-wrap {
+    height: 320px;
+    position: relative;
+    overflow: hidden;
+  }
+
   /* ── Buttons ────────────────────────────────────────────────────────── */
   .inline-btn {
     padding: var(--space-1) var(--space-2);
@@ -1168,6 +1416,103 @@
   .section-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  .section-btn.primary {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-text-inverse);
+  }
+
+  .section-btn.primary:hover:not(:disabled) {
+    background: var(--color-primary-hover, var(--color-primary));
+    border-color: var(--color-primary-hover, var(--color-primary));
+    color: var(--color-text-inverse);
+  }
+
+  /* ── Inline forms ───────────────────────────────────────────────────── */
+  .inline-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+  }
+
+  .inline-form-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-1);
+  }
+
+  .inline-form-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .inline-form-close {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    line-height: 1;
+    padding: 2px var(--space-1);
+    border-radius: var(--radius);
+  }
+
+  .inline-form-close:hover {
+    color: var(--color-text);
+    background: var(--color-surface);
+  }
+
+  .inline-form-label {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+  }
+
+  .required {
+    color: var(--color-danger);
+  }
+
+  .inline-form-input {
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color var(--transition-fast);
+  }
+
+  .inline-form-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+  }
+
+  .inline-form-input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .inline-form-error {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+  }
+
+  .inline-form-actions {
+    display: flex;
+    gap: var(--space-2);
+    padding-top: var(--space-1);
   }
 
   @media (max-width: 768px) {
