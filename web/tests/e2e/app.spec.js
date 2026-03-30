@@ -1,98 +1,59 @@
 /**
- * Gyre E2E tests — HSI navigation model (S4.1 App Shell)
+ * Gyre E2E tests — new navigation model (ui-navigation.md)
  *
  * Tests run against a live gyre-server on localhost:2222 with GYRE_AUTH_TOKEN=e2e-test-token.
  * The seeded fixture calls POST /api/v1/admin/seed before each test.
  *
- * Navigation model: 6 fixed sidebar items (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin)
- * URL routing: /inbox | /briefing | /explorer | /specs | /meta-specs | /admin (tenant scope)
- *              /workspaces/:id/:nav (workspace scope)
- *              /repos/:id/:nav (repo scope)
+ * Navigation model: workspace home dashboard + repo horizontal tabs (no sidebar)
+ * URL routing: /workspaces/:slug            → workspace home
+ *              /workspaces/:slug/r/:repo     → repo mode, Specs tab (default)
+ *              /workspaces/:slug/r/:repo/architecture → Architecture tab
+ *              /workspaces/:slug/r/:repo/decisions    → Decisions tab
+ *              /workspaces/:slug/r/:repo/code         → Code tab
+ *              /workspaces/:slug/r/:repo/settings     → Settings tab
+ *              /profile                      → user profile
  */
 
 import { test, expect } from './fixtures/seeded.js';
 
-// ---------------------------------------------------------------------------
-// Helper: navigate by direct URL (more reliable than clicking sidebar)
-// ---------------------------------------------------------------------------
-const NAV_ROUTES = {
-  'inbox':      '/inbox',
-  'briefing':   '/briefing',
-  'explorer':   '/explorer',
-  'specs':      '/specs',
-  'meta-specs': '/meta-specs',
-  'admin':      '/admin',
-};
-
-async function navigateTo(page, nav) {
-  const route = NAV_ROUTES[nav];
-  if (!route) throw new Error(`Unknown nav: ${nav}`);
-  await page.goto(route);
-  await page.waitForLoadState('networkidle');
-}
+// Seed workspace slug — matches the seed fixture data.
+// The seed endpoint creates a workspace with this slug; adjust if fixture changes.
+const SEED_SLUG = 'default';
+const SEED_REPO = 'sample-repo'; // first repo in seeded workspace; adjust if fixture changes
 
 // ---------------------------------------------------------------------------
 // App shell structure
 // ---------------------------------------------------------------------------
 
 test.describe('App shell', () => {
-  test('renders_sidebar_with_6_nav_items', async ({ page }) => {
+  test('topbar_renders_with_workspace_selector_search_decisions_avatar', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // Sidebar should be present
-    const sidebar = page.locator('[data-testid="sidebar"]');
-    await expect(sidebar).toBeVisible({ timeout: 5000 });
+    // Topbar should be present
+    const topbar = page.locator('[data-testid="topbar"]');
+    await expect(topbar).toBeVisible({ timeout: 5000 });
 
-    // All 6 nav items should be present
-    const navItems = ['Inbox', 'Briefing', 'Explorer', 'Specs', 'Meta-specs', 'Admin'];
-    for (const label of navItems) {
-      const btn = sidebar.getByRole('button', { name: label, exact: true });
-      await expect(btn).toBeVisible({ timeout: 3000 });
-    }
-  });
-
-  test('sidebar_active_state_updates_on_navigation', async ({ page }) => {
-    await navigateTo(page, 'explorer');
-
-    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
-    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-
-    // Navigate to Specs — active state should move
-    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs', exact: true });
-    await specsBtn.click();
-    await page.waitForLoadState('networkidle');
-    await expect(specsBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('sidebar_collapse_toggle', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
-
-    const collapseBtn = page.getByRole('button', { name: /collapse sidebar/i });
-    await expect(collapseBtn).toBeVisible({ timeout: 3000 });
-    await collapseBtn.click();
-
-    // Sidebar should now show 'Expand sidebar' button
-    const expandBtn = page.getByRole('button', { name: /expand sidebar/i });
-    await expect(expandBtn).toBeVisible({ timeout: 3000 });
-
-    // Click again to restore
-    await expandBtn.click();
-    await expect(page.getByRole('button', { name: /collapse sidebar/i })).toBeVisible({ timeout: 3000 });
-  });
-
-  test('topbar_renders_search_and_user_menu', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
-
-    // Search trigger should be visible in topbar
+    // Search trigger visible in topbar
     const searchTrigger = page.locator('.search-trigger').first();
     await expect(searchTrigger).toBeVisible({ timeout: 3000 });
 
-    // User menu button should be visible
+    // Decisions badge visible in topbar
+    const decisionsBadge = page.locator('[data-testid="decisions-badge"]');
+    await expect(decisionsBadge).toBeVisible({ timeout: 3000 });
+
+    // User avatar button visible
     const userBtn = page.getByRole('button', { name: /user menu/i });
     await expect(userBtn).toBeVisible({ timeout: 3000 });
+  });
+
+  test('no_sidebar_present', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // The old 6-item sidebar MUST NOT exist in the new navigation model
+    const sidebar = page.locator('[data-testid="sidebar"]');
+    await expect(sidebar).not.toBeAttached({ timeout: 3000 });
   });
 
   test('status_bar_renders_with_ws_indicator', async ({ page }) => {
@@ -103,22 +64,16 @@ test.describe('App shell', () => {
     const statusBar = page.locator('[aria-label="Status bar"]');
     await expect(statusBar).toBeVisible({ timeout: 3000 });
 
-    // WS status item should be visible
-    const wsStatus = statusBar.locator('[aria-label*="WebSocket" i]');
+    // WebSocket status item with role=status should be visible
+    const wsStatus = statusBar.locator('[role="status"]');
     await expect(wsStatus).toBeVisible({ timeout: 3000 });
   });
 
-  test('landing_page_is_explorer_on_first_visit', async ({ page }) => {
-    // Clear any stored workspace ID to simulate first visit
-    await page.addInitScript(() => {
-      localStorage.removeItem('gyre_workspace_id');
-    });
+  test('app_shell_renders_on_root_url', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // Should land on explorer (no stored workspace)
-    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
-    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+    await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
   });
 });
 
@@ -169,225 +124,6 @@ test.describe('Auth flow', () => {
     const userBtn = page.locator('.user-btn.auth-active');
     await expect(userBtn).toBeVisible({ timeout: 3000 });
   });
-});
-
-// ---------------------------------------------------------------------------
-// Inbox view
-// ---------------------------------------------------------------------------
-
-test.describe('Inbox view', () => {
-  test('inbox_view_renders', async ({ page }) => {
-    await navigateTo(page, 'inbox');
-
-    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
-    expect(page.url()).toContain('/inbox');
-  });
-
-  test('inbox_sidebar_item_is_active', async ({ page }) => {
-    await navigateTo(page, 'inbox');
-
-    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
-    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('inbox_badge_btn_in_topbar', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
-
-    // Topbar inbox badge shortcut button
-    const inboxBtn = page.locator('.inbox-badge-btn').first();
-    await expect(inboxBtn).toBeVisible({ timeout: 3000 });
-  });
-
-  test('inbox_shows_content_or_empty_state', async ({ page }) => {
-    await navigateTo(page, 'inbox');
-
-    // Inbox renders some content or empty state
-    const inboxContent = page
-      .locator('[class*="inbox"]')
-      .or(page.locator('[class*="notification"]'))
-      .or(page.locator('[class*="empty"]'))
-      .or(page.locator('[class*="skeleton"]'))
-      .first();
-    await expect(inboxContent).toBeVisible({ timeout: 5000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Briefing view
-// ---------------------------------------------------------------------------
-
-test.describe('Briefing view', () => {
-  test('briefing_view_renders', async ({ page }) => {
-    await navigateTo(page, 'briefing');
-
-    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
-    expect(page.url()).toContain('/briefing');
-  });
-
-  test('briefing_sidebar_item_is_active', async ({ page }) => {
-    await navigateTo(page, 'briefing');
-
-    const briefingBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Briefing' });
-    await expect(briefingBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('briefing_shows_content_or_empty_state', async ({ page }) => {
-    await navigateTo(page, 'briefing');
-
-    const briefingContent = page
-      .locator('[class*="briefing"]')
-      .or(page.locator('[class*="section"]'))
-      .or(page.locator('[class*="empty"]'))
-      .or(page.locator('[class*="skeleton"]'))
-      .first();
-    await expect(briefingContent).toBeVisible({ timeout: 5000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Explorer view
-// ---------------------------------------------------------------------------
-
-test.describe('Explorer view', () => {
-  test('explorer_view_renders_at_tenant_scope', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.removeItem('gyre_workspace_id');
-    });
-    await navigateTo(page, 'explorer');
-
-    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
-    expect(page.url()).toContain('/explorer');
-  });
-
-  test('explorer_sidebar_item_is_active', async ({ page }) => {
-    await navigateTo(page, 'explorer');
-
-    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
-    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('explorer_shows_workspace_cards_or_content', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.removeItem('gyre_workspace_id');
-    });
-    await navigateTo(page, 'explorer');
-
-    // Tenant scope: workspace cards or empty state
-    const explorerContent = page
-      .locator('[class*="explorer"]')
-      .or(page.locator('[class*="workspace-card"]'))
-      .or(page.locator('[class*="card"]'))
-      .or(page.locator('[class*="canvas"]'))
-      .or(page.locator('[class*="empty"]'))
-      .first();
-    await expect(explorerContent).toBeVisible({ timeout: 5000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Specs view
-// ---------------------------------------------------------------------------
-
-test.describe('Specs view', () => {
-  test('specs_view_renders', async ({ page }) => {
-    await navigateTo(page, 'specs');
-
-    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
-    expect(page.url()).toContain('/specs');
-  });
-
-  test('specs_sidebar_item_is_active', async ({ page }) => {
-    await navigateTo(page, 'specs');
-
-    const specsBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Specs', exact: true });
-    await expect(specsBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('specs_shows_table_or_empty_state', async ({ page }) => {
-    await navigateTo(page, 'specs');
-
-    const specsContent = page
-      .locator('[class*="spec"]')
-      .or(page.locator('table'))
-      .or(page.locator('[class*="empty"]'))
-      .or(page.locator('[class*="skeleton"]'))
-      .first();
-    await expect(specsContent).toBeVisible({ timeout: 5000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Meta-specs view
-// ---------------------------------------------------------------------------
-
-test.describe('Meta-specs view', () => {
-  test('metaspecs_view_renders', async ({ page }) => {
-    await navigateTo(page, 'meta-specs');
-
-    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
-    expect(page.url()).toContain('/meta-specs');
-  });
-
-  test('metaspecs_sidebar_item_is_active', async ({ page }) => {
-    await navigateTo(page, 'meta-specs');
-
-    const metaBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Meta-specs' });
-    await expect(metaBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('metaspecs_shows_persona_catalog_or_empty_state', async ({ page }) => {
-    await navigateTo(page, 'meta-specs');
-
-    const metaContent = page
-      .locator('[class*="meta"]')
-      .or(page.locator('[class*="persona"]'))
-      .or(page.locator('table'))
-      .or(page.locator('[class*="empty"]'))
-      .or(page.locator('[class*="skeleton"]'))
-      .first();
-    await expect(metaContent).toBeVisible({ timeout: 5000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Admin view
-// ---------------------------------------------------------------------------
-
-test.describe('Admin view', () => {
-  test('admin_view_renders', async ({ page }) => {
-    await navigateTo(page, 'admin');
-
-    await expect(page.locator('.content-inner')).toBeVisible({ timeout: 5000 });
-    expect(page.url()).toContain('/admin');
-  });
-
-  test('admin_sidebar_item_is_active', async ({ page }) => {
-    await navigateTo(page, 'admin');
-
-    const adminBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Admin' });
-    await expect(adminBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('admin_shows_tabbed_interface', async ({ page }) => {
-    await navigateTo(page, 'admin');
-
-    // Admin panel has tabs: Health, Jobs, Audit, Agents, etc.
-    const tabs = page.locator('[role="tab"], [class*="tab-btn"], [class*="tab-item"]');
-    await expect(tabs.first()).toBeVisible({ timeout: 5000 });
-  });
-
-  test('admin_health_tab_shows_server_info', async ({ page }) => {
-    await navigateTo(page, 'admin');
-
-    // Health tab should show gyre server info
-    const healthContent = page
-      .locator('[class*="health"]')
-      .or(page.getByText('gyre'))
-      .or(page.getByText(/0\.1\.0/))
-      .first();
-    await expect(healthContent).toBeVisible({ timeout: 5000 });
-  });
 
   test('user_menu_profile_navigates_to_profile', async ({ page }) => {
     await page.goto('/');
@@ -397,38 +133,224 @@ test.describe('Admin view', () => {
     await page.locator('[role="menuitem"]', { hasText: 'Profile' }).click();
 
     await page.waitForLoadState('networkidle');
-    // Profile view renders a .user-profile container (UserProfile component)
-    const profileContainer = page.locator('.user-profile');
-    await expect(profileContainer).toBeVisible({ timeout: 5000 });
+    // URL should contain /profile
+    expect(page.url()).toContain('/profile');
   });
 });
 
 // ---------------------------------------------------------------------------
-// Scope breadcrumb
+// Workspace home (§2 of ui-navigation.md)
 // ---------------------------------------------------------------------------
 
-test.describe('Scope breadcrumb', () => {
-  test('breadcrumb_renders_in_topbar', async ({ page }) => {
+test.describe('Workspace home', () => {
+  test('landing_shows_workspace_home_dashboard', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // ScopeBreadcrumb renders in the topbar — look for tenant name "Gyre" or breadcrumb element
-    const topbar = page.locator('.topbar, header').first();
-    await expect(topbar).toBeVisible({ timeout: 3000 });
-
-    const breadcrumb = topbar
-      .locator('[class*="breadcrumb"]')
-      .or(topbar.locator('[class*="scope"]'))
-      .or(topbar.getByText('Gyre'))
-      .first();
-    await expect(breadcrumb).toBeVisible({ timeout: 3000 });
+    // Workspace home component should be present
+    const wsHome = page.locator('[data-testid="workspace-home"]');
+    await expect(wsHome).toBeVisible({ timeout: 5000 });
   });
 
-  test('workspace_scope_url_loads_without_crash', async ({ page }) => {
-    // Navigating to a scope URL should load gracefully
-    await page.goto('/explorer');
+  test('decisions_section_renders_or_shows_empty_state', async ({ page }) => {
+    await page.goto('/');
     await page.waitForLoadState('networkidle');
+
+    const decisionsSection = page.locator('[data-testid="section-decisions"]');
+    await expect(decisionsSection).toBeVisible({ timeout: 5000 });
+
+    // After loading completes: either decision items or empty state text must be visible
+    const decisionsContent = decisionsSection
+      .locator('[data-testid="decision-item"]')
+      .or(decisionsSection.locator('[data-testid="decisions-empty"]'))
+      .or(decisionsSection.locator('.skeleton-row'))
+      .first();
+    await expect(decisionsContent).toBeVisible({ timeout: 8000 });
+  });
+
+  test('repos_section_renders_or_shows_empty_state', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const reposSection = page.locator('[data-testid="section-repos"]');
+    await expect(reposSection).toBeVisible({ timeout: 5000 });
+
+    // Repo rows or empty state must be visible
+    const reposContent = reposSection
+      .locator('[data-testid="repo-row"]')
+      .or(reposSection.locator('[data-testid="repos-empty"]'))
+      .or(reposSection.locator('.skeleton-row'))
+      .first();
+    await expect(reposContent).toBeVisible({ timeout: 8000 });
+  });
+
+  test('briefing_section_renders', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const briefingSection = page.locator('[data-testid="section-briefing"]');
+    await expect(briefingSection).toBeVisible({ timeout: 5000 });
+  });
+
+  test('specs_section_renders', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const specsSection = page.locator('[data-testid="section-specs"]');
+    await expect(specsSection).toBeVisible({ timeout: 5000 });
+  });
+
+  test('agent_rules_section_renders', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const agentRulesSection = page.locator('[data-testid="section-agent-rules"]');
+    await expect(agentRulesSection).toBeVisible({ timeout: 5000 });
+  });
+
+  test('workspace_selector_visible_in_topbar', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Workspace selector visible in workspace home mode
+    const wsSelector = page.locator('[data-testid="ws-selector"]');
+    await expect(wsSelector).toBeVisible({ timeout: 3000 });
+  });
+
+  test('workspace_home_url_loads_correctly', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}`);
+    await page.waitForLoadState('networkidle');
+
     await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Repo mode (§3 of ui-navigation.md)
+// ---------------------------------------------------------------------------
+
+test.describe('Repo mode', () => {
+  test('clicking_repo_navigates_to_repo_mode', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Wait for repo list to load (or empty state)
+    const repoLink = page.locator('[data-testid="repo-link"]').first();
+    const hasRepo = await repoLink.isVisible({ timeout: 6000 }).catch(() => false);
+    if (!hasRepo) {
+      // No repos in seed — just verify workspace home loads
+      await expect(page.locator('[data-testid="workspace-home"]')).toBeVisible({ timeout: 3000 });
+      return;
+    }
+
+    await repoLink.click();
+    await page.waitForLoadState('networkidle');
+
+    // Should enter repo mode
+    const repoMode = page.locator('[data-testid="repo-mode"]');
+    await expect(repoMode).toBeVisible({ timeout: 5000 });
+  });
+
+  test('horizontal_tabs_render_in_repo_mode', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    const tabBar = page.locator('[data-testid="repo-tab-bar"]');
+    await expect(tabBar).toBeVisible({ timeout: 5000 });
+
+    // Tabs: Specs, Architecture, Decisions, Code, ⚙ (Settings)
+    for (const tabLabel of ['Specs', 'Architecture', 'Decisions', 'Code']) {
+      await expect(tabBar.getByRole('tab', { name: tabLabel })).toBeVisible({ timeout: 3000 });
+    }
+    // Settings tab uses gear icon label
+    const settingsTab = tabBar.getByRole('tab', { name: /settings|⚙/i });
+    await expect(settingsTab).toBeVisible({ timeout: 3000 });
+  });
+
+  test('specs_tab_is_default_landing_tab', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    const specsTab = page.locator('[data-testid="repo-tab-bar"]').getByRole('tab', { name: 'Specs' });
+    await expect(specsTab).toHaveAttribute('aria-selected', 'true', { timeout: 5000 });
+  });
+
+  test('back_arrow_visible_in_topbar_in_repo_mode', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    const backBtn = page.locator('[data-testid="back-btn"]');
+    await expect(backBtn).toBeVisible({ timeout: 5000 });
+  });
+
+  test('repo_breadcrumb_shows_workspace_slash_repo', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    const breadcrumb = page.locator('[data-testid="repo-breadcrumb"]');
+    await expect(breadcrumb).toBeVisible({ timeout: 5000 });
+  });
+
+  test('back_arrow_returns_to_workspace_home', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    const backBtn = page.locator('[data-testid="back-btn"]');
+    await expect(backBtn).toBeVisible({ timeout: 5000 });
+    await backBtn.click();
+    await page.waitForLoadState('networkidle');
+
+    // Back button navigates to workspace home
+    const wsHome = page.locator('[data-testid="workspace-home"]');
+    await expect(wsHome).toBeVisible({ timeout: 5000 });
+  });
+
+  test('repo_header_renders_with_repo_name', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    const repoHeader = page.locator('[data-testid="repo-header"]');
+    await expect(repoHeader).toBeVisible({ timeout: 5000 });
+
+    const repoNameEl = page.locator('[data-testid="repo-name"]');
+    await expect(repoNameEl).toBeVisible({ timeout: 3000 });
+  });
+
+  test('architecture_tab_renders_and_is_active', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}/architecture`);
+    await page.waitForLoadState('networkidle');
+
+    const archTab = page.locator('[data-testid="repo-tab-bar"]').getByRole('tab', { name: 'Architecture' });
+    await expect(archTab).toHaveAttribute('aria-selected', 'true', { timeout: 5000 });
+
+    // Tab panel content should be visible
+    const tabContent = page.locator('[role="tabpanel"]');
+    await expect(tabContent).toBeVisible({ timeout: 5000 });
+  });
+
+  test('decisions_tab_renders_and_is_active', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}/decisions`);
+    await page.waitForLoadState('networkidle');
+
+    const decisionsTab = page.locator('[data-testid="repo-tab-bar"]').getByRole('tab', { name: 'Decisions' });
+    await expect(decisionsTab).toHaveAttribute('aria-selected', 'true', { timeout: 5000 });
+  });
+
+  test('specs_tab_renders_spec_list_or_empty_state', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}/specs`);
+    await page.waitForLoadState('networkidle');
+
+    const tabContent = page.locator('[role="tabpanel"]');
+    await expect(tabContent).toBeVisible({ timeout: 5000 });
+
+    // Spec content or empty state should be visible inside the tab panel
+    const content = tabContent
+      .locator('[class*="spec"]')
+      .or(tabContent.locator('table'))
+      .or(tabContent.locator('[class*="empty"]'))
+      .or(tabContent.locator('[class*="skeleton"]'))
+      .first();
+    await expect(content).toBeVisible({ timeout: 8000 });
   });
 });
 
@@ -437,49 +359,68 @@ test.describe('Scope breadcrumb', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('URL routing', () => {
-  test('all_6_nav_routes_are_reachable', async ({ page }) => {
-    for (const [nav, route] of Object.entries(NAV_ROUTES)) {
-      await page.goto(route);
-      await page.waitForLoadState('networkidle');
+  test('workspace_home_url_loads', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}`);
+    await page.waitForLoadState('networkidle');
 
-      // App shell should render
-      await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain(`/workspaces/${SEED_SLUG}`);
+  });
 
-      // Correct sidebar item should be active
-      const navBtn = page.locator('[data-testid="sidebar"]')
-        .getByRole('button', { name: new RegExp(nav.replace('-', '[-\\s]'), 'i') })
-        .first();
-      await expect(navBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-    }
+  test('repo_url_loads_with_tab_bar', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+    const tabBar = page.locator('[data-testid="repo-tab-bar"]');
+    await expect(tabBar).toBeVisible({ timeout: 5000 });
+  });
+
+  test('repo_architecture_url_activates_architecture_tab', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}/architecture`);
+    await page.waitForLoadState('networkidle');
+
+    const archTab = page.locator('[data-testid="repo-tab-bar"]').getByRole('tab', { name: 'Architecture' });
+    await expect(archTab).toHaveAttribute('aria-selected', 'true', { timeout: 5000 });
   });
 
   test('unknown_route_falls_back_gracefully', async ({ page }) => {
-    // SPA: unknown route should not crash the app
+    // SPA: unknown route should not crash the app shell
     await page.goto('/nonexistent-view');
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
   });
 
   test('browser_back_forward_navigation', async ({ page }) => {
-    await navigateTo(page, 'inbox');
-    await navigateTo(page, 'explorer');
+    // Navigate workspace home → repo mode
+    await page.goto(`/workspaces/${SEED_SLUG}`);
+    await page.waitForLoadState('networkidle');
 
-    // Go back to inbox
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    // Go back to workspace home
     await page.goBack();
     await page.waitForLoadState('networkidle');
-    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
-    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+    await expect(page.locator('[data-testid="workspace-home"]')).toBeVisible({ timeout: 5000 });
 
-    // Go forward to explorer
+    // Go forward to repo mode
     await page.goForward();
     await page.waitForLoadState('networkidle');
-    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
-    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
+    await expect(page.locator('[data-testid="repo-mode"]')).toBeVisible({ timeout: 5000 });
+  });
+
+  test('profile_url_renders', async ({ page }) => {
+    await page.goto('/profile');
+    await page.waitForLoadState('networkidle');
+
+    await expect(page.locator('.app')).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain('/profile');
   });
 });
 
 // ---------------------------------------------------------------------------
-// Keyboard shortcuts
+// Keyboard shortcuts (§6 of ui-navigation.md — updated g-key sequences)
 // ---------------------------------------------------------------------------
 
 test.describe('Keyboard shortcuts', () => {
@@ -523,37 +464,6 @@ test.describe('Keyboard shortcuts', () => {
     await expect(dialog).not.toBeVisible({ timeout: 3000 });
   });
 
-  test('cmd_1_navigates_to_inbox', async ({ page }) => {
-    await page.goto('/explorer');
-    await page.waitForLoadState('networkidle');
-
-    await page.keyboard.press('Control+1');
-
-    const inboxBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Inbox' });
-    await expect(inboxBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('cmd_3_navigates_to_explorer', async ({ page }) => {
-    await page.goto('/inbox');
-    await page.waitForLoadState('networkidle');
-
-    await page.keyboard.press('Control+3');
-
-    const explorerBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Explorer' });
-    await expect(explorerBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
-  test('cmd_5_navigates_to_meta_specs', async ({ page }) => {
-    // meta-specs is the only hyphenated nav ID — test it explicitly
-    await page.goto('/inbox');
-    await page.waitForLoadState('networkidle');
-
-    await page.keyboard.press('Control+5');
-
-    const metaBtn = page.locator('[data-testid="sidebar"]').getByRole('button', { name: 'Meta-specs' });
-    await expect(metaBtn).toHaveAttribute('aria-current', 'page', { timeout: 3000 });
-  });
-
   test('esc_closes_shortcuts_overlay', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
@@ -576,6 +486,60 @@ test.describe('Keyboard shortcuts', () => {
 
     await page.keyboard.press('Escape');
     await expect(dropdown).not.toBeVisible({ timeout: 3000 });
+  });
+
+  test('g_h_navigates_to_workspace_home', async ({ page }) => {
+    // Start in repo mode
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    // g h sequence (GitHub-style, 500ms window)
+    await page.keyboard.press('g');
+    await page.keyboard.press('h');
+    await page.waitForLoadState('networkidle');
+
+    // Should navigate to workspace home
+    const wsHome = page.locator('[data-testid="workspace-home"]');
+    await expect(wsHome).toBeVisible({ timeout: 5000 });
+  });
+
+  test('g_1_navigates_to_specs_tab_in_repo_mode', async ({ page }) => {
+    // Start on architecture tab
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}/architecture`);
+    await page.waitForLoadState('networkidle');
+
+    // g 1 → Specs tab (repo mode only)
+    await page.keyboard.press('g');
+    await page.keyboard.press('1');
+    await page.waitForLoadState('networkidle');
+
+    const specsTab = page.locator('[data-testid="repo-tab-bar"]').getByRole('tab', { name: 'Specs' });
+    await expect(specsTab).toHaveAttribute('aria-selected', 'true', { timeout: 3000 });
+  });
+
+  test('g_2_navigates_to_architecture_tab_in_repo_mode', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    // g 2 → Architecture tab (repo mode only)
+    await page.keyboard.press('g');
+    await page.keyboard.press('2');
+    await page.waitForLoadState('networkidle');
+
+    const archTab = page.locator('[data-testid="repo-tab-bar"]').getByRole('tab', { name: 'Architecture' });
+    await expect(archTab).toHaveAttribute('aria-selected', 'true', { timeout: 3000 });
+  });
+
+  test('esc_in_repo_mode_returns_to_workspace_home', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    // With no panel open, Esc in repo mode navigates to workspace home
+    await page.keyboard.press('Escape');
+    await page.waitForLoadState('networkidle');
+
+    const wsHome = page.locator('[data-testid="workspace-home"]');
+    await expect(wsHome).toBeVisible({ timeout: 5000 });
   });
 });
 
@@ -640,19 +604,29 @@ test.describe('Accessibility', () => {
     await expect(skipLink).toBeAttached();
   });
 
-  test('sidebar_has_aria_label', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
-
-    const sidebar = page.getByRole('navigation', { name: /main navigation/i });
-    await expect(sidebar).toBeVisible({ timeout: 3000 });
-  });
-
   test('main_content_has_id_for_skip_link', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
 
     await expect(page.locator('#main-content')).toBeAttached();
+  });
+
+  test('status_bar_has_aria_label', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Status bar uses aria-label="Status bar"
+    const statusBar = page.locator('[aria-label="Status bar"]');
+    await expect(statusBar).toBeVisible({ timeout: 3000 });
+  });
+
+  test('repo_tab_bar_has_tablist_role', async ({ page }) => {
+    await page.goto(`/workspaces/${SEED_SLUG}/r/${SEED_REPO}`);
+    await page.waitForLoadState('networkidle');
+
+    // Tab bar should have role=tablist with aria-label
+    const tabBar = page.getByRole('tablist', { name: /repo navigation/i });
+    await expect(tabBar).toBeVisible({ timeout: 5000 });
   });
 });
 
