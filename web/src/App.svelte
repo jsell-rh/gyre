@@ -654,7 +654,7 @@
     // 3. Load user role (for tenant admin gear icon) + decisions count
     try {
       const me = await api.me();
-      userIsAdmin = me?.role === 'Admin' || me?.is_admin === true;
+      userIsAdmin = me?.global_role === 'Admin' || me?.role === 'Admin' || me?.is_admin === true;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
