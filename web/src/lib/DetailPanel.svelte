@@ -1,12 +1,16 @@
 <script>
+  import { getContext } from 'svelte';
   import Tabs from './Tabs.svelte';
   import Button from './Button.svelte';
   import Badge from './Badge.svelte';
   import Skeleton from './Skeleton.svelte';
   import EmptyState from './EmptyState.svelte';
   import EditorSplit from './EditorSplit.svelte';
+  import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import { api } from './api.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
+
+  const goToRepoTab = getContext('goToRepoTab') ?? null;
 
   /**
    * DetailPanel — slide-in panel from the right.
@@ -70,11 +74,12 @@
     if (type === 'spec') {
       // Spec entities from the Specs view: richer tab set
       return [
-        { id: 'content',     label: 'Content' },
-        { id: 'edit',        label: 'Edit' },
-        { id: 'progress',    label: 'Progress' },
-        { id: 'links',       label: 'Links' },
-        { id: 'history',     label: 'History' },
+        { id: 'content',      label: 'Content' },
+        { id: 'edit',         label: 'Edit' },
+        { id: 'progress',     label: 'Progress' },
+        { id: 'links',        label: 'Links' },
+        { id: 'history',      label: 'History' },
+        { id: 'architecture', label: 'Architecture', disabled: !data?.repo_id },
       ];
     }
 
@@ -256,6 +261,15 @@
   let llmSuggestion = $state(null); // { diff: [...], explanation: string } | null
   let saving = $state(false);
 
+  // Architecture tab state (S2: spec detail mini canvas + predict loop)
+  let archNodes = $state([]);
+  let archEdges = $state([]);
+  let archLoading = $state(false);
+  let archLoaded = $state(false); // prevents re-fetch after empty result
+  let archError = $state(null);
+  let archGhostOverlays = $state([]);
+  let archPredictTimer = null;
+
   // Reset spec data when entity changes
   $effect(() => {
     if (entity?.type === 'spec') {
@@ -266,6 +280,12 @@
       editContent = '';
       llmSuggestion = null;
       llmExplanation = '';
+      archNodes = [];
+      archEdges = [];
+      archLoaded = false;
+      archError = null;
+      archGhostOverlays = [];
+      clearTimeout(archPredictTimer);
     }
   });
 
@@ -310,7 +330,66 @@
         .catch(() => { specHistory = []; })
         .finally(() => { specHistoryLoading = false; });
     }
+    if (activeTab === 'architecture' && repoId && !archLoaded && !archLoading) {
+      loadArchGraph(repoId, path);
+    }
   });
+
+  async function loadArchGraph(repoId, specPath) {
+    archLoading = true;
+    archError = null;
+    try {
+      const graph = await api.repoGraph(repoId);
+      const allNodes = graph?.nodes ?? [];
+      const allEdges = graph?.edges ?? [];
+      // Filter to nodes governed by this spec (spec_path match)
+      const specNodes = allNodes.filter((n) => n.spec_path === specPath);
+      const specNodeIds = new Set(specNodes.map((n) => n.id));
+      // Include edges where both endpoints are in this spec's node set
+      const specEdges = allEdges.filter(
+        (e) => specNodeIds.has(e.source_id ?? e.source) && specNodeIds.has(e.target_id ?? e.target)
+      );
+      archNodes = specNodes;
+      archEdges = specEdges;
+      archLoaded = true;
+    } catch (e) {
+      archError = e.message ?? 'Failed to load graph';
+      archLoaded = true; // mark loaded even on error so we don't retry automatically
+    } finally {
+      archLoading = false;
+    }
+  }
+
+  // Debounced graphPredict: when editContent changes while on the architecture tab,
+  // run a predict call 800ms after the user stops typing.
+  $effect(() => {
+    const content = editContent;
+    if (!content || entity?.type !== 'spec') return;
+    const repoId = entity.data?.repo_id;
+    if (!repoId || !archNodes.length) return;
+    clearTimeout(archPredictTimer);
+    archPredictTimer = setTimeout(async () => {
+      try {
+        const result = await api.graphPredict(repoId, {
+          spec_path: entity.id,
+          draft_content: content,
+        });
+        const overlays = result?.predictions ?? result?.overlays ?? [];
+        archGhostOverlays = overlays.map((p) => ({
+          nodeId: p.node_id ?? p.nodeId,
+          type: p.change_type ?? p.type ?? 'modified',
+        }));
+      } catch {
+        // Silent failure — predictions are best-effort
+      }
+    }, 800);
+  });
+
+  function expandToCanvas() {
+    if (!goToRepoTab || !entity) return;
+    // Navigate to Architecture tab; S3 reads highlight_spec to pre-select nodes
+    goToRepoTab('architecture', { highlight_spec: entity.id });
+  }
 
   // LLM-assisted spec editing
   async function sendLlmInstruction() {
@@ -811,6 +890,54 @@
             {/if}
           {:else}
             <EmptyState title="No history available" description="Modification history will appear when changes are recorded." />
+          {/if}
+        </div>
+
+      {:else if activeTab === 'architecture'}
+        <div class="tab-pane arch-tab">
+          {#if archLoading}
+            <div class="arch-loading-wrap">
+              <Skeleton width="100%" height="220px" />
+              <p class="arch-loading-label">Loading architecture graph…</p>
+            </div>
+          {:else if archError}
+            <div class="arch-error" role="alert">
+              <p class="arch-error-msg">{archError}</p>
+              <Button
+                variant="secondary"
+                onclick={() => { archLoaded = false; archNodes = []; loadArchGraph(entity.data?.repo_id, entity.id); }}
+              >Retry</Button>
+            </div>
+          {:else}
+            <div class="arch-mini-header">
+              <span class="arch-mini-label">
+                {archNodes.length} {archNodes.length === 1 ? 'node' : 'nodes'} governed by this spec
+              </span>
+              {#if archGhostOverlays.length}
+                <span class="arch-predict-badge">
+                  {archGhostOverlays.length} predicted change{archGhostOverlays.length !== 1 ? 's' : ''}
+                </span>
+              {/if}
+            </div>
+            <div class="arch-canvas-container" data-testid="arch-mini-canvas-wrap">
+              <ArchPreviewCanvas
+                nodes={archNodes}
+                edges={archEdges}
+                ghostOverlays={archGhostOverlays}
+                size="mini"
+              />
+            </div>
+            {#if goToRepoTab}
+              <div class="arch-expand-wrap">
+                <Button
+                  variant="secondary"
+                  onclick={expandToCanvas}
+                  disabled={!archNodes.length}
+                >
+                  Expand to canvas →
+                </Button>
+              </div>
+            {/if}
           {/if}
         </div>
 
@@ -1562,5 +1689,78 @@
   .start-interrogation:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  /* ── Architecture tab (S2: spec detail mini canvas) ────────────────────────── */
+  .arch-tab {
+    gap: var(--space-3);
+    padding: 0;
+  }
+
+  .arch-loading-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+
+  .arch-loading-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-align: center;
+    margin: 0;
+  }
+
+  .arch-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-4);
+  }
+
+  .arch-error-msg {
+    font-size: var(--text-sm);
+    color: var(--color-danger);
+    margin: 0;
+    text-align: center;
+  }
+
+  .arch-mini-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .arch-mini-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .arch-predict-badge {
+    font-size: var(--text-xs);
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 1px var(--space-2);
+  }
+
+  .arch-canvas-container {
+    flex: 1;
+    min-height: 240px;
+    overflow: hidden;
+  }
+
+  .arch-expand-wrap {
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
   }
 </style>
