@@ -261,6 +261,44 @@
   let llmSuggestion = $state(null); // { diff: [...], explanation: string } | null
   let saving = $state(false);
 
+  // ── Spec approval actions ──────────────────────────────────────────────
+  let approving = $state(false);
+  let revoking = $state(false);
+
+  async function approveCurrentSpec() {
+    if (!entity || approving) return;
+    const sha = entity.data?.current_sha;
+    const path = entity.id;
+    if (!sha || !path) { toastError('Cannot approve: missing spec SHA'); return; }
+    approving = true;
+    try {
+      await api.approveSpec(path, sha);
+      toastSuccess('Spec approved');
+      // Update local state to reflect approval
+      if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'approved' } };
+    } catch (e) {
+      toastError(`Approval failed: ${e.message}`);
+    } finally {
+      approving = false;
+    }
+  }
+
+  async function revokeCurrentSpec() {
+    if (!entity || revoking) return;
+    const path = entity.id;
+    if (!path) return;
+    revoking = true;
+    try {
+      await api.revokeSpec(path, 'Revoked from detail panel');
+      toastSuccess('Spec approval revoked');
+      if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'pending' } };
+    } catch (e) {
+      toastError(`Revocation failed: ${e.message}`);
+    } finally {
+      revoking = false;
+    }
+  }
+
   // Architecture tab state (S2: spec detail mini canvas + predict loop)
   let archNodes = $state([]);
   let archEdges = $state([]);
@@ -648,6 +686,27 @@
                 <dt>Updated</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
               {/if}
             </dl>
+            <div class="spec-approval-actions" data-testid="spec-approval-actions">
+              {#if entity.data?.approval_status === 'approved'}
+                <button
+                  class="approval-btn revoke"
+                  onclick={revokeCurrentSpec}
+                  disabled={revoking}
+                  data-testid="spec-revoke-btn"
+                >
+                  {revoking ? 'Revoking…' : 'Revoke Approval'}
+                </button>
+              {:else}
+                <button
+                  class="approval-btn approve"
+                  onclick={approveCurrentSpec}
+                  disabled={approving || !entity.data?.current_sha}
+                  data-testid="spec-approve-btn"
+                >
+                  {approving ? 'Approving…' : 'Approve'}
+                </button>
+              {/if}
+            </div>
             <div class="spec-content-box">
               <pre class="spec-content-pre">{specDetail.content}</pre>
             </div>
@@ -1243,6 +1302,54 @@
     color: var(--color-text);
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .spec-approval-actions {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+  }
+
+  .approval-btn {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .approval-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .approval-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .approval-btn.approve {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 40%, transparent);
+    color: var(--color-success);
+  }
+
+  .approval-btn.approve:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-success) 25%, transparent);
+    border-color: var(--color-success);
+  }
+
+  .approval-btn.revoke {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 40%, transparent);
+    color: var(--color-danger);
+  }
+
+  .approval-btn.revoke:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-danger) 25%, transparent);
+    border-color: var(--color-danger);
   }
 
   .spec-content-box {
