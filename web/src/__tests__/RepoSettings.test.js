@@ -376,15 +376,19 @@ describe('RepoSettings', () => {
       expect(container.querySelector('[data-testid="delete-btn"]')).toBeTruthy();
     });
 
-    it('delete confirm input renders', async () => {
+    it('delete confirm input renders after clicking delete', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openDangerTab(container);
+      // Confirm box hidden until Delete button clicked
+      expect(container.querySelector('[data-testid="delete-confirm-input"]')).toBeFalsy();
+      await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       expect(container.querySelector('[data-testid="delete-confirm-input"]')).toBeTruthy();
     });
 
     it('delete confirm button is disabled until correct name is typed', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openDangerTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       const confirmBtn = container.querySelector('[data-testid="delete-confirm-btn"]');
       expect(confirmBtn.disabled).toBe(true);
     });
@@ -392,6 +396,7 @@ describe('RepoSettings', () => {
     it('delete confirm button enabled when correct name is typed', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openDangerTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       const input = container.querySelector('[data-testid="delete-confirm-input"]');
       await fireEvent.input(input, { target: { value: 'payment-api' } });
       const confirmBtn = container.querySelector('[data-testid="delete-confirm-btn"]');

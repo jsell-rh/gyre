@@ -25,7 +25,6 @@
   let activeTab = $state('general');
 
   // ── General ──────────────────────────────────────────────────────────
-  let repoName = $state(repo?.name ?? '');
   let repoDescription = $state(repo?.description ?? '');
   let repoDefaultBranch = $state(repo?.default_branch ?? 'main');
   let repoMaxConcurrent = $state(repo?.max_concurrent_agents ?? 3);
@@ -75,6 +74,7 @@
   let archiving = $state(false);
   let archiveError = $state(null);
 
+  let deleteConfirm = $state(false);
   let deleteConfirmName = $state('');
   let deleting = $state(false);
   let deleteError = $state(null);
@@ -284,7 +284,7 @@
 
         <div class="field-card">
           <div class="field">
-            <label class="field-label">Repository Name</label>
+            <span class="field-label">Repository Name</span>
             <div class="field-value" data-testid="repo-name-display">{repo?.name ?? '—'}</div>
             <p class="field-hint">Repository names cannot be changed after creation.</p>
           </div>
@@ -626,14 +626,14 @@
             </div>
             <button
               class="btn-danger"
-              onclick={() => { deleteConfirmName = ''; archiveConfirm = false; deleteError = null; }}
+              onclick={() => { deleteConfirm = true; deleteConfirmName = ''; archiveConfirm = false; deleteError = null; }}
               data-testid="delete-btn"
             >
               Delete
             </button>
           </div>
 
-          {#if deleteConfirmName !== undefined && !archiveConfirm}
+          {#if deleteConfirm && !archiveConfirm}
             <div class="confirm-box" data-testid="delete-confirm-box">
               <p class="confirm-msg">
                 To confirm deletion, type the repository name:
@@ -653,7 +653,7 @@
               <div class="confirm-actions">
                 <button
                   class="btn-secondary"
-                  onclick={() => { deleteConfirmName = ''; deleteError = null; }}
+                  onclick={() => { deleteConfirm = false; deleteConfirmName = ''; deleteError = null; }}
                 >
                   Cancel
                 </button>
