@@ -5,6 +5,7 @@
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
+  import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
@@ -178,7 +179,12 @@
         return { mode: 'workspace_settings', slug, repoName: null, tab: null };
       }
 
-      // /workspaces/:slug  or  /workspaces/:slug/agent-rules  etc.
+      // /workspaces/:slug/agent-rules
+      if (raw[2] === 'agent-rules') {
+        return { mode: 'agent_rules', slug, repoName: null, tab: null };
+      }
+
+      // /workspaces/:slug  or  /workspaces/:slug/...  etc.
       return { mode: 'workspace_home', slug, repoName: null, tab: null };
     }
 
@@ -195,6 +201,7 @@
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
     if (m === 'workspace_settings') return `/workspaces/${encodeURIComponent(slug)}/settings`;
+    if (m === 'agent_rules') return `/workspaces/${encodeURIComponent(slug)}/agent-rules`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
       if (tab && tab !== 'specs') return `${base}/${tab}`;
@@ -266,6 +273,15 @@
     pushState({ mode: 'workspace_settings', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
   }
 
+  function goToAgentRules() {
+    if (!currentWorkspace) return;
+    mode = 'agent_rules';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'agent_rules', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
+  }
+
   function goToProfile() {
     mode = 'profile';
     fadeContent();
@@ -320,6 +336,7 @@
     repoId: currentRepo?.id,
   }));
   setContext('openDetailPanel', openDetailPanel);
+  setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
     if (params) {
@@ -435,13 +452,7 @@
             return;
           case 'a': // g a → agent rules
             e.preventDefault();
-            if (currentWorkspace) {
-              window.history.pushState(
-                { mode: 'workspace_home', wsId: currentWorkspace.id, repoName: null, repoTab: 'specs' },
-                '',
-                `/workspaces/${encodeURIComponent(wsSlug(currentWorkspace))}/agent-rules`
-              );
-            }
+            goToAgentRules();
             return;
           case '1': // g 1 → Specs tab (repo mode only)
             e.preventDefault();
@@ -517,6 +528,8 @@
       document.title = 'Profile | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
+    } else if (mode === 'agent_rules') {
+      document.title = wsName ? `Agent Rules — ${wsName} | Gyre` : 'Agent Rules | Gyre';
     } else if (mode === 'repo' && repoName) {
       document.title = wsName ? `${repoName} — ${wsName} | Gyre` : `${repoName} | Gyre`;
     } else if (mode === 'workspace_home' && wsName) {
@@ -594,6 +607,8 @@
           } catch { /* keep name-only ref */ }
         } else if (parsed.mode === 'workspace_settings') {
           mode = 'workspace_settings';
+        } else if (parsed.mode === 'agent_rules') {
+          mode = 'agent_rules';
         } else {
           mode = 'workspace_home';
         }
@@ -661,7 +676,7 @@
     function handlePopstate(e) {
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace')
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
@@ -694,7 +709,7 @@
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -759,7 +774,32 @@
       </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
-      {#if mode === 'repo'}
+      {#if mode === 'agent_rules'}
+        <!-- Agent rules mode: back arrow + WorkspaceName / Agent Rules -->
+        <div class="topbar-left repo-context">
+          <button
+            class="back-btn"
+            onclick={() => goToWorkspaceHome(currentWorkspace)}
+            aria-label="Back to workspace home"
+            data-testid="back-btn"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+              <path d="M19 12H5M12 5l-7 7 7 7"/>
+            </svg>
+          </button>
+          <nav class="breadcrumb" aria-label="Location">
+            <button
+              class="breadcrumb-ws"
+              onclick={() => goToWorkspaceHome(currentWorkspace)}
+              aria-label="Go to {currentWorkspace?.name ?? 'workspace'} home"
+            >
+              {currentWorkspace?.name ?? 'Workspace'}
+            </button>
+            <span class="breadcrumb-sep" aria-hidden="true">/</span>
+            <span class="breadcrumb-repo" aria-current="page">Agent Rules</span>
+          </nav>
+        </div>
+      {:else if mode === 'repo'}
         <!-- Repo mode: back arrow + WorkspaceName / RepoName -->
         <div class="topbar-left repo-context">
           <button
@@ -1114,6 +1154,11 @@
           <WorkspaceSettings
             workspace={currentWorkspace}
             onBack={() => goToWorkspaceHome(currentWorkspace)}
+          />
+        {:else if mode === 'agent_rules'}
+          <MetaSpecs
+            scope={currentWorkspace ? 'workspace' : 'tenant'}
+            workspaceId={currentWorkspace?.id ?? null}
           />
         {:else if mode === 'repo'}
           <RepoMode
