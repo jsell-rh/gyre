@@ -12,6 +12,7 @@ use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
+use super::repos::RepoResponse;
 use super::{new_id, now_secs};
 
 #[derive(Deserialize)]
@@ -88,11 +89,6 @@ impl From<Workspace> for WorkspaceResponse {
 
 #[derive(Deserialize)]
 pub struct AddRepoRequest {
-    pub repo_id: String,
-}
-
-#[derive(Serialize)]
-pub struct WorkspaceRepoEntry {
     pub repo_id: String,
 }
 
@@ -304,7 +300,7 @@ pub async fn list_workspace_repos(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(ws_id): Path<String>,
-) -> Result<Json<Vec<WorkspaceRepoEntry>>, ApiError> {
+) -> Result<Json<Vec<RepoResponse>>, ApiError> {
     let ws = state
         .workspaces
         .find_by_id(&Id::new(&ws_id))
@@ -314,14 +310,11 @@ pub async fn list_workspace_repos(
         return Err(ApiError::NotFound(format!("workspace {ws_id} not found")));
     }
     let repos = state.repos.list_by_workspace(&Id::new(&ws_id)).await?;
-    Ok(Json(
-        repos
-            .into_iter()
-            .map(|r| WorkspaceRepoEntry {
-                repo_id: r.id.to_string(),
-            })
-            .collect(),
-    ))
+    let mut responses = Vec::with_capacity(repos.len());
+    for repo in repos {
+        responses.push(super::repos::repo_response_with_clone_url(&state, repo).await);
+    }
+    Ok(Json(responses))
 }
 
 /// Response entry for GET /api/v1/workspaces/:workspace_id/presence.
