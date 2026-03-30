@@ -77,7 +77,8 @@
   }
 
   function selectRepo(repo) {
-    navigate?.('explorer', { type: 'repo', repoId: repo.id, workspaceId: scope.workspaceId });
+    // In workspace-scope mode, selecting a repo loads its graph in this view
+    selectedRepoId = repo.id;
   }
 
   async function loadRepos() {
