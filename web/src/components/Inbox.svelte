@@ -137,14 +137,14 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.markNotificationRead(n.id);
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
+      );
+      if (expandedId === n.id) expandedId = null;
     } catch {
-      toastError('Dismiss failed — change may not be saved.');
+      toastError('Dismiss failed — please try again.');
     }
-    notifications = notifications.map(item =>
-      item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
-    );
     actionStates = { ...actionStates, [n.id]: { loading: false } };
-    if (expandedId === n.id) expandedId = null;
   }
 
   // Spec paths in notification bodies may include a leading "specs/" prefix.
@@ -438,7 +438,10 @@
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         View Spec
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
+                      <Button variant="ghost" size="sm" onclick={() => {
+                        const b = getBody(n);
+                        openDetail({ type: 'spec', id: b.spec_path || n.entity_ref, data: n, defaultTab: 'architecture' });
+                      }}>
                         View in Explorer
                       </Button>
                       <Button
