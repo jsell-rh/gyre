@@ -121,6 +121,184 @@
   $effect.pre(() => { specLinkageOn = showSpecLinkage; });
   let showUnspeccedOnly = $state(false);
 
+  // ── Ghost overlays (from spec editing predictions) ─────────────────────────
+  let ghostOverlays = $state([]); // [{ nodeId, type: 'new'|'modified'|'removed' }]
+  let ghostByNodeId = $derived.by(() => {
+    const m = new Map();
+    for (const g of ghostOverlays) m.set(g.nodeId, g.type);
+    return m;
+  });
+
+  // ── Spec detail panel (bidirectional nav — TASK-360) ───────────────────────
+  let specPanelNode = $state(null);     // node currently shown in spec panel
+  let specContent = $state('');         // fetched raw markdown
+  let specLoading = $state(false);
+  let specEditDraft = $state('');       // editable copy
+  let specLlmInstruction = $state('');
+  let specLlmStreaming = $state(false);
+  let specLlmExplanation = $state('');
+  let specLlmSuggestion = $state(null); // { diff, explanation } | null
+  let specPredictTimer = null;
+
+  // Fetch spec content when specPanelNode changes and has a spec_path
+  $effect(() => {
+    const node = specPanelNode;
+    if (!node?.spec_path || !repoId) return;
+    let cancelled = false;
+    specLoading = true;
+    specContent = '';
+    specEditDraft = '';
+    specLlmSuggestion = null;
+    api.specContent(node.spec_path, repoId)
+      .then(d => {
+        if (!cancelled) {
+          specContent = d?.content ?? '';
+          specEditDraft = d?.content ?? '';
+        }
+      })
+      .catch(() => { if (!cancelled) specContent = ''; })
+      .finally(() => { if (!cancelled) specLoading = false; });
+    return () => { cancelled = true; };
+  });
+
+  // Run graph predict only when spec draft differs from fetched content (debounced 800ms)
+  $effect(() => {
+    const draft = specEditDraft;
+    const node = specPanelNode;
+    // Skip predict if draft matches the original fetched content (no user edits yet)
+    if (!draft || !node || !repoId || draft === specContent) return;
+    clearTimeout(specPredictTimer);
+    specPredictTimer = setTimeout(() => {
+      api.graphPredict(repoId, { spec_path: node.spec_path, draft_content: draft })
+        .then(result => {
+          if (Array.isArray(result?.overlays)) ghostOverlays = result.overlays;
+          else if (Array.isArray(result)) ghostOverlays = result;
+        })
+        .catch(() => { /* ignore prediction errors silently */ });
+    }, 800);
+    return () => { clearTimeout(specPredictTimer); };
+  });
+
+  function openSpecPanel(node) {
+    specPanelNode = node;
+    specLlmInstruction = '';
+    specLlmExplanation = '';
+    specLlmSuggestion = null;
+    ghostOverlays = [];
+  }
+
+  function closeSpecPanel() {
+    specPanelNode = null;
+    ghostOverlays = [];
+    clearTimeout(specPredictTimer);
+  }
+
+  async function sendSpecLlmInstruction() {
+    if (!specLlmInstruction.trim() || specLlmStreaming || !repoId || !specPanelNode) return;
+    const instruction = specLlmInstruction.trim();
+    specLlmInstruction = '';
+    specLlmStreaming = true;
+    specLlmExplanation = '';
+    specLlmSuggestion = null;
+    try {
+      const resp = await api.specsAssist(repoId, {
+        spec_path: specPanelNode.spec_path,
+        instruction,
+        draft_content: specEditDraft || undefined,
+      });
+      if (!resp.ok) throw new Error(`LLM request failed: ${resp.status}`);
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error('No response body');
+      const decoder = new TextDecoder();
+      let buf = '';
+      let done = false;
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        done = streamDone;
+        if (value) {
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const raw = line.slice(6);
+            if (raw === '[DONE]') { done = true; break; }
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed.event === 'partial' || parsed.type === 'partial') {
+                specLlmExplanation += parsed.text ?? parsed.explanation ?? '';
+              } else if (parsed.event === 'complete' || parsed.type === 'complete') {
+                specLlmSuggestion = { diff: parsed.diff ?? [], explanation: parsed.explanation ?? specLlmExplanation };
+                done = true; break;
+              } else if (parsed.event === 'error' || parsed.type === 'error') {
+                throw new Error(parsed.message ?? 'LLM error');
+              }
+            } catch (pe) {
+              if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      specLlmExplanation = `Error: ${e.message}`;
+    } finally {
+      specLlmStreaming = false;
+    }
+  }
+
+  function acceptSpecSuggestion() {
+    if (!specLlmSuggestion) return;
+    let content = specEditDraft;
+    for (const op of specLlmSuggestion.diff) {
+      if (op.op === 'add') {
+        const idx = content.indexOf(op.path);
+        if (idx !== -1) {
+          const lineEnd = content.indexOf('\n', idx + op.path.length);
+          const insertAt = lineEnd !== -1 ? lineEnd + 1 : content.length;
+          content = content.slice(0, insertAt) + op.content + '\n' + content.slice(insertAt);
+        } else {
+          content += '\n' + op.content;
+        }
+      } else if (op.op === 'replace') {
+        const idx = content.indexOf(op.path);
+        if (idx !== -1) {
+          const end = content.slice(idx + op.path.length).match(/\n(#{1,6} )/);
+          const endIdx = end?.index !== undefined ? idx + op.path.length + end.index + 1 : content.length;
+          content = content.slice(0, idx) + op.path + '\n' + op.content + content.slice(endIdx);
+        }
+      } else if (op.op === 'remove') {
+        const idx = content.indexOf(op.path);
+        if (idx !== -1) {
+          const rest = content.slice(idx + op.path.length);
+          const end = rest.match(/\n(#{1,6} )/);
+          const endIdx = end?.index !== undefined ? idx + op.path.length + end.index + 1 : content.length;
+          content = content.slice(0, idx) + content.slice(endIdx);
+        }
+      }
+    }
+    specEditDraft = content;
+    specLlmSuggestion = null;
+  }
+
+  // ── Query param reading on mount (TASK-360: ?highlight_spec= and ?detail=node:) ──
+  $effect(() => {
+    if (!nodes.length) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const highlightSpec = params.get('highlight_spec');
+      const detailParam = params.get('detail');
+      if (highlightSpec) {
+        const matchIds = new Set(nodes.filter(n => n.spec_path === highlightSpec).map(n => n.id));
+        if (matchIds.size) highlightedNodeIds = matchIds;
+      }
+      if (detailParam?.startsWith('node:')) {
+        const nodeId = detailParam.slice(5);
+        const node = nodes.find(n => n.id === nodeId);
+        if (node) selectNode(node);
+      }
+    } catch { /* ignore URL parse errors */ }
+  });
+
   let specCounts = $derived.by(() => {
     const specced = nodes.filter(n => !!n.spec_path).length;
     return { specced, unspecced: nodes.length - specced };
@@ -413,7 +591,7 @@
     }
   }
 
-  function closeDetail() { selectedNode = null; }
+  function closeDetail() { selectedNode = null; closeSpecPanel(); }
 
   function onDblClick(e) {
     const nodeEl = e.target.closest('.graph-node');
@@ -422,12 +600,10 @@
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
 
-    drillNode = node;
-    highlightedNodeIds = new Set();
-    setTimeout(resetView, 0);
-
-    // Shell context: scope drill-down
-    navigate?.('explorer', { scope: 'repo', repoId: node.repo_id ?? repoId });
+    // Bidirectional Architecture ↔ Spec navigation (TASK-360):
+    // Double-click opens the spec detail panel for this node.
+    selectNode(node, e);
+    openSpecPanel(node);
 
     const ve = viewEventFromDom(e, 'node', node.id, node);
     dispatchViewEvent(e.target, { ...ve, type: 'dblclick' });
@@ -766,6 +942,8 @@
           {@const opacity = encodedNodeOpacity(node)}
           {@const nodeStroke = isSelected ? '#fff' : isFindHighlighted ? '#facc15' : isSpecHighlighted ? '#a78bfa' : colors.stroke}
           {@const nodeStrokeWidth = isSelected || isHighlighted ? 2.5 : 1.5}
+          {@const ghostType = ghostByNodeId.get(node.id)}
+          {@const ghostStyle = ghostType === 'new' ? { stroke: '#22c55e', dasharray: '5 3' } : ghostType === 'modified' ? { stroke: '#eab308', dasharray: '5 3' } : ghostType === 'removed' ? { stroke: '#ef4444', dasharray: '5 3' } : null}
           <g class="graph-node" class:selected={isSelected} class:highlighted={isHighlighted}
             class:dimmed={isDimmed} class:spec-highlighted={isSpecHighlighted}
             data-node-id={node.id}
@@ -791,6 +969,11 @@
             {#if ring}
               <circle class="spec-ring" r="36" fill="none" stroke={ring.color} stroke-width="2.5"
                 stroke-dasharray={ring.dashed ? '4 3' : 'none'} opacity="0.85" pointer-events="none" />
+            {/if}
+            {#if ghostStyle}
+              <rect class="ghost-overlay-border" x="-36" y="-18" width="72" height="36" rx="5"
+                fill="none" stroke={ghostStyle.stroke} stroke-width="2" stroke-dasharray={ghostStyle.dasharray}
+                opacity="0.85" pointer-events="none" aria-hidden="true" />
             {/if}
             {#if viewSpec?.annotations}
               {@const ann = viewSpec.annotations.find(a => a.node_name === node.name)}
@@ -925,6 +1108,97 @@
             </div>
             {#if selectedNode.last_modified_at}<div class="panel-row"><span class="panel-label">Modified</span><span class="panel-val">{relativeTime(selectedNode.last_modified_at)}</span></div>{/if}
             {#if selectedNode.last_modified_by}<div class="panel-row"><span class="panel-label">By agent</span><span class="panel-val mono">{selectedNode.last_modified_by}</span></div>{/if}
+          </div>
+        </div>
+      {/if}
+
+      <!-- ── Spec detail panel (bidirectional nav TASK-360) ─────────────── -->
+      {#if specPanelNode}
+        <div class="spec-detail-panel" role="complementary" aria-label="Spec detail for {specPanelNode.name}" data-testid="spec-detail-panel">
+          <div class="spec-panel-header">
+            <div class="spec-panel-title-row">
+              <span class="spec-panel-label">Governing Spec</span>
+              <button class="close-btn" onclick={closeSpecPanel} aria-label="Close spec panel">×</button>
+            </div>
+            <span class="spec-panel-node-name">{specPanelNode.name}</span>
+          </div>
+          <div class="spec-panel-body">
+            {#if !specPanelNode.spec_path}
+              <div class="no-spec-state" data-testid="no-governing-spec">
+                <p class="no-spec-text">No governing spec</p>
+                <p class="no-spec-hint">This node has no spec_path set. Create a spec to document and govern its behavior.</p>
+                <button class="create-spec-btn" onclick={() => navigate?.('specs')} data-testid="create-spec-btn">
+                  Create spec
+                </button>
+              </div>
+            {:else}
+              <div class="spec-path-row">
+                <span class="spec-path-label">Path</span>
+                <span class="spec-path-val mono">{specPanelNode.spec_path}</span>
+              </div>
+
+              {#if specLoading}
+                <div class="spec-loading">Loading spec content…</div>
+              {:else if specContent}
+                <textarea
+                  class="spec-editor-textarea"
+                  bind:value={specEditDraft}
+                  aria-label="Spec content editor"
+                  spellcheck="false"
+                  data-testid="spec-editor"
+                ></textarea>
+
+                {#if ghostOverlays.length > 0}
+                  <div class="ghost-legend" data-testid="ghost-legend">
+                    <span class="ghost-chip new">+ new</span>
+                    <span class="ghost-chip modified">~ modified</span>
+                    <span class="ghost-chip removed">− removed</span>
+                    <span class="ghost-label">Predicted impact on canvas</span>
+                  </div>
+                {/if}
+
+                {#if specLlmSuggestion}
+                  <div class="llm-suggestion" data-testid="llm-suggestion">
+                    {#if specLlmSuggestion.explanation}
+                      <p class="suggestion-expl">{specLlmSuggestion.explanation}</p>
+                    {/if}
+                    <div class="suggestion-btns">
+                      <button class="suggestion-accept-btn" onclick={acceptSpecSuggestion}>Accept</button>
+                      <button class="suggestion-dismiss-btn" onclick={() => { specLlmSuggestion = null; }}>Dismiss</button>
+                    </div>
+                  </div>
+                {/if}
+
+                {#if specLlmStreaming && specLlmExplanation}
+                  <div class="llm-streaming" aria-live="polite">
+                    <span class="streaming-lbl">Thinking…</span>
+                    <p class="streaming-txt">{specLlmExplanation}</p>
+                  </div>
+                {/if}
+
+                <div class="llm-input-row">
+                  <textarea
+                    class="llm-textarea"
+                    bind:value={specLlmInstruction}
+                    placeholder="Describe a spec change…"
+                    rows="2"
+                    disabled={specLlmStreaming}
+                    aria-label="LLM instruction for spec editing"
+                    onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendSpecLlmInstruction(); } }}
+                  ></textarea>
+                  <button
+                    class="llm-send-btn"
+                    onclick={sendSpecLlmInstruction}
+                    disabled={!specLlmInstruction.trim() || specLlmStreaming}
+                    aria-label="Send LLM instruction"
+                  >
+                    {specLlmStreaming ? '…' : '↑'}
+                  </button>
+                </div>
+              {:else}
+                <p class="spec-no-content">Spec content unavailable. Ensure the server has repo context.</p>
+              {/if}
+            {/if}
           </div>
         </div>
       {/if}
@@ -1185,4 +1459,89 @@
       filter: none;
     }
   }
+
+  /* ── Spec detail panel (TASK-360 bidirectional nav) ─────────────────────── */
+  .spec-detail-panel {
+    width: 320px; flex-shrink: 0; background: var(--color-surface);
+    border-left: 1px solid var(--color-border); display: flex; flex-direction: column; overflow: hidden;
+  }
+  .spec-panel-header {
+    padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated); flex-shrink: 0;
+  }
+  .spec-panel-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-1); }
+  .spec-panel-label { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-muted); }
+  .spec-panel-node-name { display: block; font-size: var(--text-base); font-weight: 600; color: var(--color-text); font-family: var(--font-mono); word-break: break-all; }
+  .spec-panel-body { flex: 1; overflow-y: auto; padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+  .no-spec-state { display: flex; flex-direction: column; gap: var(--space-3); align-items: flex-start; padding: var(--space-2) 0; }
+  .no-spec-text { font-size: var(--text-base); font-weight: 600; color: var(--color-text); margin: 0; }
+  .no-spec-hint { font-size: var(--text-xs); color: var(--color-text-muted); margin: 0; line-height: 1.5; }
+  .create-spec-btn {
+    padding: var(--space-2) var(--space-4); background: var(--color-primary, #3b82f6);
+    border: none; border-radius: var(--radius); color: #fff;
+    font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500; cursor: pointer;
+  }
+  .create-spec-btn:hover { opacity: 0.88; }
+  .create-spec-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .spec-path-row { display: flex; align-items: flex-start; gap: var(--space-2); }
+  .spec-path-label { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; min-width: 40px; }
+  .spec-path-val { font-size: var(--text-xs); color: var(--color-text-secondary); font-family: var(--font-mono); word-break: break-all; }
+  .spec-loading { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
+  .spec-no-content { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; margin: 0; }
+  .spec-editor-textarea {
+    width: 100%; min-height: 160px; max-height: 280px; box-sizing: border-box;
+    padding: var(--space-2) var(--space-3); background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius);
+    color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-xs);
+    line-height: 1.6; resize: vertical;
+  }
+  .spec-editor-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; border-color: var(--color-focus); }
+  .ghost-legend {
+    display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+    padding: var(--space-2) var(--space-2); background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border); border-radius: var(--radius); font-size: var(--text-xs);
+  }
+  .ghost-label { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; flex: 1; }
+  .ghost-chip { font-size: 10px; font-family: var(--font-mono); padding: 1px 5px; border-radius: 3px; border: 1px dashed; }
+  .ghost-chip.new { color: #22c55e; border-color: #22c55e; background: color-mix(in srgb, #22c55e 8%, transparent); }
+  .ghost-chip.modified { color: #eab308; border-color: #eab308; background: color-mix(in srgb, #eab308 8%, transparent); }
+  .ghost-chip.removed { color: #ef4444; border-color: #ef4444; background: color-mix(in srgb, #ef4444 8%, transparent); }
+  .llm-suggestion {
+    padding: var(--space-2) var(--space-3); border: 1px solid var(--color-primary, #3b82f6);
+    border-radius: var(--radius); background: color-mix(in srgb, var(--color-primary, #3b82f6) 5%, transparent);
+    display: flex; flex-direction: column; gap: var(--space-2);
+  }
+  .suggestion-expl { font-size: var(--text-xs); color: var(--color-text-secondary); margin: 0; line-height: 1.5; }
+  .suggestion-btns { display: flex; gap: var(--space-2); }
+  .suggestion-accept-btn {
+    padding: var(--space-1) var(--space-3); background: var(--color-primary, #3b82f6);
+    border: none; border-radius: var(--radius); color: #fff;
+    font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer;
+  }
+  .suggestion-dismiss-btn {
+    padding: var(--space-1) var(--space-3); background: transparent;
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius);
+    color: var(--color-text-secondary); font-size: var(--text-xs); font-family: var(--font-body); cursor: pointer;
+  }
+  .llm-streaming { padding: var(--space-2) var(--space-3); background: var(--color-surface-elevated); border: 1px solid var(--color-border); border-radius: var(--radius); }
+  .streaming-lbl { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 500; display: block; margin-bottom: var(--space-1); }
+  .streaming-txt { font-size: var(--text-xs); color: var(--color-text-secondary); margin: 0; line-height: 1.5; white-space: pre-wrap; }
+  .llm-input-row { display: flex; gap: var(--space-2); align-items: flex-end; }
+  .llm-textarea {
+    flex: 1; min-height: 44px; max-height: 90px; box-sizing: border-box;
+    padding: var(--space-2) var(--space-3); background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius);
+    color: var(--color-text); font-family: var(--font-body); font-size: var(--text-sm); resize: vertical;
+  }
+  .llm-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; border-color: var(--color-focus); }
+  .llm-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+  .llm-send-btn {
+    width: 34px; height: 34px; flex-shrink: 0; background: var(--color-primary, #3b82f6);
+    border: none; border-radius: var(--radius); color: #fff;
+    font-size: var(--text-base); cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .llm-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .llm-send-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .suggestion-accept-btn:focus-visible,
+  .suggestion-dismiss-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 </style>
