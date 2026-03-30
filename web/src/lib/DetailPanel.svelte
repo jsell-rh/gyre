@@ -268,7 +268,6 @@
   let archLoaded = $state(false); // prevents re-fetch after empty result
   let archError = $state(null);
   let archGhostOverlays = $state([]);
-  let archPredictTimer = null;
 
   // Reset spec data when entity changes
   $effect(() => {
@@ -285,7 +284,6 @@
       archLoaded = false;
       archError = null;
       archGhostOverlays = [];
-      clearTimeout(archPredictTimer);
     }
   });
 
@@ -336,10 +334,14 @@
   });
 
   async function loadArchGraph(repoId, specPath) {
+    // Snapshot entity identity to detect stale results after entity switch
+    const loadingEntityId = entity?.id;
     archLoading = true;
     archError = null;
     try {
       const graph = await api.repoGraph(repoId);
+      // Discard result if entity changed while this fetch was in-flight
+      if (entity?.id !== loadingEntityId) return;
       const allNodes = graph?.nodes ?? [];
       const allEdges = graph?.edges ?? [];
       // Filter to nodes governed by this spec (spec_path match)
@@ -353,10 +355,11 @@
       archEdges = specEdges;
       archLoaded = true;
     } catch (e) {
+      if (entity?.id !== loadingEntityId) return;
       archError = e.message ?? 'Failed to load graph';
       archLoaded = true; // mark loaded even on error so we don't retry automatically
     } finally {
-      archLoading = false;
+      if (entity?.id === loadingEntityId) archLoading = false;
     }
   }
 
@@ -366,12 +369,12 @@
     const content = editContent;
     if (!content || entity?.type !== 'spec') return;
     const repoId = entity.data?.repo_id;
+    const specId = entity.id;
     if (!repoId || !archNodes.length) return;
-    clearTimeout(archPredictTimer);
-    archPredictTimer = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       try {
         const result = await api.graphPredict(repoId, {
-          spec_path: entity.id,
+          spec_path: specId,
           draft_content: content,
         });
         const overlays = result?.predictions ?? result?.overlays ?? [];
@@ -383,6 +386,8 @@
         // Silent failure — predictions are best-effort
       }
     }, 800);
+    // Cleanup: clear timer on effect re-run (new keypress) or component unmount
+    return () => clearTimeout(timer);
   });
 
   function expandToCanvas() {
