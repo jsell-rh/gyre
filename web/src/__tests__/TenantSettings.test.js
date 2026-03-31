@@ -274,7 +274,7 @@ describe('TenantSettings', () => {
     await waitFor(() => {
       const table = container.querySelector('[data-testid="audit-events-table"]');
       expect(table).toBeTruthy();
-      expect(table.textContent).toContain('tenant_created');
+      expect(table.textContent).toContain('tenant created');
       expect(table.textContent).toContain('admin');
     }, { timeout: 3000 });
   });
