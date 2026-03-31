@@ -8,9 +8,14 @@
    * Spec refs:
    *   ui-navigation.md §10 (Cross-Workspace View)
    */
+  import { getContext } from 'svelte';
   import { api } from '../lib/api.js';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToWorkspaceSettings = getContext('goToWorkspaceSettings') ?? null;
+  const goToAgentRules = getContext('goToAgentRules') ?? null;
 
   let {
     onSelectWorkspace = undefined,
@@ -70,10 +75,89 @@
     Process: 'Process',
   };
 
+  // ── Workspace name lookup map ────────────────────────────────────────────
+  let workspaceNameMap = $state({});
+
   // ── Decisions state ─────────────────────────────────────────────────────
   let decisionsLoading = $state(true);
   let decisionsError = $state(null);
   let notifications = $state([]);
+  let actionStates = $state({});
+  let showAllDecisions = $state(false);
+
+  function getBody(n) {
+    try { return JSON.parse(n.body || '{}'); } catch { return {}; }
+  }
+
+  function normalizeSpecPath(path) {
+    return path ? path.replace(/^specs\//, '') : path;
+  }
+
+  async function handleApproveSpec(n) {
+    const body = getBody(n);
+    if (!body.spec_path || !body.spec_sha) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
+    try {
+      await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Approved' } };
+    } catch (e) {
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+    }
+  }
+
+  async function handleRejectSpec(n) {
+    const body = getBody(n);
+    if (!body.spec_path) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
+    try {
+      await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected');
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Rejected' } };
+    } catch (e) {
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+    }
+  }
+
+  async function handleRetry(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.enqueue(body.mr_id);
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Re-queued' } };
+    } catch (e) {
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+    }
+  }
+
+  async function handleDismiss(n) {
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.markNotificationRead(n.id);
+      notifications = notifications.filter(item => item.id !== n.id);
+    } catch {
+      toastError('Dismiss failed — please try again.');
+    }
+    actionStates = { ...actionStates, [n.id]: { loading: false } };
+  }
+
+  const TYPE_LABELS = {
+    agent_clarification: 'Clarification',
+    spec_approval: 'Spec Approval',
+    gate_failure: 'Gate Failure',
+    cross_workspace_change: 'Cross-WS Change',
+    conflicting_interpretations: 'Conflict',
+    meta_spec_drift: 'Meta Drift',
+    budget_warning: 'Budget',
+    trust_suggestion: 'Trust',
+    spec_assertion_failure: 'Assertion Fail',
+    suggested_link: 'Suggested Link',
+  };
 
   // ── Workspaces state ────────────────────────────────────────────────────
   let workspacesLoading = $state(true);
@@ -124,8 +208,11 @@
 
   // ── Load all sections ────────────────────────────────────────────────────
   $effect(() => {
-    loadDecisions();
-    loadWorkspaces().then(() => loadBriefings());
+    // Load workspaces first so workspace name map is available for decisions
+    loadWorkspaces().then(() => {
+      loadDecisions();
+      loadBriefings();
+    });
     loadSpecs();
     loadAgentRules();
   });
@@ -134,8 +221,12 @@
     decisionsLoading = true;
     decisionsError = null;
     try {
-      const data = await api.myNotifications({ limit: 20, unread: true });
-      notifications = Array.isArray(data) ? data : (data?.items ?? []);
+      let data = await api.myNotifications();
+      data = Array.isArray(data) ? data : (data?.items ?? []);
+      // Exclude dismissed and resolved items
+      data = data.filter(n => !n.dismissed_at && !n.resolved_at);
+      data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
+      notifications = data;
     } catch (e) {
       decisionsError = e?.message ?? 'Failed to load decisions';
     } finally {
@@ -149,6 +240,7 @@
     try {
       const data = await api.workspaces();
       workspaces = Array.isArray(data) ? data : [];
+      workspaceNameMap = Object.fromEntries(workspaces.map(w => [w.id, w.name ?? w.id]));
     } catch (e) {
       workspacesError = e?.message ?? 'Failed to load workspaces';
     } finally {
@@ -266,13 +358,33 @@
       <p class="section-empty">No decisions needed — system is running autonomously.</p>
     {:else}
       <ul class="decisions-list" role="list">
-        {#each notifications.slice(0, 5) as notif (notif.id)}
-          <li class="decision-item">
+        {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as notif (notif.id)}
+          {@const body = getBody(notif)}
+          {@const state = actionStates[notif.id] ?? {}}
+          <li class="decision-item" data-testid="cwh-decision-item">
             <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[notif.notification_type] ?? '•'}</span>
             <div class="decision-body">
-              <span class="decision-desc">{notif.message ?? notif.title ?? 'Decision pending'}</span>
-              {#if notif.workspace_name}
-                <span class="decision-ws-badge">{notif.workspace_name}</span>
+              <div class="decision-content">
+                <span class="decision-type">{TYPE_LABELS[notif.notification_type] ?? notif.notification_type}</span>
+                <span class="decision-desc">{notif.message ?? notif.title ?? 'Decision pending'}</span>
+              </div>
+              {#if notif.workspace_id && workspaceNameMap[notif.workspace_id]}
+                <span class="decision-ws-badge">{workspaceNameMap[notif.workspace_id]}</span>
+              {/if}
+            </div>
+            <div class="decision-actions">
+              {#if state.success}
+                <span class="action-feedback success">{state.message}</span>
+              {:else if state.loading}
+                <span class="action-feedback">…</span>
+              {:else}
+                {#if notif.notification_type === 'spec_approval' && body.spec_path && body.spec_sha}
+                  <button class="inline-btn approve" onclick={() => handleApproveSpec(notif)} aria-label="Approve spec">Approve</button>
+                  <button class="inline-btn reject" onclick={() => handleRejectSpec(notif)} aria-label="Reject spec">Reject</button>
+                {:else if notif.notification_type === 'gate_failure' && body.mr_id}
+                  <button class="inline-btn" onclick={() => handleRetry(notif)} aria-label="Retry gate">Retry</button>
+                {/if}
+                <button class="inline-btn secondary" onclick={() => handleDismiss(notif)} aria-label="Dismiss">Dismiss</button>
               {/if}
             </div>
           </li>
@@ -280,7 +392,9 @@
       </ul>
       {#if notifications.length > 5}
         <div class="section-footer">
-          <span class="view-all-hint">{notifications.length - 5} more decisions…</span>
+          <button class="view-all-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>
+            {showAllDecisions ? 'Show fewer' : `View all ${notifications.length} decisions`}
+          </button>
         </div>
       {/if}
     {/if}
@@ -676,11 +790,25 @@
     min-width: 0;
   }
 
+  .decision-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .decision-type {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
   .decision-desc {
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
-    flex: 1;
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -694,6 +822,70 @@
     padding: 1px var(--space-2);
     white-space: nowrap;
     flex-shrink: 0;
+  }
+
+  .decision-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .action-feedback {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .action-feedback.success {
+    color: var(--color-success);
+  }
+
+  .inline-btn {
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .inline-btn:hover {
+    border-color: var(--color-border-strong);
+    color: var(--color-text);
+  }
+
+  .inline-btn.approve {
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+    color: var(--color-success);
+  }
+
+  .inline-btn.approve:hover {
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+    border-color: var(--color-success);
+  }
+
+  .inline-btn.reject {
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
+    color: var(--color-danger);
+  }
+
+  .inline-btn.reject:hover {
+    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
+    border-color: var(--color-danger);
+  }
+
+  .inline-btn.secondary {
+    color: var(--color-text-muted);
+  }
+
+  .inline-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Workspaces ───────────────────────────────────────────────────────── */
