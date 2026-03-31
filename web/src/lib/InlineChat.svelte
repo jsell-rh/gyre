@@ -22,6 +22,7 @@
   } = $props();
 
   import { onDestroy } from 'svelte';
+  import { t } from 'svelte-i18n';
 
   let inputEl = $state(null);
   let historyEl = $state(null);
@@ -54,19 +55,19 @@
     if (!r) return '';
     switch (type) {
       case 'llm-qa':
-        return `Ask about ${r} ▸`;
+        return $t('inline_chat.ask_about', { values: { recipient: r } });
       case 'spec-edit':
-        return `Edit spec: "${r}" ▸`;
+        return $t('inline_chat.edit_spec', { values: { recipient: r } });
       default:
-        return `Message to ${r} ▸`;
+        return $t('inline_chat.message_to', { values: { recipient: r } });
     }
   }
 
   function buildPlaceholder(type) {
     switch (type) {
-      case 'llm-qa':   return 'Ask a question…';
-      case 'spec-edit': return 'Describe a change…';
-      default:          return 'Type a message…';
+      case 'llm-qa':   return $t('inline_chat.placeholder_qa');
+      case 'spec-edit': return $t('inline_chat.placeholder_edit');
+      default:          return $t('inline_chat.placeholder_message');
     }
   }
 
@@ -190,8 +191,8 @@
       {/if}
     </div>
 
-    <button class="clear-btn" onclick={clearHistory} aria-label="Clear conversation">
-      Clear
+    <button class="clear-btn" onclick={clearHistory} aria-label={$t('inline_chat.clear')}>
+      {$t('inline_chat.clear')}
     </button>
   {/if}
 
@@ -245,11 +246,11 @@
     </div>
 
     {#if recipientType === 'agent'}
-      <p class="input-hint">Ctrl+Enter to send · Messages are signed and persisted via message bus</p>
+      <p class="input-hint">{$t('inline_chat.hint_agent')}</p>
     {:else if recipientType === 'llm-qa'}
-      <p class="input-hint">Ctrl+Enter to send · Read-only Q&A — cannot trigger actions</p>
+      <p class="input-hint">{$t('inline_chat.hint_qa')}</p>
     {:else if recipientType === 'spec-edit'}
-      <p class="input-hint">Ctrl+Enter to send · Produces draft suggestions — you accept before saving</p>
+      <p class="input-hint">{$t('inline_chat.hint_edit')}</p>
     {/if}
   </div>
 </div>
