@@ -402,7 +402,6 @@
           mrGates = enrichedGates;
         }
         // Fetch commit signature for merged MRs
-        const repoId = d?.repository_id ?? d?.repo_id;
         const mergeSha = d?.merge_commit_sha;
         if (repoId && mergeSha) {
           api.commitSignature(repoId, mergeSha).then(sig => {

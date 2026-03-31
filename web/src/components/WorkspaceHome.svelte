@@ -1038,9 +1038,8 @@
                     <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
                     <td class="spec-path">{spec.path}</td>
                     <td class="spec-status">
-                      {@const specDisplayStatus = spec.approval_status ?? spec.status}
-                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[specDisplayStatus] ?? '•'}</span>
-                      {specDisplayStatus ?? '—'}
+                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
+                      {spec.approval_status ?? spec.status ?? '—'}
                     </td>
                     <td class="spec-progress">
                       {#if spec.tasks_total != null}
