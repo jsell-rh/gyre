@@ -809,8 +809,9 @@
           </thead>
           <tbody>
             {#each hotFiles as file}
-              <tr class="table-row">
-                <td class="mono">{file.path ?? file.file ?? '—'}</td>
+              {@const filePath = file.path ?? file.file ?? null}
+              <tr class="table-row" onclick={() => { if (filePath) { subTab = 'files'; selectFile(filePath); } }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter' && filePath) { subTab = 'files'; selectFile(filePath); } }} title={filePath ? `View blame for ${filePath}` : ''}>
+                <td class="mono">{filePath ?? '—'}</td>
                 <td>{file.change_count ?? file.commits ?? file.count ?? 0}</td>
                 <td class="secondary">{file.author_count ?? file.authors ?? '—'}</td>
                 <td class="secondary">{relativeTime(file.last_modified ?? file.updated_at)}</td>
