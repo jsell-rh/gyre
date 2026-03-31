@@ -182,7 +182,11 @@
   $effect(() => {
     if (entity) {
       const freshTabs = computeTabs(entity);
-      if (entity.type === 'mr' && freshTabs.some(t => t.id === 'diff')) {
+      // Honor _openTab hint from caller (e.g. clicking gate badges → gates tab)
+      const requestedTab = entity.data?._openTab;
+      if (requestedTab && freshTabs.some(t => t.id === requestedTab)) {
+        activeTab = requestedTab;
+      } else if (entity.type === 'mr' && freshTabs.some(t => t.id === 'diff')) {
         activeTab = 'diff';
       } else if (entity.type === 'spec' && freshTabs.some(t => t.id === 'content')) {
         activeTab = 'content';
