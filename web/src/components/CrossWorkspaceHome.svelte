@@ -183,12 +183,28 @@
 
   let sortedSpecs = $derived.by(() => {
     return [...specs].sort((a, b) => {
+      if (specsSortCol === 'progress') {
+        const av = a.tasks_total ? (a.tasks_done ?? 0) / a.tasks_total : -1;
+        const bv = b.tasks_total ? (b.tasks_done ?? 0) / b.tasks_total : -1;
+        return specsSortDir === 'asc' ? av - bv : bv - av;
+      }
       const av = String(a[specsSortCol] ?? '');
       const bv = String(b[specsSortCol] ?? '');
       const cmp = av.localeCompare(bv);
       return specsSortDir === 'asc' ? cmp : -cmp;
     });
   });
+
+  function relTime(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - new Date(ts).getTime();
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return $t('common.time_just_now');
+    if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
+    const h = Math.floor(m / 60);
+    if (h < 24) return $t('common.time_hours_ago', { values: { count: h } });
+    return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
+  }
 
   // ── Briefing state ───────────────────────────────────────────────────────
   // Cross-workspace briefing: aggregate per-workspace briefings (§10)
@@ -469,6 +485,12 @@
             <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
               <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('cross_workspace.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
             </th>
+            <th scope="col" aria-sort={specsSortCol === 'progress' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>{$t('workspace_home.col_progress')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('progress')}</span></button>
+            </th>
+            <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -491,6 +513,14 @@
               <td class="spec-status">
                 <span>{SPEC_STATUS_ICONS[spec.status] ?? ''} {spec.status ?? '—'}</span>
               </td>
+              <td class="spec-progress">
+                {#if spec.tasks_total != null}
+                  {spec.tasks_done ?? 0}/{spec.tasks_total}
+                {:else}
+                  —
+                {/if}
+              </td>
+              <td class="spec-activity">{relTime(spec.updated_at)}</td>
             </tr>
           {/each}
         </tbody>
@@ -1071,6 +1101,19 @@
   }
 
   .spec-status { white-space: nowrap; }
+
+  .spec-progress {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .spec-activity {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
 
   /* ── Briefing ─────────────────────────────────────────────────────────── */
   .briefing-list {
