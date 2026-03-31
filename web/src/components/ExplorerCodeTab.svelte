@@ -114,8 +114,8 @@
           });
       } else if (tab === 'tasks') {
         const all = await api.tasks({ repoId });
-        // Client-side filter in case server doesn't support repo_id filter
-        tasks = (Array.isArray(all) ? all : []).filter(t => !repoId || t.repo_id === repoId || !t.repo_id);
+        // Client-side filter: only show tasks explicitly linked to this repo
+        tasks = (Array.isArray(all) ? all : []).filter(t => t.repo_id === repoId);
       } else if (tab === 'agents') {
         agents = await api.agents({ repoId });
         if (!Array.isArray(agents)) agents = [];
