@@ -1020,6 +1020,11 @@ ok "Budget: $(echo "$BUDGET" | jq -c '{max_concurrent_agents,max_tokens_per_day}
 BUDGET_SUM=$(api_get "${API}/budget/summary" 2>/dev/null) || BUDGET_SUM="{}"
 ok "Tenant budget summary retrieved"
 
+# Reset budget to not block later agent spawns
+curl -s -X PUT -H "$AUTH" -H "$CT" \
+  -d '{"max_concurrent_agents":100,"max_tokens_per_day":1000000,"max_cost_per_day":1000}' \
+  "${API}/workspaces/${WS_ID}/budget" >/dev/null 2>&1
+
 # =============================================================================
 step $((STEP++)) "Spec links (implements/conflicts enforcement)"
 # =============================================================================
@@ -1519,139 +1524,31 @@ else
   # implements code, commits, pushes, and calls gyre_agent_complete — all
   # autonomously via the Claude Agent SDK.
 
-  # The server spawns the agent command from GYRE_AGENT_COMMAND env var
-  # (falls back to /gyre/entrypoint.sh which only exists in Docker).
-  # We write the wrapper script and check if the server has GYRE_AGENT_COMMAND set.
-  AGENT_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/scripts/e2e-agent-claude.sh"
+  # The server uses GYRE_AGENT_COMMAND to spawn agent processes.
+  # scripts/e2e-agent-claude.sh handles clone, git setup, and delegates
+  # to docker/gyre-agent/agent-runner.mjs (the real Claude Agent SDK runner).
+  AGENT_SCRIPT="$(cd "$(dirname "$0")" && pwd)/e2e-agent-claude.sh"
 
-  # Write the agent wrapper script that sets up MCP config and runs Claude
-  cat > "$AGENT_SCRIPT" << 'AGENT_WRAPPER'
-#!/usr/bin/env bash
-set -euo pipefail
-
-# This script is spawned by the Gyre server as a real agent process.
-# It receives GYRE_* env vars and runs Claude Code with MCP to implement a task.
-
-: "${GYRE_SERVER_URL:?}" "${GYRE_AUTH_TOKEN:?}" "${GYRE_CLONE_URL:?}"
-: "${GYRE_BRANCH:?}" "${GYRE_AGENT_ID:?}" "${GYRE_TASK_ID:?}"
-
-echo "[agent] Starting: agent=${GYRE_AGENT_ID:0:8} task=${GYRE_TASK_ID:0:8} branch=${GYRE_BRANCH}"
-
-# Heartbeat
-curl -sf -X PUT -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
-  "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
-
-# Clone repo
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
-
-GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
-  GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
-  git clone "${GYRE_CLONE_URL}.git" "$WORK/repo" 2>/dev/null || {
-    mkdir -p "$WORK/repo"; cd "$WORK/repo"; git init
-    git remote add origin "${GYRE_CLONE_URL}.git"
-}
-
-cd "$WORK/repo"
-git config user.email "agent-${GYRE_AGENT_ID}@gyre.local"
-git config user.name "Gyre Agent"
-
-GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
-  GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
-  git fetch origin main 2>/dev/null || true
-git checkout -b "${GYRE_BRANCH}" origin/main 2>/dev/null || git checkout -b "${GYRE_BRANCH}" 2>/dev/null || true
-
-# Write MCP config for Claude to connect to Gyre
-MCP_CFG="$WORK/mcp.json"
-cat > "$MCP_CFG" << MCPEOF
-{
-  "mcpServers": {
-    "gyre": {
-      "type": "http",
-      "url": "${GYRE_SERVER_URL}/mcp",
-      "headers": {"Authorization": "Bearer ${GYRE_AUTH_TOKEN}"}
-    }
-  }
-}
-MCPEOF
-
-# Read task details for the prompt
-TASK_JSON=$(curl -sf -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
-  "${GYRE_SERVER_URL}/api/v1/tasks/${GYRE_TASK_ID}" 2>/dev/null) || TASK_JSON="{}"
-TASK_TITLE=$(echo "$TASK_JSON" | jq -r '.title // "implement task"')
-TASK_DESC=$(echo "$TASK_JSON" | jq -r '.description // ""')
-
-echo "[agent] Task: $TASK_TITLE"
-echo "[agent] Running Claude Code..."
-
-# Run Claude Code as the agent
-claude --print --bare \
-  --mcp-config "$MCP_CFG" --strict-mcp-config \
-  --model claude-sonnet-4-6 \
-  --allowedTools 'Read,Write,Edit,Bash,Glob,Grep,mcp__gyre__*' \
-  -p "You are a Gyre autonomous agent working in $(pwd).
-
-Your task: ${TASK_TITLE}
-${TASK_DESC}
-
-Agent ID: ${GYRE_AGENT_ID}
-Task ID: ${GYRE_TASK_ID}
-Branch: ${GYRE_BRANCH}
-
-Instructions:
-1. Read the task details using gyre_list_tasks (filter by id ${GYRE_TASK_ID})
-2. Implement the requirements by creating/editing files
-3. Commit with a conventional commit message (feat:, fix:, etc.)
-4. Push: run git push origin ${GYRE_BRANCH} (use git -c http.extraHeader='Authorization: Bearer ${GYRE_AUTH_TOKEN}' -c http.${GYRE_SERVER_URL}/.extraHeader='Authorization: Bearer ${GYRE_AUTH_TOKEN}' push origin ${GYRE_BRANCH})
-5. Signal completion using gyre_agent_complete with branch '${GYRE_BRANCH}' and target_branch 'main'
-
-Important: You MUST call gyre_agent_complete as your final action." 2>&1 || true
-
-echo "[agent] Claude Code finished"
-
-# Fallback: if Claude didn't call gyre_agent_complete, do it from the wrapper.
-# Check if the agent is still active (meaning complete wasn't called).
-AGENT_STATUS_CHECK=$(curl -sf -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
-  "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}" 2>/dev/null | jq -r '.status // "unknown"')
-
-if [ "$AGENT_STATUS_CHECK" = "active" ]; then
-  echo "[agent] Claude didn't call gyre_agent_complete — calling fallback..."
-  # Check if there are commits to push
-  if git log origin/${GYRE_BRANCH}..HEAD --oneline 2>/dev/null | grep -q .; then
-    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
-      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
-      GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
-      git push origin "${GYRE_BRANCH}" 2>&1 || true
+  if [ ! -f "$AGENT_SCRIPT" ]; then
+    warn "Agent script not found: ${AGENT_SCRIPT}"
+  else
+    ok "Agent entrypoint: ${AGENT_SCRIPT}"
   fi
-  curl -sf -H "Authorization: Bearer $GYRE_AUTH_TOKEN" -H "Content-Type: application/json" \
-    -d "{\"branch\":\"${GYRE_BRANCH}\",\"title\":\"feat: implement task via autonomous agent\",\"target_branch\":\"main\"}" \
-    "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}/complete" 2>/dev/null || true
-  echo "[agent] Fallback complete called"
-fi
-AGENT_WRAPPER
-  chmod +x "$AGENT_SCRIPT"
-  ok "Agent wrapper script: ${AGENT_SCRIPT}"
 
-  # Check if the server was started with GYRE_AGENT_COMMAND pointing to our script.
-  # The spawn handler uses: compute_target command → GYRE_AGENT_COMMAND → /gyre/entrypoint.sh
+  # Verify the server was started with GYRE_AGENT_COMMAND
   SERVER_PID=$(lsof -ti :${BASE_URL##*:} 2>/dev/null | head -1)
   if [ -n "$SERVER_PID" ]; then
     AGENT_CMD=$(tr '\0' '\n' < /proc/$SERVER_PID/environ 2>/dev/null | grep "^GYRE_AGENT_COMMAND=" | cut -d= -f2-)
     if [ -n "$AGENT_CMD" ]; then
-      ok "Server has GYRE_AGENT_COMMAND=${AGENT_CMD}"
+      ok "Server GYRE_AGENT_COMMAND=${AGENT_CMD}"
     else
-      warn "Server missing GYRE_AGENT_COMMAND — agent spawn will use /gyre/entrypoint.sh (Docker only)"
-      info "Restart server with: GYRE_AGENT_COMMAND=${AGENT_SCRIPT}"
+      warn "Server missing GYRE_AGENT_COMMAND — agent spawn will fail"
+      info "Restart: GYRE_AGENT_COMMAND=${AGENT_SCRIPT} cargo run -p gyre-server"
     fi
   fi
 
-  # Create a task for the real agent
   {
+    # Create a task for the real agent
     REAL_TASK=$(api_post "${API}/tasks" "{
       \"title\": \"Add a version module with build info\",
       \"description\": \"Create src/version.rs that exports a Version struct with name, version, and build_timestamp fields. Add a pub fn current() -> Version that returns the current build info. Re-export from lib.rs.\",

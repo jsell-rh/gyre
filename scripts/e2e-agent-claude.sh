@@ -1,42 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Gyre E2E Agent Runner — uses the proper agent-runner.mjs with Claude Agent SDK
+# =============================================================================
+# Gyre Agent Entrypoint (local / e2e)
 #
-# This script is spawned by the Gyre server as a real agent process.
-# It receives GYRE_* env vars and runs the agent-runner.mjs which provides:
-#   - Claude Agent SDK integration via MCP
-#   - Conversation provenance (turn tracking, upload)
-#   - Heartbeat management
+# Local equivalent of docker/gyre-agent/entrypoint.sh. Spawned by the server
+# as the GYRE_AGENT_COMMAND. Handles:
+#   1. Git clone + branch setup
+#   2. Credential configuration (no cred-proxy for local — uses ADC)
+#   3. Delegates to agent-runner.mjs (Claude Agent SDK)
 #
-# For local e2e runs, Vertex credentials come from gcloud ADC (no cred-proxy needed).
-# The server passes CLAUDE_CODE_USE_VERTEX=1 and ANTHROPIC_VERTEX_PROJECT_ID
-# via the container_env map.
+# Env vars injected by the server:
+#   GYRE_SERVER_URL, GYRE_AUTH_TOKEN (JWT), GYRE_CLONE_URL, GYRE_BRANCH,
+#   GYRE_AGENT_ID, GYRE_TASK_ID, GYRE_REPO_ID,
+#   CLAUDE_CODE_USE_VERTEX, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION
+# =============================================================================
 
 : "${GYRE_SERVER_URL:?}" "${GYRE_AUTH_TOKEN:?}" "${GYRE_CLONE_URL:?}"
 : "${GYRE_BRANCH:?}" "${GYRE_AGENT_ID:?}" "${GYRE_TASK_ID:?}"
 
-echo "[agent] Starting: agent=${GYRE_AGENT_ID:0:8} task=${GYRE_TASK_ID:0:8} branch=${GYRE_BRANCH}"
+echo "=== Gyre Agent Bootstrap (local) ==="
+echo "Agent: ${GYRE_AGENT_ID}"
+echo "Task:  ${GYRE_TASK_ID}"
+echo "Branch: ${GYRE_BRANCH}"
+echo "Server: ${GYRE_SERVER_URL}"
 
-# ── Install dependencies if needed ──────────────────────────────────────────
+# ── Resolve paths ────────────────────────────────────────────────────────────
 
-AGENT_DIR="$(cd "$(dirname "$0")/../docker/gyre-agent" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="$(cd "$SCRIPT_DIR/../docker/gyre-agent" && pwd)"
 
-if [ ! -d "$AGENT_DIR/node_modules" ]; then
-  echo "[agent] Installing npm dependencies in $AGENT_DIR..."
+if [ ! -f "$AGENT_DIR/agent-runner.mjs" ]; then
+  echo "ERROR: agent-runner.mjs not found at $AGENT_DIR"
+  exit 1
+fi
+
+# ── Install SDK if needed ────────────────────────────────────────────────────
+
+if [ ! -d "$AGENT_DIR/node_modules/@anthropic-ai" ]; then
+  echo "Installing Claude Agent SDK..."
   (cd "$AGENT_DIR" && npm install --silent 2>&1) || {
-    echo "[agent] WARNING: npm install failed — falling back to global SDK"
+    echo "ERROR: npm install failed"
+    exit 1
   }
 fi
 
-# ── Vertex AI configuration ─────────────────────────────────────────────────
-
-# For local e2e: inherit Vertex ADC from environment (gcloud auth application-default login)
-# CLAUDE_CODE_USE_VERTEX and ANTHROPIC_VERTEX_PROJECT_ID are forwarded by spawn.rs
-# CLOUD_ML_REGION / GYRE_VERTEX_LOCATION provide the region
+# ── Vertex AI (local: ADC, no cred-proxy) ────────────────────────────────────
 
 if [ -n "${GYRE_VERTEX_LOCATION:-}" ] && [ -z "${CLOUD_ML_REGION:-}" ]; then
   export CLOUD_ML_REGION="$GYRE_VERTEX_LOCATION"
+fi
+
+if [ "${CLAUDE_CODE_USE_VERTEX:-}" = "1" ]; then
+  echo "Vertex AI: project=${ANTHROPIC_VERTEX_PROJECT_ID:-unset} region=${CLOUD_ML_REGION:-unset}"
 fi
 
 # ── Heartbeat ────────────────────────────────────────────────────────────────
@@ -49,32 +65,43 @@ curl -sf -X PUT -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+echo "Cloning ${GYRE_CLONE_URL}..."
 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
   GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
   git clone "${GYRE_CLONE_URL}.git" "$WORK/repo" 2>/dev/null || {
-    mkdir -p "$WORK/repo"; cd "$WORK/repo"; git init
+    echo "Empty repo — initializing..."
+    mkdir -p "$WORK/repo"
+    cd "$WORK/repo"
+    git init
     git remote add origin "${GYRE_CLONE_URL}.git"
-}
+  }
 
 cd "$WORK/repo"
-git config user.email "agent-${GYRE_AGENT_ID}@gyre.local"
-git config user.name "Gyre Agent"
 
+# Configure git identity and auth
+git config user.email "agent-${GYRE_AGENT_ID}@gyre.local"
+git config user.name "Gyre Agent ${GYRE_AGENT_ID:0:8}"
+git config "http.${GYRE_SERVER_URL}/.extraHeader" "Authorization: Bearer ${GYRE_AUTH_TOKEN}"
+
+# Fetch and create feature branch
 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
   GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
   git fetch origin main 2>/dev/null || true
-git checkout -b "${GYRE_BRANCH}" origin/main 2>/dev/null || git checkout -b "${GYRE_BRANCH}" 2>/dev/null || true
+
+git checkout -b "${GYRE_BRANCH}" origin/main 2>/dev/null || \
+  git checkout -b "${GYRE_BRANCH}" 2>/dev/null || true
+
+echo "=== Agent ready. Workspace: $(pwd) ==="
 
 # ── Run agent-runner.mjs ─────────────────────────────────────────────────────
 
-echo "[agent] Running agent-runner.mjs..."
-export GYRE_REPO_ID="${GYRE_REPO_ID:-}"
+# agent-runner.mjs must run from its own directory (for SDK module resolution).
+# Export the working directory so the runner can tell Claude where to work.
+export GYRE_WORK_DIR="$(pwd)"
 
-# Set NODE_PATH so the SDK can be resolved from the agent dir
-export NODE_PATH="$AGENT_DIR/node_modules"
-
-exec node "$AGENT_DIR/agent-runner.mjs"
+cd "$AGENT_DIR"
+exec node agent-runner.mjs
