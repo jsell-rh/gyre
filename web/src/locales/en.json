@@ -389,7 +389,11 @@
     "respond_to": "Respond to {agent}",
     "all_caught_up": "All caught up",
     "no_activity": "No activity in the {window} window.",
-    "item_dismissed": "Item dismissed"
+    "item_dismissed": "Item dismissed",
+    "metric_mrs": "MRs",
+    "metric_runs": "runs",
+    "metric_cost": "cost",
+    "metric_budget": "budget"
   },
   "diff_suggestion": {
     "suggested_change": "Suggested Change",
@@ -434,6 +438,7 @@
     "rejection_failed": "Rejection failed",
     "retry_failed": "Retry failed",
     "accept_failed": "Accept failed",
+    "dismissed": "Dismissed",
     "dismiss_failed": "Dismiss failed \u2014 please try again.",
     "time_just_now": "just now",
     "time_minutes_ago": "{count}m ago",
@@ -846,6 +851,10 @@
     "ask_placeholder": "Ask: How does auth work?",
     "ask_btn": "Ask",
     "ask_label": "Ask about architecture",
+    "explore_arrow": "Explore \u2192",
+    "select_repo_desc": "Choose a repository above to explore its realized architecture \u2014 types, traits, functions, endpoints, and their relationships.",
+    "no_repos_hint": "No repositories found. Create a project and repository to get started.",
+    "fetching_graph": "Fetching knowledge graph\u2026",
     "graph_error": "Failed to load graph: {error}"
   },
   "detail_panel": {
@@ -911,6 +920,8 @@
     "no_history": "No history available",
     "no_history_desc": "Modification history will appear when changes are recorded.",
     "loading_arch": "Loading architecture graph\u2026",
+    "nodes_governed": "{count} {count, plural, one {node} other {nodes}} governed by this spec",
+    "predicted_changes": "{count} predicted {count, plural, one {change} other {changes}}",
     "governed_by_spec": "governed by this spec",
     "expand_to_canvas": "Expand to canvas \u2192",
     "diff_not_available": "Code diff not available",
@@ -1415,6 +1426,11 @@
     "edit": "Edit",
     "required": "Required",
     "optional": "Optional",
+    "skip_to_content": "Skip to main content",
+    "token_desc": "Set the Bearer token for all API and WebSocket requests.",
+    "token_kind": "Kind",
+    "token_agent_id": "Agent ID",
+    "token_expires": "Expires",
     "refresh": "Refresh",
     "status": {
       "active": "Active",
@@ -1440,6 +1456,20 @@
     "hint_agent": "Ctrl+Enter to send \u00b7 Messages are signed and persisted via message bus",
     "hint_qa": "Ctrl+Enter to send \u00b7 Read-only Q&A \u2014 cannot trigger actions",
     "hint_edit": "Ctrl+Enter to send \u00b7 Produces draft suggestions \u2014 you accept before saving"
+  },
+  "workspace_cards": {
+    "title": "Workspaces",
+    "subtitle": "Choose a workspace to view its agents, specs, and architecture",
+    "load_failed": "Failed to load workspaces: {error}",
+    "empty_title": "No workspaces found.",
+    "empty_desc": "Create a workspace in Admin to get started.",
+    "go_to_admin": "Go to Admin",
+    "no_results": "No results",
+    "no_results_desc": "No workspaces match your filter.",
+    "clear_filter": "Clear filter",
+    "repos": "repos",
+    "active_agents": "active agents",
+    "budget": "Budget"
   },
   "search": {
     "placeholder": "Search tasks, agents, specs, MRs\u2026",

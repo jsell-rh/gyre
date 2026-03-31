@@ -1022,7 +1022,7 @@
         <div class="risk-panel" role="complementary" aria-label="Risk heat-map — top 10 nodes">
           <div class="risk-panel-header">
             <span class="risk-panel-title">{$t('explorer_canvas.risk_heatmap')}</span>
-            <span class="risk-panel-sub">Top 10 · click to highlight</span>
+            <span class="risk-panel-sub">{$t('explorer_canvas.top_risk')}</span>
           </div>
           {#if riskData.length === 0}
             <div class="risk-empty">{repoId ? $t('explorer_canvas.loading_risk') : $t('explorer_canvas.no_risk_data')}</div>
@@ -1052,7 +1052,7 @@
                 </tbody>
               </table>
             </div>
-            <div class="risk-panel-footer"><span class="risk-panel-hint">Node size ∝ fan-in · Color = risk score</span></div>
+            <div class="risk-panel-footer"><span class="risk-panel-hint">{$t('explorer_canvas.risk_hint')}</span></div>
           {/if}
         </div>
       {/if}

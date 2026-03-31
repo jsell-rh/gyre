@@ -776,7 +776,7 @@
   });
 </script>
 
-<a href="#main-content" class="skip-to-content">Skip to main content</a>
+<a href="#main-content" class="skip-to-content">{$t('common.skip_to_content')}</a>
 
 {#if !$isLoading}
 <div class="app">
@@ -1132,7 +1132,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Decisions</a>
+            >{$t('workspace_home.sections.decisions')}</a>
           </li>
           <li>
             <a
@@ -1143,7 +1143,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Specs</a>
+            >{$t('workspace_home.sections.specs')}</a>
           </li>
           <li>
             <a
@@ -1154,7 +1154,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-repos"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Repos</a>
+            >{$t('workspace_home.sections.repos')}</a>
           </li>
           <li>
             <a
@@ -1165,7 +1165,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Briefing</a>
+            >{$t('workspace_home.sections.briefing')}</a>
           </li>
           <li>
             <a
@@ -1379,7 +1379,7 @@
       placeholder="e.g. Backend Team"
       onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
     />
-    <label class="token-label" for="ws-desc-input">Description</label>
+    <label class="token-label" for="ws-desc-input">{$t('workspace_home.create_ws_desc_label')}</label>
     <input
       id="ws-desc-input"
       class="token-input"
@@ -1398,30 +1398,30 @@
 </Modal>
 
 <!-- Token configuration modal -->
-<Modal bind:open={tokenModalOpen} title="API Token" size="sm">
+<Modal bind:open={tokenModalOpen} title={$t('settings.token.title')} size="sm">
   <div class="token-modal">
-    <p class="token-desc">Set the Bearer token for all API and WebSocket requests.</p>
+    <p class="token-desc">{$t('common.token_desc')}</p>
     {#if tokenInfo}
       <div class="token-info-box">
         <div class="token-info-row">
-          <span class="token-info-label">Kind</span>
+          <span class="token-info-label">{$t('common.token_kind')}</span>
           <span class="token-info-val">{TOKEN_KIND_LABELS[tokenInfo.kind] ?? tokenInfo.kind ?? '—'}</span>
         </div>
         {#if tokenInfo.agent_id}
           <div class="token-info-row">
-            <span class="token-info-label">Agent ID</span>
+            <span class="token-info-label">{$t('common.token_agent_id')}</span>
             <span class="token-info-val mono">{tokenInfo.agent_id}</span>
           </div>
         {/if}
         {#if tokenInfo.exp}
           <div class="token-info-row">
-            <span class="token-info-label">Expires</span>
+            <span class="token-info-label">{$t('common.token_expires')}</span>
             <span class="token-info-val">{new Date(tokenInfo.exp * 1000).toLocaleString()}</span>
           </div>
         {/if}
       </div>
     {/if}
-    <label class="token-label" for="token-input">Token</label>
+    <label class="token-label" for="token-input">{$t('settings.token.label')}</label>
     <div class="token-input-wrap">
       <input
         id="token-input"

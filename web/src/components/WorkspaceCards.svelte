@@ -124,8 +124,8 @@
 
 <div class="workspace-cards">
   <div class="cards-header">
-    <h2>Workspaces</h2>
-    <p class="subtitle">Choose a workspace to view its agents, specs, and architecture</p>
+    <h2>{$t('workspace_cards.title')}</h2>
+    <p class="subtitle">{$t('workspace_cards.subtitle')}</p>
   </div>
 
   {#if loading}
@@ -137,19 +137,19 @@
 
   {:else if error}
     <div class="error-banner" role="alert">
-      <p>Failed to load workspaces: {error}</p>
+      <p>{$t('workspace_cards.load_failed', { values: { error } })}</p>
       <button class="retry-btn" onclick={load}>{$t('common.retry')}</button>
     </div>
 
   {:else if workspaces.length === 0}
     <div class="empty-wrap">
       <EmptyState
-        title="No workspaces found."
-        description="Create a workspace in Admin to get started."
+        title={$t('workspace_cards.empty_title')}
+        description={$t('workspace_cards.empty_desc')}
       >
         {#snippet action()}
           <button class="btn-secondary" onclick={() => navigate?.('home')}>
-            Go to Admin
+            {$t('workspace_cards.go_to_admin')}
           </button>
         {/snippet}
       </EmptyState>
@@ -162,9 +162,9 @@
     </div>
     {#if visibleWs.length === 0}
       <div class="empty-wrap">
-        <EmptyState title="No results" description="No workspaces match your filter.">
+        <EmptyState title={$t('workspace_cards.no_results')} description={$t('workspace_cards.no_results_desc')}>
           {#snippet action()}
-            <button class="btn-secondary" onclick={() => { wsFilter = ''; }}>Clear filter</button>
+            <button class="btn-secondary" onclick={() => { wsFilter = ''; }}>{$t('workspace_cards.clear_filter')}</button>
           {/snippet}
         </EmptyState>
       </div>
@@ -202,7 +202,7 @@
                     {:else}
                       <span class="stat-dash">…</span>
                     {/if}
-                    <span class="stat-label">repos</span>
+                    <span class="stat-label">{$t('workspace_cards.repos')}</span>
                   </div>
 
                   <div class="stat-row">
@@ -220,14 +220,14 @@
                     {:else}
                       <span class="stat-dash">…</span>
                     {/if}
-                    <span class="stat-label">active agents</span>
+                    <span class="stat-label">{$t('workspace_cards.active_agents')}</span>
                   </div>
                 </div>
 
                 <!-- Budget bar -->
                 <div class="budget-section">
                   <div class="budget-label-row">
-                    <span class="budget-label">Budget</span>
+                    <span class="budget-label">{$t('workspace_cards.budget')}</span>
                     {#if info?.budgetPct != null}
                       <span
                         class="budget-pct"

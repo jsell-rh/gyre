@@ -971,16 +971,16 @@
               <Button
                 variant="secondary"
                 onclick={() => { archLoaded = false; archNodes = []; loadArchGraph(entity.data?.repo_id, entity.id); }}
-              >Retry</Button>
+              >{$t('common.retry')}</Button>
             </div>
           {:else}
             <div class="arch-mini-header">
               <span class="arch-mini-label">
-                {archNodes.length} {archNodes.length === 1 ? 'node' : 'nodes'} {$t('detail_panel.governed_by_spec')}
+                {$t('detail_panel.nodes_governed', { values: { count: archNodes.length } })}
               </span>
               {#if archGhostOverlays.length}
                 <span class="arch-predict-badge">
-                  {archGhostOverlays.length} predicted change{archGhostOverlays.length !== 1 ? 's' : ''}
+                  {$t('detail_panel.predicted_changes', { values: { count: archGhostOverlays.length } })}
                 </span>
               {/if}
             </div>

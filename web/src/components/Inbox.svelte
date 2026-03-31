@@ -348,7 +348,7 @@
                 >
                   P{n.priority}
                 </span>
-                {#if isDismissed}<span class="sr-only">(Dismissed)</span>{/if}
+                {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
                 <div class="card-header-text">
                   <span class="card-title">{n.title}</span>
                   {#if body.agent_id || body.mr_title}
@@ -622,7 +622,7 @@
             onclick={() => { displayLimit += PAGE_SIZE; }}
             aria-label="Show more notifications"
           >
-            Show more ({allVisibleNotifications.length - displayLimit} remaining)
+            {$t('decisions.show_more', { values: { count: allVisibleNotifications.length - displayLimit } })}
           </button>
         </div>
       {/if}
