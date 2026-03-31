@@ -538,15 +538,10 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
-  specsAssistGlobal: (body) =>
-    fetch(`${API_BASE}/specs/assist`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${getAuthToken()}`,
-      },
-      body: JSON.stringify(body),
-    }),
+  // Server does not have POST /specs/assist — only POST /repos/:id/specs/assist.
+  // Return a failed Response so callers fall through gracefully.
+  specsAssistGlobal: (_body) =>
+    Promise.resolve(new Response(null, { status: 404, statusText: 'Not available without repo context' })),
   specsSave: (repoId, data) =>
     request(`/repos/${repoId}/specs/save`, { method: 'POST', body: JSON.stringify(data) }),
   // Costs
