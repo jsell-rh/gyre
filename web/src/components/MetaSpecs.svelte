@@ -189,9 +189,9 @@
       specs = specs.map(s => s.id === selected.id ? updated : s);
       selected = updated;
       editDirty = false;
-      toastSuccess('Saved — content change bumped to v' + updated.version);
+      toastSuccess($t('meta_specs.toast.saved_version', { values: { version: updated.version } }));
     } catch (e) {
-      toastError('Save failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.save_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     editSaving = false;
   }
@@ -203,9 +203,9 @@
       const updated = await api.updateMetaSpec(selected.id, { approval_status: 'Approved' });
       specs = specs.map(s => s.id === selected.id ? updated : s);
       selected = updated;
-      toastSuccess('Approved — now active in all bound workspaces');
+      toastSuccess($t('meta_specs.toast.approved'));
     } catch (e) {
-      toastError('Approve failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.approve_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     approvalSaving = null;
   }
@@ -217,9 +217,9 @@
       const updated = await api.updateMetaSpec(selected.id, { approval_status: 'Rejected' });
       specs = specs.map(s => s.id === selected.id ? updated : s);
       selected = updated;
-      toastSuccess('Rejected');
+      toastSuccess($t('meta_specs.toast.rejected'));
     } catch (e) {
-      toastError('Reject failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.reject_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     approvalSaving = null;
   }
@@ -230,15 +230,15 @@
       const updated = await api.updateMetaSpec(spec.id, { required: !spec.required });
       specs = specs.map(s => s.id === spec.id ? updated : s);
       if (selected?.id === spec.id) selected = updated;
-      toastSuccess(updated.required ? 'Marked as required — all agents must load this' : 'Marked as optional');
+      toastSuccess(updated.required ? $t('meta_specs.toast.marked_required') : $t('meta_specs.toast.marked_optional'));
     } catch (e) {
-      toastError('Update failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.update_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     requiredSaving = null;
   }
 
   async function handleCreate() {
-    if (!createForm.name.trim()) { toastError('Name is required'); return; }
+    if (!createForm.name.trim()) { toastError($t('meta_specs.toast.name_required')); return; }
     createSaving = true;
     try {
       const payload = {
@@ -256,9 +256,9 @@
       createMode = false;
       createForm = { kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false };
       selectSpec(created, true);
-      toastSuccess('Created "' + created.name + '" — now pending review');
+      toastSuccess($t('meta_specs.toast.created', { values: { name: created.name } }));
     } catch (e) {
-      toastError('Create failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.create_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     createSaving = false;
   }
@@ -283,9 +283,9 @@
         }
       }
       deleteTarget = null;
-      toastSuccess('Deleted');
+      toastSuccess($t('meta_specs.toast.deleted'));
     } catch (e) {
-      toastError('Delete failed (may have active bindings): ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.delete_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     deleteSaving = false;
   }
@@ -305,7 +305,7 @@
     // Fallback: add as suggestion
     const id = `suggestion-${nextSuggestionId++}`;
     editSuggestions = [...editSuggestions, { id, content: `# Suggested addition\n${text}` }];
-    return 'Suggestion added below the editor.';
+    return $t('meta_specs.toast.suggestion_added');
   }
 
   function acceptSuggestion(s) {
@@ -426,7 +426,7 @@
       });
       usedPreviewId = res?.preview_id ?? null;
       if (res && !usedPreviewId) previewApiResult = res;
-    } catch { toastInfo('Preview not available from server — showing example layout'); }
+    } catch { toastInfo($t('meta_specs.toast.preview_unavailable')); }
 
     if (usedPreviewId) {
       previewId = usedPreviewId;
@@ -486,9 +486,9 @@
     publishSaving = true;
     try {
       await api.publishPersona(workspaceId, selectedMsId, { content: selectedMsContent });
-      toastSuccess('Published successfully');
+      toastSuccess($t('meta_specs.toast.published'));
     } catch (e) {
-      toastError('Publish failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.publish_failed', { values: { error: e?.message ?? 'unknown error' } }));
     } finally {
       publishSaving = false;
     }
@@ -508,7 +508,7 @@
 
     const id = `ws-suggestion-${wsNextSuggId++}`;
     wsSuggestions = [...wsSuggestions, { id, content: `+ ${text}\n# Suggested addition` }];
-    return 'Suggestion added below the editor.';
+    return $t('meta_specs.toast.suggestion_added');
   }
 
   function wsAcceptSuggestion(s) {

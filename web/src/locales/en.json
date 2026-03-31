@@ -110,7 +110,21 @@
     "create_ws_desc_placeholder": "What is this workspace for?",
     "create_ws_cancel": "Cancel",
     "create_ws_creating": "Creating…",
-    "create_ws_submit": "Create Workspace"
+    "create_ws_submit": "Create Workspace",
+    "ws_created": "Workspace \"{name}\" created.",
+    "ws_create_failed": "Failed to create workspace: {error}",
+    "type_labels": {
+      "agent_clarification": "Clarification",
+      "spec_approval": "Spec Approval",
+      "gate_failure": "Gate Failure",
+      "cross_workspace_change": "Cross-WS Change",
+      "conflicting_interpretations": "Conflict",
+      "meta_spec_drift": "Meta Drift",
+      "budget_warning": "Budget",
+      "trust_suggestion": "Trust",
+      "spec_assertion_failure": "Assertion Fail",
+      "suggested_link": "Suggested Link"
+    }
   },
   "repo_mode": {
     "tabs": {
@@ -480,7 +494,9 @@
     "col_kind": "Kind",
     "col_owner": "Owner",
     "col_updated": "Updated",
-    "markdown_source": "Markdown source"
+    "markdown_source": "Markdown source",
+    "spec_created": "Spec created — MR #{mr_id} created",
+    "create_failed": "Create failed: {error}"
   },
   "code_tab": {
     "clone": "Clone",
@@ -742,6 +758,26 @@
     "required_toggle": {
       "click_optional": "Required \u2014 click to make optional",
       "click_required": "Optional \u2014 click to make required"
+    },
+    "toast": {
+      "saved_version": "Saved — content change bumped to v{version}",
+      "save_failed": "Save failed: {error}",
+      "approved": "Approved — now active in all bound workspaces",
+      "approve_failed": "Approve failed: {error}",
+      "rejected": "Rejected",
+      "reject_failed": "Reject failed: {error}",
+      "marked_required": "Marked as required — all agents must load this",
+      "marked_optional": "Marked as optional",
+      "update_failed": "Update failed: {error}",
+      "name_required": "Name is required",
+      "created": "Created \"{name}\" — now pending review",
+      "create_failed": "Create failed: {error}",
+      "deleted": "Deleted",
+      "delete_failed": "Delete failed (may have active bindings): {error}",
+      "preview_unavailable": "Preview not available from server — showing example layout",
+      "published": "Published successfully",
+      "publish_failed": "Publish failed: {error}",
+      "suggestion_added": "Suggestion added below the editor."
     }
   },
   "editor_split": {
@@ -936,7 +972,19 @@
     "ask_why_spawn": "Ask Why \u2014 Spawn Review Agent",
     "ask_why_hint": "Spawns an interrogation agent to answer questions about this entity's decision history.",
     "ask_why_view_agent": "View spawned agent \u2192",
-    "ask_why_unavailable": "Conversation unavailable \u2014 no conversation SHA recorded for this entity."
+    "ask_why_unavailable": "Conversation unavailable \u2014 no conversation SHA recorded for this entity.",
+    "approve": "Approve",
+    "interrogation_no_context": "Cannot start interrogation: entity is missing repo/task context.",
+    "interrogation_spawned": "Interrogation agent spawned.",
+    "interrogation_failed": "Failed to spawn interrogation agent: {error}",
+    "approve_missing_sha": "Cannot approve: missing spec SHA",
+    "spec_approved": "Spec approved",
+    "approval_failed": "Approval failed: {error}",
+    "spec_revoked": "Spec approval revoked",
+    "revocation_failed": "Revocation failed: {error}",
+    "llm_assist_failed": "LLM assist failed: {error}",
+    "spec_saved": "Spec saved — MR #{mr_id} created",
+    "save_failed": "Save failed: {error}"
   },
   "explorer_canvas": {
     "no_graph": "No graph data",
@@ -1163,7 +1211,8 @@
       "stale_warning_hint": "Warn when a spec has not been updated in 30+ days.",
       "saving": "Saving\u2026",
       "saved": "Saved \u2713",
-      "save_policies": "Save Policies"
+      "save_policies": "Save Policies",
+      "policy_save_failed": "Policy save failed: {error}"
     },
     "budget": {
       "title": "Budget",
@@ -1321,6 +1370,7 @@
   },
   "tenant_settings": {
     "title": "Tenant Administration",
+    "subtitle": "System-wide configuration \u2014 users, compute, budget, audit, health, and background jobs.",
     "tabs": {
       "users": "Users",
       "compute": "Compute Targets",

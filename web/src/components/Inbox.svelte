@@ -164,7 +164,7 @@
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
     try {
       await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
-      api.resolveNotification(n.id).catch(() => toastError('Could not dismiss notification'));
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
@@ -186,7 +186,7 @@
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
     try {
       await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected from inbox');
-      api.resolveNotification(n.id).catch(() => toastError('Could not dismiss notification'));
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
@@ -208,7 +208,7 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
-      api.resolveNotification(n.id).catch(() => toastError('Could not dismiss notification'));
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
