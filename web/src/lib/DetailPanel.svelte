@@ -584,7 +584,7 @@
   class:expanded
   class:open={!!entity}
   role="dialog"
-  aria-label="Detail panel"
+  aria-label={$t('detail_panel.title')}
   aria-modal={expanded ? 'true' : undefined}
   tabindex="-1"
   onkeydown={handleKeydown}
@@ -748,7 +748,7 @@
             ></textarea>
 
             {#if llmSuggestion}
-              <div class="suggestion-block" role="region" aria-label="LLM suggestion">
+              <div class="suggestion-block" role="region" aria-label={$t('detail_panel.suggested_change')}>
                 <div class="suggestion-hdr">
                   <span class="suggestion-lbl">{$t('detail_panel.suggested_change')}</span>
                 </div>

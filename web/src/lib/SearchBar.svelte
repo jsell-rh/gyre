@@ -131,7 +131,7 @@
   <div
     class="search-dialog"
     role="dialog"
-    aria-label="Quick navigation"
+    aria-label={$t('search.dialog_label')}
     aria-modal="true"
     bind:this={dialogEl}
     onkeydown={(e) => {
@@ -163,7 +163,7 @@
         class="search-input"
         autocomplete="off"
         spellcheck="false"
-        aria-label="Search or navigate"
+        aria-label={$t('search.input_label')}
         aria-autocomplete="list"
         aria-controls="search-listbox"
         aria-activedescendant={results.length > 0 ? `search-option-${selected}` : undefined}
@@ -172,14 +172,14 @@
         aria-haspopup="listbox"
       />
       {#if searching}
-        <span class="search-spinner" aria-label="Searching...">⟳</span>
+        <span class="search-spinner" aria-label={$t('search.searching')}>⟳</span>
       {:else}
         <kbd class="search-esc" aria-hidden="true">Esc</kbd>
       {/if}
     </div>
 
     {#if results.length > 0}
-      <ul class="search-results" role="listbox" id="search-listbox" aria-label="Search results">
+      <ul class="search-results" role="listbox" id="search-listbox" aria-label={$t('search.results_label')}>
         {#each results as item, i}
           <li
             role="option"

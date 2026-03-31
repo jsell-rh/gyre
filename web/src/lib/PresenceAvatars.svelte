@@ -1,5 +1,6 @@
 <script>
   import { api } from './api.js';
+  import { t } from 'svelte-i18n';
 
   /**
    * PresenceAvatars — row of avatars for active workspace users.
@@ -116,7 +117,7 @@
 </script>
 
 {#if collapsed.length > 0}
-  <div class="presence-avatars" role="group" aria-label="Active users in this workspace">
+  <div class="presence-avatars" role="group" aria-label={$t('presence.active_users')}>
     {#each collapsed as user}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
