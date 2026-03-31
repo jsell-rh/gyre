@@ -294,8 +294,17 @@
     }
     if (activeTab === 'gates' && !mrGates && !mrGatesLoading) {
       mrGatesLoading = true;
-      api.mrGates(id)
-        .then((d) => { mrGates = Array.isArray(d) ? d : (d?.gates ?? []); })
+      const mr = mrDetail ?? entity.data ?? {};
+      const repoId = mr.repository_id ?? mr.repo_id ?? entity.data?.repository_id ?? entity.data?.repo_id;
+      Promise.all([
+        api.mrGates(id),
+        repoId ? api.repoGates(repoId).catch(() => []) : Promise.resolve([]),
+      ])
+        .then(([results, defs]) => {
+          const raw = Array.isArray(results) ? results : (results?.gates ?? []);
+          const defMap = Object.fromEntries((Array.isArray(defs) ? defs : []).map(g => [g.id, g]));
+          mrGates = raw.map(r => ({ ...r, ...(defMap[r.gate_id] ?? {}), _result_id: r.id }));
+        })
         .catch(() => { mrGates = []; })
         .finally(() => { mrGatesLoading = false; });
     }
@@ -1204,25 +1213,46 @@
           {:else if Array.isArray(mrGates) && mrGates.length > 0}
             <ul class="gates-list">
               {#each mrGates as gate}
+                {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
                 <li class="gate-item">
                   <div class="gate-row">
                     <Badge
-                      value={gate.status ?? 'unknown'}
-                      variant={gate.status === 'passed' ? 'success' : gate.status === 'failed' ? 'danger' : gate.status === 'running' ? 'warning' : 'muted'}
+                      value={gate.status === 'Passed' || gate.status === 'passed' ? 'passed' : gate.status === 'Failed' || gate.status === 'failed' ? 'failed' : gate.status === 'Running' || gate.status === 'running' ? 'running' : gate.status ?? 'pending'}
+                      variant={gate.status === 'Passed' || gate.status === 'passed' ? 'success' : gate.status === 'Failed' || gate.status === 'failed' ? 'danger' : gate.status === 'Running' || gate.status === 'running' ? 'warning' : 'muted'}
                     />
                     <span class="gate-name">{gate.name ?? gate.gate_name ?? 'Gate'}</span>
-                    {#if gate.duration_ms}
-                      <span class="gate-duration">{gate.duration_ms}ms</span>
+                    {#if gate.gate_type}
+                      <span class="gate-type-badge">{gate.gate_type}</span>
+                    {/if}
+                    {#if gate.required !== undefined}
+                      <span class="gate-required-badge" class:advisory={!gate.required}>
+                        {gate.required ? 'required' : 'advisory'}
+                      </span>
+                    {/if}
+                    {#if duration}
+                      <span class="gate-duration">{duration}ms</span>
                     {/if}
                   </div>
                   {#if gate.command}
-                    <code class="gate-cmd mono">{gate.command}</code>
+                    <div class="gate-cmd-row">
+                      <span class="gate-cmd-label">Command</span>
+                      <code class="gate-cmd mono">{gate.command}</code>
+                    </div>
                   {/if}
                   {#if gate.output}
-                    <pre class="gate-output">{gate.output}</pre>
+                    <div class="gate-output-row">
+                      <span class="gate-output-label">Output</span>
+                      <pre class="gate-output">{gate.output}</pre>
+                    </div>
                   {/if}
                   {#if gate.error}
-                    <pre class="gate-output gate-error">{gate.error}</pre>
+                    <div class="gate-output-row">
+                      <span class="gate-output-label">Error</span>
+                      <pre class="gate-output gate-error">{gate.error}</pre>
+                    </div>
+                  {/if}
+                  {#if gate.started_at}
+                    <span class="gate-timing">{fmtDate(gate.started_at)}{#if gate.finished_at} — {fmtDate(gate.finished_at)}{/if}</span>
                   {/if}
                 </li>
               {/each}
@@ -2280,6 +2310,56 @@
   }
 
   .gate-error { color: var(--color-danger); }
+
+  .gate-type-badge {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+  }
+
+  .gate-required-badge {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    color: var(--color-danger);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .gate-required-badge.advisory {
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    color: var(--color-text-muted);
+    border-color: var(--color-border);
+  }
+
+  .gate-cmd-row,
+  .gate-output-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .gate-cmd-label,
+  .gate-output-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .gate-timing {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
 
   /* ── MR Attestation tab ──────────────────────────────────────────────────── */
   .attestation-block {
