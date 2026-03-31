@@ -1249,6 +1249,9 @@ async fn process_spec_lifecycle(
                 "Auto-created by spec lifecycle hook.\nSpec: {path}\nRepo: {repo_id}"
             ));
             task.spec_path = Some(path.clone());
+            task.repo_id = gyre_common::Id::new(repo_id);
+            // task_type intentionally left as None: push-hook tasks are informational
+            // and must NOT trigger agent spawning (agent-runtime.md §1 Phase 4).
 
             match state.tasks.create(&task).await {
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
