@@ -174,11 +174,18 @@
     }
   }
 
-  // Reset active tab when entity changes, defaulting to the first tab.
+  // Reset active tab when entity changes, defaulting to a sensible tab.
+  // MRs default to 'diff' (like GitHub), everything else defaults to first tab.
   $effect(() => {
     if (entity) {
       const freshTabs = computeTabs(entity);
-      if (freshTabs.length > 0) activeTab = freshTabs[0].id;
+      if (entity.type === 'mr' && freshTabs.some(t => t.id === 'diff')) {
+        activeTab = 'diff';
+      } else if (entity.type === 'spec' && freshTabs.some(t => t.id === 'content')) {
+        activeTab = 'content';
+      } else if (freshTabs.length > 0) {
+        activeTab = freshTabs[0].id;
+      }
     }
   });
 
