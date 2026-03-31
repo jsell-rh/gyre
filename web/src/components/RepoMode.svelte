@@ -8,6 +8,7 @@
    *   - Fixed Decisions tab: passes repoId so Inbox filters to this repo only
    *   - Verified tab prop wiring for all tabs
    */
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import ExplorerView from './ExplorerView.svelte';
   import SpecDashboard from './SpecDashboard.svelte';
@@ -24,11 +25,11 @@
   } = $props();
 
   const TABS = [
-    { id: 'specs',        label: 'Specs' },
-    { id: 'architecture', label: 'Architecture' },
-    { id: 'decisions',    label: 'Decisions' },
-    { id: 'code',         label: 'Code' },
-    { id: 'settings',     label: '⚙', title: 'Settings' },
+    { id: 'specs',        labelKey: 'repo_mode.tabs.specs' },
+    { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
+    { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
+    { id: 'code',         labelKey: 'repo_mode.tabs.code' },
+    { id: 'settings',     labelKey: 'repo_mode.tabs.settings', title: 'Settings' },
   ];
 
   // ── Active agents for this repo ────────────────────────────────────────
@@ -159,9 +160,9 @@
         aria-controls="tabpanel-{tab.id}"
         tabindex={activeTab === tab.id ? 0 : -1}
         onclick={() => onTabChange?.(tab.id)}
-        title={tab.title ?? tab.label}
+        title={tab.title ?? $t(tab.labelKey)}
       >
-        {tab.label}
+        {$t(tab.labelKey)}
       </button>
     {/each}
   </div>
