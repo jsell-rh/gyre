@@ -39,12 +39,12 @@
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
       const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
-      toastSuccess(`Workspace "${name}" created.`);
+      toastSuccess($t('workspace_home.ws_created', { values: { name } }));
       createWsOpen = false;
       createWsForm = { name: '', description: '' };
       onWorkspaceCreated?.(newWs);
     } catch (e) {
-      toastError('Failed to create workspace: ' + (e.message || e));
+      toastError($t('workspace_home.ws_create_failed', { values: { error: e.message || e } }));
     } finally {
       createWsSaving = false;
     }
@@ -64,18 +64,11 @@
     suggested_link: '🔗',
   };
 
-  const TYPE_LABELS = {
-    agent_clarification: 'Clarification',
-    spec_approval: 'Spec Approval',
-    gate_failure: 'Gate Failure',
-    cross_workspace_change: 'Cross-WS Change',
-    conflicting_interpretations: 'Conflict',
-    meta_spec_drift: 'Meta Drift',
-    budget_warning: 'Budget',
-    trust_suggestion: 'Trust',
-    spec_assertion_failure: 'Assertion Fail',
-    suggested_link: 'Suggested Link',
-  };
+  function typeLabel(type) {
+    const key = `workspace_home.type_labels.${type}`;
+    const val = $t(key);
+    return val !== key ? val : type;
+  }
 
   const SPEC_STATUS_ICONS = {
     draft: '📝',
@@ -491,7 +484,7 @@
                 <li class="decision-item" data-testid="decision-item">
                   <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[n.notification_type] ?? '•'}</span>
                   <div class="decision-content">
-                    <span class="decision-type">{TYPE_LABELS[n.notification_type] ?? n.notification_type}</span>
+                    <span class="decision-type">{typeLabel(n.notification_type)}</span>
                     <span class="decision-desc">{n.message ?? n.description ?? body.description ?? ''}</span>
                     {#if n.repo_id && repoMap[n.repo_id]}
                       <span class="decision-repo">{repoMap[n.repo_id].name}</span>

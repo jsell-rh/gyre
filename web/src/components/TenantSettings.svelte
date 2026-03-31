@@ -240,7 +240,7 @@
     </button>
     <div class="header-text">
       <h1 class="settings-title">{$t('tenant_settings.title')}</h1>
-      <p class="settings-subtitle">System-wide configuration — users, compute, budget, audit, health, and background jobs.</p>
+      <p class="settings-subtitle">{$t('tenant_settings.subtitle')}</p>
     </div>
   </header>
 
