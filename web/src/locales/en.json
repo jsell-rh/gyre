@@ -27,6 +27,80 @@
       "connected": "Connected"
     }
   },
+  "topbar": {
+    "search": "Search",
+    "search_shortcut": "⌘K",
+    "decisions_pending": "{count} decisions pending",
+    "no_decisions": "No decisions pending",
+    "user_menu": "User menu",
+    "profile": "Profile",
+    "api_token": "API Token",
+    "sign_out": "Sign out",
+    "select_workspace": "Select workspace",
+    "switch_workspace": "Switch workspace",
+    "workspace_settings": "Workspace settings",
+    "tenant_settings": "Tenant settings",
+    "all_workspaces": "All Workspaces",
+    "back_to_workspace": "Back to workspace home",
+    "agent_rules_label": "Agent Rules"
+  },
+  "workspace_home": {
+    "select_workspace": "Select a workspace",
+    "select_workspace_desc": "Choose a workspace from the selector above, or create a new one.",
+    "new_workspace": "+ New Workspace",
+    "sections": {
+      "decisions": "Decisions",
+      "repos": "Repos",
+      "architecture": "Architecture",
+      "briefing": "Briefing",
+      "specs": "Specs",
+      "agent_rules": "Agent Rules"
+    },
+    "decisions_empty": "No pending decisions. At Supervised trust, decisions appear when agents need guidance, specs need approval, or gates fail.",
+    "repos_empty": "No repositories yet.",
+    "specs_empty": "No specs yet.",
+    "view_all": "View all",
+    "show_less": "Show less",
+    "manage_rules": "Manage rules",
+    "show_workspace_graph": "Show workspace graph",
+    "hide_workspace_graph": "Hide workspace graph",
+    "new_repo": "+ New Repo",
+    "import": "Import"
+  },
+  "repo_mode": {
+    "tabs": {
+      "specs": "Specs",
+      "architecture": "Architecture",
+      "decisions": "Decisions",
+      "code": "Code",
+      "settings": "⚙"
+    },
+    "agents_active": "{count} agent{count, plural, one {} other {s}} active",
+    "clone_url_copied": "Clone URL copied!",
+    "copy_clone_url": "Copy clone URL to clipboard"
+  },
+  "status_bar": {
+    "trust": "Trust: {level}",
+    "budget": "Budget: {pct}%",
+    "live": "Live",
+    "offline": "Offline",
+    "connecting": "Connecting"
+  },
+  "shortcuts": {
+    "title": "Keyboard Shortcuts",
+    "global_search": "Global search",
+    "workspace_home": "Go to workspace home",
+    "workspace_settings": "Workspace settings",
+    "agent_rules": "Agent rules",
+    "specs_tab": "Specs tab (repo mode)",
+    "architecture_tab": "Architecture tab (repo mode)",
+    "decisions_tab": "Decisions tab (repo mode)",
+    "code_tab": "Code tab (repo mode)",
+    "settings_tab": "Settings tab (repo mode)",
+    "close_panel": "Close panel / return to workspace home",
+    "focus_search": "Focus search",
+    "toggle_shortcuts": "Toggle this overlay"
+  },
   "dashboard": {
     "title": "Dashboard",
     "metrics": {
@@ -229,6 +303,11 @@
     "error": "Error: {message}",
     "view_all": "View all",
     "actions": "Actions",
+    "approve": "Approve",
+    "reject": "Reject",
+    "retry": "Retry",
+    "dismiss": "Dismiss",
+    "refresh": "Refresh",
     "status": {
       "active": "Active",
       "idle": "Idle",
