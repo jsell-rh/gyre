@@ -70,9 +70,8 @@
     let aborted = false;
     tasksLoading = true;
     api.tasks({ repoId })
-      .then(list => { if (!aborted) { repoTasks = Array.isArray(list) ? list : []; tasksLoaded = true; } })
-      .catch(() => { if (!aborted) { repoTasks = []; tasksLoaded = true; } })
-      .finally(() => { if (!aborted) tasksLoading = false; });
+      .then(list => { if (!aborted) { repoTasks = Array.isArray(list) ? list : []; tasksLoading = false; tasksLoaded = true; } })
+      .catch(() => { if (!aborted) { repoTasks = []; tasksLoading = false; tasksLoaded = true; } });
     return () => { aborted = true; };
   });
 
@@ -109,10 +108,10 @@
         if (aborted) return;
         const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
         repoMrs = mrList.map(mr => ({ ...mr, _gates: gateMap[mr.id] }));
+        mrsLoading = false;
         mrsLoaded = true;
       })
-      .catch(() => { if (!aborted) { repoMrs = []; mrsLoaded = true; } })
-      .finally(() => { if (!aborted) mrsLoading = false; });
+      .catch(() => { if (!aborted) { repoMrs = []; mrsLoading = false; mrsLoaded = true; } });
     return () => { aborted = true; };
   });
 
