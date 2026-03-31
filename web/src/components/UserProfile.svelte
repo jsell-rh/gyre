@@ -187,7 +187,7 @@
 
 <div class="user-profile">
   <div class="profile-header">
-    <button class="back-btn" onclick={() => navigate?.('home')} aria-label="Back to workspace" title="Back">
+    <button class="back-btn" onclick={() => goToWorkspaceHome?.()} aria-label={$t('topbar.back_to_workspace')} title={$t('topbar.back_to_workspace')}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
         <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
       </svg>
