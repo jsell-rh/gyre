@@ -87,6 +87,7 @@ diesel::table! {
         workspace_id -> Text,
         reverted_at -> Nullable<BigInt>,
         revert_mr_id -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
     }
 }
 
