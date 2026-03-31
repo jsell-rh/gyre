@@ -36,20 +36,20 @@
 
   const KIND_COLORS = {
     'meta:persona':   'purple',
-    'meta:principle': 'blue',
-    'meta:standard':  'orange',
-    'meta:process':   'green',
+    'meta:principle': 'info',
+    'meta:standard':  'warning',
+    'meta:process':   'success',
   };
   const META_KINDS = ['meta:persona', 'meta:principle', 'meta:standard', 'meta:process'];
 
-  function kindBadgeVariant(kind) { return KIND_COLORS[kind] || 'gray'; }
+  function kindBadgeVariant(kind) { return KIND_COLORS[kind] || 'muted'; }
   function kindLabel(kind) { return $t(`meta_specs.kind_labels.${kind}`) || kind; }
 
   function approvalVariant(status) {
-    if (status === 'Approved') return 'green';
-    if (status === 'Pending') return 'yellow';
-    if (status === 'Rejected') return 'red';
-    return 'gray';
+    if (status === 'Approved') return 'success';
+    if (status === 'Pending') return 'warning';
+    if (status === 'Rejected') return 'danger';
+    return 'muted';
   }
 
   function approvalIcon(status) {
@@ -1000,7 +1000,7 @@
                         {#each blastResult.affected_workspaces as ws}
                           <div class="binding-row">
                             <span class="mono">{ws.id}</span>
-                            <Badge value={$t('meta_specs.impact.active')} variant="green" />
+                            <Badge value={$t('meta_specs.impact.active')} variant="success" />
                           </div>
                         {/each}
                       </div>
@@ -1016,7 +1016,7 @@
                         {#each blastResult.affected_repos as repo}
                           <div class="binding-row">
                             <span class="mono">{repo.id}</span>
-                            <Badge value={repo.reason} variant="gray" />
+                            <Badge value={repo.reason} variant="muted" />
                             <span class="mono text-muted">{repo.workspace_id}</span>
                           </div>
                         {/each}
@@ -1085,7 +1085,7 @@
                         >
                           <span class="ver-badge">v{ver.version}</span>
                           <span class="ver-hash mono">{ver.content_hash?.slice(0, 10)}</span>
-                          {#if i === 0}<Badge value={$t('meta_specs.history.current')} variant="green" />{/if}
+                          {#if i === 0}<Badge value={$t('meta_specs.history.current')} variant="success" />{/if}
                         </button>
 
                         {#if diffVersion?.version === ver.version}
