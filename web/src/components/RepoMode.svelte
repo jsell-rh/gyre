@@ -435,8 +435,9 @@
                 <span class="agent-row-name">{agent.name ?? agent.id}</span>
                 <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
               </div>
-              {#if agent.task_id}
-                <span class="agent-row-task" title={agent.task_id}>{$t('repo_mode.task_label', { values: { id: agent.task_id.length > 12 ? agent.task_id.slice(0, 8) + '...' : agent.task_id } })}</span>
+              {#if agent.task_id ?? agent.current_task_id}
+                {@const tId = agent.task_id ?? agent.current_task_id}
+                <span class="agent-row-task" title={tId}>{$t('repo_mode.task_label', { values: { id: entityName('task', tId) } })}</span>
               {/if}
               {#if agent.branch}
                 <span class="agent-row-branch">{agent.branch}</span>
