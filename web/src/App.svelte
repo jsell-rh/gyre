@@ -371,7 +371,7 @@
   });
 
   // ── Detail panel (with navigation history stack) ──────────────────────
-  let detailHistory = [];
+  let detailHistory = $state([]);
 
   function openDetailPanel(entity) {
     // Push current entity to history stack before navigating
