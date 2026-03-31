@@ -1483,6 +1483,128 @@ ok "Server: $(echo "$VERSION" | jq -c '{name,version,milestone}')"
 TOKEN_INFO=$(api_get "${API}/auth/token-info" 2>/dev/null) || TOKEN_INFO="{}"
 ok "Token info: $(echo "$TOKEN_INFO" | jq -r '.token_kind // "retrieved"')"
 
+# #############################################################################
+#  LLM-POWERED MOLDABLE DEVELOPMENT — requires LLM credentials on server
+# #############################################################################
+
+step $((STEP++)) "LLM moldable development"
+# =============================================================================
+# Probe: check if LLM is configured by hitting briefing/ask. If 503, skip.
+LLM_PROBE=$(curl -s -w '\n%{http_code}' -H "$AUTH" -H "$CT" \
+  -d '{"question":"test"}' \
+  "${API}/workspaces/${WS_ID}/briefing/ask" --max-time 5 2>/dev/null)
+LLM_PROBE_CODE=$(echo "$LLM_PROBE" | tail -1)
+
+if [ "$LLM_PROBE_CODE" = "503" ]; then
+  info "LLM not configured on server (503) — skipping moldable development tests"
+  info "Start server with GYRE_VERTEX_PROJECT + GYRE_LLM_MODEL to enable"
+else
+  ok "LLM is available (HTTP ${LLM_PROBE_CODE})"
+
+  # --- Spec Assist (LLM-assisted editing) ---
+  info "Testing spec assist (SSE stream)..."
+  ASSIST_RESP=$(curl -s -N -H "$AUTH" -H "$CT" --max-time 30 \
+    -d "{\"spec_path\":\"${SPEC_PATH}\",\"instruction\":\"Add a rate limiting section to the greeting service spec\"}" \
+    "${API}/repos/${REPO_ID}/specs/assist" 2>/dev/null | head -20)
+  if echo "$ASSIST_RESP" | grep -q "event:\|data:"; then
+    ASSIST_EVENTS=$(echo "$ASSIST_RESP" | grep -c "^event:" || echo "0")
+    ok "Spec assist: ${ASSIST_EVENTS} SSE events received"
+    # Show first data payload
+    echo "$ASSIST_RESP" | grep "^data:" | head -1 | sed 's/^data://' | jq -r '.content // .text // . | .[:80]' 2>/dev/null | while IFS= read -r line; do
+      echo -e "  ${DIM}  ${line}${NC}"
+    done || true
+  else
+    warn "Spec assist: no SSE events (response: ${ASSIST_RESP:0:100})"
+  fi
+
+  # --- Briefing Ask (conversational Q&A on workspace) ---
+  info "Testing briefing ask (SSE stream)..."
+  BRIEF_RESP=$(curl -s -N -H "$AUTH" -H "$CT" --max-time 30 \
+    -d '{"question":"What types were added in the greeting service implementation?"}' \
+    "${API}/workspaces/${WS_ID}/briefing/ask" 2>/dev/null | head -30)
+  if echo "$BRIEF_RESP" | grep -q "event:\|data:"; then
+    BRIEF_EVENTS=$(echo "$BRIEF_RESP" | grep -c "^event:" || echo "0")
+    ok "Briefing ask: ${BRIEF_EVENTS} SSE events"
+    # Show a snippet of the LLM response
+    BRIEF_TEXT=$(echo "$BRIEF_RESP" | grep "^data:" | sed 's/^data://' | tr -d '\n' | head -c 200)
+    echo -e "  ${DIM}  ${BRIEF_TEXT:0:100}${NC}"
+  else
+    warn "Briefing ask: no SSE events"
+  fi
+
+  # --- Explorer View Generate (LLM-generated graph perspective) ---
+  info "Testing explorer view generation..."
+  EXPLORER_RESP=$(curl -s -N -H "$AUTH" -H "$CT" --max-time 30 \
+    -d '{"question":"Show me all types related to greeting and their relationships"}' \
+    "${API}/workspaces/${WS_ID}/explorer-views/generate" 2>/dev/null | head -20)
+  if echo "$EXPLORER_RESP" | grep -q "event:\|data:\|name\|query"; then
+    ok "Explorer view generated"
+    echo "$EXPLORER_RESP" | grep "^data:" | head -1 | sed 's/^data://' | jq -r '.name // .query // . | .[:80]' 2>/dev/null | while IFS= read -r line; do
+      echo -e "  ${DIM}  ${line}${NC}"
+    done || true
+  else
+    warn "Explorer view generation: unexpected response"
+  fi
+
+  # --- LLM Config (per-workspace model overrides) ---
+  info "Testing LLM config..."
+  # Set a workspace-level model override
+  LLM_CFG_SET=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+    -d '{"model_name":"claude-sonnet-4-20250514","max_tokens":4096}' \
+    "${API}/workspaces/${WS_ID}/llm/config/briefing-ask")
+  LLM_CFG_CODE=$(echo "$LLM_CFG_SET" | tail -1)
+  ok "LLM config override set: HTTP ${LLM_CFG_CODE}"
+
+  # Get effective config
+  LLM_CFG_GET=$(api_get "${API}/workspaces/${WS_ID}/llm/config/briefing-ask" 2>/dev/null) || LLM_CFG_GET="{}"
+  ok "Effective LLM config: $(echo "$LLM_CFG_GET" | jq -r '.model_name // "default"')"
+
+  # List all workspace LLM configs
+  LLM_CFG_LIST=$(api_get "${API}/workspaces/${WS_ID}/llm/config" 2>/dev/null) || LLM_CFG_LIST="[]"
+  ok "Workspace LLM configs: $(echo "$LLM_CFG_LIST" | jq 'length // 0')"
+
+  # Clean up override
+  curl -s -X DELETE -H "$AUTH" "${API}/workspaces/${WS_ID}/llm/config/briefing-ask" >/dev/null 2>&1
+
+  # --- LLM Prompts (per-workspace prompt template overrides) ---
+  info "Testing prompt templates..."
+  # Set a custom prompt
+  PROMPT_SET=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+    -d '{"content":"You are a greeting service expert. Answer questions about the architecture. Context: {{context}}\n\nQuestion: {{question}}"}' \
+    "${API}/workspaces/${WS_ID}/llm/prompts/briefing-ask")
+  PROMPT_CODE=$(echo "$PROMPT_SET" | tail -1)
+  ok "Custom prompt template set: HTTP ${PROMPT_CODE}"
+
+  # Get effective prompt
+  PROMPT_GET=$(api_get "${API}/workspaces/${WS_ID}/llm/prompts/briefing-ask" 2>/dev/null) || PROMPT_GET="{}"
+  ok "Effective prompt: $(echo "$PROMPT_GET" | jq -r '.content[:60] // "default"')"
+
+  # Clean up
+  curl -s -X DELETE -H "$AUTH" "${API}/workspaces/${WS_ID}/llm/prompts/briefing-ask" >/dev/null 2>&1
+
+  # --- Admin LLM Defaults ---
+  ADMIN_CFG=$(api_get "${API}/admin/llm/config/briefing-ask" 2>/dev/null) || ADMIN_CFG="{}"
+  ok "Admin default LLM config: $(echo "$ADMIN_CFG" | jq -r '.model_name // "not set"')"
+
+  ADMIN_PROMPT=$(api_get "${API}/admin/llm/prompts/briefing-ask" 2>/dev/null) || ADMIN_PROMPT="{}"
+  ok "Admin default prompt: $(echo "$ADMIN_PROMPT" | jq -r '.content[:60] // "not set"')"
+
+  # --- Meta-spec Preview (async reconciliation preview) ---
+  info "Testing meta-spec preview..."
+  PREVIEW_RESP=$(api_post "${API}/workspaces/${WS_ID}/meta-specs/preview" "{}" 2>/dev/null) || PREVIEW_RESP=""
+  if [ -n "$PREVIEW_RESP" ]; then
+    PREVIEW_ID=$(echo "$PREVIEW_RESP" | jq -r '.preview_id // "none"')
+    ok "Meta-spec preview started: ${PREVIEW_ID}"
+    if [ "$PREVIEW_ID" != "none" ]; then
+      sleep 2
+      PREVIEW_STATUS=$(api_get "${API}/workspaces/${WS_ID}/meta-specs/preview/${PREVIEW_ID}" 2>/dev/null) || PREVIEW_STATUS="{}"
+      ok "Preview status: $(echo "$PREVIEW_STATUS" | jq -r '.status // "unknown"')"
+    fi
+  else
+    info "Meta-spec preview not available"
+  fi
+fi
+
 # =============================================================================
 # Summary
 # =============================================================================
