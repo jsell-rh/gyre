@@ -519,7 +519,17 @@
     "no_repos_desc": "Create a repository in this workspace to explore its architecture.",
     "select_repo": "Select a repository",
     "select_repo_explore": "Select repository to explore",
-    "go_to_settings": "Go to Settings"
+    "go_to_settings": "Go to Settings",
+    "searching": "Searching…",
+    "concepts_found": "{count} concept{count, plural, one {} other {s}} found",
+    "no_concepts": "No concepts found",
+    "nodes_matching": "{count} {count, plural, one {node} other {nodes}} matching '{query}'",
+    "no_nodes_matching": "No nodes matching '{query}'",
+    "search_placeholder": "Search concepts… (/)",
+    "ask_placeholder": "Ask: How does auth work?",
+    "ask_btn": "Ask",
+    "ask_label": "Ask about architecture",
+    "graph_error": "Failed to load graph: {error}"
   },
   "detail_panel": {
     "tabs": {
