@@ -288,33 +288,33 @@
         {:else if currentUser}
           <div class="info-card">
             <div class="info-row">
-              <span class="info-label">Current User</span>
+              <span class="info-label">{$t('tenant_settings.users.current_user')}</span>
               <span class="info-value">{currentUser.username ?? currentUser.name ?? currentUser.email ?? '—'}</span>
             </div>
             {#if currentUser.email}
               <div class="info-row">
-                <span class="info-label">Email</span>
+                <span class="info-label">{$t('tenant_settings.users.email')}</span>
                 <span class="info-value">{currentUser.email}</span>
               </div>
             {/if}
             {#if currentUser.role}
               <div class="info-row">
-                <span class="info-label">Role</span>
+                <span class="info-label">{$t('tenant_settings.users.role')}</span>
                 <span class="info-value role-badge">{currentUser.role}</span>
               </div>
             {/if}
             {#if currentUser.tenant_id}
               <div class="info-row">
-                <span class="info-label">Tenant ID</span>
+                <span class="info-label">{$t('tenant_settings.users.tenant_id')}</span>
                 <span class="info-value mono">{currentUser.tenant_id}</span>
               </div>
             {/if}
           </div>
           <div class="panel-note">
-            <p>User provisioning is managed via your OIDC identity provider. Add users through your IdP to grant access. Roles: Admin (full access), Member (workspace access), Viewer (read-only).</p>
+            <p>{$t('tenant_settings.users.provisioning_note')}</p>
           </div>
         {:else}
-          <div class="panel-empty">No user information available.</div>
+          <div class="panel-empty">{$t('tenant_settings.users.no_user_info')}</div>
         {/if}
       </div>
 
@@ -322,8 +322,8 @@
     {:else if activeTab === 'compute'}
       <div id="tab-panel-compute" role="tabpanel" aria-label="Compute Targets" class="tab-panel" data-testid="tenant-tab-compute">
         <div class="panel-header">
-          <h2 class="panel-title">Compute Targets</h2>
-          <p class="panel-desc">Available compute targets for running agents. Shared across all workspaces in this tenant.</p>
+          <h2 class="panel-title">{$t('tenant_settings.compute.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.compute.desc')}</p>
         </div>
 
         {#if computeLoading}
@@ -331,15 +331,15 @@
         {:else if computeError}
           <div class="panel-error" role="alert">{computeError}</div>
         {:else if computeTargets.length === 0}
-          <div class="panel-empty">No compute targets configured.</div>
+          <div class="panel-empty">{$t('tenant_settings.compute.empty')}</div>
         {:else}
           <table class="data-table" data-testid="compute-targets-table">
             <thead>
               <tr>
-                <th scope="col" aria-sort={computeSortCol === 'name' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Name{sortArrow('name', computeSortCol, computeSortDir)}</button></th>
-                <th scope="col" aria-sort={computeSortCol === 'kind' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('kind', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Kind{sortArrow('kind', computeSortCol, computeSortDir)}</button></th>
-                <th scope="col" aria-sort={computeSortCol === 'status' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Status{sortArrow('status', computeSortCol, computeSortDir)}</button></th>
-                <th scope="col" aria-sort={computeSortCol === 'capacity' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('capacity', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Capacity{sortArrow('capacity', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'name' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_name')}{sortArrow('name', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'kind' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('kind', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_kind')}{sortArrow('kind', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'status' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_status')}{sortArrow('status', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'capacity' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('capacity', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_capacity')}{sortArrow('capacity', computeSortCol, computeSortDir)}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -364,8 +364,8 @@
     {:else if activeTab === 'budget'}
       <div id="tab-panel-budget" role="tabpanel" aria-label="Budget" class="tab-panel" data-testid="tenant-tab-budget">
         <div class="panel-header">
-          <h2 class="panel-title">Budget</h2>
-          <p class="panel-desc">Tenant-level budget overview across all workspaces.</p>
+          <h2 class="panel-title">{$t('tenant_settings.budget.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.budget.desc')}</p>
         </div>
 
         {#if budgetLoading}
@@ -373,44 +373,44 @@
         {:else if budgetError}
           <div class="panel-error" role="alert">{budgetError}</div>
         {:else if !budgetSummary}
-          <div class="panel-empty">No budget data available.</div>
+          <div class="panel-empty">{$t('tenant_settings.budget.empty')}</div>
         {:else}
           <div class="budget-grid">
             {#if budgetSummary.total_credits != null}
               <div class="budget-card">
-                <span class="budget-label">Total Credits</span>
+                <span class="budget-label">{$t('tenant_settings.budget.total_credits')}</span>
                 <span class="budget-value">{budgetSummary.total_credits.toLocaleString()}</span>
               </div>
             {/if}
             {#if budgetSummary.used_credits != null}
               <div class="budget-card">
-                <span class="budget-label">Used Credits</span>
+                <span class="budget-label">{$t('tenant_settings.budget.used_credits')}</span>
                 <span class="budget-value">{budgetSummary.used_credits.toLocaleString()}</span>
               </div>
             {/if}
             {#if budgetSummary.total_credits && budgetSummary.used_credits != null}
               {@const pct = Math.round((budgetSummary.used_credits / budgetSummary.total_credits) * 100)}
               <div class="budget-card">
-                <span class="budget-label">Usage</span>
+                <span class="budget-label">{$t('tenant_settings.budget.usage')}</span>
                 <span class="budget-value" class:danger={pct > 90} class:warn={pct > 70 && pct <= 90}>{pct}%</span>
               </div>
             {/if}
             {#if budgetSummary.remaining_credits != null}
               <div class="budget-card">
-                <span class="budget-label">Remaining</span>
+                <span class="budget-label">{$t('tenant_settings.budget.remaining')}</span>
                 <span class="budget-value">{budgetSummary.remaining_credits.toLocaleString()}</span>
               </div>
             {/if}
           </div>
           {#if budgetSummary.workspace_breakdown}
-            <h3 class="sub-heading">Per-Workspace Breakdown</h3>
+            <h3 class="sub-heading">{$t('tenant_settings.budget.per_workspace')}</h3>
             <table class="data-table" data-testid="budget-breakdown-table">
               <thead>
                 <tr>
-                  <th scope="col" aria-sort={budgetSortCol === 'workspace_name' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('workspace_name', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Workspace{sortArrow('workspace_name', budgetSortCol, budgetSortDir)}</button></th>
-                  <th scope="col" aria-sort={budgetSortCol === 'allocated' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('allocated', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Allocated{sortArrow('allocated', budgetSortCol, budgetSortDir)}</button></th>
-                  <th scope="col" aria-sort={budgetSortCol === 'used' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('used', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Used{sortArrow('used', budgetSortCol, budgetSortDir)}</button></th>
-                  <th scope="col" aria-sort={budgetSortCol === 'pct' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('pct', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Usage %{sortArrow('pct', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'workspace_name' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('workspace_name', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>{$t('tenant_settings.budget.col_workspace')}{sortArrow('workspace_name', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'allocated' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('allocated', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>{$t('tenant_settings.budget.col_allocated')}{sortArrow('allocated', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'used' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('used', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>{$t('tenant_settings.budget.col_used')}{sortArrow('used', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'pct' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('pct', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>{$t('tenant_settings.budget.col_usage_pct')}{sortArrow('pct', budgetSortCol, budgetSortDir)}</button></th>
                 </tr>
               </thead>
               <tbody>
@@ -432,19 +432,19 @@
     {:else if activeTab === 'audit'}
       <div id="tab-panel-audit" role="tabpanel" aria-label="Audit" class="tab-panel" data-testid="tenant-tab-audit">
         <div class="panel-header">
-          <h2 class="panel-title">Audit</h2>
-          <p class="panel-desc">Tenant activity log — admin actions, policy evaluations, and system events.</p>
+          <h2 class="panel-title">{$t('tenant_settings.audit.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.audit.desc')}</p>
         </div>
 
         <div class="filter-bar" data-testid="audit-filter-bar">
-          <label for="audit-filter-type" class="filter-label">Event type</label>
+          <label for="audit-filter-type" class="filter-label">{$t('tenant_settings.audit.event_type')}</label>
           <select
             id="audit-filter-type"
             class="filter-select"
             bind:value={auditFilterType}
             onchange={refreshAudit}
           >
-            <option value="">All events</option>
+            <option value="">{$t('tenant_settings.audit.all_events')}</option>
             <option value="tenant_created">Tenant created</option>
             <option value="tenant_updated">Tenant updated</option>
             <option value="user_role_changed">User role changed</option>
@@ -540,7 +540,7 @@
                 <th scope="col" aria-sort={jobsSortCol === 'schedule' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('schedule', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Schedule{sortArrow('schedule', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col" aria-sort={jobsSortCol === 'last_run' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('last_run', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Last Run{sortArrow('last_run', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col" aria-sort={jobsSortCol === 'status' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Status{sortArrow('status', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col">Action</th>
+                <th scope="col">{$t('tenant_settings.audit.col_action')}</th>
               </tr>
             </thead>
             <tbody>

@@ -1178,27 +1178,54 @@
     "users": {
       "title": "Users",
       "desc": "Tenant member and role management. Users are provisioned via OIDC — invite by adding them to your identity provider.",
-      "loading": "Loading users…"
+      "loading": "Loading users\u2026",
+      "current_user": "Current User",
+      "email": "Email",
+      "role": "Role",
+      "tenant_id": "Tenant ID",
+      "provisioning_note": "User provisioning is managed via your OIDC identity provider. Add users through your IdP to grant access. Roles: Admin (full access), Member (workspace access), Viewer (read-only).",
+      "no_user_info": "No user information available."
     },
     "compute": {
       "title": "Compute Targets",
-      "loading": "Loading compute targets…"
+      "desc": "Available compute targets for running agents. Shared across all workspaces in this tenant.",
+      "loading": "Loading compute targets\u2026",
+      "empty": "No compute targets configured.",
+      "col_name": "Name",
+      "col_kind": "Kind",
+      "col_status": "Status",
+      "col_capacity": "Capacity"
     },
     "budget": {
       "title": "Budget",
-      "loading": "Loading budget…"
+      "desc": "Tenant-level budget overview across all workspaces.",
+      "loading": "Loading budget\u2026",
+      "empty": "No budget data available.",
+      "total_credits": "Total Credits",
+      "used_credits": "Used Credits",
+      "usage": "Usage",
+      "remaining": "Remaining",
+      "per_workspace": "Per-Workspace Breakdown",
+      "col_workspace": "Workspace",
+      "col_allocated": "Allocated",
+      "col_used": "Used",
+      "col_usage_pct": "Usage %"
     },
     "audit": {
       "title": "Audit",
-      "loading": "Loading audit log…"
+      "desc": "Tenant activity log \u2014 admin actions, policy evaluations, and system events.",
+      "loading": "Loading audit log\u2026",
+      "event_type": "Event type",
+      "all_events": "All events",
+      "col_action": "Action"
     },
     "health": {
       "title": "Health",
-      "loading": "Loading health status…"
+      "loading": "Loading health status\u2026"
     },
     "jobs": {
       "title": "Jobs",
-      "loading": "Loading jobs…"
+      "loading": "Loading jobs\u2026"
     }
   },
   "common": {
