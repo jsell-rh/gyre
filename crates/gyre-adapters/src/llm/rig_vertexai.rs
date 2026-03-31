@@ -1,7 +1,11 @@
 //! Vertex AI LLM adapter — direct REST API implementation.
 //!
-//! Uses the Vertex AI `generateContent` REST endpoint via `reqwest` and
-//! Google Application Default Credentials (ADC) via `google-cloud-auth`.
+//! Uses the Vertex AI REST API via `reqwest` and Google Application Default
+//! Credentials (ADC) via `google-cloud-auth`.
+//!
+//! Claude models use the `rawPredict` / `streamRawPredict` endpoints with the
+//! Anthropic Messages API format. Gemini models use `generateContent` with
+//! Google's format.
 //!
 //! Note: rig-core ≥ 0.33.0 requires Rust 1.88 (let-chain syntax). Our MSRV
 //! is 1.87, so we implement the adapter without rig and call the REST API
@@ -126,21 +130,46 @@ pub struct RigVertexAiAdapter {
 }
 
 impl RigVertexAiAdapter {
-    /// Return the generateContent endpoint URL for this adapter's model.
+    /// Returns true if this adapter targets a Claude model.
+    fn is_claude(&self) -> bool {
+        self.model.starts_with("claude")
+    }
+
+    /// Return the completion endpoint URL for this adapter's model.
     ///
-    /// Claude models (claude-*) are published by Anthropic; all others (e.g.
-    /// Gemini) are published by Google. The publisher segment in the Vertex AI
-    /// REST path must match the model's actual publisher.
+    /// Claude models use `rawPredict` (Anthropic Messages API).
+    /// Gemini models use `generateContent` (Google format).
     fn endpoint_url(&self) -> String {
-        let publisher = if self.model.starts_with("claude") {
-            "anthropic"
+        let (publisher, method) = if self.is_claude() {
+            ("anthropic", "rawPredict")
         } else {
-            "google"
+            ("google", "generateContent")
         };
         format!(
             "https://{location}-aiplatform.googleapis.com/v1/\
              projects/{project}/locations/{location}/\
-             publishers/{publisher}/models/{model}:generateContent",
+             publishers/{publisher}/models/{model}:{method}",
+            location = self.location,
+            project = self.project,
+            publisher = publisher,
+            model = self.model,
+        )
+    }
+
+    /// Return the streaming endpoint URL for this adapter's model.
+    ///
+    /// Claude models use `streamRawPredict` (Anthropic SSE streaming).
+    /// Gemini models use `streamGenerateContent` (Google SSE streaming).
+    fn streaming_endpoint_url(&self) -> String {
+        let (publisher, method) = if self.is_claude() {
+            ("anthropic", "streamRawPredict")
+        } else {
+            ("google", "streamGenerateContent")
+        };
+        format!(
+            "https://{location}-aiplatform.googleapis.com/v1/\
+             projects/{project}/locations/{location}/\
+             publishers/{publisher}/models/{model}:{method}",
             location = self.location,
             project = self.project,
             publisher = publisher,
@@ -167,14 +196,13 @@ impl RigVertexAiAdapter {
         Ok(token_value)
     }
 
-    /// Send a generateContent request and return the full response JSON.
-    async fn generate_content(&self, body: Value) -> Result<Value> {
+    /// POST `body` to `url` and return the parsed JSON response.
+    async fn post_json(&self, url: &str, body: Value) -> Result<Value> {
         let token = self.bearer_token().await?;
-        let url = self.endpoint_url();
 
         let resp = self
             .client
-            .post(&url)
+            .post(url)
             .bearer_auth(&token)
             .json(&body)
             .send()
@@ -194,18 +222,150 @@ impl RigVertexAiAdapter {
         Ok(json)
     }
 
-    /// Extract the text content from a generateContent response.
-    fn extract_text(response: &Value) -> Result<String> {
-        let text = response
-            .pointer("/candidates/0/content/parts/0/text")
+    /// Build the Anthropic Messages API request body for Claude on Vertex AI.
+    fn claude_request_body(
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: Option<u32>,
+        stream: bool,
+    ) -> Value {
+        let mut body = serde_json::json!({
+            "anthropic_version": "vertex-2023-10-16",
+            "messages": [
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": max_tokens.unwrap_or(4096),
+            "stream": stream,
+        });
+        if !system_prompt.is_empty() {
+            body["system"] = system_prompt.into();
+        }
+        body
+    }
+
+    /// Build the Google generateContent request body for Gemini on Vertex AI.
+    fn gemini_request_body(
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: Option<u32>,
+    ) -> Value {
+        let mut generation_config = serde_json::json!({});
+        if let Some(max) = max_tokens {
+            generation_config["maxOutputTokens"] = max.into();
+        }
+        serde_json::json!({
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [
+                {"role": "user", "parts": [{"text": user_prompt}]}
+            ],
+            "generationConfig": generation_config,
+        })
+    }
+
+    /// Extract text from a Claude (Anthropic Messages API) response.
+    ///
+    /// Expected shape: `{"content": [{"type": "text", "text": "..."}], ...}`
+    fn extract_claude_text(response: &Value) -> Result<String> {
+        response
+            .pointer("/content/0/text")
             .and_then(Value::as_str)
+            .map(|s| s.to_string())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Unexpected Vertex AI response shape: {}",
+                    "Unexpected Claude Vertex AI response shape: {}",
                     serde_json::to_string(response).unwrap_or_default()
                 )
-            })?;
-        Ok(text.to_string())
+            })
+    }
+
+    /// Extract text from a Gemini (generateContent) response.
+    ///
+    /// Expected shape: `{"candidates": [{"content": {"parts": [{"text": "..."}]}}]}`
+    fn extract_gemini_text(response: &Value) -> Result<String> {
+        response
+            .pointer("/candidates/0/content/parts/0/text")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unexpected Gemini Vertex AI response shape: {}",
+                    serde_json::to_string(response).unwrap_or_default()
+                )
+            })
+    }
+
+    /// Stream a Claude completion via `streamRawPredict`, parsing Anthropic SSE events.
+    ///
+    /// SSE event format:
+    /// ```text
+    /// data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"..."}}
+    /// ```
+    async fn stream_claude(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: Option<u32>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        use futures_util::StreamExt;
+
+        let token = self.bearer_token().await?;
+        let url = self.streaming_endpoint_url();
+        let body = Self::claude_request_body(system_prompt, user_prompt, max_tokens, true);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .context("Vertex AI streamRawPredict request failed")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Vertex AI streamRawPredict returned {status}: {text}");
+        }
+
+        // Parse SSE events from the byte stream.
+        let byte_stream = resp.bytes_stream();
+        let text_stream = byte_stream
+            .map(|chunk_result| -> Result<String> {
+                let chunk = chunk_result.context("Error reading SSE stream chunk")?;
+                let raw = std::str::from_utf8(&chunk).context("SSE chunk is not valid UTF-8")?;
+
+                // Collect text deltas from all `data:` lines in this chunk.
+                let mut texts = Vec::new();
+                for line in raw.lines() {
+                    let Some(json_str) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+                    if json_str == "[DONE]" {
+                        break;
+                    }
+                    let Ok(event) = serde_json::from_str::<Value>(json_str) else {
+                        continue;
+                    };
+                    if event.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+                        if let Some(text) = event.pointer("/delta/text").and_then(Value::as_str) {
+                            texts.push(text.to_string());
+                        }
+                    }
+                }
+                Ok(texts.join(""))
+            })
+            // Drop empty chunks (non-delta events) to avoid noisy empty strings.
+            .filter(|result| {
+                let keep = match result {
+                    Ok(s) => !s.is_empty(),
+                    Err(_) => true,
+                };
+                std::future::ready(keep)
+            });
+
+        Ok(Box::pin(text_stream))
     }
 }
 
@@ -217,23 +377,15 @@ impl LlmPort for RigVertexAiAdapter {
         user_prompt: &str,
         max_tokens: Option<u32>,
     ) -> Result<String> {
-        let mut generation_config = serde_json::json!({});
-        if let Some(max) = max_tokens {
-            generation_config["maxOutputTokens"] = max.into();
+        if self.is_claude() {
+            let body = Self::claude_request_body(system_prompt, user_prompt, max_tokens, false);
+            let response = self.post_json(&self.endpoint_url(), body).await?;
+            Self::extract_claude_text(&response)
+        } else {
+            let body = Self::gemini_request_body(system_prompt, user_prompt, max_tokens);
+            let response = self.post_json(&self.endpoint_url(), body).await?;
+            Self::extract_gemini_text(&response)
         }
-
-        let body = serde_json::json!({
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "contents": [
-                {"role": "user", "parts": [{"text": user_prompt}]}
-            ],
-            "generationConfig": generation_config,
-        });
-
-        let response = self.generate_content(body).await?;
-        Self::extract_text(&response)
     }
 
     async fn predict_json(&self, system_prompt: &str, user_prompt: &str) -> Result<Value> {
@@ -257,9 +409,13 @@ impl LlmPort for RigVertexAiAdapter {
         user_prompt: &str,
         max_tokens: Option<u32>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        // The Vertex AI generateContent REST endpoint does not support streaming
-        // without a separate streamGenerateContent call. We fall back to complete()
-        // and emit the full response as a single chunk to satisfy the trait contract.
+        if self.is_claude() {
+            return self
+                .stream_claude(system_prompt, user_prompt, max_tokens)
+                .await;
+        }
+
+        // Gemini: fall back to non-streaming complete() and emit as a single chunk.
         let text = self
             .complete(system_prompt, user_prompt, max_tokens)
             .await?;
@@ -505,6 +661,16 @@ fn base64_decode_standard(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn make_adapter(model: &str) -> RigVertexAiAdapter {
+        RigVertexAiAdapter {
+            project: "my-project".to_string(),
+            location: "us-central1".to_string(),
+            model: model.to_string(),
+            client: reqwest::Client::new(),
+            token_cache: Arc::new(RwLock::new(TokenCache::default())),
+        }
+    }
+
     #[test]
     fn from_env_fails_without_project() {
         let original = std::env::var("GYRE_VERTEX_PROJECT").ok();
@@ -522,33 +688,22 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_url_format_gemini() {
-        let cache = Arc::new(RwLock::new(TokenCache::default()));
-        let adapter = RigVertexAiAdapter {
-            project: "my-project".to_string(),
-            location: "us-central1".to_string(),
-            model: "gemini-2.0-flash-001".to_string(),
-            client: reqwest::Client::new(),
-            token_cache: cache,
-        };
+    fn endpoint_url_gemini_uses_generate_content() {
+        let adapter = make_adapter("gemini-2.0-flash-001");
         let url = adapter.endpoint_url();
         assert!(url.contains("my-project"));
         assert!(url.contains("us-central1"));
         assert!(url.contains("gemini-2.0-flash-001"));
         assert!(url.contains("publishers/google/"));
-        assert!(url.contains("generateContent"));
+        assert!(
+            url.contains(":generateContent"),
+            "Gemini must use generateContent, got: {url}"
+        );
     }
 
     #[test]
-    fn endpoint_url_format_claude() {
-        let cache = Arc::new(RwLock::new(TokenCache::default()));
-        let adapter = RigVertexAiAdapter {
-            project: "my-project".to_string(),
-            location: "us-central1".to_string(),
-            model: "claude-opus-4-6@default".to_string(),
-            client: reqwest::Client::new(),
-            token_cache: cache,
-        };
+    fn endpoint_url_claude_uses_raw_predict() {
+        let adapter = make_adapter("claude-opus-4-6@default");
         let url = adapter.endpoint_url();
         assert!(url.contains("my-project"));
         assert!(url.contains("us-central1"));
@@ -557,7 +712,110 @@ mod tests {
             url.contains("publishers/anthropic/"),
             "Claude must use anthropic publisher, got: {url}"
         );
-        assert!(url.contains("generateContent"));
+        assert!(
+            url.contains(":rawPredict"),
+            "Claude must use rawPredict endpoint, got: {url}"
+        );
+        assert!(
+            !url.contains("generateContent"),
+            "Claude must NOT use generateContent, got: {url}"
+        );
+    }
+
+    #[test]
+    fn streaming_endpoint_url_claude_uses_stream_raw_predict() {
+        let adapter = make_adapter("claude-sonnet-4-6@default");
+        let url = adapter.streaming_endpoint_url();
+        assert!(url.contains("publishers/anthropic/"));
+        assert!(
+            url.contains(":streamRawPredict"),
+            "Claude streaming must use streamRawPredict, got: {url}"
+        );
+    }
+
+    #[test]
+    fn streaming_endpoint_url_gemini_uses_stream_generate_content() {
+        let adapter = make_adapter("gemini-2.0-flash-001");
+        let url = adapter.streaming_endpoint_url();
+        assert!(url.contains("publishers/google/"));
+        assert!(
+            url.contains(":streamGenerateContent"),
+            "Gemini streaming must use streamGenerateContent, got: {url}"
+        );
+    }
+
+    #[test]
+    fn claude_request_body_format() {
+        let body = RigVertexAiAdapter::claude_request_body(
+            "You are a helpful assistant.",
+            "Hello!",
+            Some(1024),
+            false,
+        );
+        assert_eq!(body["anthropic_version"], "vertex-2023-10-16");
+        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["system"], "You are a helpful assistant.");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "Hello!");
+    }
+
+    #[test]
+    fn claude_request_body_no_system_omits_field() {
+        let body = RigVertexAiAdapter::claude_request_body("", "Hello!", None, false);
+        assert!(
+            body.get("system").is_none() || body["system"].is_null(),
+            "Empty system prompt should not produce a system field, got: {body}"
+        );
+        assert_eq!(
+            body["max_tokens"], 4096,
+            "Default max_tokens should be 4096"
+        );
+    }
+
+    #[test]
+    fn claude_request_body_stream_true() {
+        let body = RigVertexAiAdapter::claude_request_body("sys", "user", None, true);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn extract_claude_text_success() {
+        let response = serde_json::json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello, world!"}],
+            "stop_reason": "end_turn"
+        });
+        let text = RigVertexAiAdapter::extract_claude_text(&response).unwrap();
+        assert_eq!(text, "Hello, world!");
+    }
+
+    #[test]
+    fn extract_claude_text_missing_content_returns_error() {
+        let response = serde_json::json!({"candidates": [{"content": {"parts": [{"text": "gemini response"}]}}]});
+        let result = RigVertexAiAdapter::extract_claude_text(&response);
+        assert!(result.is_err(), "Should fail on Gemini-shaped response");
+    }
+
+    #[test]
+    fn extract_gemini_text_success() {
+        let response = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "Gemini says hi"}]}}]
+        });
+        let text = RigVertexAiAdapter::extract_gemini_text(&response).unwrap();
+        assert_eq!(text, "Gemini says hi");
+    }
+
+    #[test]
+    fn extract_gemini_text_missing_returns_error() {
+        let response =
+            serde_json::json!({"content": [{"type": "text", "text": "claude response"}]});
+        let result = RigVertexAiAdapter::extract_gemini_text(&response);
+        assert!(result.is_err(), "Should fail on Claude-shaped response");
     }
 
     #[test]
