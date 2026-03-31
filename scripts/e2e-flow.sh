@@ -662,9 +662,9 @@ if [ "$GATE_RESULT_COUNT" -gt 0 ]; then
     echo -e "  ${DIM}  ${line}${NC}"
   done || true
   # Check no required gates failed (merge wouldn't succeed if they did, but verify)
-  GATE_PASSED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Passed")] | length')
-  GATE_FAILED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Failed")] | length')
-  GATE_PENDING=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Pending" or .status == "Running")] | length')
+  GATE_PASSED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "passed")] | length')
+  GATE_FAILED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "failed")] | length')
+  GATE_PENDING=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "pending" or .status == "running")] | length')
   if [ "$GATE_FAILED" = "0" ]; then
     ok "${GATE_PASSED} passed, ${GATE_PENDING} pending/advisory"
   else
@@ -827,6 +827,7 @@ step $((STEP++)) "MR reviews"
 # =============================================================================
 # Submit a review on the merged MR (post-merge review is still valid)
 REVIEW_RESP=$(api_post "${API}/merge-requests/${MR_ID}/reviews" "{
+  \"reviewer_agent_id\": \"e2e-reviewer\",
   \"decision\": \"approved\",
   \"body\": \"LGTM — all acceptance criteria met\"
 }" 2>/dev/null) || REVIEW_RESP=""
@@ -843,6 +844,7 @@ ok "Reviews on MR: ${REVIEW_CT}"
 
 # Submit a comment
 COMMENT_RESP=$(api_post "${API}/merge-requests/${MR_ID}/comments" "{
+  \"author_agent_id\": \"e2e-reviewer\",
   \"body\": \"Great implementation of the greeting service spec.\"
 }" 2>/dev/null) || COMMENT_RESP=""
 [ -n "$COMMENT_RESP" ] && ok "Comment added" || warn "Comment submission failed"
@@ -887,7 +889,7 @@ ok "Workload attestation: pid=${WL_PID}"
 
 # Agent card
 CARD_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
-  -d "{\"name\":\"e2e-worker\",\"capabilities\":[\"rust\",\"greeting\"],\"protocols\":[\"mcp\"]}" \
+  -d "{\"agent_id\":\"${AGENT_ID}\",\"name\":\"e2e-worker\",\"description\":\"E2E test agent\",\"capabilities\":[\"rust\",\"greeting\"],\"protocols\":[\"mcp\"],\"endpoint\":null}" \
   "${API}/agents/${AGENT_ID}/card")
 CARD_CODE=$(echo "$CARD_RESP" | tail -1)
 ok "Agent card published: HTTP ${CARD_CODE}"
@@ -916,7 +918,7 @@ step $((STEP++)) "Push gates (pre-accept)"
 # =============================================================================
 # Configure push gates
 PG_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
-  -d '{"gates":["ConventionalCommit"]}' \
+  -d '{"gates":["conventional-commit"]}' \
   "${API}/repos/${REPO_ID}/push-gates")
 PG_CODE=$(echo "$PG_RESP" | tail -1)
 ok "Push gates set: ConventionalCommit (HTTP ${PG_CODE})"
@@ -967,8 +969,11 @@ step $((STEP++)) "ABAC policies"
 # =============================================================================
 POLICY_RESP=$(api_post "${API}/policies" "{
   \"name\": \"e2e-allow-agents\",
-  \"effect\": \"Allow\",
-  \"rules\": [{\"claim\": \"scope\", \"operator\": \"Equals\", \"value\": \"agent\"}],
+  \"scope\": \"tenant\",
+  \"effect\": \"allow\",
+  \"conditions\": [{\"attribute\": \"subject.type\", \"operator\": \"equals\", \"value\": \"agent\"}],
+  \"actions\": [\"push\"],
+  \"resource_types\": [\"repo\"],
   \"priority\": 100
 }" 2>/dev/null) || POLICY_RESP=""
 if [ -n "$POLICY_RESP" ]; then
@@ -981,7 +986,9 @@ fi
 
 # Dry-run evaluation
 EVAL_RESP=$(api_post "${API}/policies/evaluate" "{
-  \"context\": {\"scope\": \"agent\", \"action\": \"push\"}
+  \"subject\": {\"type\": \"agent\", \"id\": \"test-agent\"},
+  \"action\": \"push\",
+  \"resource\": {\"type\": \"repo\"}
 }" 2>/dev/null) || EVAL_RESP="{}"
 EVAL_DECISION=$(echo "$EVAL_RESP" | jq -r '.decision // "unknown"')
 ok "ABAC evaluate: decision=${EVAL_DECISION}"
@@ -1060,8 +1067,8 @@ git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1 | tail -2
 sleep 1
 
 # Check spec links
-LINKS=$(api_get "${API}/specs/${SPEC2_PATH_ENCODED}/links" 2>/dev/null) || LINKS="{}"
-LINK_CT=$(echo "$LINKS" | jq '.links | length // 0')
+LINKS=$(api_get "${API}/specs/${SPEC2_PATH_ENCODED}/links" 2>/dev/null) || LINKS="[]"
+LINK_CT=$(echo "$LINKS" | jq 'length // 0')
 ok "Spec links: ${LINK_CT} link(s) on child spec"
 
 # Check spec graph
