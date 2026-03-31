@@ -1905,27 +1905,24 @@
             <div class="spec-skeleton">
               {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
-          {:else if Array.isArray(specLinks) && specLinks.length > 0}
+          {@const linkArray = Array.isArray(specLinks) ? specLinks : (specLinks?.links ?? [])}
+          {#if linkArray.length > 0}
             <ul class="links-list">
-              {#each specLinks as link}
+              {#each linkArray as link}
                 {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
                 {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
                 {@const direction = typeof link === 'object' ? link.direction : null}
-                <li class="link-item">
-                  {#if kind}<span class="link-kind">{kind}</span>{/if}
-                  {#if direction}<span class="link-direction">{direction === 'outbound' ? '\u2192' : '\u2190'}</span>{/if}
+                {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
+                <li class="link-item" class:link-conflict={isConflict}>
+                  {#if kind}
+                    <Badge
+                      value={kind.replace(/_/g, ' ')}
+                      variant={isConflict ? 'danger' : 'info'}
+                    />
+                  {/if}
+                  <span class="link-direction">{direction === 'inbound' ? '← from' : '→ to'}</span>
                   <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
-                </li>
-              {/each}
-            </ul>
-          {:else if specLinks?.links?.length > 0}
-            <ul class="links-list">
-              {#each specLinks.links as link}
-                {@const target = link.target_path ?? link.target}
-                <li class="link-item">
-                  {#if link.kind}<span class="link-kind">{link.kind}</span>{/if}
-                  {#if link.direction}<span class="link-direction">{link.direction === 'outbound' ? '\u2192' : '\u2190'}</span>{/if}
-                  <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
+                  <span class="link-full-path mono">{target}</span>
                 </li>
               {/each}
             </ul>
@@ -3361,6 +3358,25 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     font-size: var(--text-xs);
+  }
+
+  .link-conflict {
+    border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 5%, var(--color-surface-elevated));
+  }
+
+  .link-direction {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .link-full-path {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    opacity: 0.6;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .link-kind {
