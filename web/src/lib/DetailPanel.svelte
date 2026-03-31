@@ -1919,29 +1919,32 @@
             <div class="spec-skeleton">
               {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
-          {@const linkArray = Array.isArray(specLinks) ? specLinks : (specLinks?.links ?? [])}
-          {#if linkArray.length > 0}
-            <ul class="links-list">
-              {#each linkArray as link}
-                {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
-                {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
-                {@const direction = typeof link === 'object' ? link.direction : null}
-                {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
-                <li class="link-item" class:link-conflict={isConflict}>
-                  {#if kind}
-                    <Badge
-                      value={kind.replace(/_/g, ' ')}
-                      variant={isConflict ? 'danger' : 'info'}
-                    />
-                  {/if}
-                  <span class="link-direction">{direction === 'inbound' ? '← from' : '→ to'}</span>
-                  <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
-                  <span class="link-full-path mono">{target}</span>
-                </li>
-              {/each}
-            </ul>
           {:else}
-            <p class="no-data">{$t('detail_panel.no_links')}</p>
+            {#each [Array.isArray(specLinks) ? specLinks : (specLinks?.links ?? [])] as linkArray}
+              {#if linkArray.length > 0}
+                <ul class="links-list">
+                  {#each linkArray as link}
+                    {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
+                    {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
+                    {@const direction = typeof link === 'object' ? link.direction : null}
+                    {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
+                    <li class="link-item" class:link-conflict={isConflict}>
+                      {#if kind}
+                        <Badge
+                          value={kind.replace(/_/g, ' ')}
+                          variant={isConflict ? 'danger' : 'info'}
+                        />
+                      {/if}
+                      <span class="link-direction">{direction === 'inbound' ? '← from' : '→ to'}</span>
+                      <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
+                      <span class="link-full-path mono">{target}</span>
+                    </li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="no-data">{$t('detail_panel.no_links')}</p>
+              {/if}
+            {/each}
           {/if}
         </div>
 

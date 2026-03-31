@@ -45,6 +45,11 @@ vi.mock('../lib/api.js', () => ({
   api: {
     agents: vi.fn().mockResolvedValue([]),
     repo: vi.fn().mockResolvedValue(null),
+    task: vi.fn().mockResolvedValue({ title: 'mock task' }),
+    tasks: vi.fn().mockResolvedValue([]),
+    agent: vi.fn().mockResolvedValue({ name: 'mock agent' }),
+    mergeRequest: vi.fn().mockResolvedValue({ title: 'mock MR' }),
+    mergeRequests: vi.fn().mockResolvedValue([]),
   },
   setAuthToken: vi.fn(),
 }));
@@ -280,7 +285,8 @@ describe('Agent panel', () => {
     await fireEvent.click(container.querySelector('[data-testid="agent-count-btn"]'));
     await waitFor(() => {
       const panel = container.querySelector('[data-testid="agent-panel"]');
-      expect(panel?.textContent).toContain('TASK-42');
+      // entityName resolves via api.task() or falls back to shortId
+      expect(panel?.textContent).toMatch(/TASK-42|mock task/);
     });
   });
 
