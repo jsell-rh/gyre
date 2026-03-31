@@ -653,7 +653,12 @@
 
   function ctxGoToSpec(node) {
     closeContextMenu();
-    if (node.spec_path && navigate) navigate('specs');
+    if (!node.spec_path) return;
+    if (goToRepoTab) {
+      goToRepoTab('specs', { path: node.spec_path });
+    } else if (navigate) {
+      navigate('specs');
+    }
   }
 
   function ctxCopyName(node) {
