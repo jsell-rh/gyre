@@ -261,6 +261,11 @@
   let mrReviewsLoading = $state(false);
   let mrComments = $state(null);
   let mrCommentsLoading = $state(false);
+  let newCommentText = $state('');
+  let submittingComment = $state(false);
+  let newReviewDecision = $state('approved');
+  let newReviewBody = $state('');
+  let submittingReview = $state(false);
 
   // ── Agent entity tab state ─────────────────────────────────────────────────
   let agentDetail = $state(null);
@@ -460,7 +465,20 @@
     if ((activeTab === 'content' || activeTab === 'edit') && !specDetail && !specDetailLoading) {
       specDetailLoading = true;
       api.specContent(path, repoId)
-        .then((d) => { specDetail = d; editContent = d?.content ?? ''; })
+        .then(async (d) => {
+          specDetail = d;
+          editContent = d?.content ?? '';
+          // If no content but we got a repo_id from the ledger, try fetching content with repo context
+          if (!d?.content && d?.repo_id && !repoId) {
+            try {
+              const withContent = await api.specContent(path, d.repo_id);
+              if (withContent?.content) {
+                specDetail = { ...d, ...withContent };
+                editContent = withContent.content;
+              }
+            } catch { /* best effort */ }
+          }
+        })
         .catch(() => { specDetail = null; })
         .finally(() => { specDetailLoading = false; });
     }
@@ -711,6 +729,44 @@
   /** Navigate to an entity in the detail panel. */
   function navigateTo(type, id, data) {
     openDetailPanel?.({ type, id, data: data ?? {} });
+  }
+
+  async function submitComment() {
+    if (!newCommentText.trim() || !entity || submittingComment) return;
+    submittingComment = true;
+    try {
+      await api.submitComment(entity.id, { author_agent_id: 'human-reviewer', body: newCommentText.trim() });
+      toastSuccess('Comment added');
+      newCommentText = '';
+      // Reload comments
+      const cmts = await api.mrComments(entity.id).catch(() => []);
+      mrComments = Array.isArray(cmts) ? cmts : [];
+    } catch (e) {
+      toastError('Failed to add comment: ' + (e.message ?? e));
+    } finally {
+      submittingComment = false;
+    }
+  }
+
+  async function submitReview() {
+    if (!entity || submittingReview) return;
+    submittingReview = true;
+    try {
+      await api.submitReview(entity.id, {
+        reviewer_agent_id: 'human-reviewer',
+        decision: newReviewDecision,
+        body: newReviewBody.trim() || undefined,
+      });
+      toastSuccess('Review submitted');
+      newReviewBody = '';
+      // Reload reviews
+      const revs = await api.mrReviews(entity.id).catch(() => []);
+      mrReviews = Array.isArray(revs) ? revs : [];
+    } catch (e) {
+      toastError('Failed to submit review: ' + (e.message ?? e));
+    } finally {
+      submittingReview = false;
+    }
   }
 
   /** Map timeline event types to human-readable labels and icons */
@@ -1021,7 +1077,7 @@
                 <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
               {/if}
             </dl>
-            {#if !entity.data?.repo_id}
+            {#if !entity.data?.repo_id && !specDetail?.repo_id}
               <p class="spec-hint">{$t('detail_panel.full_content_requires_repo')}</p>
             {/if}
           {/if}
@@ -1343,7 +1399,8 @@
                       {/if}
                     </div>
                     {#if file.patch}
-                      <pre class="diff-patch">{file.patch}</pre>
+                      <div class="diff-patch">{#each file.patch.split('\n') as line}<span class={line.startsWith('+') ? 'diff-line-add' : line.startsWith('-') ? 'diff-line-del' : line.startsWith('@@') ? 'diff-line-hunk' : 'diff-line'}>{line}
+</span>{/each}</div>
                     {/if}
                   </div>
                 {/each}
@@ -1564,6 +1621,51 @@
             {:else}
               <p class="no-data no-data-sm">No comments yet</p>
             {/if}
+
+            <!-- Comment submission form -->
+            <div class="comment-form">
+              <span class="progress-section-label">Add Comment</span>
+              <textarea
+                class="comment-textarea"
+                bind:value={newCommentText}
+                placeholder="Write a comment..."
+                rows="2"
+                disabled={submittingComment}
+              ></textarea>
+              <div class="comment-form-actions">
+                <Button variant="primary" size="sm" onclick={submitComment} disabled={!newCommentText.trim() || submittingComment}>
+                  {submittingComment ? 'Posting...' : 'Comment'}
+                </Button>
+              </div>
+            </div>
+
+            <!-- Review submission form -->
+            <div class="comment-form">
+              <span class="progress-section-label">Submit Review</span>
+              <div class="review-form-row">
+                <select class="review-decision-select" bind:value={newReviewDecision}>
+                  <option value="approved">Approve</option>
+                  <option value="changes_requested">Request Changes</option>
+                </select>
+              </div>
+              <textarea
+                class="comment-textarea"
+                bind:value={newReviewBody}
+                placeholder="Review comment (optional)..."
+                rows="2"
+                disabled={submittingReview}
+              ></textarea>
+              <div class="comment-form-actions">
+                <Button
+                  variant={newReviewDecision === 'approved' ? 'primary' : 'secondary'}
+                  size="sm"
+                  onclick={submitReview}
+                  disabled={submittingReview}
+                >
+                  {submittingReview ? 'Submitting...' : newReviewDecision === 'approved' ? 'Approve' : 'Request Changes'}
+                </Button>
+              </div>
+            </div>
           {/if}
         </div>
 
@@ -2535,9 +2637,14 @@
     white-space: pre-wrap;
     word-break: break-all;
     color: var(--color-text);
-    max-height: 300px;
+    max-height: 400px;
     overflow-y: auto;
   }
+
+  .diff-line { display: block; }
+  .diff-line-add { display: block; background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
+  .diff-line-del { display: block; background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
+  .diff-line-hunk { display: block; color: var(--color-info); font-weight: 500; background: color-mix(in srgb, var(--color-info) 8%, transparent); }
 
   /* ── MR Gates tab ────────────────────────────────────────────────────────── */
   .gates-list {
@@ -2907,6 +3014,70 @@
   .no-data-sm {
     padding: var(--space-2) 0;
     font-size: var(--text-xs);
+  }
+
+  /* ── Comment/Review form ─────────────────────────────────────────────────── */
+  .comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .comment-textarea {
+    width: 100%;
+    min-height: 48px;
+    max-height: 120px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    resize: vertical;
+    box-sizing: border-box;
+  }
+
+  .comment-textarea:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+    border-color: var(--color-focus);
+  }
+
+  .comment-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .comment-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .review-form-row {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .review-decision-select {
+    appearance: none;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-5) var(--space-1) var(--space-2);
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right var(--space-1) center;
+    background-size: var(--space-3);
+  }
+
+  .review-decision-select:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Spec history reason ────────────────────────────────────────────────── */
