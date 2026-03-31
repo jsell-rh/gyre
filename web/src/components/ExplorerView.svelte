@@ -348,12 +348,12 @@
           <div class="graph-stats">
             <span class="stat">
               <span class="stat-val">{graph.nodes?.length ?? 0}</span>
-              <span class="stat-label">nodes</span>
+              <span class="stat-label">{$t('explorer_canvas.nodes')}</span>
             </span>
             <span class="stat-sep">·</span>
             <span class="stat">
               <span class="stat-val">{graph.edges?.length ?? 0}</span>
-              <span class="stat-label">edges</span>
+              <span class="stat-label">{$t('explorer_canvas.edges')}</span>
             </span>
           </div>
         {/if}
