@@ -15,12 +15,13 @@
     repo = null,
   } = $props();
 
-  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'release', 'audit', 'danger-zone'];
+  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'dependencies', 'release', 'audit', 'danger-zone'];
   const TAB_KEYS = {
     'general': 'repo_settings.tabs.general',
     'gates': 'repo_settings.tabs.gates',
     'policies': 'repo_settings.tabs.policies',
     'budget': 'repo_settings.tabs.budget',
+    'dependencies': 'Dependencies',
     'release': 'Release',
     'audit': 'repo_settings.tabs.audit',
     'danger-zone': 'repo_settings.tabs.danger_zone',
@@ -76,6 +77,13 @@
   let repoBudget = $state(null);
   let repoBudgetLoading = $state(false);
   let repoBudgetError = $state(null);
+
+  // ── Dependencies ───────────────────────────────────────────────────────
+  let repoDeps = $state([]);
+  let repoDependents = $state([]);
+  let blastRadius = $state([]);
+  let depsLoading = $state(false);
+  let depsError = $state(null);
 
   // ── Release ───────────────────────────────────────────────────────────
   let releaseData = $state(null);
@@ -139,6 +147,9 @@
     }
     if (activeTab === 'budget') {
       if (untrack(() => !repoBudget && !repoBudgetLoading)) loadRepoBudget(repoId);
+    }
+    if (activeTab === 'dependencies') {
+      if (untrack(() => repoDeps.length === 0 && repoDependents.length === 0 && !depsLoading)) loadDependencies(repoId);
     }
     if (activeTab === 'release') {
       // Don't auto-load — user initiates preparation
@@ -257,6 +268,25 @@
       repoBudget = null;
     }
     finally { repoBudgetLoading = false; }
+  }
+
+  async function loadDependencies(repoId) {
+    depsLoading = true;
+    depsError = null;
+    try {
+      const [deps, dependents, blast] = await Promise.all([
+        api.repoDependencies(repoId).catch(() => []),
+        api.repoDependents(repoId).catch(() => []),
+        api.repoBlastRadius(repoId).catch(() => []),
+      ]);
+      repoDeps = Array.isArray(deps) ? deps : (deps?.dependencies ?? []);
+      repoDependents = Array.isArray(dependents) ? dependents : (dependents?.dependents ?? []);
+      blastRadius = Array.isArray(blast) ? blast : (blast?.repos ?? blast?.affected ?? []);
+    } catch (e) {
+      depsError = e.message ?? 'Failed to load dependencies';
+    } finally {
+      depsLoading = false;
+    }
   }
 
   async function prepareRelease() {
@@ -768,6 +798,87 @@
                 </div>
               </div>
             {/if}
+          </div>
+        {/if}
+      </div>
+
+    <!-- Dependencies tab -->
+    {:else if activeTab === 'dependencies'}
+      <div class="tab-body" data-testid="repo-dependencies-tab">
+        <h2 class="tab-title">Cross-Repo Dependencies</h2>
+        <p class="tab-desc">View this repository's dependency relationships and blast radius — which other repos are affected when this one changes.</p>
+
+        {#if depsLoading}
+          <div class="loading-row">Loading dependencies...</div>
+        {:else if depsError}
+          <div class="error-row" role="alert">
+            <p>{depsError}</p>
+            <button class="btn-secondary" onclick={() => loadDependencies(repo?.id)}>Retry</button>
+          </div>
+        {:else}
+          <div class="deps-grid">
+            <div class="deps-section">
+              <h3 class="deps-section-title">Depends On ({repoDeps.length})</h3>
+              <p class="deps-section-hint">Repositories this repo imports or references.</p>
+              {#if repoDeps.length === 0}
+                <p class="empty-text">No outgoing dependencies detected.</p>
+              {:else}
+                <ul class="deps-list">
+                  {#each repoDeps as dep}
+                    <li class="dep-item">
+                      <span class="dep-name">{dep.target_repo_name ?? dep.name ?? dep.target_repo_id ?? dep.repo_id ?? 'Unknown'}</span>
+                      {#if dep.dep_type ?? dep.dependency_type}
+                        <span class="dep-type-tag">{(dep.dep_type ?? dep.dependency_type).replace(/_/g, ' ')}</span>
+                      {/if}
+                      {#if dep.detection_method}
+                        <span class="dep-method-tag">{dep.detection_method}</span>
+                      {/if}
+                      {#if dep.notes}
+                        <span class="dep-notes">{dep.notes}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+
+            <div class="deps-section">
+              <h3 class="deps-section-title">Dependents ({repoDependents.length})</h3>
+              <p class="deps-section-hint">Repositories that depend on this repo.</p>
+              {#if repoDependents.length === 0}
+                <p class="empty-text">No incoming dependencies detected.</p>
+              {:else}
+                <ul class="deps-list">
+                  {#each repoDependents as dep}
+                    <li class="dep-item">
+                      <span class="dep-name">{dep.source_repo_name ?? dep.name ?? dep.source_repo_id ?? dep.repo_id ?? 'Unknown'}</span>
+                      {#if dep.dep_type ?? dep.dependency_type}
+                        <span class="dep-type-tag">{(dep.dep_type ?? dep.dependency_type).replace(/_/g, ' ')}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+
+            <div class="deps-section">
+              <h3 class="deps-section-title">Blast Radius</h3>
+              <p class="deps-section-hint">If this repo changes, these repos may be affected (transitive dependents).</p>
+              {#if blastRadius.length === 0}
+                <p class="empty-text">No transitive dependents — changes to this repo are self-contained.</p>
+              {:else}
+                <ul class="deps-list">
+                  {#each blastRadius as affected}
+                    <li class="dep-item blast-item">
+                      <span class="dep-name">{affected.name ?? affected.repo_name ?? affected.repo_id ?? affected.id ?? affected}</span>
+                      {#if affected.depth != null}
+                        <span class="dep-depth-tag">depth {affected.depth}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
           </div>
         {/if}
       </div>
@@ -1716,5 +1827,74 @@
     .field-textarea,
     .filter-select,
     .confirm-input { transition: none; }
+  }
+
+  /* ── Dependencies tab ─────────────────────────────────────────────── */
+  .deps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: var(--space-6);
+  }
+
+  .deps-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .deps-section-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .deps-section-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .deps-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .dep-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated, var(--color-bg));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+  }
+
+  .dep-name {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .dep-type-tag, .dep-method-tag, .dep-depth-tag {
+    font-size: var(--text-xs);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--color-border);
+    color: var(--color-text-secondary);
+  }
+
+  .dep-notes {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .blast-item {
+    border-left: 3px solid var(--color-warning);
   }
 </style>
