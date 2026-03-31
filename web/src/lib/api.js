@@ -151,6 +151,8 @@ export const api = {
   // Hot files & blame
   repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
   repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
+  // Review routing
+  repoReviewRouting: (id, path) => request(`/repos/${id}/review-routing${path ? '?path=' + encodeURIComponent(path) : ''}`),
   // Speculative merges
   repoSpeculative: (id) => request(`/repos/${id}/speculative`),
   // Agent commits
@@ -572,6 +574,16 @@ export const api = {
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),
+  // Release preparation
+  releasePrep: (repoId) =>
+    request('/release/prepare', { method: 'POST', body: JSON.stringify({ repo_id: repoId }) }),
+  // Conversation provenance
+  conversationProvenance: (sha) => request(`/conversations/${sha}`),
+  // Agent discovery
+  agentDiscovery: (capability) => {
+    const qs = capability ? `?capability=${encodeURIComponent(capability)}` : '';
+    return request(`/agents/discover${qs}`);
+  },
   // Graph predict — LLM-powered structural predictions (TASK-358)
   graphPredict: async (repoId, body) => {
     try {
