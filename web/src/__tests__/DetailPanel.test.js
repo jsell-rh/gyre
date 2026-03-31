@@ -89,11 +89,11 @@ describe('DetailPanel', () => {
       expect(askWhy.disabled).toBe(false);
     });
 
-    it('agent entity: shows Info, Chat, History, Trace tabs', () => {
+    it('agent entity: shows Info, Chat, Logs, Trace tabs', () => {
       render(DetailPanel, { props: { entity: agentEntity } });
       expect(screen.getByRole('tab', { name: /info/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /chat/i })).toBeTruthy();
-      expect(screen.getByRole('tab', { name: /history/i })).toBeTruthy();
+      expect(screen.getByRole('tab', { name: /logs/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /trace/i })).toBeTruthy();
     });
 
