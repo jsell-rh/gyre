@@ -78,6 +78,7 @@
     askLoading = true;
     askExplanation = '';
     askError = '';
+    viewSpecNodeTypes = null;
     try {
       const res = await api.generateExplorerView(wid, {
         question: askQuery.trim(),
@@ -488,6 +489,14 @@
               <button class="chip-clear" onclick={clearConceptSearch} aria-label={$t('explorer_view.clear_search')}>✕</button>
             </span>
           {/if}
+        {/if}
+
+        <!-- Node-type filter chip — shown when Ask generated a view_spec with node_types -->
+        {#if viewSpecNodeTypes?.length}
+          <span class="concept-chip" aria-live="polite">
+            {viewSpecNodeTypes.join(', ')}
+            <button class="chip-clear" onclick={clearConceptSearch} aria-label={$t('explorer_view.clear_search')}>✕</button>
+          </span>
         {/if}
 
         <span class="control-spacer"></span>
