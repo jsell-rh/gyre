@@ -87,7 +87,7 @@ pub use rust_extractor::RustExtractor;
 pub use spec_approval::SpecApproval;
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
-pub use task::{Task, TaskError, TaskPriority, TaskStatus};
+pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::Team;
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
