@@ -49,6 +49,14 @@
   let gates = $state([]);
   let gatesLoading = $state(false);
   let gatesError = $state(null);
+  let addGateOpen = $state(false);
+  let newGateName = $state('');
+  let newGateType = $state('test_command');
+  let newGateCommand = $state('');
+  let newGateRequired = $state(true);
+  let gateCreating = $state(false);
+  let gateCreateError = $state(null);
+  let deletingGateId = $state(null);
 
   // ── Policies ──────────────────────────────────────────────────────────
   let specPolicy = $state(null);
@@ -134,6 +142,39 @@
       gates = [];
     }
     finally { gatesLoading = false; }
+  }
+
+  async function createGate() {
+    if (!repo?.id || !newGateName.trim()) return;
+    gateCreating = true;
+    gateCreateError = null;
+    try {
+      await api.createRepoGate(repo.id, {
+        name: newGateName.trim(),
+        gate_type: newGateType,
+        command: newGateCommand.trim() || undefined,
+        required: newGateRequired,
+      });
+      newGateName = '';
+      newGateCommand = '';
+      newGateType = 'test_command';
+      newGateRequired = true;
+      addGateOpen = false;
+      await loadGates(repo.id);
+    } catch (e) {
+      gateCreateError = e.message;
+    } finally { gateCreating = false; }
+  }
+
+  async function deleteGate(gateId) {
+    if (!repo?.id) return;
+    deletingGateId = gateId;
+    try {
+      await api.deleteRepoGate(repo.id, gateId);
+      await loadGates(repo.id);
+    } catch (e) {
+      toastError($t('repo_settings.gates.delete_failed', { values: { error: e.message } }));
+    } finally { deletingGateId = null; }
   }
 
   async function loadSpecPolicy(repoId) {
@@ -376,32 +417,94 @@
           <p class="loading-text">{$t('repo_settings.gates.loading')}</p>
         {:else if gatesError}
           <p class="error-text" role="alert">{gatesError}</p>
-        {:else if gates.length === 0}
-          <p class="empty-text">{$t('repo_settings.gates.empty')}</p>
         {:else}
-          <div class="gates-list" data-testid="gates-list">
-            {#each gates as gate}
-              <div class="gate-card" data-testid="gate-card">
-                <div class="gate-header">
-                  <span class="gate-name">{gate.name ?? gate.id}</span>
-                  {#if gate.kind}
-                    <span class="gate-kind">{gate.kind}</span>
+          {#if gates.length === 0}
+            <p class="empty-text">{$t('repo_settings.gates.empty')}</p>
+          {:else}
+            <div class="gates-list" data-testid="gates-list">
+              {#each gates as gate}
+                <div class="gate-card" data-testid="gate-card">
+                  <div class="gate-header">
+                    <span class="gate-name">{gate.name ?? gate.id}</span>
+                    {#if gate.gate_type}
+                      <span class="gate-kind">{gate.gate_type}</span>
+                    {/if}
+                    {#if gate.required !== undefined}
+                      <span class="gate-required" class:required={gate.required}>
+                        {gate.required ? $t('repo_settings.gates.required') : $t('repo_settings.gates.optional')}
+                      </span>
+                    {/if}
+                    <button
+                      class="btn-gate-delete"
+                      onclick={() => deleteGate(gate.id)}
+                      disabled={deletingGateId === gate.id}
+                      aria-label="{$t('repo_settings.gates.delete_gate')} {gate.name ?? gate.id}"
+                      data-testid="delete-gate-btn"
+                    >
+                      {deletingGateId === gate.id ? $t('repo_settings.gates.deleting') : $t('repo_settings.gates.delete_gate')}
+                    </button>
+                  </div>
+                  {#if gate.command}
+                    <code class="gate-command">{gate.command}</code>
                   {/if}
-                  {#if gate.required !== undefined}
-                    <span class="gate-required" class:required={gate.required}>
-                      {gate.required ? $t('repo_settings.gates.required') : $t('repo_settings.gates.optional')}
-                    </span>
+                  {#if gate.description}
+                    <p class="gate-desc">{gate.description}</p>
                   {/if}
                 </div>
-                {#if gate.command}
-                  <code class="gate-command">{gate.command}</code>
-                {/if}
-                {#if gate.description}
-                  <p class="gate-desc">{gate.description}</p>
-                {/if}
+              {/each}
+            </div>
+          {/if}
+
+          <!-- Add Gate -->
+          {#if !addGateOpen}
+            <div class="action-row action-row-left">
+              <button class="btn-secondary" onclick={() => { addGateOpen = true; }} data-testid="add-gate-btn">
+                {$t('repo_settings.gates.add_gate')}
+              </button>
+            </div>
+          {:else}
+            <div class="field-card" data-testid="add-gate-form">
+              <div class="field">
+                <label class="field-label" for="gate-name-input">{$t('repo_settings.gates.gate_name_label')}</label>
+                <input id="gate-name-input" class="field-input" type="text" placeholder={$t('repo_settings.gates.gate_name_placeholder')} bind:value={newGateName} />
               </div>
-            {/each}
-          </div>
+              <div class="field">
+                <label class="field-label" for="gate-type-select">{$t('repo_settings.gates.gate_type_label')}</label>
+                <select id="gate-type-select" class="filter-select" bind:value={newGateType}>
+                  <option value="test_command">{$t('repo_settings.gates.type_test_command')}</option>
+                  <option value="lint_command">{$t('repo_settings.gates.type_lint_command')}</option>
+                  <option value="required_approvals">{$t('repo_settings.gates.type_required_approvals')}</option>
+                  <option value="agent_review">{$t('repo_settings.gates.type_agent_review')}</option>
+                  <option value="agent_validation">{$t('repo_settings.gates.type_agent_validation')}</option>
+                </select>
+              </div>
+              {#if newGateType === 'test_command' || newGateType === 'lint_command'}
+                <div class="field">
+                  <label class="field-label" for="gate-command-input">{$t('repo_settings.gates.gate_command_label')}</label>
+                  <input id="gate-command-input" class="field-input" type="text" placeholder={$t('repo_settings.gates.gate_command_placeholder')} bind:value={newGateCommand} />
+                </div>
+              {/if}
+              <div class="field">
+                <label class="toggle-row">
+                  <input type="checkbox" bind:checked={newGateRequired} />
+                  <span class="toggle-label">
+                    <span class="toggle-name">{$t('repo_settings.gates.gate_required_label')}</span>
+                  </span>
+                </label>
+              </div>
+              {#if gateCreateError}
+                <p class="error-text" role="alert">{$t('repo_settings.gates.create_failed', { values: { error: gateCreateError } })}</p>
+              {/if}
+              <div class="confirm-actions">
+                <button class="btn-secondary" onclick={() => { addGateOpen = false; gateCreateError = null; }}>
+                  {$t('common.cancel')}
+                </button>
+                <button class="btn-primary" onclick={createGate} disabled={gateCreating || !newGateName.trim()} data-testid="create-gate-btn">
+                  {gateCreating ? $t('repo_settings.gates.creating') : $t('repo_settings.gates.create_gate')}
+                </button>
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -990,6 +1093,29 @@
     color: var(--color-text-muted);
     margin: 0;
   }
+
+  .btn-gate-delete {
+    margin-left: auto;
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .btn-gate-delete:hover:not(:disabled) {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .btn-gate-delete:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-gate-delete:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  .action-row-left { justify-content: flex-start; }
 
   /* ── Budget ───────────────────────────────────────────────────────── */
   .budget-card {
