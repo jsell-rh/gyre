@@ -116,6 +116,23 @@
   let auditLoading = $state(false);
   let auditError = $state(null);
   let auditFilterType = $state('');
+  let auditSortCol = $state('timestamp');
+  let auditSortDir = $state(-1);
+
+  function toggleAuditSort(col) {
+    if (col === auditSortCol) { auditSortDir *= -1; }
+    else { auditSortCol = col; auditSortDir = 1; }
+  }
+
+  const sortedAuditEvents = $derived(
+    [...auditEvents].sort((a, b) => {
+      const av = a[auditSortCol] ?? '';
+      const bv = b[auditSortCol] ?? '';
+      if (av < bv) return -1 * auditSortDir;
+      if (av > bv) return 1 * auditSortDir;
+      return 0;
+    })
+  );
 
   const AUDIT_EVENT_TYPES = [
     'spec_approved', 'spec_revoked', 'gate_override', 'trust_changed',
@@ -735,7 +752,13 @@
           <p class="empty-text">{$t('workspace_settings.audit.empty')}</p>
         {:else}
           <div class="audit-list" data-testid="audit-list">
-            {#each auditEvents as evt}
+            <div class="audit-row audit-header">
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('event_type')}>{$t('workspace_settings.audit.col_type')}{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('actor')}>{$t('workspace_settings.audit.col_actor')}{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('details')}>{$t('workspace_settings.audit.col_detail')}{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('timestamp')}>{$t('workspace_settings.audit.col_time')}{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+            </div>
+            {#each sortedAuditEvents as evt}
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
@@ -1463,6 +1486,33 @@
     color: var(--color-text-muted);
     white-space: nowrap;
     font-family: var(--font-mono);
+  }
+
+  .audit-header {
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .audit-sort-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    padding: 0;
+    transition: color var(--transition-fast);
+  }
+
+  .audit-sort-btn:hover { color: var(--color-text); }
+
+  .audit-sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Action row ───────────────────────────────────────────────────── */

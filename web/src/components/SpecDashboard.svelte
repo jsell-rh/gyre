@@ -135,6 +135,14 @@
 
   function sortList(list, col, dir) {
     return [...list].sort((a, b) => {
+      if (col === 'progress') {
+        const pa = progressMap[a.path];
+        const pb = progressMap[b.path];
+        const av = pa && pa.total_tasks ? pa.completed_tasks / pa.total_tasks : -1;
+        const bv = pb && pb.total_tasks ? pb.completed_tasks / pb.total_tasks : -1;
+        const cmp = av - bv;
+        return dir === 'asc' ? cmp : -cmp;
+      }
       const av = String(a[col] ?? '');
       const bv = String(b[col] ?? '');
       const cmp = av.localeCompare(bv);
@@ -330,7 +338,12 @@
                 <span class="sort-arrow" aria-hidden="true">{sortArrow('approval_status')}</span>
               </button>
             </th>
-            <th scope="col">{$t('spec_dashboard.col_progress')}</th>
+            <th scope="col" aria-sort={sortCol === 'progress' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('progress')}>
+                {$t('spec_dashboard.col_progress')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('progress')}</span>
+              </button>
+            </th>
           </tr>
         </thead>
         <tbody>
