@@ -358,6 +358,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ reason }),
     }),
+  rejectSpec: (path, reason) =>
+    request(`/specs/${encodeURIComponent(path)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
   getSpecHistory: (path) => request(`/specs/${encodeURIComponent(path)}/history`),
   getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),

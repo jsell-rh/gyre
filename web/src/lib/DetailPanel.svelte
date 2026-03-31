@@ -591,6 +591,7 @@
   // ── Spec approval actions ──────────────────────────────────────────────
   let approving = $state(false);
   let revoking = $state(false);
+  let rejecting = $state(false);
 
   async function approveCurrentSpec() {
     if (!entity || approving) return;
@@ -623,6 +624,22 @@
       toastError($t('detail_panel.revocation_failed', { values: { error: e.message } }));
     } finally {
       revoking = false;
+    }
+  }
+
+  async function rejectCurrentSpec() {
+    if (!entity || rejecting) return;
+    const path = entity.id;
+    if (!path) return;
+    rejecting = true;
+    try {
+      await api.rejectSpec(path, 'Rejected from detail panel');
+      toastSuccess('Spec rejected');
+      if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'rejected' } };
+    } catch (e) {
+      toastError('Rejection failed: ' + (e.message ?? e));
+    } finally {
+      rejecting = false;
     }
   }
 
@@ -1684,6 +1701,15 @@
                 >
                   {revoking ? $t('detail_panel.revoking') : $t('detail_panel.revoke_approval')}
                 </button>
+              {:else if entity.data?.approval_status === 'rejected'}
+                <button
+                  class="approval-btn approve"
+                  onclick={approveCurrentSpec}
+                  disabled={approving || !entity.data?.current_sha}
+                  data-testid="spec-approve-btn"
+                >
+                  {approving ? $t('detail_panel.approving') : 'Re-approve'}
+                </button>
               {:else}
                 <button
                   class="approval-btn approve"
@@ -1692,6 +1718,14 @@
                   data-testid="spec-approve-btn"
                 >
                   {approving ? $t('detail_panel.approving') : $t('detail_panel.approve')}
+                </button>
+                <button
+                  class="approval-btn revoke"
+                  onclick={rejectCurrentSpec}
+                  disabled={rejecting}
+                  data-testid="spec-reject-btn"
+                >
+                  {rejecting ? 'Rejecting...' : 'Reject'}
                 </button>
               {/if}
             </div>
