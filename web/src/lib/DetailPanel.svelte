@@ -1090,7 +1090,12 @@
                   <dt>Conflicts</dt><dd><Badge value="conflicts" variant="danger" /></dd>
                 {/if}
                 {#if mr.depends_on?.length}
-                  <dt>Depends on</dt><dd class="mono">{mr.depends_on.map(shortId).join(', ')}</dd>
+                  <dt>Depends on</dt>
+                  <dd>
+                    {#each mr.depends_on as depId, i}
+                      <button class="entity-link mono" title={depId} onclick={() => navigateTo('mr', depId)}>{entityName('mr', depId)}</button>{#if i < mr.depends_on.length - 1}, {/if}
+                    {/each}
+                  </dd>
                 {/if}
                 {#if mr.atomic_group}
                   <dt>Atomic group</dt><dd class="mono">{mr.atomic_group}</dd>
@@ -1184,13 +1189,15 @@
                   <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{entityName('repo', ag.repo_id)}</dd>
                 {/if}
                 {#if ag.mr_id}
-                  <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{shortId(ag.mr_id)}</button></dd>
+                  <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
                 {#if ag.created_at}
-                  <dt>Created</dt><dd>{fmtDate(ag.created_at)}</dd>
+                  <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
                 {/if}
                 {#if ag.completed_at}
                   <dt>Completed</dt><dd>{fmtDate(ag.completed_at)}</dd>
+                  {@const dur = ag.completed_at - ag.created_at}
+                  <dt>Duration</dt><dd>{dur < 60 ? `${Math.round(dur)}s` : dur < 3600 ? `${Math.round(dur / 60)}m` : `${Math.round(dur / 3600)}h ${Math.round((dur % 3600) / 60)}m`}</dd>
                 {:else if ag.created_at}
                   {@const elapsed = Math.round((Date.now() / 1000 - ag.created_at) / 60)}
                   <dt>Running</dt><dd>{elapsed < 60 ? `${elapsed}m` : `${Math.round(elapsed / 60)}h ${elapsed % 60}m`}</dd>
@@ -1892,7 +1899,7 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{entityName('agent', att.author_agent_id)}</button></dd>
                 {/if}
                 {#if att.mr_id}
-                  <dt>MR</dt><dd class="mono" title={att.mr_id}>{shortId(att.mr_id)}</dd>
+                  <dt>MR</dt><dd><button class="entity-link mono" title={att.mr_id} onclick={() => navigateTo('mr', att.mr_id)}>{entityName('mr', att.mr_id)}</button></dd>
                 {/if}
                 {#if att.task_id}
                   <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
@@ -1985,7 +1992,7 @@
                           (review.decision === 'changes_requested' || review.status === 'changes_requested') ? 'danger' : 'info'
                         }
                       />
-                      <span class="review-author mono">{review.reviewer ?? review.user_id ?? shortId(review.reviewer_id)}</span>
+                      <span class="review-author mono">{review.reviewer ?? review.reviewer_agent_id ?? review.user_id ?? shortId(review.reviewer_id)}</span>
                       <span class="review-time">{fmtDate(review.created_at ?? review.timestamp)}</span>
                     </div>
                     {#if review.body}
@@ -2004,7 +2011,7 @@
                 {#each mrComments as comment}
                   <div class="review-item comment-item">
                     <div class="review-header">
-                      <span class="review-author mono">{comment.author ?? comment.user_id ?? shortId(comment.author_id)}</span>
+                      <span class="review-author mono">{comment.author ?? comment.author_agent_id ?? comment.user_id ?? shortId(comment.author_id)}</span>
                       <span class="review-time">{fmtDate(comment.created_at ?? comment.timestamp)}</span>
                     </div>
                     {#if comment.body}
@@ -2077,7 +2084,7 @@
                   {#if entry.timestamp || entry.created_at}
                     <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
                   {/if}
-                  <span class="trace-msg">{entry.message ?? entry.content ?? JSON.stringify(entry)}</span>
+                  <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
                 </div>
               {/each}
             </div>
