@@ -282,6 +282,30 @@ pub async fn spawn_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {} not found", req.task_id)))?;
 
+    // Agent-runtime §1 Phase 4: Only Implementation tasks trigger worker agent spawning.
+    // Delegation and Coordination tasks trigger orchestrator spawning (different path).
+    // Tasks without a task_type (pre-approval push-hook tasks) do NOT trigger agent spawning.
+    // Exception: interrogation agents bypass this check (they are system-initiated, not task-driven).
+    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
+    if !is_interrogation {
+        match &task.task_type {
+            Some(gyre_domain::TaskType::Implementation) => { /* allowed */ }
+            Some(gyre_domain::TaskType::Delegation) => {
+                return Err(ApiError::InvalidInput(
+                    "delegation tasks trigger orchestrator spawning, not worker agent spawning"
+                        .to_string(),
+                ));
+            }
+            Some(gyre_domain::TaskType::Coordination) => {
+                return Err(ApiError::InvalidInput(
+                    "coordination tasks trigger orchestrator spawning, not worker agent spawning"
+                        .to_string(),
+                ));
+            }
+            None => { /* backward compat: allow tasks without task_type */ }
+        }
+    }
+
     // Fetch workspace for compute target resolution and clone URL.
     let workspace = state
         .workspaces
@@ -352,8 +376,6 @@ pub async fn spawn_agent(
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
-
-    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
 
     // HSI §4: Interrogation agents get a short-lived 30-minute JWT.
     let jwt_ttl = if is_interrogation {
