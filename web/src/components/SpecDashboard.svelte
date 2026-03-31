@@ -191,13 +191,13 @@
         content: newSpecContent,
         message: `Create ${newSpecPath.trim()} via UI`,
       });
-      toastSuccess(`Spec created — MR #${result.mr_id} created`);
+      toastSuccess($t('spec_dashboard.spec_created', { values: { mr_id: result.mr_id } }));
       showNewSpec = false;
       newSpecPath = '';
       newSpecContent = '# New Spec\n\n## Overview\n\n';
       await load();
     } catch (e) {
-      toastError(`Create failed: ${e.message}`);
+      toastError($t('spec_dashboard.create_failed', { values: { error: e.message } }));
     } finally {
       newSpecSaving = false;
     }
@@ -355,7 +355,7 @@
               <td>
                 <Badge
                   value={spec.approval_status ?? 'unknown'}
-                  color={statusColor(spec.approval_status)}
+                  variant={statusColor(spec.approval_status)}
                 />
               </td>
               <td class="col-progress">
@@ -420,7 +420,7 @@
               <td>
                 <Badge
                   value={spec.approval_status ?? 'unknown'}
-                  color={statusColor(spec.approval_status)}
+                  variant={statusColor(spec.approval_status)}
                 />
               </td>
               <td class="col-kind">{spec.kind || '—'}</td>

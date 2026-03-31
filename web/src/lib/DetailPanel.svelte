@@ -141,7 +141,7 @@
     const taskId = data.task_id ?? data.current_task_id ?? null;
     const conversationSha = data.conversation_sha ?? null;
     if (!repoId || !taskId) {
-      toastError('Cannot start interrogation: entity is missing repo/task context.');
+      toastError($t('detail_panel.interrogation_no_context'));
       return;
     }
     interrogationLoading = true;
@@ -156,9 +156,9 @@
         conversation_sha: conversationSha,
       });
       interrogationAgentId = result?.agent?.id ?? null;
-      toastSuccess('Interrogation agent spawned.');
+      toastSuccess($t('detail_panel.interrogation_spawned'));
     } catch (e) {
-      toastError('Failed to spawn interrogation agent: ' + (e?.message ?? String(e)));
+      toastError($t('detail_panel.interrogation_failed', { values: { error: e?.message ?? String(e) } }));
     } finally {
       interrogationLoading = false;
     }
@@ -270,15 +270,15 @@
     if (!entity || approving) return;
     const sha = entity.data?.current_sha;
     const path = entity.id;
-    if (!sha || !path) { toastError('Cannot approve: missing spec SHA'); return; }
+    if (!sha || !path) { toastError($t('detail_panel.approve_missing_sha')); return; }
     approving = true;
     try {
       await api.approveSpec(path, sha);
-      toastSuccess('Spec approved');
+      toastSuccess($t('detail_panel.spec_approved'));
       // Update local state to reflect approval
       if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'approved' } };
     } catch (e) {
-      toastError(`Approval failed: ${e.message}`);
+      toastError($t('detail_panel.approval_failed', { values: { error: e.message } }));
     } finally {
       approving = false;
     }
@@ -291,10 +291,10 @@
     revoking = true;
     try {
       await api.revokeSpec(path, 'Revoked from detail panel');
-      toastSuccess('Spec approval revoked');
+      toastSuccess($t('detail_panel.spec_revoked'));
       if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'pending' } };
     } catch (e) {
-      toastError(`Revocation failed: ${e.message}`);
+      toastError($t('detail_panel.revocation_failed', { values: { error: e.message } }));
     } finally {
       revoking = false;
     }
@@ -491,7 +491,7 @@
         }
       }
     } catch (e) {
-      toastError(`LLM assist failed: ${e.message}`);
+      toastError($t('detail_panel.llm_assist_failed', { values: { error: e.message } }));
     } finally {
       llmStreaming = false;
     }
@@ -555,9 +555,9 @@
         content: editContent,
         message: `Update ${entity.id} via UI editor`,
       });
-      toastSuccess(`Spec saved — MR #${result.mr_id} created`);
+      toastSuccess($t('detail_panel.spec_saved', { values: { mr_id: result.mr_id } }));
     } catch (e) {
-      toastError(`Save failed: ${e.message}`);
+      toastError($t('detail_panel.save_failed', { values: { error: e.message } }));
     } finally {
       saving = false;
     }
@@ -677,7 +677,7 @@
               {#if entity.data?.approval_status}
                 <dt>{$t('detail_panel.status')}</dt>
                 <dd>
-                  <Badge value={entity.data.approval_status} color={specStatusColor(entity.data.approval_status)} />
+                  <Badge value={entity.data.approval_status} variant={specStatusColor(entity.data.approval_status)} />
                 </dd>
               {/if}
               {#if entity.data?.owner}
@@ -726,7 +726,7 @@
               {/if}
               {#if entity.data?.approval_status}
                 <dt>{$t('detail_panel.status')}</dt>
-                <dd><Badge value={entity.data.approval_status} color={specStatusColor(entity.data.approval_status)} /></dd>
+                <dd><Badge value={entity.data.approval_status} variant={specStatusColor(entity.data.approval_status)} /></dd>
               {/if}
               {#if entity.data?.current_sha}
                 <dt>{$t('detail_panel.sha')}</dt><dd class="mono">{entity.data.current_sha.slice(0, 7)}</dd>
@@ -868,7 +868,7 @@
               <ul class="task-list">
                 {#each specProgress.tasks as task}
                   <li class="task-item">
-                    <Badge value={task.status} color={taskStatusColor(task.status)} />
+                    <Badge value={task.status} variant={taskStatusColor(task.status)} />
                     <span class="task-title">{task.title}</span>
                     {#if task.agent_id}
                       <span class="task-agent mono">{task.agent_id.slice(0, 8)}</span>
@@ -939,7 +939,7 @@
                     <div class="history-row">
                       <Badge
                         value={ev.event}
-                        color={ev.event === 'approved' ? 'success' : ev.event === 'invalidated' ? 'danger' : 'neutral'}
+                        variant={ev.event === 'approved' ? 'success' : ev.event === 'invalidated' ? 'danger' : 'muted'}
                       />
                       <span class="history-user mono">{ev.user_id || ev.approver_id || '—'}</span>
                       <span class="history-time">{fmtDate(ev.timestamp || ev.approved_at)}</span>
