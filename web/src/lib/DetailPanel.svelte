@@ -1044,6 +1044,7 @@
                       type === 'task' ? api.task(id).then(t => t?.title) :
                       type === 'repo' ? api.repo(id).then(r => r?.name) :
                       type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      type === 'workspace' ? api.workspace(id).then(w => w?.name) :
                       Promise.resolve(null);
       fetcher.then(name => {
         if (name) entityNameCache = { ...entityNameCache, [key]: name };
@@ -1576,7 +1577,7 @@
                   <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
                 {#if ag.workspace_id}
-                  <dt>Workspace</dt><dd class="mono" title={ag.workspace_id}>{shortId(ag.workspace_id)}</dd>
+                  <dt>Workspace</dt><dd class="mono" title={ag.workspace_id}>{entityName('workspace', ag.workspace_id)}</dd>
                 {/if}
                 {#if ag.created_at}
                   <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
