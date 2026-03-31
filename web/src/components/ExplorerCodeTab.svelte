@@ -83,7 +83,22 @@
         }
         agentCommits = acMap;
       } else if (tab === 'merge-requests') {
-        mrs = await api.mergeRequests({ repository_id: repoId });
+        const mrList = await api.mergeRequests({ repository_id: repoId });
+        // Enrich MRs with gate results summary
+        mrs = Array.isArray(mrList) ? mrList : [];
+        // Load gate results for each MR in parallel (best-effort)
+        const gatePromises = mrs.map(mr =>
+          api.mrGates(mr.id).then(gates => {
+            const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
+            const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
+            const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
+            const total = arr.length;
+            return { id: mr.id, passed, failed, total };
+          }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0 }))
+        );
+        const gateResults = await Promise.all(gatePromises);
+        const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
+        mrs = mrs.map(mr => ({ ...mr, _gates: gateMap[mr.id] }));
       } else if (tab === 'merge-queue') {
         const [all, mrList] = await Promise.all([
           api.mergeQueue(),
@@ -351,6 +366,7 @@
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>{$t('code_tab.col_title')} {sortIcon('title')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('source_branch')}>Branch {sortIcon('source_branch')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
+              <th scope="col">Gates</th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('updated_at')}>{$t('code_tab.col_updated')} {sortIcon('updated_at')}</button></th>
             </tr>
           </thead>
@@ -360,13 +376,29 @@
                 <td>
                   <div class="mr-title-cell">
                     <span title={mr.title}>{mr.title}</span>
-                    {#if mr.spec_ref}
-                      <span class="mr-spec-ref" title={mr.spec_ref}>{mr.spec_ref.split('@')[0]?.split('/').pop()}</span>
-                    {/if}
+                    <div class="mr-meta-line">
+                      {#if mr.author_agent_id || mr.agent_id}
+                        <button class="agent-link" title="View agent" onclick={(e) => { e.stopPropagation(); onRowClick({ id: mr.author_agent_id ?? mr.agent_id }, 'agent'); }}>
+                          <span class="agent-icon" aria-hidden="true">&#x2699;</span>{mr.author_agent_id?.slice(0, 8) ?? mr.agent_id?.slice(0, 8)}
+                        </button>
+                      {/if}
+                      {#if mr.spec_ref}
+                        <span class="mr-spec-ref" title={mr.spec_ref}>{mr.spec_ref.split('@')[0]?.split('/').pop()}</span>
+                      {/if}
+                    </div>
                   </div>
                 </td>
                 <td class="mono secondary">{mr.source_branch ?? '—'}</td>
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
+                <td>
+                  {#if mr._gates?.total > 0}
+                    <span class="gate-summary" class:gate-all-pass={mr._gates.failed === 0 && mr._gates.passed === mr._gates.total} class:gate-has-fail={mr._gates.failed > 0}>
+                      {mr._gates.passed}/{mr._gates.total}
+                    </span>
+                  {:else}
+                    <span class="secondary">—</span>
+                  {/if}
+                </td>
                 <td class="secondary">
                   <div class="mr-updated-cell">
                     <span>{relativeTime(mr.updated_at)}</span>
@@ -839,6 +871,39 @@
   .status-badge.status-in_progress { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-color: color-mix(in srgb, var(--color-warning) 40%, transparent); color: var(--color-warning); }
   .status-badge.status-blocked { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); color: var(--color-danger); }
   .status-badge.status-backlog { background: var(--color-surface-elevated); border-color: var(--color-border); color: var(--color-text-muted); }
+
+  /* MR meta line (agent + spec) */
+  .mr-meta-line {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  /* Gate summary badge */
+  .gate-summary {
+    display: inline-block;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-mono);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+  }
+
+  .gate-all-pass {
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+    color: var(--color-success);
+  }
+
+  .gate-has-fail {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+    color: var(--color-danger);
+  }
 
   /* Agent link in commit table */
   .agent-link {
