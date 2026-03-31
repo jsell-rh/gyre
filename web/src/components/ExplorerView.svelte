@@ -562,6 +562,7 @@
             onSelectNode={onSelectNode}
             conceptFilterIds={conceptFilterIds}
             conceptQuery={conceptQuery.trim()}
+            categoryFilters={activeFilters}
           />
         {/if}
       </div>
