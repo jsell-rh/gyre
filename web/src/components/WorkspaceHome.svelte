@@ -296,7 +296,6 @@
     } catch {
       actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: $t('decisions.dismiss_failed') } };
     }
-    actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
 
   // ── Spec navigation ────────────────────────────────────────────────────
