@@ -734,28 +734,29 @@
     openDetailPanel?.({ type, id, data: data ?? {} });
   }
 
-  /** Resolve a human-friendly name for an entity ID (cached). */
-  function resolveEntityName(type, id) {
+  /** Queue entity name resolution outside of template rendering. */
+  function queueNameResolution(type, id) {
     if (!id) return;
     const key = `${type}:${id}`;
     if (entityNameCache[key] !== undefined) return;
-    entityNameCache = { ...entityNameCache, [key]: null }; // mark as loading
-    if (type === 'agent') {
-      api.agent(id).then(a => {
-        entityNameCache = { ...entityNameCache, [key]: a?.name ?? null };
+    // Use queueMicrotask to avoid state mutation during template rendering
+    queueMicrotask(() => {
+      if (entityNameCache[key] !== undefined) return;
+      entityNameCache = { ...entityNameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'task' ? api.task(id).then(t => t?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) entityNameCache = { ...entityNameCache, [key]: name };
       }).catch(() => {});
-    } else if (type === 'task') {
-      api.task(id).then(t => {
-        entityNameCache = { ...entityNameCache, [key]: t?.title ?? null };
-      }).catch(() => {});
-    }
+    });
   }
 
   function entityName(type, id) {
     if (!id) return shortId(id);
     const cached = entityNameCache[`${type}:${id}`];
     if (cached) return cached;
-    resolveEntityName(type, id);
+    queueNameResolution(type, id);
     return shortId(id);
   }
 
