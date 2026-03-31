@@ -390,6 +390,11 @@
       } else if (specsSortCol === 'updated_at') {
         av = a.updated_at ?? '';
         bv = b.updated_at ?? '';
+      } else if (specsSortCol === 'progress') {
+        av = a.tasks_total ? (a.tasks_done ?? 0) / a.tasks_total : -1;
+        bv = b.tasks_total ? (b.tasks_done ?? 0) / b.tasks_total : -1;
+        const cmp = av - bv;
+        return specsSortDir === 'asc' ? cmp : -cmp;
       } else {
         av = String(a[specsSortCol] ?? '');
         bv = String(b[specsSortCol] ?? '');
@@ -749,7 +754,9 @@
                   <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('workspace_home.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
                   </th>
-                  <th scope="col">{$t('workspace_home.col_progress')}</th>
+                  <th scope="col" aria-sort={specsSortCol === 'progress' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>{$t('workspace_home.col_progress')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('progress')}</span></button>
+                  </th>
                   <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
                   </th>

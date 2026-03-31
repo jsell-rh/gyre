@@ -463,7 +463,9 @@
             <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
               <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>{$t('cross_workspace.col_path')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
             </th>
-            <th scope="col">{$t('cross_workspace.col_workspace_repo')}</th>
+            <th scope="col" aria-sort={specsSortCol === 'workspace_name' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('workspace_name')}>{$t('cross_workspace.col_workspace_repo')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('workspace_name')}</span></button>
+            </th>
             <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
               <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('cross_workspace.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
             </th>
