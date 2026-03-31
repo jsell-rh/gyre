@@ -775,14 +775,29 @@
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m === 'workspace_home') {
-          // keep currentWorkspace
+        } else if (m !== 'cross_workspace' && m !== 'profile') {
+          // Try to recover workspace from URL slug if state doesn't have wsId
+          const p2 = parseUrl(window.location.pathname);
+          if (p2?.slug) {
+            const ws = findWorkspaceBySlug(p2.slug);
+            if (ws) currentWorkspace = ws;
+          }
         }
         if (repoName && m === 'repo') {
           // Restore repo ID from cache if available
-          const wsId = currentWorkspace?.id;
-          const cachedId = wsId ? repoIdCache.get(`${wsId}:${repoName}`) : null;
+          const cwsId = currentWorkspace?.id;
+          const cachedId = cwsId ? repoIdCache.get(`${cwsId}:${repoName}`) : null;
           currentRepo = { id: cachedId ?? null, name: repoName };
+          // If cache miss, resolve repo ID from API so tabs load properly
+          if (!cachedId && cwsId) {
+            api.repos({ workspaceId: cwsId }).then(repos => {
+              const found = (Array.isArray(repos) ? repos : []).find(r => r.name === repoName);
+              if (found) {
+                repoIdCache.set(`${cwsId}:${repoName}`, found.id);
+                currentRepo = { id: found.id, name: repoName };
+              }
+            }).catch(() => {});
+          }
         } else {
           currentRepo = null;
         }
@@ -806,9 +821,19 @@
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
-            const wsId = currentWorkspace?.id;
-            const cachedId = wsId ? repoIdCache.get(`${wsId}:${p.repoName}`) : null;
-            currentRepo = { id: cachedId ?? null, name: p.repoName };
+            const cwsId2 = currentWorkspace?.id;
+            const cachedId2 = cwsId2 ? repoIdCache.get(`${cwsId2}:${p.repoName}`) : null;
+            currentRepo = { id: cachedId2 ?? null, name: p.repoName };
+            // If cache miss, resolve repo ID from API so tabs load properly
+            if (!cachedId2 && cwsId2) {
+              api.repos({ workspaceId: cwsId2 }).then(repos => {
+                const found = (Array.isArray(repos) ? repos : []).find(r => r.name === p.repoName);
+                if (found) {
+                  repoIdCache.set(`${cwsId2}:${p.repoName}`, found.id);
+                  currentRepo = { id: found.id, name: p.repoName };
+                }
+              }).catch(() => {});
+            }
           } else {
             currentRepo = null;
           }
