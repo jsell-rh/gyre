@@ -244,6 +244,10 @@ export const api = {
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
   appendAgentLog: (id, message) =>
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
+  // Agent messages (distinct from logs — typed messages: TaskAssignment, ReviewRequest, etc.)
+  agentMessages: (id) => request(`/agents/${id}/messages`),
+  sendAgentMessage: (id, data) =>
+    request(`/agents/${id}/messages`, { method: 'POST', body: JSON.stringify(data) }),
   // MR dependencies
   mrDependencies: (id) => request(`/merge-requests/${id}/dependencies`),
   setMrDependencies: (id, data) =>
