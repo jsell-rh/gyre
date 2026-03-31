@@ -202,14 +202,14 @@ describe('WorkspaceHome — Architecture section', () => {
     expect(container.querySelector('[data-testid="section-agent-rules"]')).toBeTruthy();
   });
 
-  it('Architecture section appears between Specs and Repos (per ui-navigation.md §2)', () => {
+  it('Architecture section appears between Specs and Agent Rules (per ui-navigation.md §2)', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     const sections = [...container.querySelectorAll('[data-testid^="section-"]')];
     const ids = sections.map(s => s.getAttribute('data-testid'));
     const specsIdx = ids.indexOf('section-specs');
     const archIdx = ids.indexOf('section-architecture');
-    const reposIdx = ids.indexOf('section-repos');
+    const rulesIdx = ids.indexOf('section-agent-rules');
     expect(archIdx).toBeGreaterThan(specsIdx);
-    expect(archIdx).toBeLessThan(reposIdx);
+    expect(archIdx).toBeLessThan(rulesIdx);
   });
 });
