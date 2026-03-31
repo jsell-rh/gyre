@@ -1773,29 +1773,67 @@
               {#if c.agent_id}
                 <dt>Agent</dt><dd><button class="entity-link mono" title={c.agent_id} onclick={() => navigateTo('agent', c.agent_id)}>{entityName('agent', c.agent_id)}</button></dd>
               {/if}
+              {#if c.spec_ref}
+                {@const commitSpecPath = c.spec_ref.split('@')[0]}
+                <dt>Spec</dt><dd><button class="entity-link mono" title={c.spec_ref} onclick={() => navigateTo('spec', commitSpecPath, { path: commitSpecPath })}>{commitSpecPath.split('/').pop()}</button></dd>
+              {/if}
               {#if c.branch}
                 <dt>Branch</dt><dd class="mono">{c.branch}</dd>
               {/if}
               {#if c.parents?.length > 0}
                 <dt>Parents</dt><dd class="mono">{c.parents.map(p => p.slice(0, 7)).join(', ')}</dd>
               {/if}
+              {#if c.conversation_sha}
+                <dt>Conversation</dt><dd class="mono copyable" title="Click to copy: {c.conversation_sha}" onclick={() => copyId(c.conversation_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(c.conversation_sha); }}>{c.conversation_sha.slice(0, 12)}...</dd>
+              {/if}
             </dl>
-            {#if c.agent_id}
+
+            <!-- Provenance chain -->
+            {#if c.spec_ref || c.agent_id}
               <div class="provenance-chain">
                 <span class="provenance-label">Provenance</span>
                 <div class="provenance-flow">
-                  <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', c.agent_id)} title={c.agent_id}>
-                    <span class="provenance-icon prov-icon-agent"></span>
-                    <span class="provenance-type">Agent</span>
-                    <span class="provenance-name">{entityName('agent', c.agent_id)}</span>
-                  </button>
-                  <span class="provenance-arrow">&#x2192;</span>
+                  {#if c.spec_ref}
+                    {@const commitSpecPath2 = c.spec_ref.split('@')[0]}
+                    <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', commitSpecPath2, { path: commitSpecPath2 })} title={c.spec_ref}>
+                      <span class="provenance-icon prov-icon-spec"></span>
+                      <span class="provenance-type">Spec</span>
+                      <span class="provenance-name">{commitSpecPath2.split('/').pop()}</span>
+                    </button>
+                    <span class="provenance-arrow">&#x2192;</span>
+                  {/if}
+                  {#if c.agent_id}
+                    <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', c.agent_id)} title={c.agent_id}>
+                      <span class="provenance-icon prov-icon-agent"></span>
+                      <span class="provenance-type">Agent</span>
+                      <span class="provenance-name">{entityName('agent', c.agent_id)}</span>
+                    </button>
+                    <span class="provenance-arrow">&#x2192;</span>
+                  {/if}
                   <span class="provenance-node provenance-code provenance-current">
                     <span class="provenance-icon prov-icon-code"></span>
                     <span class="provenance-type">Commit</span>
                     <span class="provenance-name">{sha.slice(0, 7)}</span>
                   </span>
                 </div>
+              </div>
+            {/if}
+
+            <!-- Investigate: spawn interrogation agent from this commit's context -->
+            {#if c.agent_id && c.conversation_sha}
+              <div class="commit-investigate">
+                <button
+                  class="investigate-btn"
+                  onclick={startInterrogation}
+                  disabled={interrogationLoading}
+                  title="Spawn an agent with this commit's conversation context to investigate decisions"
+                >
+                  {interrogationLoading ? 'Spawning...' : 'Investigate this commit'}
+                </button>
+                <p class="investigate-hint">Resume the agent conversation that produced this commit</p>
+                {#if interrogationAgentId}
+                  <button class="entity-link" onclick={() => navigateTo('agent', interrogationAgentId)}>View spawned agent →</button>
+                {/if}
               </div>
             {/if}
           {:else}
@@ -3072,6 +3110,40 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin: var(--space-3) 0 0;
+  }
+
+  .commit-investigate {
+    margin-top: var(--space-4);
+    padding: var(--space-3);
+    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .investigate-btn {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    align-self: flex-start;
+    transition: background var(--transition-fast);
+  }
+
+  .investigate-btn:hover { background: var(--color-primary-hover); }
+  .investigate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .investigate-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
   }
 
   .view-spawned-link {
