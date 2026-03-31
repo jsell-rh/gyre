@@ -805,7 +805,7 @@
                 <div class="sidebar-item-meta">
                   <Badge value={kindLabel(spec.kind)} variant={kindBadgeVariant(spec.kind)} />
                   {#if spec.required}
-                    <span class="required-chip">Required</span>
+                    <span class="required-chip">{$t('common.required')}</span>
                   {/if}
                   <span class="ver-chip">v{spec.version}</span>
                 </div>
@@ -895,7 +895,7 @@
                 <Badge value={kindLabel(selected.kind)} variant={kindBadgeVariant(selected.kind)} />
                 <Badge value={selected.approval_status} variant={approvalVariant(selected.approval_status)} />
                 {#if selected.required}
-                  <span class="required-chip">Required</span>
+                  <span class="required-chip">{$t('common.required')}</span>
                 {/if}
                 <span class="ver-chip">v{selected.version}</span>
               </div>
@@ -907,7 +907,7 @@
                   disabled={requiredSaving === selected.id}
                   aria-label={selected.required ? 'Required — click to make optional' : 'Optional — click to make required'}
                 >
-                  {selected.required ? 'Required' : 'Optional'}
+                  {selected.required ? $t('common.required') : $t('common.optional')}
                 </button>
                 <Button variant="danger" size="sm" onclick={() => deleteTarget = selected}>{$t('common.delete')}</Button>
               </div>
