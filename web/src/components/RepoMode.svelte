@@ -15,6 +15,7 @@
   import Inbox from './Inbox.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
   import RepoSettings from './RepoSettings.svelte';
+  import AgentCardPanel from './AgentCardPanel.svelte';
 
   let {
     workspace = null,
@@ -37,6 +38,7 @@
   let agentsLoading = $state(false);
   let agentPanelOpen = $state(false);
   let agentPanelEl = $state(null);
+  let selectedAgentId = $state(null);
 
   $effect(() => {
     const repoId = repo?.id;
@@ -234,7 +236,14 @@
           <p class="agent-panel-empty">No active agents in this repo.</p>
         {:else}
           {#each activeAgents as agent}
-            <div class="agent-row" data-testid="agent-row">
+            <button
+              class="agent-row"
+              class:agent-row-selected={selectedAgentId === agent.id}
+              data-testid="agent-row"
+              onclick={() => { selectedAgentId = selectedAgentId === agent.id ? null : agent.id; }}
+              aria-expanded={selectedAgentId === agent.id}
+              aria-label="Agent {agent.name ?? agent.id}"
+            >
               <div class="agent-row-info">
                 <span class="agent-row-name">{agent.name ?? agent.id}</span>
                 <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
@@ -242,7 +251,10 @@
               {#if agent.task_id}
                 <span class="agent-row-task">Task: {agent.task_id}</span>
               {/if}
-            </div>
+            </button>
+            {#if selectedAgentId === agent.id}
+              <AgentCardPanel agentId={agent.id} />
+            {/if}
           {/each}
         {/if}
       </div>
@@ -527,6 +539,26 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
+    width: 100%;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    color: var(--color-text);
+    transition: border-color var(--transition-fast);
+  }
+
+  .agent-row:hover {
+    border-color: var(--color-border-strong);
+  }
+
+  .agent-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .agent-row-selected {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface));
   }
 
   .agent-row-info {
