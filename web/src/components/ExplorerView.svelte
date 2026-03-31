@@ -534,7 +534,7 @@
 
         {:else if explorerTab === 'briefing'}
           <div class="briefing-wrap">
-            <Briefing workspaceId={scope.workspaceId} repoId={selectedRepoId} scope="workspace" workspaceName={workspaceName} />
+            <Briefing workspaceId={scope.workspaceId} repoId={selectedRepoId} scope={scopeType === 'repo' ? 'repo' : 'workspace'} workspaceName={workspaceName} />
           </div>
 
         {:else if explorerTab === 'code'}
