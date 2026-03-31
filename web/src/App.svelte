@@ -319,6 +319,19 @@
     );
   }
 
+  function goToTenantAgentRules() {
+    mode = 'cross_workspace';
+    crossWorkspaceTab = 'agent-rules';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    window.history.pushState(
+      { mode: 'cross_workspace', crossWorkspaceTab: 'agent-rules', wsId: null, repoName: null, repoTab: null },
+      '',
+      '/all/agent-rules'
+    );
+  }
+
   function selectWorkspace(ws) {
     wsDropdownOpen = false;
     if (ws === 'all') {
@@ -614,7 +627,7 @@
       mode = 'profile';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
-      crossWorkspaceTab = parsed.tab === 'settings' ? 'settings' : null;
+      crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
     } else if (parsed?.slug) {
       // URL-driven workspace navigation
       const ws = findWorkspaceBySlug(parsed.slug);
@@ -736,7 +749,7 @@
           mode = 'profile';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
-          crossWorkspaceTab = p.tab === 'settings' ? 'settings' : null;
+          crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
@@ -1227,6 +1240,8 @@
         {:else if mode === 'cross_workspace'}
           {#if crossWorkspaceTab === 'settings'}
             <TenantSettings onBack={() => goToCrossWorkspace()} />
+          {:else if crossWorkspaceTab === 'agent-rules'}
+            <MetaSpecs scope="tenant" workspaceId={null} />
           {:else}
             <CrossWorkspaceHome
               onSelectWorkspace={(ws) => goToWorkspaceHome(ws)}
