@@ -1162,6 +1162,7 @@
     "show_all_specs": "Show all {count} specs",
     "briefing_empty": "No briefing data available across workspaces.",
     "agent_rules_empty": "No tenant-level agent rules defined.",
+    "manage_tenant_rules": "Manage tenant rules",
     "rule_required": "Required",
     "create_ws_name_label": "Name *",
     "create_ws_name_placeholder": "e.g. Backend Team",

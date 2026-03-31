@@ -21,6 +21,7 @@
   let {
     onSelectWorkspace = undefined,
     onSettings = undefined,
+    onManageAgentRules = undefined,
   } = $props();
 
   // ── Create Workspace form state ──────────────────────────────────────
@@ -532,6 +533,13 @@
     <div class="section-header">
       <h2 class="section-title" id="agent-rules-heading">{$t('cross_workspace.sections.agent_rules')}</h2>
       <span class="section-scope-tag">{$t('cross_workspace.scope_tenant_level')}</span>
+      {#if onManageAgentRules}
+        <button
+          class="manage-rules-btn"
+          onclick={() => onManageAgentRules?.()}
+          data-testid="manage-tenant-rules-btn"
+        >{$t('cross_workspace.manage_tenant_rules')}</button>
+      {/if}
     </div>
 
     {#if rulesLoading}
@@ -707,6 +715,24 @@
     background: var(--color-border);
     border-radius: var(--radius-sm);
     padding: 2px var(--space-2);
+  }
+
+  .manage-rules-btn {
+    margin-left: auto;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    padding: 0;
+  }
+
+  .manage-rules-btn:hover { text-decoration: underline; }
+
+  .manage-rules-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .section-loading,
