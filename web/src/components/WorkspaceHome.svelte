@@ -736,31 +736,31 @@
           </div>
           <div class="section-body">
             <div class="prov-flow-bar">
-              <div class="prov-flow-node">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-specs')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Specs section">
                 <span class="prov-flow-count">{provenanceSummary.approved + provenanceSummary.pending}</span>
                 <span class="prov-flow-label">Specs</span>
                 {#if provenanceSummary.pending > 0}
                   <span class="prov-flow-sub prov-sub-pending">{provenanceSummary.pending} pending</span>
                 {/if}
-              </div>
+              </button>
               <span class="prov-flow-arrow">→</span>
-              <div class="prov-flow-node">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-tasks')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Tasks section">
                 <span class="prov-flow-count">{provenanceSummary.totalTasks}</span>
                 <span class="prov-flow-label">Tasks</span>
                 {#if provenanceSummary.inProgressTasks > 0}
                   <span class="prov-flow-sub prov-sub-active">{provenanceSummary.inProgressTasks} in progress</span>
                 {/if}
-              </div>
+              </button>
               <span class="prov-flow-arrow">→</span>
-              <div class="prov-flow-node">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-agents')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Agents section">
                 <span class="prov-flow-count">{wsAgents.length}</span>
                 <span class="prov-flow-label">Agents</span>
                 {#if provenanceSummary.activeAgentCount > 0}
                   <span class="prov-flow-sub prov-sub-active">{provenanceSummary.activeAgentCount} active</span>
                 {/if}
-              </div>
+              </button>
               <span class="prov-flow-arrow">→</span>
-              <div class="prov-flow-node">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-mrs')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to MRs section">
                 <span class="prov-flow-count">{wsMrs.length}</span>
                 <span class="prov-flow-label">MRs</span>
                 {#if provenanceSummary.openMrs > 0}
@@ -769,7 +769,7 @@
                 {#if provenanceSummary.mergedMrs > 0}
                   <span class="prov-flow-sub prov-sub-merged">{provenanceSummary.mergedMrs} merged</span>
                 {/if}
-              </div>
+              </button>
             </div>
           </div>
         </section>
@@ -2512,6 +2512,23 @@
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
+  }
+
+  .prov-flow-clickable {
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
+  }
+
+  .prov-flow-clickable:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface-elevated));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  }
+
+  .prov-flow-clickable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .prov-flow-count {
