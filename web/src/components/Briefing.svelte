@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -23,13 +24,14 @@
   const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
 
   // --- Time range ---
-  const TIME_RANGES = [
-    { label: 'Since last visit', value: 'last_visit' },
-    { label: 'Last 24h',         value: '24h' },
-    { label: 'Last 7d',          value: '7d' },
-    { label: 'Last 30d',         value: '30d' },
-    { label: 'Custom range',     value: 'custom' },
-  ];
+  const TIME_RANGE_VALUES = ['last_visit', '24h', '7d', '30d', 'custom'];
+  const TIME_RANGE_KEYS = {
+    last_visit: 'briefing.time_ranges.last_visit',
+    '24h':      'briefing.time_ranges.24h',
+    '7d':       'briefing.time_ranges.7d',
+    '30d':      'briefing.time_ranges.30d',
+    custom:     'briefing.time_ranges.custom',
+  };
 
   let selectedRange = $state('last_visit');
   let customSince = $state(''); // ISO date string for custom range
@@ -55,14 +57,16 @@
     }
   }
 
+  const RANGE_LABEL_KEYS = {
+    '24h':      'briefing.range_labels.24h',
+    '7d':       'briefing.range_labels.7d',
+    '30d':      'briefing.range_labels.30d',
+    custom:     'briefing.range_labels.custom',
+    last_visit: 'briefing.range_labels.last_visit',
+  };
+
   function labelForRange(range) {
-    switch (range) {
-      case '24h':    return '24 hours';
-      case '7d':     return '7 days';
-      case '30d':    return '30 days';
-      case 'custom': return 'custom range';
-      default:       return 'last visit';
-    }
+    return $t(RANGE_LABEL_KEYS[range] ?? 'briefing.range_labels.last_visit');
   }
 
   function isEmpty(data) {
@@ -181,7 +185,7 @@
         ...briefing,
         cross_workspace: briefing.cross_workspace.filter(x => x.id !== item.id),
       };
-      toastInfo('Item dismissed');
+      toastInfo($t('briefing.item_dismissed'));
     }
   }
 
@@ -204,20 +208,20 @@
   });
 </script>
 
-<span class="sr-only" aria-live="polite">{loading ? 'Loading briefing…' : 'Briefing loaded'}</span>
+<span class="sr-only" aria-live="polite">{loading ? $t('briefing.loading') : $t('briefing.loaded')}</span>
 <div class="briefing" data-testid="briefing-view" aria-busy={loading}>
     <!-- Header -->
     <div class="briefing-header">
       <div class="header-left">
-        <h1 class="briefing-title">Briefing</h1>
+        <h1 class="briefing-title">{$t('briefing.title')}</h1>
         {#if !loading}
-          <span class="briefing-since" data-testid="since-label">Since {sinceLabel}</span>
+          <span class="briefing-since" data-testid="since-label">{$t('briefing.since', { values: { label: sinceLabel } })}</span>
         {/if}
         {#if scope === 'tenant' || scope === 'repo' || workspaceName}
-          <span class="briefing-scope-hint">{scope === 'tenant' ? 'All workspaces' : scope === 'repo' ? 'Repository' : workspaceName}</span>
+          <span class="briefing-scope-hint">{scope === 'tenant' ? $t('briefing.scope_all') : scope === 'repo' ? $t('briefing.scope_repo') : workspaceName}</span>
         {/if}
         {#if trustLevel}
-          <span class="briefing-trust">Trust: {trustLevel}</span>
+          <span class="briefing-trust">{$t('briefing.trust_label', { values: { level: trustLevel } })}</span>
         {/if}
       </div>
       <div class="header-right">
@@ -228,8 +232,8 @@
             onchange={(e) => onRangeChange(e.target.value)}
             aria-label="Briefing time range"
           >
-            {#each TIME_RANGES as opt}
-              <option value={opt.value}>{opt.label}</option>
+            {#each TIME_RANGE_VALUES as val}
+              <option value={val}>{$t(TIME_RANGE_KEYS[val])}</option>
             {/each}
           </select>
           {#if selectedRange === 'custom'}
@@ -240,7 +244,7 @@
               aria-label="Custom start date"
               data-testid="custom-date-input"
             />
-            <button class="apply-btn" onclick={onCustomApply} disabled={!customSince}>Apply</button>
+            <button class="apply-btn" onclick={onCustomApply} disabled={!customSince}>{$t('briefing.apply')}</button>
           {/if}
         </div>
       </div>
@@ -249,11 +253,11 @@
     {#if error}
       <div class="error-banner" role="alert" data-testid="error-banner">
         {#if !isEmpty(briefing)}
-          Could not load live briefing: {error}. Showing cached data.
+          {$t('briefing.error_cached', { values: { error } })}
         {:else}
-          Unable to load briefing data: {error}. Check your connection.
+          {$t('briefing.error_full', { values: { error } })}
         {/if}
-        <button class="action-btn" onclick={load}>Retry</button>
+        <button class="action-btn" onclick={load}>{$t('briefing.retry')}</button>
       </div>
     {/if}
 
@@ -270,7 +274,7 @@
         <section class="briefing-section" data-testid="section-completed" aria-labelledby="briefing-completed">
           <h2 class="section-heading" id="briefing-completed">
             <span class="section-icon completed-icon" aria-hidden="true">✓</span>
-            COMPLETED
+            {$t('briefing.section_completed')}
           </h2>
           {#each briefing.completed as item (item.id ?? item.title)}
             <div class="section-item" data-testid="completed-item">
@@ -314,7 +318,7 @@
         <section class="briefing-section" data-testid="section-in-progress" aria-labelledby="briefing-inprogress">
           <h2 class="section-heading" id="briefing-inprogress">
             <span class="section-icon inprogress-icon" aria-hidden="true">◐</span>
-            IN PROGRESS
+            {$t('briefing.section_in_progress')}
           </h2>
           {#each briefing.in_progress as item (item.id ?? item.title)}
             <div class="section-item" data-testid="in-progress-item">
@@ -369,7 +373,7 @@
                       onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
                       data-testid="respond-to-agent-btn"
                     >
-                      Respond to {u.agent_id}
+                      {$t('briefing.respond_to', { values: { agent: u.agent_id } })}
                     </button>
                   {/each}
                 {/if}
@@ -379,7 +383,7 @@
                     onclick={() => handleViewSpec(item.spec_ref)}
                     data-testid="view-spec-btn"
                   >
-                    View spec
+                    {$t('briefing.view_spec')}
                   </button>
                 {/if}
               </div>
@@ -393,7 +397,7 @@
         <section class="briefing-section" data-testid="section-cross-workspace" aria-labelledby="briefing-crossworkspace">
           <h2 class="section-heading" id="briefing-crossworkspace">
             <span class="section-icon cross-icon" aria-hidden="true">↔</span>
-            CROSS-WORKSPACE
+            {$t('briefing.section_cross_workspace')}
           </h2>
           {#each briefing.cross_workspace as item (item.id ?? item.spec_ref)}
             <div class="section-item" data-testid="cross-workspace-item">
@@ -420,7 +424,7 @@
                   onclick={() => handleReviewChanges(item)}
                   data-testid="review-changes-btn"
                 >
-                  Review changes
+                  {$t('briefing.review_changes')}
                 </button>
                 <button
                   class="action-btn secondary"
@@ -428,7 +432,7 @@
                   data-testid="dismiss-btn"
                   aria-label="Dismiss: {item.description ?? item.spec_ref ?? 'item'}"
                 >
-                  Dismiss
+                  {$t('common.dismiss')}
                 </button>
               </div>
             </div>
@@ -441,7 +445,7 @@
         <section class="briefing-section exceptions-section" data-testid="section-exceptions" aria-labelledby="briefing-exceptions">
           <h2 class="section-heading" id="briefing-exceptions">
             <span class="section-icon exception-icon" aria-hidden="true">✗</span>
-            EXCEPTIONS
+            {$t('briefing.section_exceptions')}
           </h2>
           {#each briefing.exceptions as item (item.id ?? item.mr_id)}
             <div class="section-item exception-item" data-testid="exception-item">
@@ -451,7 +455,7 @@
                   <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
                 {/if}
                 <span class="item-name">
-                  Gate failure:
+                  {$t('briefing.gate_failure')}
                   {#if item.repo && item.mr_id}
                     <button
                       class="entity-ref mr-ref"
@@ -476,28 +480,28 @@
                     onclick={() => handleViewDiff(item)}
                     data-testid="view-diff-btn"
                   >
-                    View Diff
+                    {$t('briefing.view_diff')}
                   </button>
                   <button
                     class="action-btn secondary"
                     onclick={() => handleViewOutput(item)}
                     data-testid="view-output-btn"
                   >
-                    View Output
+                    {$t('briefing.view_output')}
                   </button>
                   <button
                     class="action-btn secondary"
                     onclick={() => openEntity('mr', item.mr_id, { action: 'override' })}
                     data-testid="override-btn"
                   >
-                    Override
+                    {$t('briefing.override')}
                   </button>
                   <button
                     class="action-btn secondary"
                     onclick={() => openEntity('mr', item.mr_id, { action: 'close' })}
                     data-testid="close-mr-btn"
                   >
-                    Close MR
+                    {$t('briefing.close_mr')}
                   </button>
                 {/if}
               </div>
@@ -509,7 +513,7 @@
       <!-- METRICS -->
       {#if briefing.metrics}
         <section class="metrics-row" data-testid="section-metrics" aria-labelledby="briefing-metrics">
-          <h2 class="section-heading metrics-heading" id="briefing-metrics">METRICS</h2>
+          <h2 class="section-heading metrics-heading" id="briefing-metrics">{$t('briefing.section_metrics')}</h2>
           <div class="metrics-grid">
             {#if briefing.metrics.mrs_count != null}
               <div class="metric-cell" data-testid="metric-mrs">
@@ -541,8 +545,8 @@
 
       {#if !briefing.completed?.length && !briefing.in_progress?.length && !briefing.cross_workspace?.length && !briefing.exceptions?.length && !briefing.metrics}
         <EmptyState
-          title="All caught up"
-          description="No activity in the {sinceLabel} window."
+          title={$t('briefing.all_caught_up')}
+          description={$t('briefing.no_activity', { values: { window: sinceLabel } })}
         />
       {/if}
 
