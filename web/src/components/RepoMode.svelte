@@ -93,7 +93,24 @@
     let aborted = false;
     mrsLoading = true;
     api.mergeRequests({ repository_id: repoId })
-      .then(list => { if (!aborted) { repoMrs = Array.isArray(list) ? list : []; mrsLoaded = true; } })
+      .then(async (list) => {
+        if (aborted) return;
+        const mrList = Array.isArray(list) ? list : [];
+        // Enrich MRs with gate results summary (best-effort, parallel)
+        const gatePromises = mrList.map(mr =>
+          api.mrGates(mr.id).then(gates => {
+            const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
+            const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
+            const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
+            return { id: mr.id, passed, failed, total: arr.length };
+          }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0 }))
+        );
+        const gateResults = await Promise.all(gatePromises);
+        if (aborted) return;
+        const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
+        repoMrs = mrList.map(mr => ({ ...mr, _gates: gateMap[mr.id] }));
+        mrsLoaded = true;
+      })
       .catch(() => { if (!aborted) { repoMrs = []; mrsLoaded = true; } })
       .finally(() => { if (!aborted) mrsLoading = false; });
     return () => { aborted = true; };
@@ -337,6 +354,7 @@
                 <th>Branch</th>
                 <th>Agent</th>
                 <th>Spec</th>
+                <th>Gates</th>
                 <th>Changes</th>
                 <th>Updated</th>
               </tr>
@@ -349,6 +367,21 @@
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
                   <td class="cell-mono">{#if mr.author_agent_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{:else}{''}{/if}</td>
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
+                  <td>
+                    {#if mr._gates?.total > 0}
+                      <span class="gate-summary-compact">
+                        {#if mr._gates.failed > 0}
+                          <span class="gate-fail-compact" title="{mr._gates.failed} failed">✗{mr._gates.failed}</span>
+                        {/if}
+                        {#if mr._gates.passed > 0}
+                          <span class="gate-pass-compact" title="{mr._gates.passed} passed">✓{mr._gates.passed}</span>
+                        {/if}
+                        {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}
+                          <span class="gate-pending-compact" title="{mr._gates.total - mr._gates.passed - mr._gates.failed} pending">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>
+                        {/if}
+                      </span>
+                    {/if}
+                  </td>
                   <td>
                     {#if mr.diff_stats}
                       <span class="diff-stat-compact">
@@ -900,6 +933,19 @@
 
   .diff-ins { color: var(--color-success); font-weight: 600; }
   .diff-del { color: var(--color-danger); font-weight: 600; }
+
+  /* Gate summary in MR table */
+  .gate-summary-compact {
+    display: inline-flex;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+
+  .gate-pass-compact { color: var(--color-success); font-weight: 600; }
+  .gate-fail-compact { color: var(--color-danger); font-weight: 600; }
+  .gate-pending-compact { color: var(--color-text-muted); }
 
   /* ── Entity link buttons in tables ──────────────────────────────────── */
   .entity-link-btn {
