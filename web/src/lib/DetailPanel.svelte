@@ -41,6 +41,8 @@
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
   let enqueueing = $state(false);
+  let conversationData = $state(null);
+  let conversationLoading = $state(false);
 
   // Editor Split pop-out (spec entities only)
   let showEditorSplit = $state(false);
@@ -333,6 +335,8 @@
       taskAgents = null;
       taskMrs = null;
     }
+    conversationData = null;
+    interrogationAgentId = null;
   });
 
   // Load MR data per tab
@@ -592,6 +596,18 @@
         taskMrs = mrs;
       }).finally(() => { taskAgentsLoading = false; taskMrsLoading = false; });
     }
+  });
+
+  // Load conversation provenance for ask-why tab
+  $effect(() => {
+    if (activeTab !== 'ask-why') return;
+    const convSha = entity?.data?.conversation_sha;
+    if (!convSha || conversationData || conversationLoading) return;
+    conversationLoading = true;
+    api.conversationProvenance(convSha)
+      .then((d) => { conversationData = d; })
+      .catch(() => { conversationData = null; })
+      .finally(() => { conversationLoading = false; });
   });
 
   // ── Spec entity tab state (S4.5) ────────────────────────────────────────────
@@ -2863,18 +2879,61 @@
       {:else if activeTab === 'ask-why'}
         <div class="tab-pane ask-why">
           {#if entity.data?.conversation_sha}
-            <button
-              class="start-interrogation"
-              onclick={startInterrogation}
-              disabled={interrogationLoading}
-              aria-describedby="ask-why-hint"
-            >
-              {interrogationLoading ? $t('detail_panel.ask_why_starting') : $t('detail_panel.ask_why_spawn')}
-            </button>
-            <p class="ask-why-hint" id="ask-why-hint">{$t('detail_panel.ask_why_hint')}</p>
-            {#if interrogationAgentId}
-              <a class="view-spawned-link" href="/explorer?detail=agent:{interrogationAgentId}">{$t('detail_panel.ask_why_view_agent')}</a>
+            <!-- Conversation History -->
+            {#if conversationLoading}
+              <div class="spec-skeleton">
+                {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+              </div>
+            {:else if conversationData}
+              {@const turns = conversationData.turns ?? conversationData.messages ?? []}
+              {#if turns.length > 0}
+                <span class="progress-section-label">Conversation ({turns.length} turns)</span>
+                <div class="conversation-trace">
+                  {#each turns as turn, i}
+                    <div class="conv-turn" class:conv-turn-user={turn.role === 'user' || turn.role === 'human'} class:conv-turn-assistant={turn.role === 'assistant'}>
+                      <div class="conv-turn-header">
+                        <Badge value={turn.role ?? 'message'} variant={turn.role === 'assistant' ? 'info' : turn.role === 'user' || turn.role === 'human' ? 'warning' : 'muted'} />
+                        {#if turn.timestamp}
+                          <span class="conv-turn-time">{fmtDate(turn.timestamp)}</span>
+                        {/if}
+                        {#if turn.tool_name}
+                          <span class="conv-turn-tool mono">{turn.tool_name}</span>
+                        {/if}
+                      </div>
+                      <div class="conv-turn-content">
+                        {turn.content ?? turn.text ?? turn.message ?? JSON.stringify(turn)}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="no-data no-data-sm">Conversation recorded but no turns available</p>
+              {/if}
+              {#if conversationData.model}
+                <div class="conv-meta">
+                  <span class="conv-meta-label">Model:</span> <span class="mono">{conversationData.model}</span>
+                  {#if conversationData.total_tokens}
+                    <span class="conv-meta-label">Tokens:</span> <span>{conversationData.total_tokens.toLocaleString()}</span>
+                  {/if}
+                </div>
+              {/if}
             {/if}
+
+            <!-- Spawn investigation agent -->
+            <div class="ask-why-actions">
+              <button
+                class="start-interrogation"
+                onclick={startInterrogation}
+                disabled={interrogationLoading}
+                aria-describedby="ask-why-hint"
+              >
+                {interrogationLoading ? $t('detail_panel.ask_why_starting') : $t('detail_panel.ask_why_spawn')}
+              </button>
+              <p class="ask-why-hint" id="ask-why-hint">{$t('detail_panel.ask_why_hint')}</p>
+              {#if interrogationAgentId}
+                <button class="entity-link" onclick={() => navigateTo('agent', interrogationAgentId)}>{$t('detail_panel.ask_why_view_agent')}</button>
+              {/if}
+            </div>
           {:else}
             <p class="ask-why-unavailable">{$t('detail_panel.ask_why_unavailable')}</p>
           {/if}
@@ -3079,9 +3138,78 @@
 
   /* Ask Why tab */
   .ask-why {
-    align-items: center;
-    padding: var(--space-6) var(--space-4);
+    padding: var(--space-4);
+  }
+
+  .ask-why-actions {
     text-align: center;
+    padding: var(--space-4) 0;
+    margin-top: var(--space-4);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .conversation-trace {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-height: 400px;
+    overflow-y: auto;
+    margin-bottom: var(--space-3);
+  }
+
+  .conv-turn {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+  }
+
+  .conv-turn-user {
+    border-left: 3px solid var(--color-warning);
+  }
+
+  .conv-turn-assistant {
+    border-left: 3px solid var(--color-primary);
+  }
+
+  .conv-turn-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+
+  .conv-turn-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .conv-turn-tool {
+    font-size: var(--text-xs);
+    background: var(--color-border);
+    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm);
+  }
+
+  .conv-turn-content {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 150px;
+    overflow-y: auto;
+  }
+
+  .conv-meta {
+    display: flex;
+    gap: var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: var(--space-2) 0;
+  }
+
+  .conv-meta-label {
+    font-weight: 600;
   }
 
   .start-interrogation {
