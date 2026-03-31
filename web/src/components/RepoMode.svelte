@@ -190,6 +190,32 @@
     return 'muted';
   }
 
+  // ── Task quick status change ─────────────────────────────────────────
+  let changingTaskStatus = $state(null);
+
+  async function quickChangeTaskStatus(task, newStatus, e) {
+    e?.stopPropagation();
+    if (changingTaskStatus) return;
+    changingTaskStatus = task.id;
+    try {
+      await api.updateTaskStatus(task.id, newStatus);
+      toastSuccess(`Task "${task.title ?? 'Untitled'}" → ${newStatus}`);
+      repoTasks = repoTasks.map(t => t.id === task.id ? { ...t, status: newStatus } : t);
+    } catch (err) {
+      toastError('Failed to update: ' + (err.message ?? err));
+    } finally {
+      changingTaskStatus = null;
+    }
+  }
+
+  const TASK_STATUS_TRANSITIONS = {
+    backlog: ['in_progress'],
+    in_progress: ['done', 'blocked'],
+    blocked: ['in_progress'],
+    review: ['done', 'in_progress'],
+    done: ['in_progress'],
+  };
+
   // ── MR quick actions ──────────────────────────────────────────────────
   let enqueueingMr = $state(null);
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
@@ -358,6 +384,7 @@
                 <th>Spec</th>
                 <th>Agent</th>
                 <th>Updated</th>
+                <th class="th-action"></th>
               </tr>
             </thead>
             <tbody>
@@ -370,6 +397,20 @@
                   <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id ?? repo?.id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
                   <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                   <td class="cell-time">{fmtRelTime(task.updated_at ?? task.created_at)}</td>
+                  <td class="cell-action">
+                    {#if TASK_STATUS_TRANSITIONS[task.status]?.length}
+                      {#each TASK_STATUS_TRANSITIONS[task.status] as nextStatus}
+                        <button
+                          class="quick-action-btn quick-action-{nextStatus}"
+                          onclick={(e) => quickChangeTaskStatus(task, nextStatus, e)}
+                          disabled={changingTaskStatus === task.id}
+                          title="Move to {nextStatus.replace(/_/g, ' ')}"
+                        >
+                          {changingTaskStatus === task.id ? '...' : nextStatus === 'in_progress' ? 'Start' : nextStatus === 'done' ? 'Done' : nextStatus === 'blocked' ? 'Block' : nextStatus.replace(/_/g, ' ')}
+                        </button>
+                      {/each}
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -1027,6 +1068,9 @@
   }
   .quick-action-btn:hover { opacity: 0.85; }
   .quick-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .quick-action-done { background: var(--color-success); }
+  .quick-action-blocked { background: var(--color-danger); }
+  .quick-action-in_progress { background: var(--color-warning); color: var(--color-text); }
   .queue-badge {
     display: inline-block;
     background: var(--color-warning);
