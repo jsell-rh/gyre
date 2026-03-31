@@ -1286,19 +1286,23 @@
             <ul class="links-list">
               {#each specLinks as link}
                 {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
-                {@const kind = typeof link === 'object' ? link.kind : null}
+                {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
+                {@const direction = typeof link === 'object' ? link.direction : null}
                 <li class="link-item">
                   {#if kind}<span class="link-kind">{kind}</span>{/if}
-                  <span class="link-target mono">{target}</span>
+                  {#if direction}<span class="link-direction">{direction === 'outbound' ? '\u2192' : '\u2190'}</span>{/if}
+                  <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
                 </li>
               {/each}
             </ul>
           {:else if specLinks?.links?.length > 0}
             <ul class="links-list">
               {#each specLinks.links as link}
+                {@const target = link.target_path ?? link.target}
                 <li class="link-item">
                   {#if link.kind}<span class="link-kind">{link.kind}</span>{/if}
-                  <span class="link-target mono">{link.target_path ?? link.target}</span>
+                  {#if link.direction}<span class="link-direction">{link.direction === 'outbound' ? '\u2192' : '\u2190'}</span>{/if}
+                  <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
                 </li>
               {/each}
             </ul>
@@ -2471,6 +2475,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .link-direction {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
   }
 
   /* History list (spec type) */
