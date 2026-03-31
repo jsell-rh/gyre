@@ -65,7 +65,25 @@
     "show_workspace_graph": "Show workspace graph",
     "hide_workspace_graph": "Hide workspace graph",
     "new_repo": "+ New Repo",
-    "import": "Import"
+    "import": "Import",
+    "new_repo_title": "New Repository",
+    "import_repo_title": "Import Repository",
+    "new_repo_name_label": "Name",
+    "new_repo_name_placeholder": "my-repo",
+    "new_repo_desc_label": "Description",
+    "new_repo_desc_placeholder": "Optional description",
+    "new_repo_creating": "Creating…",
+    "new_repo_create": "Create",
+    "import_url_label": "Repository URL",
+    "import_url_placeholder": "https://github.com/org/repo",
+    "import_name_label": "Name",
+    "import_name_placeholder": "Auto-derived from URL",
+    "import_importing": "Importing…",
+    "import_submit": "Import",
+    "specs_no_status": "No specs with that status.",
+    "all_statuses": "All statuses",
+    "rules_reconciling": "Reconciling: {count} meta-spec(s) recently updated",
+    "rules_no_metaspecs": "No meta-specs configured."
   },
   "repo_mode": {
     "tabs": {

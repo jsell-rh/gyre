@@ -479,7 +479,7 @@
           {:else if decisionsError}
             <div class="error-row" role="alert">
               <p class="error-text">{decisionsError}</p>
-              <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">Retry</button>
+              <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">{$t('common.retry')}</button>
             </div>
           {:else if notifications.length === 0}
             <p class="empty-text" data-testid="decisions-empty">{$t('workspace_home.decisions_empty')}</p>
@@ -508,28 +508,28 @@
                           class="inline-btn approve"
                           onclick={() => handleApproveSpec(n)}
                           data-testid="btn-approve"
-                          aria-label="Approve spec"
-                        >Approve</button>
+                          aria-label={$t('common.approve')}
+                        >{$t('common.approve')}</button>
                         <button
                           class="inline-btn reject"
                           onclick={() => handleRejectSpec(n)}
                           data-testid="btn-reject"
-                          aria-label="Reject spec"
-                        >Reject</button>
+                          aria-label={$t('common.reject')}
+                        >{$t('common.reject')}</button>
                       {:else if n.notification_type === 'gate_failure' && body.mr_id}
                         <button
                           class="inline-btn"
                           onclick={() => handleRetry(n)}
                           data-testid="btn-retry"
-                          aria-label="Retry gate"
-                        >Retry</button>
+                          aria-label={$t('common.retry')}
+                        >{$t('common.retry')}</button>
                       {/if}
                       <button
                         class="inline-btn secondary"
                         onclick={() => handleDismiss(n)}
                         data-testid="btn-dismiss"
-                        aria-label="Dismiss"
-                      >Dismiss</button>
+                        aria-label={$t('common.dismiss')}
+                      >{$t('common.dismiss')}</button>
                     {/if}
                   </div>
                 </li>
@@ -551,7 +551,7 @@
           {:else if reposError}
             <div class="error-row" role="alert">
               <p class="error-text">{reposError}</p>
-              <button class="retry-btn" onclick={loadRepos} aria-label="Retry loading repos">Retry</button>
+              <button class="retry-btn" onclick={loadRepos} aria-label="Retry loading repos">{$t('common.retry')}</button>
             </div>
           {:else if repos.length === 0}
             <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
@@ -608,27 +608,27 @@
               onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}
             >
               <div class="inline-form-header">
-                <span class="inline-form-title">New Repository</span>
-                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }} aria-label="Cancel">✕</button>
+                <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }} aria-label="{$t('common.cancel')}">✕</button>
               </div>
-              <label class="inline-form-label" for="new-repo-name">Name <span class="required" aria-hidden="true">*</span></label>
+              <label class="inline-form-label" for="new-repo-name">{$t('workspace_home.new_repo_name_label')} <span class="required" aria-hidden="true">*</span></label>
               <input
                 id="new-repo-name"
                 class="inline-form-input"
                 data-testid="new-repo-name-input"
                 type="text"
-                placeholder="my-repo"
+                placeholder={$t('workspace_home.new_repo_name_placeholder')}
                 bind:value={newRepoName}
                 required
                 disabled={newRepoLoading}
               />
-              <label class="inline-form-label" for="new-repo-desc">Description</label>
+              <label class="inline-form-label" for="new-repo-desc">{$t('workspace_home.new_repo_desc_label')}</label>
               <input
                 id="new-repo-desc"
                 class="inline-form-input"
                 data-testid="new-repo-description-input"
                 type="text"
-                placeholder="Optional description"
+                placeholder={$t('workspace_home.new_repo_desc_placeholder')}
                 bind:value={newRepoDescription}
                 disabled={newRepoLoading}
               />
@@ -637,9 +637,9 @@
               {/if}
               <div class="inline-form-actions">
                 <button type="submit" class="section-btn primary" data-testid="new-repo-submit" disabled={newRepoLoading || !newRepoName.trim()}>
-                  {newRepoLoading ? 'Creating…' : 'Create'}
+                  {newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}
                 </button>
-                <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>Cancel</button>
+                <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
               </div>
             </form>
           {/if}
@@ -651,27 +651,27 @@
               onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}
             >
               <div class="inline-form-header">
-                <span class="inline-form-title">Import Repository</span>
-                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; importName = ''; }} aria-label="Cancel">✕</button>
+                <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; importName = ''; }} aria-label="{$t('common.cancel')}">✕</button>
               </div>
-              <label class="inline-form-label" for="import-url">Repository URL <span class="required" aria-hidden="true">*</span></label>
+              <label class="inline-form-label" for="import-url">{$t('workspace_home.import_url_label')} <span class="required" aria-hidden="true">*</span></label>
               <input
                 id="import-url"
                 class="inline-form-input"
                 data-testid="import-url-input"
                 type="url"
-                placeholder="https://github.com/org/repo"
+                placeholder={$t('workspace_home.import_url_placeholder')}
                 bind:value={importUrl}
                 required
                 disabled={importLoading}
               />
-              <label class="inline-form-label" for="import-name">Name</label>
+              <label class="inline-form-label" for="import-name">{$t('workspace_home.import_name_label')}</label>
               <input
                 id="import-name"
                 class="inline-form-input"
                 data-testid="import-name-input"
                 type="text"
-                placeholder="Auto-derived from URL"
+                placeholder={$t('workspace_home.import_name_placeholder')}
                 bind:value={importName}
                 disabled={importLoading}
               />
@@ -680,9 +680,9 @@
               {/if}
               <div class="inline-form-actions">
                 <button type="submit" class="section-btn primary" data-testid="import-submit" disabled={importLoading || !importUrl.trim()}>
-                  {importLoading ? 'Importing…' : 'Import'}
+                  {importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}
                 </button>
-                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; importName = ''; }}>Cancel</button>
+                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; importName = ''; }}>{$t('common.cancel')}</button>
               </div>
             </form>
           {/if}
@@ -711,7 +711,7 @@
             {:else if archError}
               <div class="error-row" role="alert">
                 <p class="error-text">{archError}</p>
-                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
+                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">{$t('common.retry')}</button>
               </div>
             {:else if archGraph}
               <div class="arch-canvas-wrap" data-testid="arch-canvas">
@@ -749,7 +749,7 @@
               aria-label="Filter specs by status"
               data-testid="specs-status-filter"
             >
-              <option value="">All statuses</option>
+              <option value="">{$t('workspace_home.all_statuses')}</option>
               <option value="draft">Draft</option>
               <option value="pending">Pending</option>
               <option value="approved">Approved</option>
@@ -764,18 +764,18 @@
           {:else if specsError}
             <div class="error-row" role="alert">
               <p class="error-text">{specsError}</p>
-              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">Retry</button>
+              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">{$t('common.retry')}</button>
             </div>
           {:else if filteredSpecs.length === 0}
             <p class="empty-text" data-testid="specs-empty">
-              {specsStatusFilter ? 'No specs with that status.' : 'No specs yet.'}
+              {specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}
             </p>
           {:else}
             <table class="specs-table" data-testid="specs-table">
               <thead>
                 <tr>
                   <th scope="col" aria-sort={specsSortCol === 'repo' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>Repo <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>{$t('workspace_home.sections.repos')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
                   </th>
                   <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
@@ -838,7 +838,7 @@
           {:else if rulesError}
             <div class="error-row" role="alert">
               <p class="error-text">{rulesError}</p>
-              <button class="retry-btn" onclick={loadRules} aria-label="Retry loading agent rules">Retry</button>
+              <button class="retry-btn" onclick={loadRules} aria-label="Retry loading agent rules">{$t('common.retry')}</button>
             </div>
           {:else}
             <p class="rules-summary" data-testid="rules-summary">
@@ -870,7 +870,7 @@
                 {/each}
               </ul>
             {:else if allMetaSpecs.length === 0}
-              <p class="empty-text">No meta-specs configured.</p>
+              <p class="empty-text">{$t('workspace_home.rules_no_metaspecs')}</p>
             {/if}
           {/if}
         </div>
