@@ -117,7 +117,7 @@ specs:
     auto_create_tasks: false
 
   # Personas (not implementation contracts)
-  - path: personas/ceo.md
+  - path: personas/workspace-orchestrator.md
     title: Workspace Orchestrator Persona
     owner: user:jsell
     approval:

@@ -80,7 +80,7 @@ How Gyre gets built - process and standards for the agent team.
 
 | Persona | Path | Summary |
 |---|---|---|
-| Workspace Orchestrator | [`personas/ceo.md`](personas/ceo.md) | Top-level orchestrator, delegates to repo orchestrators |
+| Workspace Orchestrator | [`personas/workspace-orchestrator.md`](personas/workspace-orchestrator.md) | Top-level orchestrator, delegates to repo orchestrators |
 | Accountability Agent | [`personas/accountability.md`](personas/accountability.md) | Spec integrity guardian, detects implementation drift |
 | Security Agent | [`personas/security.md`](personas/security.md) | Continuous security review, threat detection, OWASP + agent-specific threats |
 
