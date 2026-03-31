@@ -1070,12 +1070,14 @@
               </thead>
               <tbody>
                 {#each wsAgents.slice(0, 10) as agent}
+                  {@const taskId = agent.task_id ?? agent.current_task_id}
+                  {@const spawnedAt = agent.created_at ?? agent.spawned_at}
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>
                     <td><span class="status-badge status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span></td>
                     <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.task_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: agent.task_id, data: {} }); }} title={agent.task_id}>{entityName('task', agent.task_id)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: taskId, data: {} }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
-                    <td class="ws-cell-time">{fmtDuration(agent.created_at, agent.completed_at)}</td>
+                    <td class="ws-cell-time">{fmtDuration(spawnedAt, agent.completed_at)}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: agent.mr_id, data: {} }); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
                     <td class="ws-cell-mono">{repoMap[agent.repo_id]?.name ?? ''}</td>
                   </tr>
@@ -2145,9 +2147,19 @@
     color: var(--color-info);
   }
 
-  .status-blocked, .status-failed, .status-closed {
+  .status-blocked, .status-failed, .status-closed, .status-dead {
     background: color-mix(in srgb, var(--color-danger) 15%, transparent);
     color: var(--color-danger);
+  }
+
+  .status-idle, .status-stopped {
+    background: color-mix(in srgb, var(--color-info) 15%, transparent);
+    color: var(--color-info);
+  }
+
+  .status-review {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
   }
 
   .status-backlog, .status-review, .status-pending {
