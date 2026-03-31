@@ -58,11 +58,11 @@
   // ── Constants ───────────────────────────────────────────────────────────────
   const STATUS_FILTERS = ['all', 'draft', 'pending', 'approved', 'deprecated'];
   const TABLE_COLS = [
-    ['path',            'Path'],
-    ['approval_status', 'Status'],
-    ['kind',            'Kind'],
-    ['owner',           'Owner'],
-    ['updated_at',      'Updated'],
+    ['path',            'spec_dashboard.col_path'],
+    ['approval_status', 'spec_dashboard.col_status'],
+    ['kind',            'spec_dashboard.col_kind'],
+    ['owner',           'spec_dashboard.col_owner'],
+    ['updated_at',      'spec_dashboard.col_updated'],
   ];
 
   // ── Load specs ──────────────────────────────────────────────────────────────
@@ -297,7 +297,7 @@
     {:else if error}
       <div class="error-banner" role="alert">
         <span>{error}</span>
-        <button onclick={load} class="retry-btn">Retry</button>
+        <button onclick={load} class="retry-btn">{$t('common.retry')}</button>
       </div>
 
     {:else if filtered.length === 0}
@@ -320,17 +320,17 @@
           <tr>
             <th scope="col" aria-sort={sortCol === 'path' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
               <button class="sort-btn" onclick={() => toggleSort('path')}>
-                Path
+                {$t('spec_dashboard.col_path')}
                 <span class="sort-arrow" aria-hidden="true">{sortArrow('path')}</span>
               </button>
             </th>
             <th scope="col" aria-sort={sortCol === 'approval_status' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
               <button class="sort-btn" onclick={() => toggleSort('approval_status')}>
-                Status
+                {$t('spec_dashboard.col_status')}
                 <span class="sort-arrow" aria-hidden="true">{sortArrow('approval_status')}</span>
               </button>
             </th>
-            <th scope="col">Progress</th>
+            <th scope="col">{$t('spec_dashboard.col_progress')}</th>
           </tr>
         </thead>
         <tbody>
@@ -390,10 +390,10 @@
       <table class="specs-table" role="grid" aria-label="Specs registry">
         <thead>
           <tr>
-            {#each TABLE_COLS as [col, label]}
+            {#each TABLE_COLS as [col, labelKey]}
               <th scope="col" aria-sort={sortCol === col ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                 <button class="sort-btn" onclick={() => toggleSort(col)}>
-                  {label}
+                  {$t(labelKey)}
                   <span class="sort-arrow" aria-hidden="true">{sortArrow(col)}</span>
                 </button>
               </th>
@@ -464,7 +464,7 @@
     </div>
     <!-- Right: preview -->
     <div class="preview-pane">
-      <span class="preview-label">Markdown source</span>
+      <span class="preview-label">{$t('spec_dashboard.markdown_source')}</span>
       <pre class="preview-pre">{newSpecContent}</pre>
     </div>
   </div>

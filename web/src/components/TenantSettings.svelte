@@ -11,6 +11,7 @@
    *    Only visible to tenant Admin role users. Tabs: Users, Compute Targets, Budget, Audit, Health, Jobs."
    */
   import { untrack } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toast as showToast } from '../lib/toast.svelte.js';
 
@@ -19,12 +20,12 @@
   } = $props();
 
   const TABS = [
-    { id: 'users',    label: 'Users' },
-    { id: 'compute',  label: 'Compute Targets' },
-    { id: 'budget',   label: 'Budget' },
-    { id: 'audit',    label: 'Audit' },
-    { id: 'health',   label: 'Health' },
-    { id: 'jobs',     label: 'Jobs' },
+    { id: 'users',    labelKey: 'tenant_settings.tabs.users' },
+    { id: 'compute',  labelKey: 'tenant_settings.tabs.compute' },
+    { id: 'budget',   labelKey: 'tenant_settings.tabs.budget' },
+    { id: 'audit',    labelKey: 'tenant_settings.tabs.audit' },
+    { id: 'health',   labelKey: 'tenant_settings.tabs.health' },
+    { id: 'jobs',     labelKey: 'tenant_settings.tabs.jobs' },
   ];
 
   let activeTab = $state('users');
@@ -238,7 +239,7 @@
       </svg>
     </button>
     <div class="header-text">
-      <h1 class="settings-title">Tenant Administration</h1>
+      <h1 class="settings-title">{$t('tenant_settings.title')}</h1>
       <p class="settings-subtitle">System-wide configuration — users, compute, budget, audit, health, and background jobs.</p>
     </div>
   </header>
@@ -264,7 +265,7 @@
         onclick={() => { activeTab = tab.id; }}
         data-testid="tenant-settings-tab-{tab.id}"
       >
-        {tab.label}
+        {$t(tab.labelKey)}
       </button>
     {/each}
   </div>
@@ -276,12 +277,12 @@
     {#if activeTab === 'users'}
       <div id="tab-panel-users" role="tabpanel" aria-label="Users" class="tab-panel" data-testid="tenant-tab-users">
         <div class="panel-header">
-          <h2 class="panel-title">Users</h2>
-          <p class="panel-desc">Tenant member and role management. Users are provisioned via OIDC — invite by adding them to your identity provider.</p>
+          <h2 class="panel-title">{$t('tenant_settings.users.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.users.desc')}</p>
         </div>
 
         {#if usersLoading}
-          <div class="panel-loading" aria-live="polite">Loading users…</div>
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.users.loading')}</div>
         {:else if usersError}
           <div class="panel-error" role="alert">{usersError}</div>
         {:else if currentUser}
@@ -326,7 +327,7 @@
         </div>
 
         {#if computeLoading}
-          <div class="panel-loading" aria-live="polite">Loading compute targets…</div>
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.compute.loading')}</div>
         {:else if computeError}
           <div class="panel-error" role="alert">{computeError}</div>
         {:else if computeTargets.length === 0}
@@ -368,7 +369,7 @@
         </div>
 
         {#if budgetLoading}
-          <div class="panel-loading" aria-live="polite">Loading budget…</div>
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.budget.loading')}</div>
         {:else if budgetError}
           <div class="panel-error" role="alert">{budgetError}</div>
         {:else if !budgetSummary}
@@ -459,7 +460,7 @@
         </div>
 
         {#if auditLoading}
-          <div class="panel-loading" aria-live="polite">Loading audit log…</div>
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.audit.loading')}</div>
         {:else if auditError}
           <div class="panel-error" role="alert">{auditError}</div>
         {:else if auditEvents.length === 0}
@@ -497,7 +498,7 @@
         </div>
 
         {#if healthLoading}
-          <div class="panel-loading" aria-live="polite">Loading health status…</div>
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.health.loading')}</div>
         {:else if healthError}
           <div class="panel-error" role="alert">{healthError}</div>
         {:else if !health}
@@ -526,7 +527,7 @@
         </div>
 
         {#if jobsLoading}
-          <div class="panel-loading" aria-live="polite">Loading jobs…</div>
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.jobs.loading')}</div>
         {:else if jobsError}
           <div class="panel-error" role="alert">{jobsError}</div>
         {:else if jobs.length === 0}

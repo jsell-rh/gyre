@@ -1,5 +1,6 @@
 <script>
   import { getContext, onDestroy } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import MoldableView from '../lib/MoldableView.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -284,7 +285,7 @@
     {:else if wsReposError}
       <div class="error-banner" role="alert">
         <span>{wsReposError}</span>
-        <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">Retry</button>
+        <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">{$t('common.retry')}</button>
       </div>
     {:else if wsRepos.length === 0}
       <EmptyState title="No repositories" description="Create a repository in this workspace to explore its architecture." />
@@ -549,7 +550,7 @@
         {:else if graphError}
           <div class="graph-error" role="alert">
             <p>Failed to load graph: {graphError}</p>
-            <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">Retry</button>
+            <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">{$t('common.retry')}</button>
           </div>
 
         {:else if graph}

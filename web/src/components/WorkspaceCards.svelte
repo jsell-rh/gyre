@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Card from '../lib/Card.svelte';
   import Badge from '../lib/Badge.svelte';
@@ -137,7 +138,7 @@
   {:else if error}
     <div class="error-banner" role="alert">
       <p>Failed to load workspaces: {error}</p>
-      <button class="retry-btn" onclick={load}>Retry</button>
+      <button class="retry-btn" onclick={load}>{$t('common.retry')}</button>
     </div>
 
   {:else if workspaces.length === 0}

@@ -309,7 +309,7 @@
     {#if error}
       <div class="error-banner" role="alert">
         {error}
-        <button class="retry-btn" onclick={loadNotifications}>Retry</button>
+        <button class="retry-btn" onclick={loadNotifications}>{$t('common.retry')}</button>
       </div>
     {/if}
 
@@ -531,7 +531,7 @@
                     {:else if n.notification_type === 'conflicting_interpretations'}
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>View Both Specs</Button>
                       <span class="coming-soon-note">Auto-reconciliation coming soon — view both specs above to resolve manually.</span>
-                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
                         variant="primary"
@@ -552,10 +552,10 @@
                       >
                         Adjust Meta-spec
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'budget_warning'}
                       <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>Increase Limit</Button>
-                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
                         variant="primary"
@@ -584,7 +584,7 @@
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
                         Update Spec
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'suggested_link'}
                       <Button
                         variant="primary"
