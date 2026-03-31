@@ -2275,6 +2275,34 @@
                   </dd>
                 {/if}
               </dl>
+              <!-- Expand attestation gate results -->
+              {#if att.gate_results?.length > 0}
+                <details class="att-gates-detail">
+                  <summary class="progress-section-label">Gate Results ({att.gate_results.length})</summary>
+                  <ul class="gates-list">
+                    {#each att.gate_results as gate}
+                      {@const gStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : gate.status ?? 'unknown'}
+                      <li class="gate-item gate-item-{gStatus}">
+                        <div class="gate-row">
+                          <span class="gate-status-icon">{gStatus === 'passed' ? '✓' : gStatus === 'failed' ? '✗' : '○'}</span>
+                          <span class="gate-name">{gate.gate_name ?? gate.name ?? shortId(gate.gate_id)}</span>
+                          {#if gate.gate_type}
+                            <span class="gate-type-badge">{gate.gate_type.replace(/_/g, ' ')}</span>
+                          {/if}
+                          {#if gate.required !== undefined}
+                            <span class="gate-required-badge" class:advisory={!gate.required}>
+                              {gate.required ? 'required' : 'advisory'}
+                            </span>
+                          {/if}
+                        </div>
+                        {#if gate.output}
+                          <pre class="gate-output">{gate.output}</pre>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                </details>
+              {/if}
               {#if mrAttestation.signature}
                 <div class="att-sig-block">
                   <span class="att-sig-label">Ed25519 Signature</span>
