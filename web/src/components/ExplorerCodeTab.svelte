@@ -493,17 +493,19 @@
                     <th scope="col" class="blame-col-line">#</th>
                     <th scope="col" class="blame-col-agent">Agent</th>
                     <th scope="col" class="blame-col-sha">Commit</th>
+                    <th scope="col" class="blame-col-spec">Spec</th>
                     <th scope="col" class="blame-col-content">Content</th>
                   </tr>
                 </thead>
                 <tbody>
                   {#each lines as line, i}
                     {@const agentId = line.agent_id ?? line.agent}
+                    {@const specRef = line.spec_ref ?? line.spec_path}
                     <tr class="blame-row" class:blame-agent-row={!!agentId}>
                       <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
                       <td class="blame-agent">
                         {#if agentId}
-                          <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title={agentId}>
+                          <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title="View agent: {agentId}">
                             <span class="agent-icon" aria-hidden="true">&#x2699;</span>
                             {resolveEntityName('agent', agentId)}
                           </button>
@@ -513,11 +515,21 @@
                       </td>
                       <td class="blame-sha mono">
                         {#if line.sha ?? line.commit_sha}
-                          <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId }, 'commit')} title={line.sha ?? line.commit_sha}>
+                          <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {(line.sha ?? line.commit_sha).slice(0, 7)}">
                             {(line.sha ?? line.commit_sha).slice(0, 7)}
                           </button>
                         {:else}
                           —
+                        {/if}
+                      </td>
+                      <td class="blame-spec">
+                        {#if specRef}
+                          {@const specName = specRef.split('@')[0]?.split('/').pop()}
+                          <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
+                            {specName}
+                          </button>
+                        {:else}
+                          <span class="secondary">—</span>
                         {/if}
                       </td>
                       <td class="blame-content mono"><pre class="blame-line-pre">{line.content ?? line.text ?? ''}</pre></td>
@@ -1406,6 +1418,9 @@
   .blame-col-line { width: 40px; text-align: right; }
   .blame-col-agent { width: 120px; }
   .blame-col-sha { width: 70px; }
+  .blame-col-spec { width: 100px; }
+
+  .blame-spec { white-space: nowrap; font-size: var(--text-xs); }
 
   .blame-row td {
     padding: 0 var(--space-2);
