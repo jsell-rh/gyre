@@ -232,7 +232,13 @@ const options = {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     },
   },
-  allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'mcp__gyre__*'],
+  allowedTools: [
+    'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep',
+    'mcp__gyre__gyre_list_tasks', 'mcp__gyre__gyre_update_task',
+    'mcp__gyre__gyre_agent_heartbeat', 'mcp__gyre__gyre_record_activity',
+    'mcp__gyre__gyre_search', 'mcp__gyre__gyre_create_task',
+    // gyre_agent_complete is NOT listed — the runner calls it after conversation upload
+  ],
   permissionMode: 'acceptEdits',
 };
 
@@ -252,10 +258,11 @@ Instructions:
 2. Implement the task requirements by editing files in ${process.env.GYRE_WORK_DIR || process.cwd()}.
 3. Commit your changes with a descriptive conventional-commit message.
 4. Push your changes: \`git push origin ${branch}\`
-5. Use \`gyre_agent_complete\` to signal completion (agent_id: "${agentId}"). Include a summary with decisions and uncertainties.
+
+Do NOT call gyre_agent_complete — the runner handles completion after uploading
+conversation provenance. Just implement, commit, and push.
 
 Use \`gyre_agent_heartbeat\` periodically to signal liveness.
-Use \`gyre_record_activity\` to log significant progress milestones.
 
 Begin by reading your task description, then implement it completely.`;
 
@@ -334,19 +341,53 @@ try {
     }
   }
 
-  // ── Post-completion: upload conversation and pass SHA ──────────────────────
+  // ── Post-query: upload conversation, then signal completion ─────────────
 
   console.log(`[provenance] Uploading conversation (${conversationLog.length} messages, ${turnCounter} turns)...`);
   conversationSha = await uploadConversation();
+  if (conversationSha) {
+    console.log(`[provenance] Conversation SHA: ${conversationSha}`);
+  }
+
+  // Signal completion via REST API (not MCP — we need the token still valid)
+  console.log(`[complete] Signaling agent completion...`);
+  try {
+    const completeResp = await fetch(`${serverUrl}/api/v1/agents/${agentId}/complete`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        branch,
+        title: `feat: implement task via autonomous agent`,
+        target_branch: 'main',
+      }),
+    });
+    if (completeResp.ok) {
+      const mr = await completeResp.json();
+      console.log(`[complete] MR created: ${mr.id}`);
+    } else {
+      console.warn(`[complete] HTTP ${completeResp.status}: ${await completeResp.text()}`);
+    }
+  } catch (e) {
+    console.warn(`[complete] failed: ${e.message}`);
+  }
 
   console.log(`=== Agent runner complete (${messageCount} messages, ${turnCounter} turns) ===`);
-  if (conversationSha) {
-    console.log(`=== Conversation SHA: ${conversationSha} ===`);
-  }
 } catch (err) {
   // Best-effort: upload whatever conversation we have even on error
   console.log(`[provenance] Uploading partial conversation after error...`);
   conversationSha = await uploadConversation();
+
+  // Still try to complete
+  try {
+    await fetch(`${serverUrl}/api/v1/agents/${agentId}/complete`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ branch, title: `feat: implement task (error recovery)`, target_branch: 'main' }),
+    });
+  } catch (_) { /* best effort */ }
 
   console.error(`=== Agent runner error: ${err.message} ===`);
   process.exit(1);
