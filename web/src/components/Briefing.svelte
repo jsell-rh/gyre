@@ -185,11 +185,15 @@
     }
   }
 
+  let chatHistory = $state([]);
+
   function briefingAskHandler(question) {
     if (!workspaceId) {
       throw new Error('Briefing Q&A is only available within a workspace.');
     }
-    return api.briefingAsk(workspaceId, { question, history: [] });
+    const trimmedHistory = chatHistory.slice(-20);
+    chatHistory = [...chatHistory, { role: 'user', content: question }];
+    return api.briefingAsk(workspaceId, { question, history: trimmedHistory });
   }
 
   // Reload when scope or workspaceId changes (not just on mount)

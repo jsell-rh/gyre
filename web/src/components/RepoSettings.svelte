@@ -74,7 +74,6 @@
   let archiving = $state(false);
   let archiveError = $state(null);
 
-  let deleteConfirm = $state(false);
   let deleteConfirmName = $state('');
   let deleting = $state(false);
   let deleteError = $state(null);

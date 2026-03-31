@@ -89,6 +89,7 @@
   let decisionsError = $state(null);
   let notifications = $state([]);
   let actionStates = $state({});
+  let showAllDecisions = $state(false);
 
   // ── Repos state ────────────────────────────────────────────────────────
   let reposLoading = $state(true);
@@ -234,8 +235,8 @@
     rulesError = null;
     try {
       const [wsData, globalData] = await Promise.all([
-        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }).catch(() => []),
-        api.getMetaSpecs({ scope: 'Global' }).catch(() => []),
+        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
+        api.getMetaSpecs({ scope: 'Global' }),
       ]);
       workspaceMetaSpecs = Array.isArray(wsData) ? wsData : [];
       globalMetaSpecs = Array.isArray(globalData) ? globalData : [];
@@ -467,7 +468,7 @@
             {/if}
           </h2>
           {#if notifications.length > 0}
-            <button class="section-action-btn" onclick={() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>View all</button>
+            <button class="section-action-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>{showAllDecisions ? 'Show less' : 'View all'}</button>
           {/if}
         </div>
         <div class="section-body">
@@ -483,7 +484,7 @@
             <p class="empty-text" data-testid="decisions-empty">No pending decisions. At Supervised trust, decisions appear when agents need guidance, specs need approval, or gates fail.</p>
           {:else}
             <ul class="decision-list" role="list">
-              {#each notifications.slice(0, 5) as n (n.id)}
+              {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as n (n.id)}
                 {@const body = getBody(n)}
                 {@const state = actionStates[n.id] ?? {}}
                 <li class="decision-item" data-testid="decision-item">
