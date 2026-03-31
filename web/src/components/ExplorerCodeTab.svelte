@@ -157,6 +157,29 @@
     openDetailPanel?.({ type, id: row.id, data: row });
   }
 
+  // Lightweight entity name cache for human-friendly display
+  let nameCache = $state({});
+
+  function resolveEntityName(type, id) {
+    if (!id) return '';
+    const key = `${type}:${id}`;
+    if (nameCache[key] !== undefined) return nameCache[key] || shortName(id);
+    nameCache = { ...nameCache, [key]: null };
+    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                    type === 'task' ? api.task(id).then(t => t?.title) :
+                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                    Promise.resolve(null);
+    fetcher.then(name => {
+      if (name) nameCache = { ...nameCache, [key]: name };
+    }).catch(() => {});
+    return shortName(id);
+  }
+
+  function shortName(id) {
+    if (!id) return '';
+    return id.length > 12 ? id.slice(0, 8) : id;
+  }
+
   function toggleSort(field) {
     if (sortField === field) {
       sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -362,9 +385,9 @@
                 <td class="commit-msg" title={commit.message ?? commit.summary ?? ''}>{commit.message ?? commit.summary ?? '—'}</td>
                 <td class="secondary">
                   {#if commitAgent}
-                    <button class="agent-link" title="View agent {commitAgent}" onclick={(e) => { e.stopPropagation(); onRowClick({ id: commitAgent }, 'agent'); }}>
+                    <button class="agent-link" title={commitAgent} onclick={(e) => { e.stopPropagation(); onRowClick({ id: commitAgent }, 'agent'); }}>
                       <span class="agent-icon" aria-hidden="true">&#x2699;</span>
-                      {commit.author ?? commit.author_name ?? commitAgent.slice(0, 8)}
+                      {resolveEntityName('agent', commitAgent)}
                     </button>
                   {:else}
                     {commit.author ?? commit.author_name ?? '—'}
@@ -399,8 +422,9 @@
                     <span title={mr.title}>{mr.title}</span>
                     <div class="mr-meta-line">
                       {#if mr.author_agent_id || mr.agent_id}
-                        <button class="agent-link" title="View agent" onclick={(e) => { e.stopPropagation(); onRowClick({ id: mr.author_agent_id ?? mr.agent_id }, 'agent'); }}>
-                          <span class="agent-icon" aria-hidden="true">&#x2699;</span>{mr.author_agent_id?.slice(0, 8) ?? mr.agent_id?.slice(0, 8)}
+                        {@const agentId = mr.author_agent_id ?? mr.agent_id}
+                        <button class="agent-link" title={agentId} onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }}>
+                          <span class="agent-icon" aria-hidden="true">&#x2699;</span>{resolveEntityName('agent', agentId)}
                         </button>
                       {/if}
                       {#if mr.spec_ref}
@@ -566,7 +590,7 @@
                       {#if ac.agent_id}
                         <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: ac.agent_id }, 'agent'); }} title={ac.agent_id}>
                           <span class="agent-icon" aria-hidden="true">&#x2699;</span>
-                          {ac.agent_name ?? ac.agent_id.slice(0, 8)}
+                          {ac.agent_name ?? resolveEntityName('agent', ac.agent_id)}
                         </button>
                       {:else}
                         <span class="secondary">—</span>
@@ -602,7 +626,7 @@
                       {#if entry.agent_id}
                         <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: entry.agent_id }, 'agent'); }} title={entry.agent_id}>
                           <span class="agent-icon" aria-hidden="true">&#x2699;</span>
-                          {entry.agent_id.slice(0, 8)}
+                          {resolveEntityName('agent', entry.agent_id)}
                         </button>
                       {:else}
                         <span class="secondary">—</span>
@@ -640,7 +664,7 @@
               <tr class="table-row" onclick={() => onRowClick(agent, 'agent')} tabindex="0" role="button" aria-label="View agent: {agent.name}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(agent, 'agent'); } }}>
                 <td>
                   <div class="agent-name-cell">
-                    <span>{agent.name ?? agent.id?.slice(0, 8) ?? '—'}</span>
+                    <span>{agent.name ?? resolveEntityName('agent', agent.id)}</span>
                     {#if agent.agent_type}
                       <span class="agent-type-tag">{agent.agent_type}</span>
                     {/if}
