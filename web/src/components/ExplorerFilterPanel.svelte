@@ -46,7 +46,7 @@
 </script>
 
 {#if visible}
-  <div class="filter-panel" role="complementary" aria-label="Explorer filter panel">
+  <div class="filter-panel" role="complementary" aria-label={$t('explorer_filter.title')}>
     <div class="filter-header">
       <span class="filter-title">{$t('explorer_filter.title')}</span>
     </div>
@@ -92,7 +92,7 @@
           step="1"
           bind:value={minChurn}
           oninput={emitFilter}
-          aria-label="Minimum churn count"
+          aria-label={$t('explorer_filter.min_churn')}
         />
         <span class="churn-val">{minChurn}</span>
       </div>
