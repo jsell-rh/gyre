@@ -368,7 +368,7 @@
               </div>
               <div class="card-header-right">
                 {#if isResolved}
-                  <Badge value="Resolved" variant="success" />
+                  <Badge value={$t('decisions.status_resolved')} variant="success" />
                 {/if}
                 {#if scope === 'tenant' && n.workspace_id}
                   <Badge value={workspaceMap[n.workspace_id] ?? n.workspace_id} variant="default" />
@@ -390,7 +390,7 @@
                 {/if}
                 {#if body.gate_name || body.command}
                   <div class="gate-detail">
-                    {#if body.gate_name}<span class="gate-label">Gate: <strong>{body.gate_name}</strong></span>{/if}
+                    {#if body.gate_name}<span class="gate-label">{$t('decisions.gate_label', { values: { name: body.gate_name } })}</span>{/if}
                     {#if body.command}<code class="gate-command">{body.command}</code>{/if}
                   </div>
                 {/if}
@@ -411,7 +411,7 @@
                       class="ref-link"
                       onclick={() => openDetail({ type: 'spec', id: body.spec_path, data: n })}
                     >
-                      Related spec: {body.spec_path}
+                      {$t('decisions.related_spec', { values: { path: body.spec_path } })}
                     </button>
                   {/if}
                   {#if body.agent_id}
@@ -419,18 +419,18 @@
                       class="ref-link"
                       onclick={() => openDetail({ type: 'agent', id: body.agent_id, data: n })}
                     >
-                      Agent: {body.agent_id}
+                      {$t('decisions.agent_label', { values: { id: body.agent_id } })}
                     </button>
                   {/if}
                   {#if body.persona}
-                    <span class="ref-info">Persona: {body.persona}</span>
+                    <span class="ref-info">{$t('decisions.persona_label', { values: { name: body.persona } })}</span>
                   {/if}
                   {#if body.mr_id}
                     <button
                       class="ref-link"
                       onclick={() => openDetail({ type: 'mr', id: body.mr_id, data: n })}
                     >
-                      MR: {body.mr_title || body.mr_id}
+                      {$t('decisions.mr_label', { values: { title: body.mr_title || body.mr_id } })}
                     </button>
                   {/if}
                 </div>

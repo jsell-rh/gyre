@@ -224,12 +224,12 @@
     if (!ts) return '—';
     const diff = Date.now() - ts * 1000;
     const secs = Math.floor(diff / 1000);
-    if (secs < 60) return `${secs}s ago`;
+    if (secs < 60) return $t('common.time_just_now');
     const mins = Math.floor(secs / 60);
-    if (mins < 60) return `${mins}m ago`;
+    if (mins < 60) return $t('common.time_minutes_ago', { values: { count: mins } });
     const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
+    if (hrs < 24) return $t('common.time_hours_ago', { values: { count: hrs } });
+    return $t('common.time_days_ago', { values: { count: Math.floor(hrs / 24) } });
   }
 </script>
 
@@ -270,7 +270,7 @@
 
     {#if allKinds.length > 2}
       <div class="filter-group" role="group" aria-label="Filter by kind">
-        <span class="filter-label">Kind:</span>
+        <span class="filter-label">{$t('spec_dashboard.filter_kind')}</span>
         {#each allKinds as k}
           <button
             class="pill"

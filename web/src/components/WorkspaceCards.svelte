@@ -157,7 +157,7 @@
 
   {:else}
     <div class="ws-filter-wrap">
-      <input type="text" bind:value={wsFilter} placeholder="Filter workspaces…" class="ws-filter" aria-label="Filter workspaces" />
+      <input type="text" bind:value={wsFilter} placeholder={$t('workspace_cards.filter_workspaces')} class="ws-filter" aria-label={$t('workspace_cards.filter_workspaces')} />
       <span class="sr-only" aria-live="polite" role="status">{visibleWs.length} workspace{visibleWs.length === 1 ? '' : 's'} shown</span>
     </div>
     {#if visibleWs.length === 0}
@@ -179,7 +179,7 @@
                 {#if ws.trust_level}
                   <Badge value={ws.trust_level} variant={trustVariant(ws.trust_level)} />
                 {:else}
-                  <Badge value="Standard" variant="muted" />
+                  <Badge value={$t('workspace_cards.trust_default')} variant="muted" />
                 {/if}
               {/snippet}
 
@@ -253,7 +253,7 @@
                   onclick={() => handleEnter(ws)}
                   aria-label="Enter workspace {ws.name}"
                 >
-                  Enter Workspace
+                  {$t('workspace_cards.enter_workspace')}
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
                     <path d="M9 18l6-6-6-6"/>
                   </svg>
