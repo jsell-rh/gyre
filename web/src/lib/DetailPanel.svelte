@@ -1031,12 +1031,15 @@
               {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
           {:else if specProgress}
-            {@const total = specProgress.total_tasks ?? 0}
+            {@const totalTasks = specProgress.total_tasks ?? (specProgress.tasks?.length ?? 0)}
             {@const done = specProgress.completed_tasks ?? 0}
-            {@const pct = total > 0 ? Math.round((done / total) * 100) : 0}
+            {@const pct = totalTasks > 0 ? Math.round((done / totalTasks) * 100) : 0}
             <div class="progress-summary">
-              <span class="progress-big">{done}/{total}</span>
+              <span class="progress-big">{done}/{totalTasks}</span>
               <span class="progress-lbl">{$t('detail_panel.tasks_complete')}</span>
+              {#if specProgress.merged_mrs}
+                <span class="progress-mrs">{specProgress.merged_mrs} MR{specProgress.merged_mrs !== 1 ? 's' : ''} merged</span>
+              {/if}
             </div>
             <div
               class="progress-bar-track"
@@ -1048,19 +1051,37 @@
               <div class="progress-bar-fill" style="width: {pct}%"></div>
             </div>
             {#if specProgress.tasks?.length > 0}
+              <span class="progress-section-label">Tasks</span>
               <ul class="task-list">
                 {#each specProgress.tasks as task}
                   <li class="task-item">
                     <Badge value={task.status} variant={taskStatusColor(task.status)} />
                     <span class="task-title">{task.title}</span>
+                    {#if task.priority && task.priority !== 'medium'}
+                      <span class="task-priority priority-{task.priority}">{task.priority}</span>
+                    {/if}
                     {#if task.agent_id}
-                      <span class="task-agent mono">{task.agent_id.slice(0, 8)}</span>
+                      <span class="task-agent mono" title={task.agent_id}>{task.agent_id.slice(0, 8)}</span>
                     {/if}
                   </li>
                 {/each}
               </ul>
             {:else}
               <p class="no-data">{$t('detail_panel.no_tasks')}</p>
+            {/if}
+            {#if specProgress.mrs?.length > 0}
+              <span class="progress-section-label">Merge Requests</span>
+              <ul class="task-list">
+                {#each specProgress.mrs as mr}
+                  <li class="task-item">
+                    <Badge value={mr.status} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
+                    <span class="task-title">{mr.title}</span>
+                    {#if mr.spec_ref}
+                      <span class="task-agent mono" title={mr.spec_ref}>{mr.spec_ref.split('@')[0]?.split('/').pop()}</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
             {/if}
           {:else}
             <p class="no-data">{$t('detail_panel.progress_requires_repo')}</p>
@@ -2036,6 +2057,41 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     flex-shrink: 0;
+  }
+
+  .task-priority {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .task-priority.priority-high,
+  .task-priority.priority-critical {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .task-priority.priority-low {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+  }
+
+  .progress-mrs {
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    margin-left: auto;
+  }
+
+  .progress-section-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+    margin-top: var(--space-2);
   }
 
   /* Links tab */
