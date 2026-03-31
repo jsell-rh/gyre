@@ -169,6 +169,11 @@
     }
   }
 
+  // ── Budget/Cost state ───────────────────────────────────────────────────
+  let budgetLoading = $state(true);
+  let budgetData = $state(null); // { config, usage }
+  let costData = $state(null);   // cost summary
+
   // ── Agent Rules state ──────────────────────────────────────────────────
   let rulesLoading = $state(true);
   let rulesError = $state(null);
@@ -338,6 +343,25 @@
       wsAgents = [];
     } finally {
       agentsLoading = false;
+    }
+  }
+
+  // ── Budget/Cost: load ──────────────────────────────────────────────────
+  async function loadBudget() {
+    if (!workspace?.id) return;
+    budgetLoading = true;
+    try {
+      const [budget, costs] = await Promise.all([
+        api.workspaceBudget(workspace.id).catch(() => null),
+        api.costSummary().catch(() => null),
+      ]);
+      budgetData = budget;
+      costData = costs;
+    } catch {
+      budgetData = null;
+      costData = null;
+    } finally {
+      budgetLoading = false;
     }
   }
 
@@ -663,6 +687,7 @@
     loadMrs();
     loadAgents();
     loadActivity();
+    loadBudget();
   });
 </script>
 
@@ -1326,6 +1351,96 @@
             {#if wsAgents.length > 10}
               <p class="show-more-hint">{wsAgents.length - 10} more agents not shown</p>
             {/if}
+          {/if}
+        </div>
+      </section>
+
+      <!-- ── Budget & Cost ──────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-budget" data-testid="section-budget">
+        <div class="section-header">
+          <h2 class="section-title" id="section-budget">Budget & Cost</h2>
+        </div>
+        <div class="section-body">
+          {#if budgetLoading}
+            <div class="skeleton-row"></div>
+          {:else if budgetData || costData}
+            <div class="budget-overview">
+              {#if budgetData}
+                {@const config = budgetData.config ?? budgetData}
+                {@const usage = budgetData.usage ?? {}}
+                <div class="budget-meters">
+                  {#if config.max_concurrent_agents != null}
+                    {@const activeCount = wsAgents.filter(a => a.status === 'active').length}
+                    {@const pct = config.max_concurrent_agents > 0 ? Math.round((activeCount / config.max_concurrent_agents) * 100) : 0}
+                    <div class="budget-meter">
+                      <div class="budget-meter-header">
+                        <span class="budget-meter-label">Concurrent Agents</span>
+                        <span class="budget-meter-value">{activeCount} / {config.max_concurrent_agents}</span>
+                      </div>
+                      <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
+                        <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
+                      </div>
+                    </div>
+                  {/if}
+                  {#if config.max_tokens_per_day != null}
+                    {@const usedTokens = usage.tokens_today ?? 0}
+                    {@const pct = config.max_tokens_per_day > 0 ? Math.round((usedTokens / config.max_tokens_per_day) * 100) : 0}
+                    <div class="budget-meter">
+                      <div class="budget-meter-header">
+                        <span class="budget-meter-label">Tokens Today</span>
+                        <span class="budget-meter-value">{usedTokens.toLocaleString()} / {config.max_tokens_per_day.toLocaleString()}</span>
+                      </div>
+                      <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
+                        <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
+                      </div>
+                    </div>
+                  {/if}
+                  {#if config.max_cost_per_day != null}
+                    {@const usedCost = usage.cost_today ?? 0}
+                    {@const pct = config.max_cost_per_day > 0 ? Math.round((usedCost / config.max_cost_per_day) * 100) : 0}
+                    <div class="budget-meter">
+                      <div class="budget-meter-header">
+                        <span class="budget-meter-label">Cost Today</span>
+                        <span class="budget-meter-value">${usedCost.toFixed(2)} / ${config.max_cost_per_day.toFixed(2)}</span>
+                      </div>
+                      <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
+                        <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <p class="empty-text">No budget limits configured for this workspace.</p>
+              {/if}
+              {#if costData}
+                {@const entries = Array.isArray(costData) ? costData : (costData.entries ?? costData.agents ?? [])}
+                {#if entries.length > 0}
+                  <div class="cost-breakdown">
+                    <span class="progress-section-label">Cost by Agent</span>
+                    <table class="entity-table entity-table-compact">
+                      <thead>
+                        <tr>
+                          <th>Agent</th>
+                          <th>Tokens</th>
+                          <th>Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each entries.slice(0, 5) as entry}
+                          <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: entry.agent_id, data: {} })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: entry.agent_id, data: {} }); }}>
+                            <td class="cell-title">{entityName('agent', entry.agent_id)}</td>
+                            <td>{(entry.total_tokens ?? entry.tokens ?? 0).toLocaleString()}</td>
+                            <td>${(entry.total_cost ?? entry.cost ?? 0).toFixed(2)}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {:else}
+            <p class="empty-text">No budget configured. Set limits in workspace settings to track agent resource usage.</p>
           {/if}
         </div>
       </section>
@@ -2724,6 +2839,88 @@
     font-size: 10px;
     white-space: nowrap;
     margin-left: auto;
+  }
+
+  /* ── Budget & Cost ──────────────────────────────────────────────────── */
+  .budget-overview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
+  .budget-meters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: var(--space-4);
+  }
+
+  .budget-meter {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .budget-meter-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+
+  .budget-meter-label {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .budget-meter-value {
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    color: var(--color-text);
+  }
+
+  .progress-bar-track {
+    height: 6px;
+    background: var(--color-border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 3px;
+    transition: width var(--transition-normal);
+  }
+
+  .progress-bar-fill.progress-bar-warn {
+    background: var(--color-warning);
+  }
+
+  .progress-bar-fill.progress-bar-danger {
+    background: var(--color-danger);
+  }
+
+  .cost-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .entity-table-compact {
+    font-size: var(--text-sm);
+  }
+
+  .entity-table-compact th,
+  .entity-table-compact td {
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .progress-section-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
   }
 
   @media (prefers-reduced-motion: reduce) {
