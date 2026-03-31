@@ -344,18 +344,44 @@
         api.mrDependencies(id).catch(() => null),
         api.mrGates(id).catch(() => []),
         api.mrTimeline(id).catch(() => []),
-      ]).then(([d, deps, gates, timeline]) => {
+        api.mrDiff(id).catch(() => null),
+      ]).then(async ([d, deps, gates, timeline, diff]) => {
         mrDetail = d;
         mrDeps = deps;
+        // Enrich diff_stats from the diff endpoint if MR response lacks them
+        if (!d?.diff_stats && diff) {
+          mrDetail = { ...mrDetail, diff_stats: { files_changed: diff.files_changed ?? 0, insertions: diff.insertions ?? 0, deletions: diff.deletions ?? 0 } };
+        }
+        // Pre-cache diff for the diff tab
+        if (!mrDiff && diff) mrDiff = diff;
         // Pre-cache timeline for the timeline tab
-        if (!mrTimeline) mrTimeline = Array.isArray(timeline) ? timeline : [];
+        const rawTimeline = Array.isArray(timeline) ? timeline : (timeline?.events ?? []);
+        if (!mrTimeline) mrTimeline = rawTimeline;
+        // Resolve task_id via agent's current_task_id if MR lacks it
+        const agentId = d?.author_agent_id ?? d?.agent_id;
+        if (!d?.task_id && agentId) {
+          try {
+            const ag = await api.agent(agentId);
+            const taskId = ag?.current_task_id ?? ag?.task_id;
+            if (taskId) mrDetail = { ...mrDetail, task_id: taskId };
+          } catch { /* best effort */ }
+        }
         // Pre-compute gate summary for info tab
         const gateList = Array.isArray(gates) ? gates : (gates?.gates ?? []);
         if (gateList.length > 0) {
           const passed = gateList.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = gateList.filter(g => g.status === 'Failed' || g.status === 'failed').length;
           const total = gateList.length;
-          mrDetail = { ...mrDetail, _gateSummary: { passed, failed, total } };
+          // Also store gate names for display
+          const gateNames = gateList.map(g => ({ name: g.gate_name ?? g.name ?? 'Gate', status: g.status, required: g.required }));
+          mrDetail = { ...mrDetail, _gateSummary: { passed, failed, total, gates: gateNames } };
+        }
+        // Pre-cache gates for the gates tab
+        if (!mrGates) {
+          mrGates = gateList.map(r => ({
+            ...r,
+            name: r.gate_name ?? r.name,
+          }));
         }
         // Build mini status story from timeline
         if (mrTimeline.length > 0) {
@@ -430,6 +456,17 @@
     }
   });
 
+  /** Normalize server agent fields to UI-expected names */
+  function normalizeAgent(d) {
+    if (!d) return d;
+    return {
+      ...d,
+      task_id: d.task_id ?? d.current_task_id,
+      created_at: d.created_at ?? d.spawned_at,
+      completed_at: d.completed_at ?? (d.status === 'idle' || d.status === 'stopped' || d.status === 'completed' ? (d.last_heartbeat ?? d.spawned_at) : undefined),
+    };
+  }
+
   // Load agent data per tab
   $effect(() => {
     if (entity?.type !== 'agent') return;
@@ -441,8 +478,11 @@
         api.agent(id),
         api.agentLogs(id, 5, 0).catch(() => []),
         api.agentContainer(id).catch(() => null),
-      ]).then(([d, logs, container]) => {
-        agentDetail = d ? { ...d, _container: container } : d;
+        api.agentWorkload(id).catch(() => null),
+        api.agentTouchedPaths(id).catch(() => null),
+      ]).then(([d, logs, container, workload, touchedPaths]) => {
+        const norm = normalizeAgent(d);
+        agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths } : norm;
         // Pre-cache a few recent logs for the info view
         if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
       }).catch(() => { agentDetail = null; })
@@ -465,10 +505,11 @@
     if (activeTab === 'history' && !agentWorkload && !agentWorkloadLoading) {
       agentWorkloadLoading = true;
       Promise.all([
-        api.agent(id).catch(() => null),
+        api.agent(id).then(normalizeAgent).catch(() => null),
         api.agentContainer(id).catch(() => null),
-      ]).then(([ag, container]) => {
-        agentWorkload = { agent: ag, container };
+        api.agentWorkload(id).catch(() => null),
+      ]).then(([ag, container, workload]) => {
+        agentWorkload = { agent: ag, container, workload };
       }).catch(() => { agentWorkload = null; })
         .finally(() => { agentWorkloadLoading = false; });
     }
@@ -1217,6 +1258,19 @@
                       <span class="gate-pill gate-pill-pending">{mr._gateSummary.total - mr._gateSummary.passed - mr._gateSummary.failed} pending</span>
                     {/if}
                   </div>
+                  {#if mr._gateSummary.gates?.length > 0}
+                    <div class="gate-detail-list">
+                      {#each mr._gateSummary.gates as gate}
+                        {@const passed = gate.status === 'Passed' || gate.status === 'passed'}
+                        {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
+                        <span class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed}>
+                          <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
+                          <span class="gate-detail-name">{gate.name}</span>
+                          {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
               {/if}
 
@@ -1264,7 +1318,7 @@
               {@const ag = agentDetail ?? entity.data ?? {}}
               <dl class="entity-meta">
                 <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
-                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
+                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} /></dd>
                 <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
@@ -1297,6 +1351,30 @@
                 {/if}
               </dl>
 
+              <!-- Workload attestation (compute target, hostname, alive) -->
+              {#if ag._workload}
+                <div class="agent-container-info">
+                  <span class="progress-section-label">Runtime</span>
+                  <dl class="entity-meta">
+                    {#if ag._workload.compute_target}
+                      <dt>Compute</dt><dd>{ag._workload.compute_target}</dd>
+                    {/if}
+                    {#if ag._workload.hostname}
+                      <dt>Host</dt><dd class="mono">{ag._workload.hostname}</dd>
+                    {/if}
+                    {#if ag._workload.alive !== undefined}
+                      <dt>Alive</dt><dd><Badge value={ag._workload.alive ? 'yes' : 'no'} variant={ag._workload.alive ? 'success' : 'muted'} /></dd>
+                    {/if}
+                    {#if ag._workload.pid}
+                      <dt>PID</dt><dd class="mono">{ag._workload.pid}</dd>
+                    {/if}
+                    {#if ag._workload.attested_at}
+                      <dt>Attested</dt><dd>{fmtDate(ag._workload.attested_at)}</dd>
+                    {/if}
+                  </dl>
+                </div>
+              {/if}
+
               <!-- Container info if available -->
               {#if ag._container}
                 <div class="agent-container-info">
@@ -1313,6 +1391,24 @@
                     {/if}
                   </dl>
                 </div>
+              {/if}
+
+              <!-- Touched paths (files written by this agent) -->
+              {#if ag._touchedPaths}
+                {@const paths = Array.isArray(ag._touchedPaths) ? ag._touchedPaths : (ag._touchedPaths?.paths ?? ag._touchedPaths?.files ?? [])}
+                {#if paths.length > 0}
+                  <div class="agent-container-info">
+                    <span class="progress-section-label">Files Modified</span>
+                    <div class="touched-paths-list">
+                      {#each paths.slice(0, 10) as p}
+                        <span class="touched-path mono">{typeof p === 'string' ? p : (p.path ?? p.file ?? JSON.stringify(p))}</span>
+                      {/each}
+                      {#if paths.length > 10}
+                        <span class="touched-path-more">+{paths.length - 10} more files</span>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
               {/if}
 
               <!-- Provenance chain for agent -->
@@ -1829,11 +1925,12 @@
                 {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
               </div>
             {:else if agentWorkload}
-              {@const ag = agentWorkload.agent ?? agentDetail ?? entity.data ?? {}}
+              {@const ag = normalizeAgent(agentWorkload.agent) ?? agentDetail ?? entity.data ?? {}}
               {@const container = agentWorkload.container}
+              {@const wl = agentWorkload.workload}
               <span class="progress-section-label">Lifecycle</span>
               <dl class="entity-meta">
-                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
+                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' ? 'info' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
                 {#if ag.created_at}
                   <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
                 {/if}
@@ -1842,10 +1939,39 @@
                   {@const dur = ag.completed_at - ag.created_at}
                   <dt>Duration</dt><dd>{dur < 60 ? `${Math.round(dur)}s` : dur < 3600 ? `${Math.round(dur / 60)}m` : `${Math.round(dur / 3600)}h ${Math.round((dur % 3600) / 60)}m`}</dd>
                 {/if}
+                {#if ag.task_id}
+                  <dt>Task</dt><dd><button class="entity-link" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{entityName('task', ag.task_id)}</button></dd>
+                {/if}
                 {#if ag.mr_id}
                   <dt>Result MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
               </dl>
+              {#if wl}
+                <span class="progress-section-label">Runtime Environment</span>
+                <dl class="entity-meta">
+                  {#if wl.compute_target}
+                    <dt>Compute</dt><dd>{wl.compute_target}</dd>
+                  {/if}
+                  {#if wl.hostname}
+                    <dt>Host</dt><dd class="mono">{wl.hostname}</dd>
+                  {/if}
+                  {#if wl.pid}
+                    <dt>PID</dt><dd class="mono">{wl.pid}</dd>
+                  {/if}
+                  {#if wl.alive !== undefined}
+                    <dt>Alive</dt><dd><Badge value={wl.alive ? 'yes' : 'no'} variant={wl.alive ? 'success' : 'muted'} /></dd>
+                  {/if}
+                  {#if wl.attested_at}
+                    <dt>Attested</dt><dd>{fmtDate(wl.attested_at)}</dd>
+                  {/if}
+                  {#if wl.last_verified_at}
+                    <dt>Last verified</dt><dd>{fmtDate(wl.last_verified_at)}</dd>
+                  {/if}
+                  {#if wl.stack_fingerprint}
+                    <dt>Stack</dt><dd class="mono" title={wl.stack_fingerprint}>{shortId(wl.stack_fingerprint)}</dd>
+                  {/if}
+                </dl>
+              {/if}
               {#if container}
                 <span class="progress-section-label">Container</span>
                 <dl class="entity-meta">
@@ -3871,6 +3997,61 @@
   .gate-pill-pending {
     background: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
     color: var(--color-text-muted);
+  }
+
+  /* ── Gate detail list (individual gate results) ─────────────────────────── */
+  .gate-detail-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: var(--space-2);
+  }
+
+  .gate-detail-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    padding: 2px 0;
+  }
+
+  .gate-detail-item.gate-pass .gate-check { color: var(--color-success); }
+  .gate-detail-item.gate-fail .gate-check { color: var(--color-danger); }
+  .gate-check { font-weight: 600; width: 14px; text-align: center; }
+  .gate-detail-name { font-weight: 500; }
+
+  .gate-advisory-tag {
+    font-size: 9px;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  /* ── Touched paths ─────────────────────────────────────────────────────── */
+  .touched-paths-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .touched-path {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    padding: 2px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .touched-path-more {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+    padding: 2px 0;
   }
 
   /* ── MR deps section ───────────────────────────────────────────────────── */
