@@ -140,10 +140,11 @@
     try {
       await api.markNotificationRead(n.id);
       notifications = notifications.filter(item => item.id !== n.id);
+      actionStates = { ...actionStates, [n.id]: { loading: false } };
     } catch {
       toastError($t('decisions.dismiss_failed'));
+      actionStates = { ...actionStates, [n.id]: { loading: false } };
     }
-    actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
 
   function typeLabel(type) {
