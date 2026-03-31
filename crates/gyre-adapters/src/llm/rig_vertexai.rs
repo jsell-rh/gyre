@@ -219,10 +219,18 @@ impl RigVertexAiAdapter {
             .json()
             .await
             .context("Failed to parse Vertex AI response")?;
+        tracing::debug!(
+            "Vertex AI raw response: {}",
+            serde_json::to_string(&json).unwrap_or_default()
+        );
         Ok(json)
     }
 
     /// Build the Anthropic Messages API request body for Claude on Vertex AI.
+    ///
+    /// For `rawPredict` (non-streaming), the `stream` field is omitted — the
+    /// endpoint is always synchronous. For `streamRawPredict`, `stream: true`
+    /// is included to signal Anthropic SSE mode.
     fn claude_request_body(
         system_prompt: &str,
         user_prompt: &str,
@@ -235,8 +243,12 @@ impl RigVertexAiAdapter {
                 {"role": "user", "content": user_prompt}
             ],
             "max_tokens": max_tokens.unwrap_or(4096),
-            "stream": stream,
         });
+        // Only include `stream` for streaming calls (streamRawPredict).
+        // rawPredict is always synchronous and does not require this field.
+        if stream {
+            body["stream"] = true.into();
+        }
         if !system_prompt.is_empty() {
             body["system"] = system_prompt.into();
         }
@@ -754,7 +766,11 @@ mod tests {
         );
         assert_eq!(body["anthropic_version"], "vertex-2023-10-16");
         assert_eq!(body["max_tokens"], 1024);
-        assert_eq!(body["stream"], false);
+        // Non-streaming rawPredict calls must NOT include the stream field.
+        assert!(
+            body.get("stream").is_none() || body["stream"].is_null(),
+            "Non-streaming body must omit stream field, got: {body}"
+        );
         assert_eq!(body["system"], "You are a helpful assistant.");
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
