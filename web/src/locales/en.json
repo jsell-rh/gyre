@@ -436,6 +436,8 @@
     "all_caught_up": "All caught up!",
     "no_pending": "No pending notifications.",
     "show_more": "Show more ({count} remaining)",
+    "show_more_label": "Show more notifications",
+    "load_failed": "Failed to load notifications",
     "filter_by_type": "Filter by notification type",
     "respond_to_agent": "Respond to Agent",
     "view_spec": "View Spec",
@@ -1303,7 +1305,17 @@
       "col_detail": "Detail",
       "col_time": "Time",
       "ascending": "ascending",
-      "descending": "descending"
+      "descending": "descending",
+      "event_types": {
+        "spec_approved": "Spec approved",
+        "spec_revoked": "Spec revoked",
+        "gate_override": "Gate override",
+        "agent_spawned": "Agent spawned",
+        "agent_stopped": "Agent stopped",
+        "mr_merged": "MR merged",
+        "mr_opened": "MR opened",
+        "commit_pushed": "Commit pushed"
+      }
     },
     "danger_zone": {
       "title": "Danger Zone",
@@ -1492,7 +1504,9 @@
       "title": "Health",
       "subtitle": "Current status of all system components.",
       "loading": "Loading health status\u2026",
-      "empty": "No health data available."
+      "empty": "No health data available.",
+      "status_ok": "ok",
+      "status_error": "error"
     },
     "jobs": {
       "title": "Jobs",
@@ -1549,6 +1563,8 @@
     "token_agent_id": "Agent ID",
     "token_expires": "Expires",
     "refresh": "Refresh",
+    "expand": "Expand",
+    "collapse": "Collapse",
     "time_just_now": "just now",
     "time_minutes_ago": "{count}m ago",
     "time_hours_ago": "{count}h ago",

@@ -511,7 +511,7 @@
               <div class="health-card" class:health-ok={ok} class:health-warn={degraded} class:health-err={!ok && !degraded}>
                 <span class="health-dot" aria-hidden="true"></span>
                 <span class="health-component">{component}</span>
-                <span class="health-status">{typeof status === 'boolean' ? (status ? 'ok' : 'error') : (status ?? '—')}</span>
+                <span class="health-status">{typeof status === 'boolean' ? (status ? $t('tenant_settings.health.status_ok') : $t('tenant_settings.health.status_error')) : (status ?? '—')}</span>
               </div>
             {/each}
           </div>

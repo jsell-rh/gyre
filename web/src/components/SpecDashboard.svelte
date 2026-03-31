@@ -323,7 +323,7 @@
 
     {:else if scope === 'repo'}
       <!-- Repo scope: sortable table with progress -->
-      <table class="specs-table repo-specs-table" role="grid" aria-label="Specs">
+      <table class="specs-table repo-specs-table" role="grid" aria-label={$t('spec_dashboard.title')}>
         <thead>
           <tr>
             <th scope="col" aria-sort={sortCol === 'path' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
@@ -338,10 +338,22 @@
                 <span class="sort-arrow" aria-hidden="true">{sortArrow('approval_status')}</span>
               </button>
             </th>
+            <th scope="col" aria-sort={sortCol === 'kind' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('kind')}>
+                {$t('spec_dashboard.col_kind')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('kind')}</span>
+              </button>
+            </th>
             <th scope="col" aria-sort={sortCol === 'progress' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
               <button class="sort-btn" onclick={() => toggleSort('progress')}>
                 {$t('spec_dashboard.col_progress')}
                 <span class="sort-arrow" aria-hidden="true">{sortArrow('progress')}</span>
+              </button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'updated_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('updated_at')}>
+                {$t('spec_dashboard.col_updated')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('updated_at')}</span>
               </button>
             </th>
           </tr>
@@ -360,7 +372,7 @@
                 if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
               }}
               aria-selected={selectedPath === spec.path}
-              aria-label="Spec: {spec.path}"
+              aria-label="{$t('spec_dashboard.title')}: {spec.path}"
             >
               <td class="col-path">
                 <span class="spec-path" title={spec.path}>{spec.path}</span>
@@ -371,18 +383,19 @@
                   variant={statusColor(spec.approval_status)}
                 />
               </td>
+              <td class="col-kind">{spec.kind || '—'}</td>
               <td class="col-progress">
                 {#if label}
                   <div class="progress-cell">
                     <span class="progress-label-text">{label}</span>
                     <div
                       class="progress-bar-wrap"
-                      title="{pct}% complete"
+                      title="{pct}%"
                       role="progressbar"
                       aria-valuenow={pct}
                       aria-valuemin="0"
                       aria-valuemax="100"
-                      aria-label="{spec.path} progress: {pct}%"
+                      aria-label="{$t('spec_dashboard.col_progress')}: {pct}%"
                     >
                       <div class="progress-bar">
                         <div class="progress-fill" style="width: {pct}%"></div>
@@ -393,6 +406,7 @@
                   <span class="col-time">—</span>
                 {/if}
               </td>
+              <td class="col-time">{relTime(spec.updated_at)}</td>
             </tr>
           {/each}
         </tbody>
