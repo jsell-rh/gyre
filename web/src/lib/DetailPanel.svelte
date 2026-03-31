@@ -507,11 +507,21 @@
         api.agentWorkload(id).catch(() => null),
         api.agentTouchedPaths(id).catch(() => null),
         api.agentCard(id).catch(() => null),
-      ]).then(([d, logs, container, workload, touchedPaths, card]) => {
+      ]).then(async ([d, logs, container, workload, touchedPaths, card]) => {
         const norm = normalizeAgent(d);
         agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths, _card: card } : norm;
         // Pre-cache a few recent logs for the info view
         if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
+        // Resolve spec_path via task if available
+        const taskId = norm?.task_id;
+        if (taskId && !norm?.spec_path) {
+          try {
+            const task = await api.task(taskId);
+            if (task?.spec_path) {
+              agentDetail = { ...agentDetail, spec_path: task.spec_path, _taskTitle: task.title };
+            }
+          } catch { /* best effort */ }
+        }
       }).catch(() => { agentDetail = null; })
         .finally(() => { agentDetailLoading = false; });
     }
@@ -1482,7 +1492,10 @@
                   <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
                 {/if}
                 {#if ag.task_id}
-                  <dt>Task</dt><dd><button class="entity-link" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{entityName('task', ag.task_id)}</button></dd>
+                  <dt>Task</dt><dd><button class="entity-link" title={ag._taskTitle ?? ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{ag._taskTitle ?? entityName('task', ag.task_id)}</button></dd>
+                {/if}
+                {#if ag.spec_path}
+                  <dt>Spec</dt><dd><button class="entity-link mono" title={ag.spec_path} onclick={() => navigateTo('spec', ag.spec_path, { path: ag.spec_path, repo_id: ag.repo_id })}>{ag.spec_path.split('/').pop()}</button></dd>
                 {/if}
                 {#if ag.repo_id}
                   <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{entityName('repo', ag.repo_id)}</dd>
@@ -1567,15 +1580,23 @@
               {/if}
 
               <!-- Provenance chain for agent -->
-              {#if ag.task_id || ag.mr_id}
+              {#if ag.spec_path || ag.task_id || ag.mr_id}
                 <div class="provenance-chain">
                   <span class="provenance-label">Provenance</span>
                   <div class="provenance-flow">
+                    {#if ag.spec_path}
+                      <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', ag.spec_path, { path: ag.spec_path, repo_id: ag.repo_id })} title={ag.spec_path}>
+                        <span class="provenance-icon prov-icon-spec"></span>
+                        <span class="provenance-type">Spec</span>
+                        <span class="provenance-name">{ag.spec_path.split('/').pop()}</span>
+                      </button>
+                      <span class="provenance-arrow">&#x2192;</span>
+                    {/if}
                     {#if ag.task_id}
                       <button class="provenance-node provenance-task" onclick={() => navigateTo('task', ag.task_id)} title={ag.task_id}>
                         <span class="provenance-icon prov-icon-task"></span>
                         <span class="provenance-type">Task</span>
-                        <span class="provenance-name">{entityName('task', ag.task_id)}</span>
+                        <span class="provenance-name">{ag._taskTitle ?? entityName('task', ag.task_id)}</span>
                       </button>
                       <span class="provenance-arrow">&#x2192;</span>
                     {/if}
