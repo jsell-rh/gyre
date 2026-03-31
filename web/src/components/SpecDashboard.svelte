@@ -105,13 +105,24 @@
     load();
   });
 
-  // Open "New Spec" modal when navigated here with ?create=true (e.g. from ExplorerCanvas)
+  // Handle URL query params on mount:
+  // - ?create=true opens the "New Spec" modal (e.g. from ExplorerCanvas)
+  // - ?path=<spec_path> opens the spec detail panel (e.g. from workspace home spec click)
   onMount(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.get('create') === 'true') {
       showNewSpec = true;
       url.searchParams.delete('create');
       window.history.replaceState({}, '', url.toString());
+    }
+    const specPath = url.searchParams.get('path');
+    if (specPath) {
+      url.searchParams.delete('path');
+      window.history.replaceState({}, '', url.toString());
+      // Defer so specs have time to load before opening the panel
+      load().then(() => {
+        handleRowClick({ path: specPath, repo_id: repoId });
+      });
     }
   });
 
