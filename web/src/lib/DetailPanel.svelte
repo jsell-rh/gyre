@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import Tabs from './Tabs.svelte';
   import Button from './Button.svelte';
   import Badge from './Badge.svelte';
@@ -74,28 +75,28 @@
     if (type === 'spec') {
       // Spec entities from the Specs view: richer tab set
       return [
-        { id: 'content',      label: 'Content' },
-        { id: 'edit',         label: 'Edit' },
-        { id: 'progress',     label: 'Progress' },
-        { id: 'links',        label: 'Links' },
-        { id: 'history',      label: 'History' },
-        { id: 'architecture', label: 'Architecture', disabled: !data?.repo_id },
+        { id: 'content',      label: $t('detail_panel.tabs.content') },
+        { id: 'edit',         label: $t('detail_panel.tabs.edit') },
+        { id: 'progress',     label: $t('detail_panel.tabs.progress') },
+        { id: 'links',        label: $t('detail_panel.tabs.links') },
+        { id: 'history',      label: $t('detail_panel.tabs.history') },
+        { id: 'architecture', label: $t('detail_panel.tabs.architecture'), disabled: !data?.repo_id },
       ];
     }
 
-    const result = [{ id: 'info', label: 'Info' }];
+    const result = [{ id: 'info', label: $t('detail_panel.tabs.info') }];
 
     if (type === 'mr') {
       result.push(
-        { id: 'diff',        label: 'Diff' },
-        { id: 'gates',       label: 'Gates' },
+        { id: 'diff',        label: $t('detail_panel.tabs.diff') },
+        { id: 'gates',       label: $t('detail_panel.tabs.gates') },
       );
       if (data.status === 'merged') {
-        result.push({ id: 'attestation', label: 'Attestation' });
+        result.push({ id: 'attestation', label: $t('detail_panel.tabs.attestation') });
       }
       result.push({
         id: 'ask-why',
-        label: 'Ask Why',
+        label: $t('detail_panel.tabs.ask_why'),
         disabled: !data.conversation_sha,
         title: data.conversation_sha ? undefined : 'Conversation unavailable',
       });
@@ -104,14 +105,14 @@
 
     if (type === 'agent') {
       result.push(
-        { id: 'chat',    label: 'Chat' },
-        { id: 'history', label: 'History' },
-        { id: 'trace',   label: 'Trace' },
+        { id: 'chat',    label: $t('detail_panel.tabs.chat') },
+        { id: 'history', label: $t('detail_panel.tabs.history') },
+        { id: 'trace',   label: $t('detail_panel.tabs.trace') },
       );
       if (data.conversation_sha !== undefined) {
         result.push({
           id: 'ask-why',
-          label: 'Ask Why',
+          label: $t('detail_panel.tabs.ask_why'),
           disabled: !data.conversation_sha,
           title: data.conversation_sha ? undefined : 'Conversation unavailable',
         });
@@ -120,16 +121,16 @@
     }
 
     if (type === 'node') {
-      if (data.spec_path) result.push({ id: 'spec', label: 'Spec' });
-      if (data.author_agent_id) result.push({ id: 'chat', label: 'Chat' });
-      result.push({ id: 'history', label: 'History' });
+      if (data.spec_path) result.push({ id: 'spec', label: $t('detail_panel.tabs.spec') });
+      if (data.author_agent_id) result.push({ id: 'chat', label: $t('detail_panel.tabs.chat') });
+      result.push({ id: 'history', label: $t('detail_panel.tabs.history') });
       return result;
     }
 
     // Generic: info + optional extras
-    if (data.spec_path) result.push({ id: 'spec', label: 'Spec' });
-    if (data.author_agent_id) result.push({ id: 'chat', label: 'Chat' });
-    if (data.has_history) result.push({ id: 'history', label: 'History' });
+    if (data.spec_path) result.push({ id: 'spec', label: $t('detail_panel.tabs.spec') });
+    if (data.author_agent_id) result.push({ id: 'chat', label: $t('detail_panel.tabs.chat') });
+    if (data.has_history) result.push({ id: 'history', label: $t('detail_panel.tabs.history') });
     return result;
   }
 

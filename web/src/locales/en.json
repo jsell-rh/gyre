@@ -505,6 +505,40 @@
       "approval": "Approval"
     }
   },
+  "explorer_view": {
+    "workspace_title": "Workspace Architecture",
+    "workspace_desc": "Select a workspace repository to explore its knowledge graph",
+    "system_title": "System Explorer",
+    "system_subtitle": "Realized architecture — navigate the living knowledge graph",
+    "sub_tabs": {
+      "architecture": "Architecture",
+      "briefing": "Briefing",
+      "code": "Code"
+    },
+    "no_repos": "No repositories",
+    "no_repos_desc": "Create a repository in this workspace to explore its architecture.",
+    "select_repo": "Select a repository",
+    "select_repo_explore": "Select repository to explore",
+    "go_to_settings": "Go to Settings"
+  },
+  "detail_panel": {
+    "tabs": {
+      "info": "Info",
+      "content": "Content",
+      "edit": "Edit",
+      "progress": "Progress",
+      "links": "Links",
+      "history": "History",
+      "architecture": "Architecture",
+      "diff": "Diff",
+      "gates": "Gates",
+      "attestation": "Attestation",
+      "ask_why": "Ask Why",
+      "chat": "Chat",
+      "trace": "Trace",
+      "spec": "Spec"
+    }
+  },
   "explorer_filter": {
     "title": "Filters",
     "categories": "Categories",
