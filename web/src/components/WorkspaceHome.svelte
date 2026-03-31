@@ -447,7 +447,8 @@
   // ── Derived: filtered + sorted specs ──────────────────────────────────
   let filteredSpecs = $derived.by(() => {
     let result = specs.filter(s => {
-      if (specsStatusFilter && s.status !== specsStatusFilter) return false;
+      const specStatus = s.approval_status ?? s.status;
+      if (specsStatusFilter && specStatus !== specsStatusFilter) return false;
       return true;
     });
     return [...result].sort((a, b) => {
@@ -1036,8 +1037,9 @@
                     <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
                     <td class="spec-path">{spec.path}</td>
                     <td class="spec-status">
-                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.status] ?? '•'}</span>
-                      {spec.status ?? '—'}
+                      {@const specDisplayStatus = spec.approval_status ?? spec.status}
+                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[specDisplayStatus] ?? '•'}</span>
+                      {specDisplayStatus ?? '—'}
                     </td>
                     <td class="spec-progress">
                       {#if spec.tasks_total != null}
