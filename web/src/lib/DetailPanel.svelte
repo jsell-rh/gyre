@@ -267,6 +267,9 @@
   let newReviewBody = $state('');
   let submittingReview = $state(false);
 
+  // Agent/task name cache for cross-references
+  let entityNameCache = $state({});
+
   // ── Agent entity tab state ─────────────────────────────────────────────────
   let agentDetail = $state(null);
   let agentDetailLoading = $state(false);
@@ -731,6 +734,31 @@
     openDetailPanel?.({ type, id, data: data ?? {} });
   }
 
+  /** Resolve a human-friendly name for an entity ID (cached). */
+  function resolveEntityName(type, id) {
+    if (!id) return;
+    const key = `${type}:${id}`;
+    if (entityNameCache[key] !== undefined) return;
+    entityNameCache = { ...entityNameCache, [key]: null }; // mark as loading
+    if (type === 'agent') {
+      api.agent(id).then(a => {
+        entityNameCache = { ...entityNameCache, [key]: a?.name ?? null };
+      }).catch(() => {});
+    } else if (type === 'task') {
+      api.task(id).then(t => {
+        entityNameCache = { ...entityNameCache, [key]: t?.title ?? null };
+      }).catch(() => {});
+    }
+  }
+
+  function entityName(type, id) {
+    if (!id) return shortId(id);
+    const cached = entityNameCache[`${type}:${id}`];
+    if (cached) return cached;
+    resolveEntityName(type, id);
+    return shortId(id);
+  }
+
   async function submitComment() {
     if (!newCommentText.trim() || !entity || submittingComment) return;
     submittingComment = true;
@@ -890,15 +918,15 @@
                   <dt>Spec</dt><dd><button class="entity-link mono" title={mr.spec_ref} onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })}>{specPath.split('/').pop()}</button></dd>
                 {/if}
                 {#if mr.author_agent_id}
-                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.author_agent_id} onclick={() => navigateTo('agent', mr.author_agent_id)}>{shortId(mr.author_agent_id)}</button></dd>
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.author_agent_id} onclick={() => navigateTo('agent', mr.author_agent_id)}>{entityName('agent', mr.author_agent_id)}</button></dd>
                 {:else if mr.agent_id}
-                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{shortId(mr.agent_id)}</button></dd>
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{entityName('agent', mr.agent_id)}</button></dd>
                 {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
                   <dt>Author</dt><dd class="mono" title={mr.author_id}>{shortId(mr.author_id)}</dd>
                 {/if}
                 {#if mr.task_id}
-                  <dt>Task</dt><dd><button class="entity-link mono" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{shortId(mr.task_id)}</button></dd>
+                  <dt>Task</dt><dd><button class="entity-link" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{entityName('task', mr.task_id)}</button></dd>
                 {/if}
                 {#if mr.has_conflicts}
                   <dt>Conflicts</dt><dd><Badge value="conflicts" variant="danger" /></dd>
@@ -935,7 +963,7 @@
                   <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
                 {/if}
                 {#if ag.task_id}
-                  <dt>Task</dt><dd><button class="entity-link mono" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{shortId(ag.task_id)}</button></dd>
+                  <dt>Task</dt><dd><button class="entity-link" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{entityName('task', ag.task_id)}</button></dd>
                 {/if}
                 {#if ag.repo_id}
                   <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{shortId(ag.repo_id)}</dd>
@@ -1501,13 +1529,13 @@
                   <dt>Spec approved</dt><dd><Badge value={att.spec_fully_approved ? 'yes' : 'no'} variant={att.spec_fully_approved ? 'success' : 'warning'} /></dd>
                 {/if}
                 {#if att.author_agent_id}
-                  <dt>Agent</dt><dd><button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{shortId(att.author_agent_id)}</button></dd>
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{entityName('agent', att.author_agent_id)}</button></dd>
                 {/if}
                 {#if att.mr_id}
                   <dt>MR</dt><dd class="mono" title={att.mr_id}>{shortId(att.mr_id)}</dd>
                 {/if}
                 {#if att.task_id}
-                  <dt>Task</dt><dd><button class="entity-link mono" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{shortId(att.task_id)}</button></dd>
+                  <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
                 {/if}
                 {#if att.repo_id}
                   <dt>Repo</dt><dd class="mono" title={att.repo_id}>{shortId(att.repo_id)}</dd>
