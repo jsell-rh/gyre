@@ -140,7 +140,7 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         }
     }
 
-    let _ = state
+    if let Err(e) = state
         .gate_results
         .update_status(
             result_id.as_str(),
@@ -149,7 +149,15 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
             Some(finished_at),
             Some(output),
         )
-        .await;
+        .await
+    {
+        warn!(
+            gate_id = %gate.id,
+            result_id = %result_id,
+            error = %e,
+            "failed to persist final gate result status"
+        );
+    }
 }
 
 /// Run an AgentReview gate.
