@@ -7,6 +7,7 @@
    */
   import { untrack } from 'svelte';
   import { api } from '../lib/api.js';
+  import { toastError } from '../lib/toast.svelte.js';
 
   let {
     workspace = null,
@@ -248,7 +249,7 @@
       await api.updateWorkspace(workspace.id, { default_compute_target: defaultComputeTarget });
       generalSaved = true;
       setTimeout(() => { generalSaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) { toastError(e?.message ?? 'Failed to save settings'); }
     finally { generalSaving = false; }
   }
 
@@ -259,7 +260,7 @@
       await api.updateWorkspace(workspace.id, { trust_level: trustLevel });
       trustSaved = true;
       setTimeout(() => { trustSaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) { toastError(e?.message ?? 'Failed to save trust level'); }
     finally { trustSaving = false; }
   }
 
@@ -276,7 +277,7 @@
       });
       policyDriftSaved = true;
       setTimeout(() => { policyDriftSaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) { toastError(e?.message ?? 'Failed to save drift policy'); }
     finally { policyDriftSaving = false; }
   }
 
@@ -689,6 +690,7 @@
           <select
             class="filter-select"
             bind:value={auditFilterType}
+            onchange={() => loadAudit(workspace?.id)}
             aria-label="Filter by event type"
             data-testid="audit-filter-select"
           >
