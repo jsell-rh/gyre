@@ -56,11 +56,11 @@ The workspace orchestrator's job is **cross-repo impact analysis and delegation*
 
 The workspace orchestrator **only creates tasks** (via `task.create` MCP tool). It never spawns agents, never touches code, never interacts with compute targets. It thinks in tasks.
 
-**Orchestrator spawn:** Both orchestrators use the workspace's configured compute target (§3). The workspace orchestrator has a workspace-scoped JWT. It completes after processing its inbox. If new `SpecApproved` messages arrive later, a new session is spawned.
+**Orchestrator spawn and message routing:** Both orchestrators use the workspace's configured compute target (§3). The workspace orchestrator has a workspace-scoped JWT. It completes after processing its inbox. The `SpecApproved` message uses `Destination::Workspace(workspace_id)` routing (amends `message-bus.md` scoping rules). The server maintains an **orchestrator registry** per workspace: if an active workspace orchestrator exists, the message is delivered to its inbox. If none exists, the server spawns one and delivers the message to the new agent's inbox before it starts processing. This is an internal server mechanism, not a message bus feature — the server intercepts workspace-destined `SpecApproved` messages and ensures exactly-one-active-orchestrator semantics via a per-workspace mutex. Concurrent `SpecApproved` events are serialized: the second message waits in the inbox until the first is processed (or until a new session is spawned if the orchestrator completed between messages).
 
 ### Phase 3: Repo Orchestrator — Task Decomposition
 
-When a delegation task is created in a repo, the system spawns the **repo orchestrator** — an LLM agent with the `repo-orchestrator` persona and a repo-scoped JWT.
+When a delegation task is created in a repo, the **task scheduler** detects it by `task_type: Delegation` (same scheduler that handles `Implementation` tasks, but with different behavior). For delegation tasks, the scheduler spawns the **repo orchestrator** — an LLM agent with the `repo-orchestrator` persona and a repo-scoped JWT. The same exactly-one-active semantics apply: a per-repo mutex ensures only one repo orchestrator is active at a time. If a repo orchestrator is already active, the delegation task waits in the queue.
 
 The repo orchestrator:
 
@@ -83,9 +83,9 @@ The repo orchestrator **only creates tasks**. It never spawns agents. The system
 
 When a sub-task is created (status: `Backlog`), the **system** (not an orchestrator) handles agent spawning mechanically:
 
-1. **Task scheduler** detects new `Backlog` tasks with a `spec_ref` (implementation tasks, not orchestrator delegation tasks)
+1. **Task scheduler** detects new `Backlog` tasks with `task_type: Implementation` (NOT `Delegation` or `Coordination` — those trigger orchestrator spawning, not worker agent spawning). The `task_type` field is the discriminator that prevents pre-approval tasks (created by `spec-lifecycle.md` push hook, which do NOT have `task_type: Implementation`) from triggering agent spawning.
 2. Checks ordering: are all `depends_on` tasks completed? Is this task's `order` value the next to run?
-3. **Preconditions:** Checks repo status (rejects if `Archived` per `repo-lifecycle.md` §4), checks `max_agents` limit (waits if at capacity — does not reject, queues), checks workspace budget (rejects if exhausted)
+3. **Preconditions:** Checks repo status (rejects if `Archived` per `repo-lifecycle.md` §4), checks `max_agents` limit (queues task — the scheduler re-checks periodically as agents complete, does not reject or return 429), checks workspace budget (rejects if exhausted — task stays `Backlog` with a `BudgetExhausted` flag)
 4. Sets task status to `InProgress`
 5. Creates the agent record (`Active` status)
 
@@ -135,9 +135,9 @@ When the agent signals completion:
    - **Gate failure messages in inbox** — the agent reads these on startup and addresses them
 4. The agent re-implements, commits, pushes, signals done
 5. Gates run again
-6. Loop continues until convergence or `max_iterations` reached
+6. Loop continues until convergence or `max_iterations` reached (default: 10, configurable per repo via `repo_lifecycle.md` §3 repo settings. Stored on the Repository entity as `max_agent_iterations: Option<u32>`, falls back to workspace default, then server default of 10.)
 
-**Max iterations reached:** Task marked `Blocked`. Agent marked `Failed`. JWT revoked. Orchestrator notified via inbox message. Orchestrator may re-decompose the task, adjust the spec, or escalate to a human via a priority-1 notification ("Agent needs clarification").
+**Max iterations reached:** Task marked `Blocked`. Agent marked `Failed`. JWT revoked. The system creates a `TaskBlocked` message destined to the repo's orchestrator inbox (same routing mechanism as `SpecApproved` — if no orchestrator is active, the server spawns one to process the failure). The repo orchestrator may re-decompose the task, adjust the approach, or escalate to a human via a priority-1 notification ("Agent needs clarification").
 
 **Spawn failure:** If `ComputeTarget::spawn_process()` fails (Docker not running, SSH unreachable, K8s API down), the server:
 1. Marks the agent `Failed` with error details
@@ -399,7 +399,7 @@ Tenant budget (absolute ceiling)
               └── Per-agent enforcement (charged to repo, rolled up to workspace)
 ```
 
-Budget is tracked per repo and aggregated to workspace. The repo-level budget (defined in `repo-lifecycle.md` §3) provides fine-grained control — a workspace admin can give a critical repo a larger share of the workspace budget. When no repo-level budget is set, the repo inherits the workspace limit. Agent usage charges against the repo's budget, which rolls up to the workspace total. The `max_agents` field on `Repository` (per `repo-lifecycle.md` §3) is enforced at agent spawn time: the server checks the count of `Active` agents scoped to the repo before provisioning a new one. If at the limit, spawn returns `429 Too Many Requests` with a message indicating the repo's concurrent agent limit. **Fallback:** When `Repository.max_agents` is `None`, the server falls back to `Workspace.max_agents_per_repo` (per `platform-model.md` §1). When both are `None`, no limit is enforced. A repo's `max_agents` cannot exceed the workspace's `max_agents_per_repo` — the server validates this on `PUT /api/v1/repos/:id` and rejects values that exceed the workspace limit (400 error).
+Budget is tracked per repo and aggregated to workspace. The repo-level budget (defined in `repo-lifecycle.md` §3) provides fine-grained control — a workspace admin can give a critical repo a larger share of the workspace budget. When no repo-level budget is set, the repo inherits the workspace limit. Agent usage charges against the repo's budget, which rolls up to the workspace total. The `max_agents` field on `Repository` (per `repo-lifecycle.md` §3) is enforced at agent spawn time: the server checks the count of `Active` agents scoped to the repo before provisioning a new one. If at the limit, the task scheduler queues the task and re-checks periodically as agents complete (no 429 — the scheduler handles queuing internally). **Fallback:** When `Repository.max_agents` is `None`, the server falls back to `Workspace.max_agents_per_repo` (per `platform-model.md` §1). When both are `None`, no limit is enforced. A repo's `max_agents` cannot exceed the workspace's `max_agents_per_repo` — the server validates this on `PUT /api/v1/repos/:id` and rejects values that exceed the workspace limit (400 error).
 
 ### Enforcement Levels
 
