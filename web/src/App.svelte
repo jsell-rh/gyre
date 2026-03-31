@@ -883,7 +883,7 @@
               <button
                 class="ws-name-btn"
                 onclick={() => goToWorkspaceHome(currentWorkspace)}
-                aria-label="Go to {currentWorkspace.name} workspace home"
+                aria-label={$t('topbar.go_to_workspace_home', { values: { name: currentWorkspace.name } })}
                 data-testid="ws-name-btn"
               >
                 {currentWorkspace.name}

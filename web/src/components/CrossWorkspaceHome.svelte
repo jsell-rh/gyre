@@ -239,7 +239,7 @@
       data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
       notifications = data;
     } catch (e) {
-      decisionsError = e?.message ?? 'Failed to load decisions';
+      decisionsError = e?.message ?? $t('cross_workspace.error_load_decisions');
     } finally {
       decisionsLoading = false;
     }
@@ -253,7 +253,7 @@
       workspaces = Array.isArray(data) ? data : [];
       workspaceNameMap = Object.fromEntries(workspaces.map(w => [w.id, w.name ?? w.id]));
     } catch (e) {
-      workspacesError = e?.message ?? 'Failed to load workspaces';
+      workspacesError = e?.message ?? $t('cross_workspace.error_load_workspaces');
     } finally {
       workspacesLoading = false;
     }
@@ -267,7 +267,7 @@
       const data = await api.specsForWorkspace(null);
       specs = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
-      specsError = e?.message ?? 'Failed to load specs';
+      specsError = e?.message ?? $t('cross_workspace.error_load_specs');
     } finally {
       specsLoading = false;
     }
@@ -297,7 +297,7 @@
         .filter((r) => r.status === 'fulfilled' && r.value.summary)
         .map((r) => r.value);
     } catch (e) {
-      briefingError = e?.message ?? 'Failed to load briefing';
+      briefingError = e?.message ?? $t('cross_workspace.error_load_briefing');
     } finally {
       briefingLoading = false;
     }
@@ -310,7 +310,7 @@
       const data = await api.getMetaSpecs({ scope: 'Global' });
       globalMetaSpecs = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
-      rulesError = e?.message ?? 'Failed to load agent rules';
+      rulesError = e?.message ?? $t('cross_workspace.error_load_rules');
     } finally {
       rulesLoading = false;
     }

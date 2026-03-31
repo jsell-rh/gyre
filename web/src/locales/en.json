@@ -133,7 +133,19 @@
     },
     "go_to_repo_decisions": "Go to {name} decisions",
     "scope_tenant": "Tenant",
-    "scope_workspace": "Workspace"
+    "scope_workspace": "Workspace",
+    "decisions_badge_label": "{count} decisions",
+    "retry_loading_decisions": "Retry loading decisions",
+    "retry_loading_repos": "Retry loading repos",
+    "open_repo": "Open repository {name}",
+    "repo_status": "Status: {status}",
+    "filter_specs_by_status": "Filter specs by status",
+    "retry_loading_specs": "Retry loading specs",
+    "open_spec": "Open spec {path}",
+    "retry_loading_graph": "Retry loading workspace graph",
+    "retry_loading_rules": "Retry loading agent rules",
+    "error_create_repo": "Failed to create repository",
+    "error_load_graph": "Failed to load workspace graph"
   },
   "repo_mode": {
     "tabs": {
@@ -152,7 +164,11 @@
     "task_label": "Task: {id}",
     "budget_label": "Budget: {pct}%",
     "clone_url_copied": "Clone URL copied!",
-    "copy_clone_url": "Copy clone URL to clipboard"
+    "copy_clone_url": "Copy clone URL to clipboard",
+    "agent_count_click": "{label} — click to view",
+    "repo_navigation": "Repo navigation",
+    "agent_label": "Agent {name}",
+    "settings_title": "Settings"
   },
   "status_bar": {
     "label": "Status bar",
@@ -426,7 +442,14 @@
     "uncertain": "uncertain: \"{text}\"",
     "not_yet_available": "Briefing data not yet available",
     "sub_specs_progress": "{done}/{total} sub-specs complete.",
-    "agents_active": "{count} {count, plural, one {agent} other {agents}} active."
+    "agents_active": "{count} {count, plural, one {agent} other {agents}} active.",
+    "time_range_label": "Briefing time range",
+    "custom_start_date": "Custom start date",
+    "view_spec_label": "View spec {ref}",
+    "view_agent_label": "View agent {id}",
+    "review_changes_label": "Review changes to {ref}",
+    "dismiss_label": "Dismiss: {description}",
+    "view_mr_label": "View MR #{id} in {repo}"
   },
   "diff_suggestion": {
     "suggested_change": "Suggested Change",
@@ -499,7 +522,10 @@
     "agent_label": "Agent: {id}",
     "mr_label": "MR: {title}",
     "on_mr": "on {title}",
-    "spec_label_short": "spec: {name}"
+    "spec_label_short": "spec: {name}",
+    "unresolved_label": "{count} unresolved items",
+    "notifications_label": "Notifications",
+    "priority_label": "Priority {level}"
   },
   "spec_dashboard": {
     "title": "Specs",
@@ -534,7 +560,11 @@
     "filter_approved": "Approved",
     "filter_deprecated": "Deprecated",
     "progress_tasks": "{done}/{total} tasks",
-    "loaded": "specs loaded"
+    "loaded": "specs loaded",
+    "filter_by_status": "Filter by status",
+    "filter_by_kind": "Filter by kind",
+    "specs_registry": "Specs registry",
+    "spec_label": "Spec: {path}"
   },
   "code_tab": {
     "clone": "Clone",
@@ -575,7 +605,9 @@
     "time_minutes_ago": "{count}m ago",
     "time_hours_ago": "{count}h ago",
     "time_days_ago": "{count}d ago",
-    "loaded": "code view loaded"
+    "loaded": "code view loaded",
+    "sub_tabs_label": "Code sub-tabs",
+    "view_queue_entry": "View queue entry"
   },
   "user_profile": {
     "title": "My Profile",
@@ -628,7 +660,11 @@
       "TrustSuggestion": "Trust Suggestions",
       "SpecDrift": "Spec Drift Alerts",
       "AgentNeedsClarification": "Agent Clarification Requests"
-    }
+    },
+    "switch_workspace": "Switch to {name} workspace",
+    "enable_notification": "Enable {label} notifications",
+    "mark_as_read": "Mark as read",
+    "view_in_inbox_label": "View in Inbox"
   },
   "agent_card": {
     "title": "Agent Card",
@@ -1219,7 +1255,12 @@
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
       "suggested_link": "Suggested Link"
-    }
+    },
+    "error_load_decisions": "Failed to load decisions",
+    "error_load_workspaces": "Failed to load workspaces",
+    "error_load_specs": "Failed to load specs",
+    "error_load_briefing": "Failed to load briefing",
+    "error_load_rules": "Failed to load agent rules"
   },
   "repo_settings": {
     "tab_bar_label": "Repo settings sections",
@@ -1549,7 +1590,14 @@
     "audit_col_event": "Event",
     "audit_col_actor": "Actor",
     "audit_col_details": "Details",
-    "refresh": "Refresh"
+    "refresh": "Refresh",
+    "sections_label": "Tenant administration sections",
+    "error_load_users": "Failed to load user info",
+    "error_load_compute": "Failed to load compute targets",
+    "error_load_budget": "Failed to load budget summary",
+    "error_load_audit": "Failed to load audit log",
+    "error_load_health": "Failed to load health status",
+    "error_load_jobs": "Failed to load jobs"
   },
   "common": {
     "cancel": "Cancel",

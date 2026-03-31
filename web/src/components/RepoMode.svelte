@@ -30,7 +30,7 @@
     { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
     { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
     { id: 'code',         labelKey: 'repo_mode.tabs.code' },
-    { id: 'settings',     labelKey: 'repo_mode.tabs.settings', title: 'Settings' },
+    { id: 'settings',     labelKey: 'repo_mode.tabs.settings', titleKey: 'repo_mode.settings_title' },
   ];
 
   // ── Active agents for this repo ────────────────────────────────────────
@@ -116,7 +116,7 @@
       <button
         class="agent-count-btn"
         onclick={() => { agentPanelOpen = true; }}
-        aria-label="{agentsLoading ? $t('repo_mode.loading_agents') : activeAgents.length + ' agents active'} — click to view"
+        aria-label={$t('repo_mode.agent_count_click', { values: { label: agentsLoading ? $t('repo_mode.loading_agents') : $t('repo_mode.agents_active', { values: { count: activeAgents.length } }) } })}
         data-testid="agent-count-btn"
       >
         {#if agentsLoading}
@@ -138,7 +138,7 @@
         <button
           class="clone-btn"
           onclick={copyCloneUrl}
-          aria-label={cloneCopied ? 'Clone URL copied!' : 'Copy clone URL to clipboard'}
+          aria-label={cloneCopied ? $t('repo_mode.clone_url_copied') : $t('repo_mode.copy_clone_url')}
           title={cloneUrl}
           data-testid="clone-url-btn"
         >
@@ -151,7 +151,7 @@
 
   <!-- ── Tab bar ─────────────────────────────────────────────────────── -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="tab-bar" role="tablist" aria-label="Repo navigation" data-testid="repo-tab-bar" onkeydown={handleTabKeydown}>
+  <div class="tab-bar" role="tablist" aria-label={$t('repo_mode.repo_navigation')} data-testid="repo-tab-bar" onkeydown={handleTabKeydown}>
     {#each TABS as tab}
       <button
         class="tab-btn"
@@ -162,7 +162,7 @@
         aria-controls="tabpanel-{tab.id}"
         tabindex={activeTab === tab.id ? 0 : -1}
         onclick={() => onTabChange?.(tab.id)}
-        title={tab.title ?? $t(tab.labelKey)}
+        title={tab.titleKey ? $t(tab.titleKey) : $t(tab.labelKey)}
       >
         {$t(tab.labelKey)}
       </button>
@@ -242,7 +242,7 @@
               data-testid="agent-row"
               onclick={() => { selectedAgentId = selectedAgentId === agent.id ? null : agent.id; }}
               aria-expanded={selectedAgentId === agent.id}
-              aria-label="Agent {agent.name ?? agent.id}"
+              aria-label={$t('repo_mode.agent_label', { values: { name: agent.name ?? agent.id } })}
             >
               <div class="agent-row-info">
                 <span class="agent-row-name">{agent.name ?? agent.id}</span>

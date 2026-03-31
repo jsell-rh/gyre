@@ -230,7 +230,7 @@
             class="range-select"
             value={selectedRange}
             onchange={(e) => onRangeChange(e.target.value)}
-            aria-label="Briefing time range"
+            aria-label={$t('briefing.time_range_label')}
           >
             {#each TIME_RANGE_VALUES as val}
               <option value={val}>{$t(TIME_RANGE_KEYS[val])}</option>
@@ -241,7 +241,7 @@
               class="date-input"
               type="date"
               bind:value={customSince}
-              aria-label="Custom start date"
+              aria-label={$t('briefing.custom_start_date')}
               data-testid="custom-date-input"
             />
             <button class="apply-btn" onclick={onCustomApply} disabled={!customSince}>{$t('briefing.apply')}</button>
@@ -289,7 +289,7 @@
                     class="entity-ref"
                     onclick={() => handleViewSpec(item.spec_ref)}
                     data-testid="spec-ref-link"
-                    aria-label="View spec {item.spec_ref}"
+                    aria-label={$t('briefing.view_spec_label', { values: { ref: item.spec_ref } })}
                   >
                     spec: {item.spec_ref}
                   </button>
@@ -333,7 +333,7 @@
                     class="entity-ref"
                     onclick={() => handleViewSpec(item.spec_ref)}
                     data-testid="spec-ref-link"
-                    aria-label="View spec {item.spec_ref}"
+                    aria-label={$t('briefing.view_spec_label', { values: { ref: item.spec_ref } })}
                   >
                     spec: {item.spec_ref}
                   </button>
@@ -356,7 +356,7 @@
                         class="entity-ref agent-ref"
                         onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
                         data-testid="agent-ref-link"
-                        aria-label="View agent {u.agent_id}"
+                        aria-label={$t('briefing.view_agent_label', { values: { id: u.agent_id } })}
                       >
                         {u.agent_id}
                       </button>
@@ -412,7 +412,7 @@
                     class="entity-ref"
                     onclick={() => handleReviewChanges(item)}
                     data-testid="spec-ref-link"
-                    aria-label="Review changes to {item.spec_ref}"
+                    aria-label={$t('briefing.review_changes_label', { values: { ref: item.spec_ref } })}
                   >
                     {item.spec_ref}
                   </button>
@@ -430,7 +430,7 @@
                   class="action-btn secondary"
                   onclick={() => handleDismiss(item)}
                   data-testid="dismiss-btn"
-                  aria-label="Dismiss: {item.description ?? item.spec_ref ?? 'item'}"
+                  aria-label={$t('briefing.dismiss_label', { values: { description: item.description ?? item.spec_ref ?? '' } })}
                 >
                   {$t('common.dismiss')}
                 </button>
@@ -461,7 +461,7 @@
                       class="entity-ref mr-ref"
                       onclick={() => handleViewDiff(item)}
                       data-testid="mr-ref-link"
-                      aria-label="View MR #{item.mr_id} in {item.repo}"
+                      aria-label={$t('briefing.view_mr_label', { values: { id: item.mr_id, repo: item.repo } })}
                     >
                       {item.repo} MR #{item.mr_id}
                     </button>
