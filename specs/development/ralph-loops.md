@@ -1,6 +1,6 @@
 # Ralph Loops
 
-> **Superseded by [`specs/system/ralph-loop.md`](../system/ralph-loop.md).** This file is kept for historical context only. The canonical definition of the Ralph loop, including the agent/session model, message inbox, and terminal conditions, lives in the system spec.
+> **Superseded by [`specs/system/agent-runtime.md`](../system/agent-runtime.md) §1.** This file is kept for historical context only. The canonical definition of the agent lifecycle, signal chain, and Ralph loop lives in the agent runtime spec.
 
 ## Definition
 
