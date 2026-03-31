@@ -491,7 +491,8 @@
   // ── Relative time helper ───────────────────────────────────────────────
   function relTime(ts) {
     if (!ts) return '';
-    const diff = Date.now() - new Date(ts).getTime();
+    const ms = typeof ts === 'number' && ts < 1e12 ? ts * 1000 : new Date(ts).getTime();
+    const diff = Date.now() - ms;
     const m = Math.floor(diff / 60000);
     if (m < 1) return $t('common.time_just_now');
     if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
