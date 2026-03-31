@@ -39,19 +39,13 @@
     suggested_link: 'default',
   };
 
-  // Human-readable type labels
-  const TYPE_LABELS = {
-    agent_clarification: 'Clarification',
-    spec_approval: 'Spec Approval',
-    gate_failure: 'Gate Failure',
-    cross_workspace_change: 'Cross-WS Change',
-    conflicting_interpretations: 'Conflict',
-    meta_spec_drift: 'Meta Drift',
-    budget_warning: 'Budget',
-    trust_suggestion: 'Trust',
-    spec_assertion_failure: 'Assertion Fail',
-    suggested_link: 'Suggested Link',
-  };
+  // Human-readable type labels — derived from i18n
+  function typeLabel(typ) {
+    const key = `decisions.type_labels.${typ}`;
+    const val = $t(key);
+    // If i18n returns the key itself, fall back to raw type
+    return val === key ? typ : val;
+  }
 
   async function loadWorkspaceNames() {
     if (scope !== 'tenant') return;
@@ -102,11 +96,11 @@
     if (!ts) return '';
     const diff = Date.now() - new Date(ts).getTime();
     const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m ago`;
+    if (m < 1) return $t('decisions.time_just_now');
+    if (m < 60) return $t('decisions.time_minutes_ago', { values: { count: m } });
     const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+    if (h < 24) return $t('decisions.time_hours_ago', { values: { count: h } });
+    return $t('decisions.time_days_ago', { values: { count: Math.floor(h / 24) } });
   }
 
   function toggleExpand(id) {
@@ -153,7 +147,7 @@
       );
       if (expandedId === n.id) expandedId = null;
     } catch {
-      toastError('Dismiss failed — please try again.');
+      toastError($t('decisions.dismiss_failed'));
     }
     actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
@@ -176,12 +170,12 @@
       );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: 'Approved' },
+        [n.id]: { loading: false, success: true, message: $t('decisions.approved') },
       };
     } catch (e) {
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: false, message: e.message || 'Approval failed' },
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.approval_failed') },
       };
     }
   }
@@ -198,12 +192,12 @@
       );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: 'Rejected' },
+        [n.id]: { loading: false, success: true, message: $t('decisions.rejected') },
       };
     } catch (e) {
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: false, message: e.message || 'Rejection failed' },
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.rejection_failed') },
       };
     }
   }
@@ -220,12 +214,12 @@
       );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: 'Re-queued' },
+        [n.id]: { loading: false, success: true, message: $t('decisions.re_queued') },
       };
     } catch (e) {
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: false, message: e.message || 'Retry failed' },
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.retry_failed') },
       };
     }
   }
@@ -290,11 +284,11 @@
             class="type-filter"
             value={filterType}
             onchange={(e) => { filterType = e.target.value; }}
-            aria-label="Filter by notification type"
+            aria-label={$t('decisions.filter_by_type')}
             data-testid="inbox-type-filter"
           >
             {#each availableTypes as typ}
-              <option value={typ}>{typ === 'all' ? $t('decisions.all_types') : (TYPE_LABELS[typ] ?? typ)}</option>
+              <option value={typ}>{typ === 'all' ? $t('decisions.all_types') : (typeLabel(typ))}</option>
             {/each}
           </select>
         {/if}
@@ -302,7 +296,7 @@
           <input type="checkbox" bind:checked={showDismissed} />
           {$t('decisions.show_dismissed')}
         </label>
-        <Button variant="ghost" size="sm" onclick={loadNotifications}>Refresh</Button>
+        <Button variant="ghost" size="sm" onclick={loadNotifications}>{$t('common.refresh')}</Button>
       </div>
     </div>
 
@@ -380,7 +374,7 @@
                   <Badge value={workspaceMap[n.workspace_id] ?? n.workspace_id} variant="default" />
                 {/if}
                 <Badge
-                  value={TYPE_LABELS[n.notification_type] || n.notification_type}
+                  value={typeLabel(n.notification_type)}
                   variant={TYPE_VARIANTS[n.notification_type] || 'default'}
                 />
                 <span class="card-age">{relativeTime(n.created_at)}</span>
@@ -457,16 +451,16 @@
                   <div class="card-actions">
                     {#if n.notification_type === 'agent_clarification'}
                       <Button variant="primary" size="sm" onclick={() => handleRespondToAgent(n)}>
-                        Respond to Agent
+                        {$t('decisions.respond_to_agent')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        View Spec
+                        {$t('decisions.view_spec')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => {
                         const b = getBody(n);
                         openDetail({ type: 'spec', id: b.spec_path || n.entity_ref, data: n, defaultTab: 'architecture' });
                       }}>
-                        View in Explorer
+                        {$t('decisions.view_in_explorer')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -474,7 +468,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'spec_approval'}
                       <Button
@@ -483,7 +477,7 @@
                         disabled={state?.loading}
                         onclick={() => handleApproveSpec(n)}
                       >
-                        {state?.loading && state?.action === 'approve' ? 'Approving…' : 'Approve'}
+                        {state?.loading && state?.action === 'approve' ? $t('decisions.approving') : $t('common.approve')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -491,14 +485,14 @@
                         disabled={state?.loading}
                         onclick={() => handleRejectSpec(n)}
                       >
-                        {state?.loading && state?.action === 'reject' ? 'Rejecting…' : 'Reject'}
+                        {state?.loading && state?.action === 'reject' ? $t('decisions.rejecting') : $t('common.reject')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        Open Spec
+                        {$t('decisions.open_spec')}
                       </Button>
                     {:else if n.notification_type === 'gate_failure'}
                       <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
-                        View MR
+                        {$t('decisions.view_mr')}
                       </Button>
                       <Button
                         variant="primary"
@@ -506,7 +500,7 @@
                         disabled={state?.loading}
                         onclick={() => handleRetry(n)}
                       >
-                        {state?.loading ? 'Retrying…' : 'Retry Gate'}
+                        {state?.loading ? $t('decisions.retrying') : $t('decisions.retry_gate')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -514,11 +508,11 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'cross_workspace_change'}
                       <Button variant="primary" size="sm" onclick={() => handleViewSpec(n)}>
-                        Review Changes
+                        {$t('decisions.review_changes')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -526,11 +520,11 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'conflicting_interpretations'}
-                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>View Both Specs</Button>
-                      <span class="coming-soon-note">Auto-reconciliation coming soon — view both specs above to resolve manually.</span>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>{$t('decisions.view_both_specs')}</Button>
+                      <span class="coming-soon-note">{$t('decisions.reconciliation_note')}</span>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
@@ -543,18 +537,18 @@
                             data: n,
                           })}
                       >
-                        View Results
+                        {$t('decisions.view_results')}
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
                         onclick={() => handleAdjustMetaSpec(n)}
                       >
-                        Adjust Meta-spec
+                        {$t('decisions.adjust_metaspec')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'budget_warning'}
-                      <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>Increase Limit</Button>
+                      <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>{$t('decisions.increase_limit')}</Button>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
@@ -563,7 +557,7 @@
                         disabled={state?.loading}
                         onclick={() => handleIncreaseTrust(n)}
                       >
-                        Increase Trust
+                        {$t('decisions.increase_trust')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -571,7 +565,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'spec_assertion_failure'}
                       <Button
@@ -579,10 +573,10 @@
                         size="sm"
                         onclick={() => openDetail({ type: 'repo', id: body.repo_id, data: n })}
                       >
-                        View Code
+                        {$t('decisions.view_code')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        Update Spec
+                        {$t('decisions.update_spec')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'suggested_link'}
@@ -597,13 +591,13 @@
                             notifications = notifications.map(item =>
                               item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
                             );
-                            actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Accepted' } };
+                            actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.accepted') } };
                           } catch {
-                            actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: 'Accept failed' } };
+                            actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: $t('decisions.accept_failed') } };
                           }
                         }}
                       >
-                        Accept
+                        {$t('decisions.accept')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -611,7 +605,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {/if}
                   </div>
