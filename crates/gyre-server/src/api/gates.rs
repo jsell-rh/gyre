@@ -85,6 +85,14 @@ pub struct GateResultResponse {
     pub output: Option<String>,
     pub started_at: Option<u64>,
     pub finished_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 impl From<GateResult> for GateResultResponse {
@@ -97,6 +105,10 @@ impl From<GateResult> for GateResultResponse {
             output: r.output,
             started_at: r.started_at,
             finished_at: r.finished_at,
+            gate_name: None,
+            gate_type: None,
+            required: None,
+            command: None,
         }
     }
 }
@@ -240,16 +252,44 @@ pub async fn delete_gate(
 }
 
 /// GET /api/v1/merge-requests/:id/gates — list gate results for an MR.
+///
+/// Enriches each result with gate definition fields (name, type, required,
+/// command) so the UI can display meaningful information without a separate
+/// gate definitions fetch.
 pub async fn list_mr_gate_results(
     State(state): State<Arc<AppState>>,
     Path(mr_id): Path<String>,
 ) -> Result<Json<Vec<GateResultResponse>>, ApiError> {
-    let mut out: Vec<GateResultResponse> = state
-        .gate_results
-        .list_by_mr_id(&mr_id)
-        .await?
+    let results = state.gate_results.list_by_mr_id(&mr_id).await?;
+
+    // Collect unique gate_ids to look up definitions
+    let gate_ids: Vec<String> = results
+        .iter()
+        .map(|r| r.gate_id.to_string())
+        .collect::<std::collections::HashSet<_>>()
         .into_iter()
-        .map(GateResultResponse::from)
+        .collect();
+
+    // Build a map of gate_id → definition (best-effort)
+    let mut gate_defs = std::collections::HashMap::new();
+    for gid in &gate_ids {
+        if let Ok(Some(def)) = state.quality_gates.find_by_id(gid).await {
+            gate_defs.insert(gid.clone(), def);
+        }
+    }
+
+    let mut out: Vec<GateResultResponse> = results
+        .into_iter()
+        .map(|r| {
+            let mut resp = GateResultResponse::from(r);
+            if let Some(def) = gate_defs.get(&resp.gate_id) {
+                resp.gate_name = Some(def.name.clone());
+                resp.gate_type = Some(gate_type_str(&def.gate_type));
+                resp.required = Some(def.required);
+                resp.command = def.command.clone();
+            }
+            resp
+        })
         .collect();
     out.sort_by_key(|r| r.started_at.unwrap_or(0));
     Ok(Json(out))
