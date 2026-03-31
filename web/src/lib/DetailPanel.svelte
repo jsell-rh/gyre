@@ -602,7 +602,7 @@
       onChange={(v) => { editContent = v; }}
       repoId={entity.data?.repo_id ?? null}
       specPath={entity.id}
-      ghostOverlays={[]}
+      ghostOverlays={archGhostOverlays}
       onClose={closeEditorSplit}
       context="spec"
     />
