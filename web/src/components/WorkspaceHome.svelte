@@ -1048,10 +1048,18 @@
                       {spec.approval_status ?? spec.status ?? '—'}
                     </td>
                     <td class="spec-progress">
-                      {#if spec.tasks_total != null}
-                        {spec.tasks_done ?? 0}/{spec.tasks_total}
+                      {#if spec.tasks_total != null && spec.tasks_total > 0}
+                        {@const pct = Math.round(((spec.tasks_done ?? 0) / spec.tasks_total) * 100)}
+                        <div class="progress-cell" title="{spec.tasks_done ?? 0} of {spec.tasks_total} tasks done ({pct}%)">
+                          <span class="progress-text">{spec.tasks_done ?? 0}/{spec.tasks_total}</span>
+                          <div class="progress-mini-bar">
+                            <div class="progress-mini-fill" style="width: {pct}%"></div>
+                          </div>
+                        </div>
+                      {:else if spec.tasks_total != null}
+                        <span class="secondary">0/0</span>
                       {:else}
-                        —
+                        <span class="secondary">—</span>
                       {/if}
                     </td>
                     <td class="spec-activity">{relTime(spec.updated_at)}</td>
@@ -1924,6 +1932,32 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     white-space: nowrap;
+  }
+
+  .progress-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 50px;
+  }
+
+  .progress-text {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+  }
+
+  .progress-mini-bar {
+    height: 3px;
+    background: var(--color-surface-elevated);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .progress-mini-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 2px;
+    transition: width var(--transition-fast);
   }
 
   .spec-activity {
