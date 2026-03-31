@@ -151,6 +151,8 @@
   "repo_mode": {
     "tabs": {
       "specs": "Specs",
+      "tasks": "Tasks",
+      "mrs": "MRs",
       "architecture": "Architecture",
       "decisions": "Decisions",
       "code": "Code",

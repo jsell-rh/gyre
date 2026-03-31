@@ -8,14 +8,18 @@
    *   - Fixed Decisions tab: passes repoId so Inbox filters to this repo only
    *   - Verified tab prop wiring for all tabs
    */
+  import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import Badge from '../lib/Badge.svelte';
   import ExplorerView from './ExplorerView.svelte';
   import SpecDashboard from './SpecDashboard.svelte';
   import Inbox from './Inbox.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
   import RepoSettings from './RepoSettings.svelte';
   import AgentCardPanel from './AgentCardPanel.svelte';
+
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
 
   let {
     workspace = null,
@@ -27,6 +31,8 @@
 
   const TABS = [
     { id: 'specs',        labelKey: 'repo_mode.tabs.specs' },
+    { id: 'tasks',        labelKey: 'repo_mode.tabs.tasks' },
+    { id: 'mrs',          labelKey: 'repo_mode.tabs.mrs' },
     { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
     { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
     { id: 'code',         labelKey: 'repo_mode.tabs.code' },
@@ -51,6 +57,76 @@
       .finally(() => { if (!aborted) agentsLoading = false; });
     return () => { aborted = true; };
   });
+
+  // ── Tasks for this repo ──────────────────────────────────────────────
+  let repoTasks = $state([]);
+  let tasksLoading = $state(false);
+  let tasksLoaded = $state(false);
+
+  $effect(() => {
+    if (activeTab !== 'tasks') return;
+    const repoId = repo?.id;
+    if (!repoId || tasksLoaded) return;
+    let aborted = false;
+    tasksLoading = true;
+    api.tasks({ repoId })
+      .then(list => { if (!aborted) { repoTasks = Array.isArray(list) ? list : []; tasksLoaded = true; } })
+      .catch(() => { if (!aborted) { repoTasks = []; tasksLoaded = true; } })
+      .finally(() => { if (!aborted) tasksLoading = false; });
+    return () => { aborted = true; };
+  });
+
+  // Reset when repo changes
+  $effect(() => {
+    if (repo?.id) { tasksLoaded = false; mrsLoaded = false; }
+  });
+
+  // ── MRs for this repo ────────────────────────────────────────────────
+  let repoMrs = $state([]);
+  let mrsLoading = $state(false);
+  let mrsLoaded = $state(false);
+
+  $effect(() => {
+    if (activeTab !== 'mrs') return;
+    const repoId = repo?.id;
+    if (!repoId || mrsLoaded) return;
+    let aborted = false;
+    mrsLoading = true;
+    api.mergeRequests({ repository_id: repoId })
+      .then(list => { if (!aborted) { repoMrs = Array.isArray(list) ? list : []; mrsLoaded = true; } })
+      .catch(() => { if (!aborted) { repoMrs = []; mrsLoaded = true; } })
+      .finally(() => { if (!aborted) mrsLoading = false; });
+    return () => { aborted = true; };
+  });
+
+  function shortId(id) {
+    if (!id) return '';
+    return id.length > 12 ? id.slice(0, 8) : id;
+  }
+
+  function fmtRelTime(ts) {
+    if (!ts) return '';
+    const now = Date.now() / 1000;
+    const diff = now - ts;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  function taskStatusVariant(s) {
+    if (s === 'done') return 'success';
+    if (s === 'in_progress') return 'warning';
+    if (s === 'blocked') return 'danger';
+    return 'muted';
+  }
+
+  function mrStatusVariant(s) {
+    if (s === 'merged') return 'success';
+    if (s === 'open') return 'info';
+    if (s === 'closed') return 'danger';
+    return 'muted';
+  }
 
   // Move focus to panel when it opens
   $effect(() => {
@@ -177,6 +253,87 @@
         repoId={repo?.id ?? null}
         scope="repo"
       />
+    {:else if activeTab === 'tasks'}
+      <div class="list-tab">
+        {#if tasksLoading}
+          <p class="list-loading">Loading tasks...</p>
+        {:else if repoTasks.length === 0}
+          <div class="list-empty">
+            <p>No tasks for this repository yet.</p>
+            <p class="list-empty-hint">Tasks are created when specs are approved and work is decomposed.</p>
+          </div>
+        {:else}
+          <table class="entity-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Title</th>
+                <th>Priority</th>
+                <th>Type</th>
+                <th>Spec</th>
+                <th>Agent</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each repoTasks as task}
+                <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'task', id: task.id, data: task }); }}>
+                  <td><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
+                  <td class="cell-title">{task.title ?? 'Untitled task'}</td>
+                  <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
+                  <td class="cell-type">{task.task_type ?? ''}</td>
+                  <td class="cell-mono">{task.spec_path ? task.spec_path.split('/').pop() : ''}</td>
+                  <td class="cell-mono">{task.assigned_to ? shortId(task.assigned_to) : ''}</td>
+                  <td class="cell-time">{fmtRelTime(task.updated_at ?? task.created_at)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+    {:else if activeTab === 'mrs'}
+      <div class="list-tab">
+        {#if mrsLoading}
+          <p class="list-loading">Loading merge requests...</p>
+        {:else if repoMrs.length === 0}
+          <div class="list-empty">
+            <p>No merge requests for this repository yet.</p>
+            <p class="list-empty-hint">MRs are created when agents complete their work.</p>
+          </div>
+        {:else}
+          <table class="entity-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Title</th>
+                <th>Branch</th>
+                <th>Agent</th>
+                <th>Changes</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each repoMrs as mr}
+                <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
+                  <td><Badge value={mr.status ?? 'open'} variant={mrStatusVariant(mr.status)} /></td>
+                  <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
+                  <td class="cell-mono">{mr.source_branch ?? ''}</td>
+                  <td class="cell-mono">{mr.author_agent_id ? shortId(mr.author_agent_id) : ''}</td>
+                  <td>
+                    {#if mr.diff_stats}
+                      <span class="diff-stat-compact">
+                        <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                        <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                      </span>
+                    {/if}
+                  </td>
+                  <td class="cell-time">{fmtRelTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
     {:else if activeTab === 'architecture'}
       <ExplorerView
         scope={{ type: 'repo', workspaceId: workspace?.id, repoId: repo?.id }}
@@ -610,6 +767,108 @@
     color: var(--color-text-muted);
     font-family: var(--font-mono);
   }
+
+  /* ── Entity list tabs (Tasks, MRs) ──────────────────────────────────── */
+  .list-tab {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-4) var(--space-6);
+  }
+
+  .list-loading {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    font-style: italic;
+    padding: var(--space-8) 0;
+    text-align: center;
+  }
+
+  .list-empty {
+    text-align: center;
+    padding: var(--space-8) var(--space-4);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+  }
+
+  .list-empty-hint {
+    font-size: var(--text-xs);
+    margin-top: var(--space-2);
+    opacity: 0.7;
+  }
+
+  .entity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  .entity-table thead th {
+    text-align: left;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  .entity-table tbody .entity-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .entity-table tbody .entity-row:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .entity-table tbody .entity-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  .entity-table td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: middle;
+  }
+
+  .cell-title {
+    font-weight: 500;
+    color: var(--color-text);
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cell-mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .cell-type {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .cell-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .diff-stat-compact {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    display: inline-flex;
+    gap: var(--space-1);
+  }
+
+  .diff-ins { color: var(--color-success); }
+  .diff-del { color: var(--color-danger); }
 
   /* ── Responsive ─────────────────────────────────────────────────────── */
   @media (max-width: 768px) {
