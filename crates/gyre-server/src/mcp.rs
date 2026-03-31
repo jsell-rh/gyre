@@ -106,7 +106,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "gyre_create_task",
-                "description": "Create a new task in the Gyre platform.",
+                "description": "Create a new task in the Gyre platform. Orchestrators use task_type to distinguish implementation (worker agents), delegation (repo orchestrator), and coordination (cross-repo notification) tasks.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -117,12 +117,29 @@ fn tool_definitions() -> Value {
                             "enum": ["low", "medium", "high", "critical"],
                             "description": "Task priority (default: medium)"
                         },
-                        "parent_task_id": { "type": "string", "description": "Parent task ID for subtasks" },
+                        "parent_task_id": { "type": "string", "description": "Parent task ID (links delegation→sub-task)" },
                         "labels": {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Labels to attach to the task"
-                        }
+                        },
+                        "task_type": {
+                            "type": "string",
+                            "enum": ["implementation", "delegation", "coordination"],
+                            "description": "Task type: implementation (triggers agent spawning), delegation (triggers repo orchestrator), coordination (cross-repo dependency notification). Null for informational/pre-approval tasks."
+                        },
+                        "order": {
+                            "type": "integer",
+                            "description": "Execution priority (lower = first). Tasks with the same order can run in parallel."
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Task IDs that must complete before this task starts. Takes precedence over order."
+                        },
+                        "spec_path": { "type": "string", "description": "Spec path this task implements (e.g. system/auth.md)" },
+                        "repo_id": { "type": "string", "description": "Repository ID this task belongs to" },
+                        "workspace_id": { "type": "string", "description": "Workspace ID this task belongs to" }
                     },
                     "required": ["title"]
                 }
@@ -135,7 +152,7 @@ fn tool_definitions() -> Value {
                     "properties": {
                         "status": {
                             "type": "string",
-                            "enum": ["backlog", "in_progress", "review", "done", "blocked"],
+                            "enum": ["backlog", "in_progress", "review", "done", "blocked", "cancelled"],
                             "description": "Filter by task status"
                         },
                         "assigned_to": { "type": "string", "description": "Filter by assigned agent ID" }
@@ -155,7 +172,7 @@ fn tool_definitions() -> Value {
                         "assigned_to": { "type": "string", "description": "Agent ID to assign" },
                         "status": {
                             "type": "string",
-                            "enum": ["backlog", "in_progress", "review", "done", "blocked"],
+                            "enum": ["backlog", "in_progress", "review", "done", "blocked", "cancelled"],
                             "description": "Transition to new status"
                         },
                         "branch": { "type": "string", "description": "Git branch for this task" },
@@ -410,6 +427,35 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
     }
+    // Signal chain fields (agent-runtime.md §1):
+    if let Some(tt) = get_str(args, "task_type") {
+        task.task_type = match tt {
+            "implementation" => Some(gyre_domain::TaskType::Implementation),
+            "delegation" => Some(gyre_domain::TaskType::Delegation),
+            "coordination" => Some(gyre_domain::TaskType::Coordination),
+            _ => {
+                return tool_error(format!(
+                    "unknown task_type: {tt}. Use implementation, delegation, or coordination"
+                ))
+            }
+        };
+    }
+    if let Some(order) = args.get("order").and_then(|v| v.as_u64()) {
+        task.order = Some(order as u32);
+    }
+    if let Some(deps) = args.get("depends_on").and_then(|v| v.as_array()) {
+        task.depends_on = deps
+            .iter()
+            .filter_map(|v| v.as_str().map(Id::new))
+            .collect();
+    }
+    task.spec_path = get_str(args, "spec_path").map(|s| s.to_string());
+    if let Some(repo_id) = get_str(args, "repo_id") {
+        task.repo_id = Id::new(repo_id);
+    }
+    if let Some(ws_id) = get_str(args, "workspace_id") {
+        task.workspace_id = Id::new(ws_id);
+    }
     match state.tasks.create(&task).await {
         Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
@@ -433,13 +479,20 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
             let items: Vec<Value> = list
                 .into_iter()
                 .map(|t| {
-                    json!({
+                    let mut v = json!({
                         "id": t.id.to_string(),
                         "title": t.title,
                         "status": format!("{:?}", t.status).to_lowercase(),
                         "priority": format!("{:?}", t.priority).to_lowercase(),
                         "assigned_to": t.assigned_to.map(|id| id.to_string()),
-                    })
+                    });
+                    if let Some(ref tt) = t.task_type {
+                        v["task_type"] = json!(format!("{:?}", tt).to_lowercase());
+                    }
+                    if let Some(ref sp) = t.spec_path {
+                        v["spec_path"] = json!(sp);
+                    }
+                    v
                 })
                 .collect();
             tool_result(serde_json::to_string_pretty(&items).unwrap_or_default())
@@ -1894,6 +1947,88 @@ mod tests {
             .contains("path traversal"));
     }
 
+    // ── signal chain: gyre_create_task with task_type ──────────────────────
+
+    #[tokio::test]
+    async fn mcp_create_task_with_signal_chain_fields() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 60,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_create_task",
+                    "arguments": {
+                        "title": "Implement auth module",
+                        "task_type": "implementation",
+                        "order": 1,
+                        "depends_on": ["task-parent-1"],
+                        "spec_path": "system/auth.md",
+                        "repo_id": "repo-abc",
+                        "workspace_id": "ws-abc",
+                        "parent_task_id": "delegation-task-1"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "create_task with signal chain fields should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Created task"));
+    }
+
+    #[tokio::test]
+    async fn mcp_create_task_delegation_type() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_create_task",
+                    "arguments": {
+                        "title": "Decompose spec into sub-tasks",
+                        "task_type": "delegation",
+                        "spec_path": "system/auth.md"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_create_task_invalid_task_type() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 62,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_create_task",
+                    "arguments": {
+                        "title": "Bad type",
+                        "task_type": "invalid_type"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown task_type"));
+    }
+
     #[tokio::test]
     async fn mcp_create_task_missing_title() {
         let (status, json) = mcp_post(
@@ -1911,6 +2046,47 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── gyre_create_task tool advertises signal chain fields ──────────────────
+
+    #[tokio::test]
+    async fn create_task_tool_schema_includes_signal_chain_fields() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "tools/list",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let create_task = tools
+            .iter()
+            .find(|t| t["name"] == "gyre_create_task")
+            .expect("gyre_create_task must be in tools list");
+        let props = &create_task["inputSchema"]["properties"];
+        assert!(
+            props.get("task_type").is_some(),
+            "must have task_type field"
+        );
+        assert!(props.get("order").is_some(), "must have order field");
+        assert!(
+            props.get("depends_on").is_some(),
+            "must have depends_on field"
+        );
+        assert!(
+            props.get("spec_path").is_some(),
+            "must have spec_path field"
+        );
+        assert!(props.get("repo_id").is_some(), "must have repo_id field");
+        assert!(
+            props.get("workspace_id").is_some(),
+            "must have workspace_id field"
+        );
     }
 
     // ── agent_complete tool advertises summary field in schema ────────────────
