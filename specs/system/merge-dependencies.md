@@ -155,15 +155,15 @@ The speculative merge system (from forge-advantages spec) uses the dependency gr
 | Dependency MR fails gates repeatedly | Escalate to CEO: "MR-042 is blocked because its dependency MR-041 can't pass gates" |
 | Circular dependency detected at declaration | Reject with error: "cycle detected: MR-041 -> MR-042 -> MR-041" |
 | Atomic group member fails merge | Roll back all group members, requeue, notify all authors |
-| Dependency chain too deep (>10 levels) | Warning to CEO. Not rejected, but flagged as a decomposition smell. |
+| Dependency chain too deep (>10 levels) | Warning to repo orchestrator. Not rejected, but flagged as a decomposition smell. |
 
-## CEO Agent Integration
+## Orchestrator Integration
 
-Dependencies reduce CEO workload:
+Dependencies reduce orchestrator workload:
 
-**Before:** CEO serializes dependent work by only dispatching Agent B after Agent A's MR merges. This blocks parallelism.
+**Before:** Repo orchestrator serializes dependent work by only dispatching Agent B after Agent A's MR merges. This blocks parallelism.
 
-**After:** CEO dispatches both agents in parallel with `depends_on` declared. Both agents work simultaneously. The merge queue handles ordering. CEO's DISPATCH step includes dependency declarations alongside task descriptions.
+**After:** Repo orchestrator dispatches both agents in parallel with `depends_on` declared. Both agents work simultaneously. The merge queue handles ordering. The orchestrator's decomposition step includes dependency declarations alongside task descriptions.
 
 The Manager Agent spec (`development/manager-agent.md`) should be updated: when dispatching parallel tasks with dependencies, include `depends_on` in the dispatch parameters.
 
