@@ -114,6 +114,18 @@
         if (aborted) return;
         const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
         repoMrs = mrList.map(mr => ({ ...mr, _gates: gateMap[mr.id] }));
+        // Enrich MRs missing diff_stats (best-effort, don't block render)
+        const needsDiffStats = repoMrs.filter(mr => !mr.diff_stats).slice(0, 20);
+        if (needsDiffStats.length > 0) {
+          Promise.all(needsDiffStats.map(mr =>
+            api.mrDiff(mr.id).then(diff => ({ id: mr.id, diff_stats: { files_changed: diff?.files_changed ?? 0, insertions: diff?.insertions ?? 0, deletions: diff?.deletions ?? 0 } }))
+              .catch(() => null)
+          )).then(results => {
+            if (aborted) return;
+            const statsMap = Object.fromEntries((results.filter(Boolean)).map(r => [r.id, r.diff_stats]));
+            repoMrs = repoMrs.map(mr => statsMap[mr.id] ? { ...mr, diff_stats: statsMap[mr.id] } : mr);
+          });
+        }
         mrsLoading = false;
         mrsLoaded = true;
       })
