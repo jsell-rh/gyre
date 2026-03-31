@@ -1472,7 +1472,27 @@
               {@const ag = agentDetail ?? entity.data ?? {}}
               <dl class="entity-meta">
                 <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
-                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} /></dd>
+                <dt>Status</dt>
+                <dd>
+                  <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
+                  {#if ag.status && ag.status !== 'pending'}
+                    <span class="status-story">
+                      <span class="status-step status-step-info">Spawned</span>
+                      <span class="status-step-arrow">→</span>
+                      {#if ag.status === 'active'}
+                        <span class="status-step status-step-success">Active</span>
+                      {:else}
+                        <span class="status-step status-step-success">Active</span>
+                        <span class="status-step-arrow">→</span>
+                        <span class="status-step status-step-{ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : 'muted'}">{ag.status}</span>
+                      {/if}
+                      {#if ag.mr_id}
+                        <span class="status-step-arrow">→</span>
+                        <span class="status-step status-step-success">MR created</span>
+                      {/if}
+                    </span>
+                  {/if}
+                </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
@@ -1628,7 +1648,7 @@
               <!-- Recent logs preview -->
               {#if Array.isArray(agentLogs) && agentLogs.length > 0}
                 <div class="agent-recent-logs">
-                  <span class="progress-section-label">Recent Activity</span>
+                  <span class="progress-section-label">Recent Activity ({agentLogs.length} entries)</span>
                   <div class="trace-list trace-list-compact">
                     {#each agentLogs.slice(0, 3) as entry}
                       <div class="trace-entry">
@@ -1639,6 +1659,9 @@
                       </div>
                     {/each}
                   </div>
+                  {#if agentLogs.length > 3}
+                    <button class="view-all-logs-btn" onclick={() => { activeTab = 'history'; }}>View all {agentLogs.length} log entries →</button>
+                  {/if}
                 </div>
               {/if}
             {/if}
@@ -4478,6 +4501,20 @@
   .trace-list-compact {
     max-height: 120px;
     overflow-y: auto;
+  }
+
+  .view-all-logs-btn {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    padding: var(--space-1) 0;
+    text-align: left;
+  }
+
+  .view-all-logs-btn:hover {
+    text-decoration: underline;
   }
 
   /* ── Comment/Review form ─────────────────────────────────────────────────── */
