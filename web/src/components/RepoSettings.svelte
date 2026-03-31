@@ -567,10 +567,10 @@
         {:else}
           <div class="audit-list" data-testid="repo-audit-list">
             <div class="audit-row audit-header">
-              <button class="audit-sort-btn" aria-sort={auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('event_type')}>Type{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
-              <button class="audit-sort-btn" aria-sort={auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('actor')}>Actor{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
-              <button class="audit-sort-btn" aria-sort={auditSortCol === 'details' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('details')}>Detail{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
-              <button class="audit-sort-btn" aria-sort={auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('timestamp')}>Time{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="Sort by type {auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('event_type')}>Type{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="Sort by actor {auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('actor')}>Actor{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="Sort by detail {auditSortCol === 'details' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('details')}>Detail{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="Sort by time {auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('timestamp')}>Time{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
             </div>
             {#each sortedAuditEvents as evt}
               <div class="audit-row" data-testid="audit-row">

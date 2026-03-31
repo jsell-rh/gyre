@@ -335,10 +335,10 @@
           <table class="data-table" data-testid="compute-targets-table">
             <thead>
               <tr>
-                <th scope="col"><button class="sort-btn" aria-sort={computeSortCol === 'name' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('name', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Name{sortArrow('name', computeSortCol, computeSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={computeSortCol === 'kind' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('kind', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Kind{sortArrow('kind', computeSortCol, computeSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={computeSortCol === 'status' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('status', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Status{sortArrow('status', computeSortCol, computeSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={computeSortCol === 'capacity' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('capacity', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Capacity{sortArrow('capacity', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'name' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Name{sortArrow('name', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'kind' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('kind', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Kind{sortArrow('kind', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'status' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Status{sortArrow('status', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col" aria-sort={computeSortCol === 'capacity' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('capacity', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>Capacity{sortArrow('capacity', computeSortCol, computeSortDir)}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -406,10 +406,10 @@
             <table class="data-table" data-testid="budget-breakdown-table">
               <thead>
                 <tr>
-                  <th scope="col"><button class="sort-btn" aria-sort={budgetSortCol === 'workspace_name' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('workspace_name', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Workspace{sortArrow('workspace_name', budgetSortCol, budgetSortDir)}</button></th>
-                  <th scope="col"><button class="sort-btn" aria-sort={budgetSortCol === 'allocated' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('allocated', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Allocated{sortArrow('allocated', budgetSortCol, budgetSortDir)}</button></th>
-                  <th scope="col"><button class="sort-btn" aria-sort={budgetSortCol === 'used' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('used', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Used{sortArrow('used', budgetSortCol, budgetSortDir)}</button></th>
-                  <th scope="col"><button class="sort-btn" aria-sort={budgetSortCol === 'pct' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('pct', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Usage %{sortArrow('pct', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'workspace_name' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('workspace_name', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Workspace{sortArrow('workspace_name', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'allocated' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('allocated', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Allocated{sortArrow('allocated', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'used' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('used', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Used{sortArrow('used', budgetSortCol, budgetSortDir)}</button></th>
+                  <th scope="col" aria-sort={budgetSortCol === 'pct' ? (budgetSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('pct', budgetSortCol, budgetSortDir, v => budgetSortCol = v, v => budgetSortDir = v)}>Usage %{sortArrow('pct', budgetSortCol, budgetSortDir)}</button></th>
                 </tr>
               </thead>
               <tbody>
@@ -468,10 +468,10 @@
           <table class="data-table" data-testid="audit-events-table">
             <thead>
               <tr>
-                <th scope="col"><button class="sort-btn" aria-sort={auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('timestamp', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Time{sortArrow('timestamp', auditSortCol, auditSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('event_type', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Event{sortArrow('event_type', auditSortCol, auditSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('actor', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Actor{sortArrow('actor', auditSortCol, auditSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={auditSortCol === 'detail' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('detail', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Details{sortArrow('detail', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('timestamp', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Time{sortArrow('timestamp', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('event_type', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Event{sortArrow('event_type', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('actor', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Actor{sortArrow('actor', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'detail' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('detail', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Details{sortArrow('detail', auditSortCol, auditSortDir)}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -535,10 +535,10 @@
           <table class="data-table" data-testid="jobs-table">
             <thead>
               <tr>
-                <th scope="col"><button class="sort-btn" aria-sort={jobsSortCol === 'name' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('name', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Job{sortArrow('name', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={jobsSortCol === 'schedule' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('schedule', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Schedule{sortArrow('schedule', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={jobsSortCol === 'last_run' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('last_run', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Last Run{sortArrow('last_run', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col"><button class="sort-btn" aria-sort={jobsSortCol === 'status' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleSort('status', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Status{sortArrow('status', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'name' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Job{sortArrow('name', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'schedule' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('schedule', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Schedule{sortArrow('schedule', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'last_run' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('last_run', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Last Run{sortArrow('last_run', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'status' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Status{sortArrow('status', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col">Action</th>
               </tr>
             </thead>
