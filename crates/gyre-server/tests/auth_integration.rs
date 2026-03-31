@@ -322,7 +322,7 @@ async fn token_revoked_after_agent_complete() {
     let task_resp: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", &auth)
-        .json(&serde_json::json!({"title": "revoke-task"}))
+        .json(&serde_json::json!({"title": "revoke-task", "task_type": "implementation"}))
         .send()
         .await
         .unwrap()

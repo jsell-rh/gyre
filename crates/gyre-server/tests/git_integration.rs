@@ -118,7 +118,7 @@ async fn create_task(client: &reqwest::Client, api: &str, auth_hdr: &str, title:
     let resp: serde_json::Value = client
         .post(format!("{api}/tasks"))
         .header("Authorization", auth_hdr)
-        .json(&serde_json::json!({ "title": title }))
+        .json(&serde_json::json!({ "title": title, "task_type": "implementation" }))
         .send()
         .await
         .unwrap()
