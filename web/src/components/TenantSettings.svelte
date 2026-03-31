@@ -324,6 +324,35 @@
     return id.length > 12 ? id.slice(0, 8) + '…' : id;
   }
 
+  // ── Entity name cache for workspace/resource resolution ────────────────
+  let nameCache = $state({});
+
+  function resolveWorkspaceName(id) {
+    if (!id) return '—';
+    const key = `ws:${id}`;
+    if (nameCache[key] !== undefined) return nameCache[key] || shortId(id);
+    nameCache = { ...nameCache, [key]: null };
+    api.workspace(id).then(ws => {
+      if (ws?.name) nameCache = { ...nameCache, [key]: ws.name };
+    }).catch(() => {});
+    return shortId(id);
+  }
+
+  function resolveEntityName(type, id) {
+    if (!id) return shortId(id);
+    const key = `${type}:${id}`;
+    if (nameCache[key] !== undefined) return nameCache[key] || shortId(id);
+    nameCache = { ...nameCache, [key]: null };
+    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                    type === 'repo' ? api.repo(id).then(r => r?.name) :
+                    type === 'ws' ? api.workspace(id).then(w => w?.name) :
+                    Promise.resolve(null);
+    fetcher.then(name => {
+      if (name) nameCache = { ...nameCache, [key]: name };
+    }).catch(() => {});
+    return shortId(id);
+  }
+
   // ── Tab keyboard navigation ────────────────────────────────────────────
   let tabListEl = $state(null);
 
@@ -633,8 +662,8 @@
                           {#if ev.event_type}<dt>Event</dt><dd>{ev.event_type}</dd>{/if}
                           {#if ev.actor}<dt>Actor</dt><dd>{ev.actor}</dd>{/if}
                           {#if ev.ip_address}<dt>IP</dt><dd class="mono">{ev.ip_address}</dd>{/if}
-                          {#if ev.resource_type}<dt>Resource</dt><dd>{ev.resource_type}{ev.resource_id ? ': ' + shortId(ev.resource_id) : ''}</dd>{/if}
-                          {#if ev.workspace_id}<dt>Workspace</dt><dd class="mono">{shortId(ev.workspace_id)}</dd>{/if}
+                          {#if ev.resource_type}<dt>Resource</dt><dd>{ev.resource_type}{ev.resource_id ? ': ' + resolveEntityName(ev.resource_type === 'agent' ? 'agent' : ev.resource_type === 'repo' || ev.resource_type === 'repository' ? 'repo' : ev.resource_type, ev.resource_id) : ''}</dd>{/if}
+                          {#if ev.workspace_id}<dt>Workspace</dt><dd class="mono" title={ev.workspace_id}>{resolveWorkspaceName(ev.workspace_id)}</dd>{/if}
                           {#if ev.detail ?? ev.message}<dt>Detail</dt><dd class="audit-full-detail">{ev.detail ?? ev.message}</dd>{/if}
                           {#if ev.metadata}
                             <dt>Metadata</dt><dd><pre class="audit-meta-pre">{JSON.stringify(ev.metadata, null, 2)}</pre></dd>
@@ -802,7 +831,7 @@
                         {dec.decision ?? '—'}
                       </span>
                     </td>
-                    <td class="mono">{dec.subject?.type ? `${dec.subject.type}:${shortId(dec.subject.id)}` : (dec.subject_id ?? '—')}</td>
+                    <td class="mono" title={dec.subject?.id ?? dec.subject_id ?? ''}>{dec.subject?.type ? `${dec.subject.type}: ${resolveEntityName(dec.subject.type, dec.subject.id)}` : (dec.subject_id ? resolveEntityName('agent', dec.subject_id) : '—')}</td>
                     <td>{dec.action ?? '—'}</td>
                     <td>{dec.resource?.type ?? dec.resource_type ?? '—'}</td>
                     <td class="mono">{dec.matched_policy ?? dec.policy_name ?? '—'}</td>
@@ -842,7 +871,7 @@
               <tbody>
                 {#each costSummary as entry (entry.agent_id ?? entry.id)}
                   <tr>
-                    <td class="mono">{shortId(entry.agent_id ?? entry.id)}</td>
+                    <td class="mono" title={entry.agent_id ?? entry.id ?? ''}>{resolveEntityName('agent', entry.agent_id ?? entry.id)}</td>
                     <td>{entry.total_cost != null ? `$${entry.total_cost.toFixed(4)}` : '—'}</td>
                     <td>{entry.total_tokens?.toLocaleString() ?? entry.tokens?.toLocaleString() ?? '—'}</td>
                     <td>{entry.count ?? entry.entries ?? '—'}</td>
@@ -879,7 +908,7 @@
                   <span class="activity-time">{fmtTimestamp(entry.timestamp ?? entry.created_at)}</span>
                   <span class="event-type">{(entry.event_type ?? entry.kind ?? '—').replace(/_/g, ' ')}</span>
                   {#if entry.actor ?? entry.user_id ?? entry.agent_id}
-                    <span class="activity-actor mono">{entry.actor ?? shortId(entry.user_id ?? entry.agent_id)}</span>
+                    <span class="activity-actor mono" title={entry.user_id ?? entry.agent_id ?? ''}>{entry.actor ?? (entry.agent_id ? resolveEntityName('agent', entry.agent_id) : shortId(entry.user_id))}</span>
                   {/if}
                   {#if entry.detail ?? entry.message ?? entry.description}
                     <span class="activity-detail">{entry.detail ?? entry.message ?? entry.description}</span>
