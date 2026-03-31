@@ -15,6 +15,7 @@
    */
 
   import { getContext, onMount } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -237,18 +238,18 @@
   <!-- ── Header ─────────────────────────────────────────────────────────────── -->
   <div class="view-header">
     <div>
-      <h1 class="page-title">Specs</h1>
+      <h1 class="page-title">{$t('spec_dashboard.title')}</h1>
       {#if scope === 'tenant'}
-        <p class="page-desc">All specs across workspaces</p>
+        <p class="page-desc">{$t('spec_dashboard.all_workspace')}</p>
       {:else if scope === 'workspace'}
-        <p class="page-desc">Specs in this workspace</p>
+        <p class="page-desc">{$t('spec_dashboard.in_workspace')}</p>
       {/if}
     </div>
     <div class="header-actions">
       {#if scope === 'repo' && repoId}
-        <Button variant="primary" onclick={() => (showNewSpec = true)}>+ New Spec</Button>
+        <Button variant="primary" onclick={() => (showNewSpec = true)}>{$t('spec_dashboard.new_spec')}</Button>
       {/if}
-      <Button variant="secondary" onclick={load}>Refresh</Button>
+      <Button variant="secondary" onclick={load}>{$t('spec_dashboard.refresh')}</Button>
     </div>
   </div>
 
@@ -301,14 +302,14 @@
 
     {:else if filtered.length === 0}
       <EmptyState
-        title="No specs found"
+        title={$t('spec_dashboard.no_specs')}
         description={filterStatus === 'all' && filterKind === 'all'
-          ? 'No specs are registered.'
-          : 'No specs match the current filters.'}
+          ? $t('spec_dashboard.no_specs_registered')
+          : $t('spec_dashboard.no_specs_filter')}
       />
       {#if filterStatus !== 'all' || filterKind !== 'all'}
         <div class="clear-filters-wrap">
-          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; }}>Clear filters</button>
+          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; }}>{$t('spec_dashboard.clear_filters')}</button>
         </div>
       {/if}
 
@@ -434,26 +435,26 @@
 </div>
 
 <!-- ── New Spec modal (Editor Split layout per ui-layout.md §2) ────────────── -->
-<Modal bind:open={showNewSpec} title="New Spec" size="lg">
+<Modal bind:open={showNewSpec} title={$t('spec_dashboard.new_spec_title')} size="lg">
   <div class="new-spec-body">
     <!-- Left: editor -->
     <div class="editor-pane">
-      <label class="field-label" for="new-spec-path">Spec Path</label>
+      <label class="field-label" for="new-spec-path">{$t('spec_dashboard.spec_path_label')}</label>
       <input
         id="new-spec-path"
         class="field-input mono"
         type="text"
         bind:value={newSpecPath}
-        placeholder="system/my-feature.md"
+        placeholder={$t('spec_dashboard.spec_path_placeholder')}
         aria-required="true"
         aria-invalid={pathTouched && !newSpecPath.trim() ? 'true' : 'false'}
         aria-describedby={pathTouched && !newSpecPath.trim() ? 'path-error' : undefined}
         onblur={() => { pathTouched = true; }}
       />
       {#if pathTouched && !newSpecPath.trim()}
-        <span id="path-error" role="alert" style="color: var(--color-danger); font-size: var(--text-xs);">Path is required</span>
+        <span id="path-error" role="alert" style="color: var(--color-danger); font-size: var(--text-xs);">{$t('spec_dashboard.path_required')}</span>
       {/if}
-      <label class="field-label" for="new-spec-content">Content</label>
+      <label class="field-label" for="new-spec-content">{$t('spec_dashboard.spec_content_label')}</label>
       <textarea
         id="new-spec-content"
         class="spec-editor"
@@ -468,14 +469,14 @@
     </div>
   </div>
   <div class="modal-footer">
-    <Button variant="secondary" onclick={() => { showNewSpec = false; }}>Cancel</Button>
+    <Button variant="secondary" onclick={() => { showNewSpec = false; }}>{$t('common.cancel')}</Button>
     <Button
       variant="primary"
       onclick={saveNewSpec}
       disabled={newSpecSaving || !newSpecPath.trim()}
       aria-busy={newSpecSaving}
     >
-      {newSpecSaving ? 'Saving…' : 'Save & Create MR'}
+      {newSpecSaving ? $t('spec_dashboard.saving') : $t('spec_dashboard.save_create_mr')}
     </Button>
   </div>
 </Modal>

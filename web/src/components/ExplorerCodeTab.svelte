@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -11,10 +12,10 @@
 
   let subTab = $state('branches');
   const SUB_TABS = [
-    { id: 'branches', label: 'Branches' },
-    { id: 'commits', label: 'Commits' },
-    { id: 'merge-requests', label: 'Merge Requests' },
-    { id: 'merge-queue', label: 'Merge Queue' },
+    { id: 'branches', labelKey: 'code_tab.branches' },
+    { id: 'commits', labelKey: 'code_tab.commits' },
+    { id: 'merge-requests', labelKey: 'code_tab.merge_requests' },
+    { id: 'merge-queue', labelKey: 'code_tab.merge_queue' },
   ];
 
   // Clone URL copy state
@@ -172,15 +173,15 @@
   <!-- Clone URL header -->
   {#if cloneUrl}
     <div class="clone-url-bar">
-      <span class="clone-label">Clone</span>
+      <span class="clone-label">{$t('code_tab.clone')}</span>
       <code class="clone-url-text" title={cloneUrl}>{cloneUrl}</code>
       <button class="clone-copy-btn" onclick={copyCloneUrl} aria-label="Copy clone URL" title="Copy clone URL">
         {#if cloneCopied}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-          Copied!
+          {$t('code_tab.copied')}
         {:else}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-          Copy
+          {$t('code_tab.copy')}
         {/if}
       </button>
     </div>
@@ -195,7 +196,7 @@
         aria-selected={subTab === st.id}
         onclick={() => switchSubTab(st.id)}
         type="button"
-      >{st.label}</button>
+      >{$t(st.labelKey)}</button>
     {/each}
   </div>
 
@@ -204,7 +205,7 @@
     <input
       type="search"
       class="filter-input"
-      placeholder="Filter {SUB_TABS.find(t => t.id === subTab)?.label ?? ''}…"
+      placeholder="Filter {$t(SUB_TABS.find(st => st.id === subTab)?.labelKey ?? '')}…"
       bind:value={filterQuery}
       aria-label="Filter list"
     />
@@ -221,7 +222,7 @@
       <Skeleton lines={6} />
     {:else if subTab === 'branches'}
       {#if filteredBranches.length === 0}
-        <EmptyState title="No branches" message={filterQuery ? 'No branches match your filter.' : 'No branches found for this repository.'} />
+        <EmptyState title={$t('code_tab.no_branches')} message={filterQuery ? 'No branches match your filter.' : 'No branches found for this repository.'} />
       {:else}
         <table class="code-table">
           <thead>
@@ -247,7 +248,7 @@
 
     {:else if subTab === 'commits'}
       {#if filteredCommits.length === 0}
-        <EmptyState title="No commits" message={filterQuery ? 'No commits match your filter.' : 'No commits found for this branch.'} />
+        <EmptyState title={$t('code_tab.no_commits')} message={filterQuery ? 'No commits match your filter.' : 'No commits found for this branch.'} />
       {:else}
         <table class="code-table">
           <thead>
@@ -273,7 +274,7 @@
 
     {:else if subTab === 'merge-requests'}
       {#if filteredMrs.length === 0}
-        <EmptyState title="No merge requests" message={filterQuery ? 'No MRs match your filter.' : 'No open merge requests for this repository.'} />
+        <EmptyState title={$t('code_tab.no_mrs')} message={filterQuery ? 'No MRs match your filter.' : 'No open merge requests for this repository.'} />
       {:else}
         <table class="code-table">
           <thead>
@@ -299,7 +300,7 @@
 
     {:else if subTab === 'merge-queue'}
       {#if filteredQueue.length === 0}
-        <EmptyState title="Merge queue empty" message={filterQuery ? 'No entries match your filter.' : 'No entries in the merge queue for this repository.'} />
+        <EmptyState title={$t('code_tab.queue_empty')} message={filterQuery ? 'No entries match your filter.' : 'No entries in the merge queue for this repository.'} />
       {:else}
         <table class="code-table">
           <thead>
