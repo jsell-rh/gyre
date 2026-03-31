@@ -495,12 +495,14 @@
         </thead>
         <tbody>
           {#each (specsShowAll ? sortedSpecs : sortedSpecs.slice(0, 10)) as spec (spec.path ?? spec.id)}
-            <tr class="spec-row" class:clickable={spec.workspace_id} onclick={() => {
-              if (spec.workspace_id) {
+            <tr class="spec-row clickable" onclick={() => {
+              if (openDetailPanel) {
+                openDetailPanel({ type: 'spec', id: spec.path, data: { ...spec, path: spec.path, repo_id: spec.repo_id } });
+              } else if (spec.workspace_id) {
                 const ws = workspaces.find(w => w.id === spec.workspace_id);
                 if (ws && onSelectWorkspace) onSelectWorkspace(ws);
               }
-            }} role={spec.workspace_id ? 'button' : undefined} tabindex={spec.workspace_id ? 0 : undefined} onkeydown={(e) => { if (e.key === 'Enter' && spec.workspace_id) { const ws = workspaces.find(w => w.id === spec.workspace_id); if (ws && onSelectWorkspace) onSelectWorkspace(ws); } }}>
+            }} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') { if (openDetailPanel) { openDetailPanel({ type: 'spec', id: spec.path, data: { ...spec, path: spec.path, repo_id: spec.repo_id } }); } else if (spec.workspace_id) { const ws = workspaces.find(w => w.id === spec.workspace_id); if (ws && onSelectWorkspace) onSelectWorkspace(ws); } } }}>
               <td class="spec-path">{spec.path ?? spec.name ?? '—'}</td>
               <td class="spec-attribution">
                 {#if spec.workspace_name}
