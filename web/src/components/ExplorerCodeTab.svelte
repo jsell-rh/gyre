@@ -16,6 +16,8 @@
     { id: 'commits', labelKey: 'code_tab.commits' },
     { id: 'merge-requests', labelKey: 'code_tab.merge_requests' },
     { id: 'merge-queue', labelKey: 'code_tab.merge_queue' },
+    { id: 'hot-files', label: 'Hot Files' },
+    { id: 'provenance', label: 'Provenance' },
     { id: 'tasks', labelKey: 'code_tab.tasks' },
     { id: 'agents', labelKey: 'code_tab.agents' },
   ];
@@ -49,6 +51,9 @@
   let tasks = $state([]);
   let agents = $state([]);
   let agentCommits = $state({});
+  let hotFiles = $state([]);
+  let aibomEntries = $state([]);
+  let agentCommitRecords = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let filterQuery = $state('');
@@ -116,6 +121,16 @@
         const all = await api.tasks({ repoId });
         // Client-side filter: only show tasks explicitly linked to this repo
         tasks = (Array.isArray(all) ? all : []).filter(t => t.repo_id === repoId);
+      } else if (tab === 'hot-files') {
+        hotFiles = await api.repoHotFiles(repoId, 30).catch(() => []);
+        if (!Array.isArray(hotFiles)) hotFiles = [];
+      } else if (tab === 'provenance') {
+        const [aibom, acList] = await Promise.all([
+          api.repoAibom(repoId).catch(() => []),
+          api.repoAgentCommits(repoId).catch(() => []),
+        ]);
+        aibomEntries = Array.isArray(aibom) ? aibom : [];
+        agentCommitRecords = Array.isArray(acList) ? acList : [];
       } else if (tab === 'agents') {
         agents = await api.agents({ repoId });
         if (!Array.isArray(agents)) agents = [];
@@ -269,7 +284,7 @@
         aria-selected={subTab === st.id}
         onclick={() => switchSubTab(st.id)}
         type="button"
-      >{$t(st.labelKey)}</button>
+      >{st.labelKey ? $t(st.labelKey) : st.label}</button>
     {/each}
   </div>
 
@@ -486,6 +501,111 @@
           </tbody>
         </table>
       {/if}
+
+    {:else if subTab === 'hot-files'}
+      {#if hotFiles.length === 0}
+        <EmptyState title="No hot files" message="No files have been frequently modified yet. Hot files appear after multiple commits touch the same paths." />
+      {:else}
+        <table class="code-table">
+          <thead>
+            <tr>
+              <th scope="col">File</th>
+              <th scope="col">Changes</th>
+              <th scope="col">Authors</th>
+              <th scope="col">Last Modified</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each hotFiles as file}
+              <tr class="table-row">
+                <td class="mono">{file.path ?? file.file ?? '—'}</td>
+                <td>{file.change_count ?? file.commits ?? file.count ?? 0}</td>
+                <td class="secondary">{file.author_count ?? file.authors ?? '—'}</td>
+                <td class="secondary">{relativeTime(file.last_modified ?? file.updated_at)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    {:else if subTab === 'provenance'}
+      <div class="provenance-tab">
+        {#if agentCommitRecords.length > 0}
+          <div class="provenance-section">
+            <h3 class="provenance-heading">Agent Commit Attribution</h3>
+            <p class="provenance-desc">Every commit is tracked back to the agent that authored it, forming an auditable chain from spec to code.</p>
+            <table class="code-table">
+              <thead>
+                <tr>
+                  <th scope="col">Commit</th>
+                  <th scope="col">Agent</th>
+                  <th scope="col">Branch</th>
+                  <th scope="col">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each agentCommitRecords as ac}
+                  <tr class="table-row" onclick={() => { if (ac.agent_id) onRowClick({ id: ac.agent_id }, 'agent'); }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter' && ac.agent_id) onRowClick({ id: ac.agent_id }, 'agent'); }}>
+                    <td class="mono">{(ac.sha ?? ac.commit_sha ?? '').slice(0, 7)}</td>
+                    <td>
+                      {#if ac.agent_id}
+                        <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: ac.agent_id }, 'agent'); }} title={ac.agent_id}>
+                          <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                          {ac.agent_name ?? ac.agent_id.slice(0, 8)}
+                        </button>
+                      {:else}
+                        <span class="secondary">—</span>
+                      {/if}
+                    </td>
+                    <td class="mono secondary">{ac.branch ?? '—'}</td>
+                    <td class="secondary">{relativeTime(ac.timestamp ?? ac.created_at)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+
+        {#if aibomEntries.length > 0}
+          <div class="provenance-section">
+            <h3 class="provenance-heading">AI Bill of Materials (AIBOM)</h3>
+            <p class="provenance-desc">Records of AI model usage in code generation, for compliance and auditability.</p>
+            <table class="code-table">
+              <thead>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Agent</th>
+                  <th scope="col">Tokens</th>
+                  <th scope="col">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each aibomEntries as entry}
+                  <tr class="table-row">
+                    <td>{entry.model ?? entry.model_name ?? '—'}</td>
+                    <td>
+                      {#if entry.agent_id}
+                        <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: entry.agent_id }, 'agent'); }} title={entry.agent_id}>
+                          <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                          {entry.agent_id.slice(0, 8)}
+                        </button>
+                      {:else}
+                        <span class="secondary">—</span>
+                      {/if}
+                    </td>
+                    <td>{entry.total_tokens ?? entry.tokens ?? '—'}</td>
+                    <td class="secondary">{relativeTime(entry.timestamp ?? entry.created_at)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+
+        {#if agentCommitRecords.length === 0 && aibomEntries.length === 0}
+          <EmptyState title="No provenance data" message="Provenance records appear after agents commit code. Each commit is attributed to its authoring agent, and AI model usage is tracked." />
+        {/if}
+      </div>
 
     {:else if subTab === 'agents'}
       {#if filteredAgents.length === 0}
@@ -919,6 +1039,35 @@
   }
   .agent-link:hover { text-decoration-color: var(--color-primary); }
   .agent-icon { margin-right: 2px; font-size: var(--text-xs); }
+
+  /* Provenance tab */
+  .provenance-tab {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    padding: var(--space-2) 0;
+  }
+
+  .provenance-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .provenance-heading {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+    padding: 0 var(--space-4);
+  }
+
+  .provenance-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+    padding: 0 var(--space-4);
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .subtab-btn, .sort-btn, .table-row { transition: none; }
