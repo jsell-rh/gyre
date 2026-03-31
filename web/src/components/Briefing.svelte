@@ -139,7 +139,7 @@
       if (e.message && e.message.includes('404')) {
         // 404: no briefing data yet — show empty state
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
-        error = 'Briefing data not yet available';
+        error = $t('briefing.not_yet_available');
       } else {
         // Real error — set briefing to null to prevent "All caught up" showing alongside error
         briefing = null;
@@ -297,13 +297,13 @@
               </div>
               <div class="item-detail">
                 {#if item.mrs_merged != null}
-                  <span>{item.mrs_merged} MR{item.mrs_merged !== 1 ? 's' : ''} merged. All gates passed.</span>
+                  <span>{$t('briefing.mrs_merged', { values: { count: item.mrs_merged } })}</span>
                 {/if}
                 {#if item.decision}
                   <span class="item-decision">
-                    Decision: {item.decision}
+                    {$t('briefing.decision_label', { values: { text: item.decision } })}
                     {#if item.confidence}
-                      <span class="confidence-badge confidence-{item.confidence}">(confidence: {item.confidence})</span>
+                      <span class="confidence-badge confidence-{item.confidence}">({$t('briefing.confidence', { values: { level: item.confidence } })})</span>
                     {/if}
                   </span>
                 {/if}
@@ -360,7 +360,7 @@
                       >
                         {u.agent_id}
                       </button>
-                      <span class="uncertainty-text">uncertain: "{u.text}"</span>
+                      <span class="uncertainty-text">{$t('briefing.uncertain', { values: { text: u.text } })}</span>
                     </div>
                   {/each}
                 </div>
