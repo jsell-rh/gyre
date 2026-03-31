@@ -43,7 +43,12 @@
     "all_workspaces": "All Workspaces",
     "back_to_workspace": "Back to workspace home",
     "back_to_all_workspaces": "Back to All Workspaces",
-    "agent_rules_label": "Agent Rules"
+    "agent_rules_label": "Agent Rules",
+    "location": "Location",
+    "go_to_workspace_home": "Go to {name} home",
+    "open_search": "Open search (Ctrl+K)",
+    "navigation_drawer": "Navigation drawer",
+    "close_drawer": "Close navigation drawer"
   },
   "workspace_home": {
     "select_workspace": "Select a workspace",
@@ -150,8 +155,9 @@
     "copy_clone_url": "Copy clone URL to clipboard"
   },
   "status_bar": {
-    "trust": "Trust: {level}",
-    "budget": "Budget: {pct}%",
+    "label": "Status bar",
+    "trust": "Trust",
+    "budget": "Budget",
     "live": "Live",
     "live_tooltip": "Live \u2014 real-time updates active",
     "offline": "Offline",
@@ -363,7 +369,9 @@
       "label": "Bearer Token",
       "placeholder": "gyre-dev-token",
       "save": "Save Token",
-      "saved": "Token saved"
+      "saved": "Token saved",
+      "hide": "Hide token",
+      "show": "Show token"
     }
   },
   "briefing": {
@@ -933,7 +941,10 @@
     "ask_request_failed": "Request failed: {status}",
     "ask_llm_failed": "LLM connection failed",
     "repos_load_failed": "Failed to load repositories: {error}",
-    "concept_search_failed": "Concept search failed: {error}"
+    "concept_search_failed": "Concept search failed: {error}",
+    "explore_repo": "Explore {name} repository",
+    "toggle_filters": "Toggle filter panel",
+    "clear_search": "Clear search"
   },
   "detail_panel": {
     "tabs": {

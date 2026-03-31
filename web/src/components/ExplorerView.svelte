@@ -293,7 +293,7 @@
     {:else}
       <div class="ws-repo-grid">
         {#each wsRepos as repo (repo.id)}
-          <button class="ws-repo-card" onclick={() => selectRepo(repo)} aria-label="Explore {repo.name} repository">
+          <button class="ws-repo-card" onclick={() => selectRepo(repo)} aria-label={$t('explorer_view.explore_repo', { values: { name: repo.name } })}>
             <div class="ws-repo-card-left">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="ws-repo-icon" aria-hidden="true">
                 <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
@@ -335,7 +335,7 @@
               class="repo-select"
               value={selectedRepoId}
               onchange={onRepoChange}
-              aria-label="Select repository to explore"
+              aria-label={$t('explorer_view.select_repo')}
             >
               <option value="">{$t('explorer_view.select_repo')}</option>
               {#each repos as repo}
@@ -364,7 +364,7 @@
     <!-- Architecture / Code tab switcher — only shown when a repo is selected -->
     {#if selectedRepoId}
       <!-- svelte-ignore a11y_interactive_supports_focus -->
-      <div class="explorer-tabs" role="tablist" aria-label="Explorer view"
+      <div class="explorer-tabs" role="tablist" aria-label={$t('explorer_view.system_title')}
         onkeydown={(e) => {
           const tabs = ['architecture', 'briefing', 'code'];
           const idx = tabs.indexOf(explorerTab);
@@ -414,8 +414,8 @@
           class="ctrl-btn icon-btn"
           class:active={filterVisible}
           onclick={() => { filterVisible = !filterVisible; }}
-          title="Toggle filter panel"
-          aria-label="Toggle filter panel"
+          title={$t('explorer_view.toggle_filters')}
+          aria-label={$t('explorer_view.toggle_filters')}
           aria-pressed={filterVisible}
           type="button"
         >
@@ -437,7 +437,7 @@
             value={conceptQuery}
             oninput={onSearchInput}
             onkeydown={onSearchKeydown}
-            aria-label="Search concepts by name or qualified name"
+            aria-label={$t('explorer_view.search_placeholder')}
             bind:this={searchInputEl}
           />
         </div>
@@ -462,12 +462,12 @@
           {#if conceptNodes.length > 0}
             <span class="concept-chip">
               {$t('explorer_view.nodes_matching', { values: { count: conceptNodes.length, query: conceptQuery.trim() } })}
-              <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
+              <button class="chip-clear" onclick={clearConceptSearch} aria-label={$t('explorer_view.clear_search')}>✕</button>
             </span>
           {:else}
             <span class="concept-chip no-results">
               {$t('explorer_view.no_nodes_matching', { values: { query: conceptQuery.trim() } })}
-              <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
+              <button class="chip-clear" onclick={clearConceptSearch} aria-label={$t('explorer_view.clear_search')}>✕</button>
             </span>
           {/if}
         {/if}
@@ -483,7 +483,7 @@
             bind:value={askQuery}
             onkeydown={(e) => { if (e.key === 'Enter') submitAsk(); }}
             disabled={askLoading}
-            aria-label="Ask about architecture"
+            aria-label={$t('explorer_view.ask_placeholder')}
             aria-busy={askLoading}
           />
           <button
@@ -491,7 +491,7 @@
             onclick={submitAsk}
             disabled={askLoading || !askQuery.trim()}
             type="button"
-            aria-label="Submit question"
+            aria-label={$t('explorer_view.ask_btn')}
           >
             {#if askLoading}
               <span class="spinner" aria-hidden="true"></span>
@@ -551,7 +551,7 @@
         {:else if graphError}
           <div class="graph-error" role="alert">
             <p>{$t('explorer_view.graph_error', { values: { error: graphError } })}</p>
-            <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">{$t('common.retry')}</button>
+            <button onclick={() => loadGraph(selectedRepoId)} aria-label={$t('common.retry')}>{$t('common.retry')}</button>
           </div>
 
         {:else if graph}
