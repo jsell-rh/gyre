@@ -77,7 +77,7 @@
       // Sort by priority ascending (1 = highest)
       notifications = data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     } catch (e) {
-      error = e.message || 'Failed to load notifications';
+      error = e.message || $t('decisions.load_failed');
       notifications = [];
     } finally {
       if (!isBackground) loading = false;
@@ -338,7 +338,7 @@
               onclick={() => toggleExpand(n.id)}
               aria-expanded={isExpanded}
               aria-controls="inbox-card-{n.id}"
-              aria-label="{isExpanded ? 'Collapse' : 'Expand'}: {n.title}"
+              aria-label="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
             >
               <div class="card-header-left">
                 <span
@@ -620,7 +620,7 @@
           <button
             class="show-more-btn"
             onclick={() => { displayLimit += PAGE_SIZE; }}
-            aria-label="Show more notifications"
+            aria-label={$t('decisions.show_more_label')}
           >
             {$t('decisions.show_more', { values: { count: allVisibleNotifications.length - displayLimit } })}
           </button>

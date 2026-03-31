@@ -656,7 +656,7 @@
           >
             <option value="">{$t('repo_settings.audit.all_event_types')}</option>
             {#each AUDIT_EVENT_TYPES as et}
-              <option value={et}>{et}</option>
+              <option value={et}>{$t(`repo_settings.audit.event_types.${et}`)}</option>
             {/each}
           </select>
           <button
