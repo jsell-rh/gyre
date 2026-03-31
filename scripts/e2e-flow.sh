@@ -1484,11 +1484,9 @@ TOKEN_INFO=$(api_get "${API}/auth/token-info" 2>/dev/null) || TOKEN_INFO="{}"
 ok "Token info: $(echo "$TOKEN_INFO" | jq -r '.token_kind // "retrieved"')"
 
 # #############################################################################
-#  LLM-POWERED MOLDABLE DEVELOPMENT — requires LLM credentials on server
+#  LLM-POWERED TESTS — requires LLM credentials
 # #############################################################################
 
-step $((STEP++)) "LLM moldable development"
-# =============================================================================
 # Probe: check if LLM is configured by hitting briefing/ask. If 503, skip.
 LLM_PROBE=$(curl -s -w '\n%{http_code}' -H "$AUTH" -H "$CT" \
   -d '{"question":"test"}' \
@@ -1496,10 +1494,210 @@ LLM_PROBE=$(curl -s -w '\n%{http_code}' -H "$AUTH" -H "$CT" \
 LLM_PROBE_CODE=$(echo "$LLM_PROBE" | tail -1)
 
 if [ "$LLM_PROBE_CODE" = "503" ]; then
+  step $((STEP++)) "Real agent spawn (Claude Agent SDK)"
+  info "LLM not configured — skipping real agent test"
+
+  step $((STEP++)) "LLM moldable development"
   info "LLM not configured on server (503) — skipping moldable development tests"
   info "Start server with GYRE_VERTEX_PROJECT + GYRE_LLM_MODEL to enable"
 else
   ok "LLM is available (HTTP ${LLM_PROBE_CODE})"
+
+  # =========================================================================
+  step $((STEP++)) "Real agent spawn (Claude Agent SDK)"
+  # =========================================================================
+  # This is the key test: the server spawns a real process that runs Claude
+  # Code with MCP connection back to Gyre. The agent reads its task,
+  # implements code, commits, pushes, and calls gyre_agent_complete — all
+  # autonomously via the Claude Agent SDK.
+
+  # Create a compute target that runs claude --print as the agent command.
+  # The server injects GYRE_* env vars; we configure the command and args.
+  AGENT_SCRIPT="$(cd /home/jsell/code/gyre/worktrees/ralph-ui-fix && pwd)/scripts/e2e-agent-claude.sh"
+
+  # Write the agent wrapper script that sets up MCP config and runs Claude
+  cat > "$AGENT_SCRIPT" << 'AGENT_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This script is spawned by the Gyre server as a real agent process.
+# It receives GYRE_* env vars and runs Claude Code with MCP to implement a task.
+
+: "${GYRE_SERVER_URL:?}" "${GYRE_AUTH_TOKEN:?}" "${GYRE_CLONE_URL:?}"
+: "${GYRE_BRANCH:?}" "${GYRE_AGENT_ID:?}" "${GYRE_TASK_ID:?}"
+
+echo "[agent] Starting: agent=${GYRE_AGENT_ID:0:8} task=${GYRE_TASK_ID:0:8} branch=${GYRE_BRANCH}"
+
+# Heartbeat
+curl -sf -X PUT -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
+  "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
+
+# Clone repo
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
+  GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
+  git clone "${GYRE_CLONE_URL}.git" "$WORK/repo" 2>/dev/null || {
+    mkdir -p "$WORK/repo"; cd "$WORK/repo"; git init
+    git remote add origin "${GYRE_CLONE_URL}.git"
+}
+
+cd "$WORK/repo"
+git config user.email "agent-${GYRE_AGENT_ID}@gyre.local"
+git config user.name "Gyre Agent"
+
+GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
+  GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
+  git fetch origin main 2>/dev/null || true
+git checkout -b "${GYRE_BRANCH}" origin/main 2>/dev/null || git checkout -b "${GYRE_BRANCH}" 2>/dev/null || true
+
+# Write MCP config for Claude to connect to Gyre
+MCP_CFG="$WORK/mcp.json"
+cat > "$MCP_CFG" << MCPEOF
+{
+  "mcpServers": {
+    "gyre": {
+      "type": "url",
+      "url": "${GYRE_SERVER_URL}/mcp",
+      "headers": {"Authorization": "Bearer ${GYRE_AUTH_TOKEN}"}
+    }
+  }
+}
+MCPEOF
+
+# Read task details for the prompt
+TASK_JSON=$(curl -sf -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
+  "${GYRE_SERVER_URL}/api/v1/tasks/${GYRE_TASK_ID}" 2>/dev/null) || TASK_JSON="{}"
+TASK_TITLE=$(echo "$TASK_JSON" | jq -r '.title // "implement task"')
+TASK_DESC=$(echo "$TASK_JSON" | jq -r '.description // ""')
+
+echo "[agent] Task: $TASK_TITLE"
+echo "[agent] Running Claude Code..."
+
+# Run Claude Code as the agent
+claude --print --bare \
+  --mcp-config "$MCP_CFG" --strict-mcp-config \
+  --model claude-sonnet-4-6 \
+  --allowedTools 'Read,Write,Edit,Bash,Glob,Grep,mcp__gyre__*' \
+  -p "You are a Gyre autonomous agent working in $(pwd).
+
+Your task: ${TASK_TITLE}
+${TASK_DESC}
+
+Agent ID: ${GYRE_AGENT_ID}
+Task ID: ${GYRE_TASK_ID}
+Branch: ${GYRE_BRANCH}
+
+Instructions:
+1. Read the task details using gyre_list_tasks (filter by id ${GYRE_TASK_ID})
+2. Implement the requirements by creating/editing files
+3. Commit with a conventional commit message (feat:, fix:, etc.)
+4. Push: run git push origin ${GYRE_BRANCH} (use git -c http.extraHeader='Authorization: Bearer ${GYRE_AUTH_TOKEN}' -c http.${GYRE_SERVER_URL}/.extraHeader='Authorization: Bearer ${GYRE_AUTH_TOKEN}' push origin ${GYRE_BRANCH})
+5. Signal completion using gyre_agent_complete with branch '${GYRE_BRANCH}' and target_branch 'main'
+
+Important: You MUST call gyre_agent_complete as your final action." 2>&1 || true
+
+echo "[agent] Claude Code finished"
+AGENT_WRAPPER
+  chmod +x "$AGENT_SCRIPT"
+  ok "Agent wrapper script created"
+
+  # Create a compute target that uses our wrapper
+  AGENT_CT=$(api_post "${API}/admin/compute-targets" "{
+    \"name\": \"e2e-claude-agent-${RUN_ID}\",
+    \"target_type\": \"local\",
+    \"config\": {
+      \"command\": \"${AGENT_SCRIPT}\",
+      \"args\": []
+    }
+  }" 2>/dev/null) || AGENT_CT=""
+
+  if [ -n "$AGENT_CT" ]; then
+    AGENT_CT_ID=$(echo "$AGENT_CT" | jq -r '.id // "none"')
+    ok "Compute target: ${AGENT_CT_ID} (local, claude wrapper)"
+  else
+    warn "Compute target creation failed — skipping real agent test"
+    AGENT_CT_ID=""
+  fi
+
+  if [ -n "$AGENT_CT_ID" ] && [ "$AGENT_CT_ID" != "none" ]; then
+    # Create a task for the real agent
+    REAL_TASK=$(api_post "${API}/tasks" "{
+      \"title\": \"Add a version module with build info\",
+      \"description\": \"Create src/version.rs that exports a Version struct with name, version, and build_timestamp fields. Add a pub fn current() -> Version that returns the current build info. Re-export from lib.rs.\",
+      \"priority\": \"medium\",
+      \"task_type\": \"implementation\",
+      \"spec_path\": \"${SPEC_PATH}\",
+      \"workspace_id\": \"${WS_ID}\",
+      \"repo_id\": \"${REPO_ID}\"
+    }")
+    REAL_TASK_ID=$(echo "$REAL_TASK" | jq -r '.id')
+    ok "Task for real agent: ${REAL_TASK_ID}"
+
+    # Spawn the agent — the server will exec our wrapper script
+    info "Spawning real Claude agent..."
+    REAL_SPAWN=$(api_post "${API}/agents/spawn" "{
+      \"name\": \"claude-agent-${RUN_ID}\",
+      \"repo_id\": \"${REPO_ID}\",
+      \"task_id\": \"${REAL_TASK_ID}\",
+      \"branch\": \"feat/version-module\",
+      \"compute_target_id\": \"${AGENT_CT_ID}\"
+    }")
+    REAL_AGENT_ID=$(echo "$REAL_SPAWN" | jq -r '.agent.id')
+    ok "Agent spawned: ${REAL_AGENT_ID}"
+
+    # Wait for the agent to complete (polls status, max 120s)
+    info "Waiting for Claude agent to complete autonomously..."
+    AGENT_DONE=false
+    for i in $(seq 1 120); do
+      sleep 2
+      REAL_AGENT_STATUS=$(api_get "${API}/agents/${REAL_AGENT_ID}" | jq -r '.status')
+      if [ "$REAL_AGENT_STATUS" = "idle" ]; then
+        AGENT_DONE=true
+        break
+      fi
+      if [ "$REAL_AGENT_STATUS" = "failed" ] || [ "$REAL_AGENT_STATUS" = "dead" ]; then
+        warn "Agent ended with status: ${REAL_AGENT_STATUS}"
+        AGENT_DONE=true
+        break
+      fi
+      [ $((i % 15)) -eq 0 ] && info "Agent working... (${i}s, status: ${REAL_AGENT_STATUS})"
+    done
+
+    if [ "$AGENT_DONE" = true ] && [ "$REAL_AGENT_STATUS" = "idle" ]; then
+      ok "Claude agent completed autonomously!"
+
+      # Verify MR was created by the agent
+      REAL_MRS=$(api_get "${API}/merge-requests?repository_id=${REPO_ID}")
+      REAL_AGENT_MR=$(echo "$REAL_MRS" | jq ".[] | select(.author_agent_id == \"${REAL_AGENT_ID}\")")
+      if [ -n "$REAL_AGENT_MR" ]; then
+        REAL_MR_ID=$(echo "$REAL_AGENT_MR" | jq -r '.id')
+        REAL_MR_STATUS=$(echo "$REAL_AGENT_MR" | jq -r '.status')
+        ok "Agent created MR: ${REAL_MR_ID} (${REAL_MR_STATUS})"
+
+        # Check the diff
+        REAL_DIFF=$(api_get "${API}/merge-requests/${REAL_MR_ID}/diff")
+        REAL_DIFF_FILES=$(echo "$REAL_DIFF" | jq '.files_changed')
+        ok "Agent MR diff: ${REAL_DIFF_FILES} files changed"
+      else
+        warn "No MR found from the real agent"
+      fi
+    elif [ "$AGENT_DONE" = false ]; then
+      warn "Agent did not complete within 240s (status: ${REAL_AGENT_STATUS})"
+    fi
+
+    # Clean up compute target
+    curl -s -X DELETE -H "$AUTH" "${API}/admin/compute-targets/${AGENT_CT_ID}" >/dev/null 2>&1
+  fi
+
+  # =========================================================================
+  step $((STEP++)) "LLM moldable development"
+  # =========================================================================
 
   # --- Spec Assist (LLM-assisted editing) ---
   info "Testing spec assist (SSE stream)..."
