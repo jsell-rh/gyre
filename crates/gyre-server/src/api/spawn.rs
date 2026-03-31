@@ -2294,7 +2294,8 @@ mod tests {
     async fn spawn_rejects_delegation_tasks() {
         let app = app();
         let (app, repo_id) = create_repo(app).await;
-        let (app, task_id) = create_task_with_type(app, "Delegation task", Some("delegation")).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation task", Some("delegation")).await;
         let (_, resp) = try_spawn(app, "worker-deleg", &repo_id, &task_id, "feat/deleg").await;
 
         assert_eq!(
@@ -2336,10 +2337,8 @@ mod tests {
         let app = app();
         let (app, repo_id) = create_repo(app).await;
         // Create task without task_type (simulates push-hook pre-approval task).
-        let (app, task_id) =
-            create_task_with_type(app, "Pre-approval push-hook task", None).await;
-        let (_, resp) =
-            try_spawn(app, "worker-none", &repo_id, &task_id, "feat/no-type").await;
+        let (app, task_id) = create_task_with_type(app, "Pre-approval push-hook task", None).await;
+        let (_, resp) = try_spawn(app, "worker-none", &repo_id, &task_id, "feat/no-type").await;
 
         assert_eq!(
             resp.status(),
@@ -2360,8 +2359,7 @@ mod tests {
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) =
             create_task_with_type(app, "Implementation task", Some("implementation")).await;
-        let (_, resp) =
-            try_spawn(app, "worker-impl", &repo_id, &task_id, "feat/impl").await;
+        let (_, resp) = try_spawn(app, "worker-impl", &repo_id, &task_id, "feat/impl").await;
 
         assert_eq!(
             resp.status(),
