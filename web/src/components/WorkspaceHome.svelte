@@ -278,6 +278,9 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: Date.now() / 1000 } : item
+      );
       actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_re_queued') } };
     } catch (e) {
       actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
@@ -288,9 +291,10 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.markNotificationRead(n.id);
-      notifications = notifications.filter(item => item.id !== n.id);
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.dismissed') } };
+      setTimeout(() => { notifications = notifications.filter(item => item.id !== n.id); }, 600);
     } catch {
-      toastError($t('decisions.dismiss_failed'));
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: $t('decisions.dismiss_failed') } };
     }
     actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
