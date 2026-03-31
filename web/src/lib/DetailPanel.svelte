@@ -326,7 +326,19 @@
         .then(([results, defs]) => {
           const raw = Array.isArray(results) ? results : (results?.gates ?? []);
           const defMap = Object.fromEntries((Array.isArray(defs) ? defs : []).map(g => [g.id, g]));
-          mrGates = raw.map(r => ({ ...r, ...(defMap[r.gate_id] ?? {}), _result_id: r.id }));
+          // Server now enriches results with gate_name/gate_type/required/command,
+          // but fall back to client-side join for older servers
+          mrGates = raw.map(r => {
+            const def = defMap[r.gate_id] ?? {};
+            return {
+              ...r,
+              name: r.gate_name ?? def.name ?? r.name,
+              gate_type: r.gate_type ?? def.gate_type,
+              required: r.required ?? def.required,
+              command: r.command ?? def.command,
+              _result_id: r.id,
+            };
+          });
         })
         .catch(() => { mrGates = []; })
         .finally(() => { mrGatesLoading = false; });
@@ -974,37 +986,37 @@
                   <div class="provenance-flow">
                     {#if specPath}
                       <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })} title={specPath}>
-                        <span class="provenance-icon">&#x1F4C4;</span>
+                        <span class="provenance-icon prov-icon-spec"></span>
                         <span class="provenance-type">Spec</span>
                         <span class="provenance-name">{specPath.split('/').pop()}</span>
                       </button>
-                      <span class="provenance-arrow">\u2192</span>
+                      <span class="provenance-arrow">&#x2192;</span>
                     {/if}
                     {#if mr.task_id}
                       <button class="provenance-node provenance-task" onclick={() => navigateTo('task', mr.task_id)} title={mr.task_id}>
-                        <span class="provenance-icon">&#x2611;</span>
+                        <span class="provenance-icon prov-icon-task"></span>
                         <span class="provenance-type">Task</span>
                         <span class="provenance-name">{entityName('task', mr.task_id)}</span>
                       </button>
-                      <span class="provenance-arrow">\u2192</span>
+                      <span class="provenance-arrow">&#x2192;</span>
                     {/if}
                     {#if agentId}
                       <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', agentId)} title={agentId}>
-                        <span class="provenance-icon">&#x2699;</span>
+                        <span class="provenance-icon prov-icon-agent"></span>
                         <span class="provenance-type">Agent</span>
                         <span class="provenance-name">{entityName('agent', agentId)}</span>
                       </button>
-                      <span class="provenance-arrow">\u2192</span>
+                      <span class="provenance-arrow">&#x2192;</span>
                     {/if}
                     <span class="provenance-node provenance-mr provenance-current">
-                      <span class="provenance-icon">&#x1F500;</span>
+                      <span class="provenance-icon prov-icon-mr"></span>
                       <span class="provenance-type">MR</span>
                       <span class="provenance-name">{mr.status ?? 'open'}</span>
                     </span>
                     {#if mr.status === 'merged' && mr.diff_stats}
-                      <span class="provenance-arrow">\u2192</span>
+                      <span class="provenance-arrow">&#x2192;</span>
                       <span class="provenance-node provenance-code">
-                        <span class="provenance-icon">&#x1F4BB;</span>
+                        <span class="provenance-icon prov-icon-code"></span>
                         <span class="provenance-type">Code</span>
                         <span class="provenance-name">+{mr.diff_stats.insertions ?? 0} -{mr.diff_stats.deletions ?? 0}</span>
                       </span>
@@ -3248,9 +3260,16 @@
   }
 
   .provenance-icon {
-    font-size: var(--text-base);
-    line-height: 1;
+    width: 16px;
+    height: 16px;
+    display: inline-block;
   }
+
+  .prov-icon-spec { background: var(--color-info); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpolyline points='14 2 14 8 20 8'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpolyline points='14 2 14 8 20 8'/%3E%3C/svg%3E") center/contain no-repeat; }
+  .prov-icon-task { background: var(--color-warning); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpolyline points='9 11 12 14 22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpolyline points='9 11 12 14 22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E") center/contain no-repeat; }
+  .prov-icon-agent { background: var(--color-success); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z'/%3E%3C/svg%3E") center/contain no-repeat; }
+  .prov-icon-mr { background: var(--color-primary); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='18' cy='18' r='3'/%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Cpath d='M6 21V9a9 9 0 0 0 9 9'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='18' cy='18' r='3'/%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Cpath d='M6 21V9a9 9 0 0 0 9 9'/%3E%3C/svg%3E") center/contain no-repeat; }
+  .prov-icon-code { background: var(--color-text-secondary); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E") center/contain no-repeat; }
 
   .provenance-type {
     font-size: 9px;
