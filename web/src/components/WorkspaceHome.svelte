@@ -490,7 +490,11 @@
                     <span class="decision-type">{typeLabel(n.notification_type)}</span>
                     <span class="decision-desc">{n.message ?? n.description ?? body.description ?? ''}</span>
                     {#if n.repo_id && repoMap[n.repo_id]}
-                      <span class="decision-repo">{repoMap[n.repo_id].name}</span>
+                      <button
+                        class="decision-repo-link"
+                        onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[n.repo_id], 'decisions'); }}
+                        aria-label={$t('workspace_home.go_to_repo_decisions', { values: { name: repoMap[n.repo_id].name } })}
+                      >{repoMap[n.repo_id].name}</button>
                     {/if}
                   </div>
                   <div class="decision-actions">
@@ -1240,10 +1244,25 @@
     text-overflow: ellipsis;
   }
 
-  .decision-repo {
+  .decision-repo-link {
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    color: var(--color-link, var(--color-primary));
     font-family: var(--font-mono);
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-align: left;
+  }
+
+  .decision-repo-link:hover {
+    color: var(--color-link-hover, var(--color-primary));
+  }
+
+  .decision-repo-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .decision-actions {
