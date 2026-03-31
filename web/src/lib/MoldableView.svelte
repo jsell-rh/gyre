@@ -15,6 +15,7 @@
     conceptFilterIds = null,
     conceptQuery = '',
     categoryFilters = null,
+    nodeTypeFilter = null,
   } = $props();
 
   // Category → node_type mapping for filter panel integration
@@ -54,6 +55,7 @@
     let result = nodes;
     if (conceptFilterIds) result = result.filter(n => conceptFilterIds.has(n.id));
     if (categoryFilters?.categories) result = result.filter(passesCategoryFilter);
+    if (nodeTypeFilter?.length) result = result.filter(n => nodeTypeFilter.includes(n.node_type));
     return result;
   });
 
@@ -71,6 +73,7 @@
       ? nodes.filter(n => conceptFilterIds.has(n.id))
       : nodes;
     if (categoryFilters?.categories) result = result.filter(passesCategoryFilter);
+    if (nodeTypeFilter?.length) result = result.filter(n => nodeTypeFilter.includes(n.node_type));
     if (filterType) result = result.filter(n => n.node_type === filterType);
     const dir = sortDir === 'asc' ? 1 : -1;
     return [...result].sort((a, b) => {
