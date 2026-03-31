@@ -11,6 +11,7 @@
    *   HSI §2 (trust-level filtering)
    */
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Briefing from './Briefing.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
@@ -445,14 +446,14 @@
           <polyline points="9 22 9 12 15 12 15 22"/>
         </svg>
       </div>
-      <h2 class="no-workspace-title">Select a workspace</h2>
-      <p class="no-workspace-desc">Choose a workspace from the selector above, or create a new one.</p>
+      <h2 class="no-workspace-title">{$t('workspace_home.select_workspace')}</h2>
+      <p class="no-workspace-desc">{$t('workspace_home.select_workspace_desc')}</p>
       <button
         class="create-ws-btn"
         onclick={() => { createWsForm = { name: '', description: '' }; createWsOpen = true; }}
         data-testid="create-workspace-btn"
       >
-        + New Workspace
+        {$t('workspace_home.new_workspace')}
       </button>
     </div>
   {:else}
@@ -462,13 +463,13 @@
       <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
         <div class="section-header">
           <h2 class="section-title" id="section-decisions">
-            Decisions
+            {$t('workspace_home.sections.decisions')}
             {#if notifications.length > 0}
               <span class="section-badge" aria-label="{notifications.length} decisions">{notifications.length}</span>
             {/if}
           </h2>
           {#if notifications.length > 0}
-            <button class="section-action-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>{showAllDecisions ? 'Show less' : 'View all'}</button>
+            <button class="section-action-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>{showAllDecisions ? $t('workspace_home.show_less') : $t('workspace_home.view_all')}</button>
           {/if}
         </div>
         <div class="section-body">
@@ -481,7 +482,7 @@
               <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">Retry</button>
             </div>
           {:else if notifications.length === 0}
-            <p class="empty-text" data-testid="decisions-empty">No pending decisions. At Supervised trust, decisions appear when agents need guidance, specs need approval, or gates fail.</p>
+            <p class="empty-text" data-testid="decisions-empty">{$t('workspace_home.decisions_empty')}</p>
           {:else}
             <ul class="decision-list" role="list">
               {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as n (n.id)}
@@ -541,7 +542,7 @@
       <!-- ── Repos ─────────────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
         <div class="section-header">
-          <h2 class="section-title" id="section-repos">Repos</h2>
+          <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
         </div>
         <div class="section-body">
           {#if reposLoading}
@@ -553,7 +554,7 @@
               <button class="retry-btn" onclick={loadRepos} aria-label="Retry loading repos">Retry</button>
             </div>
           {:else if repos.length === 0}
-            <p class="empty-text" data-testid="repos-empty">No repositories yet.</p>
+            <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
           {:else}
             <ul class="repo-list" role="list">
               {#each repos as repo (repo.id)}
@@ -591,13 +592,13 @@
               data-testid="btn-new-repo"
               onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }}
               aria-expanded={newRepoOpen}
-            >+ New Repo</button>
+            >{$t('workspace_home.new_repo')}</button>
             <button
               class="section-btn"
               data-testid="btn-import-repo"
               onclick={() => { importOpen = !importOpen; importName = ''; newRepoOpen = false; }}
               aria-expanded={importOpen}
-            >Import</button>
+            >{$t('workspace_home.import')}</button>
           </div>
 
           {#if newRepoOpen}
@@ -697,9 +698,9 @@
           aria-controls="arch-body"
           data-testid="arch-toggle"
         >
-          <h2 class="section-title" id="section-architecture">Architecture</h2>
+          <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
           <span class="arch-toggle-label" aria-hidden="true">
-            {archExpanded ? '▾ Hide workspace graph' : '▸ Show workspace graph'}
+            {archExpanded ? '▾ ' + $t('workspace_home.hide_workspace_graph') : '▸ ' + $t('workspace_home.show_workspace_graph')}
           </span>
         </button>
         {#if archExpanded}
@@ -729,7 +730,7 @@
       <!-- ── Briefing ──────────────────────────────────────────────────── -->
       <section class="home-section home-section-briefing" aria-labelledby="section-briefing" data-testid="section-briefing">
         <div class="section-header">
-          <h2 class="section-title" id="section-briefing">Briefing</h2>
+          <h2 class="section-title" id="section-briefing">{$t('workspace_home.sections.briefing')}</h2>
         </div>
         <div class="section-body section-body-briefing">
           <Briefing workspaceId={workspace.id} scope="workspace" workspaceName={workspace.name} />
@@ -739,7 +740,7 @@
       <!-- ── Specs ─────────────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-specs" data-testid="section-specs">
         <div class="section-header">
-          <h2 class="section-title" id="section-specs">Specs</h2>
+          <h2 class="section-title" id="section-specs">{$t('workspace_home.sections.specs')}</h2>
           <div class="header-controls">
             <select
               class="filter-select"
@@ -824,12 +825,12 @@
       <!-- ── Agent Rules ───────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
         <div class="section-header">
-          <h2 class="section-title" id="section-agent-rules">Agent Rules</h2>
+          <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
           <button
             class="section-action-btn"
             data-testid="manage-rules-link"
             onclick={() => goToAgentRules?.()}
-          >Manage rules</button>
+          >{$t('workspace_home.manage_rules')}</button>
         </div>
         <div class="section-body">
           {#if rulesLoading}

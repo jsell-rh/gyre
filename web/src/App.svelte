@@ -1,6 +1,6 @@
 <script>
   import './lib/design-system.css';
-  import { isLoading } from 'svelte-i18n';
+  import { isLoading, t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
@@ -1017,8 +1017,8 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
           </svg>
-          <span>Search</span>
-          <kbd aria-hidden="true">⌘K</kbd>
+          <span>{$t('topbar.search')}</span>
+          <kbd aria-hidden="true">{$t('topbar.search_shortcut')}</kbd>
         </button>
       </div>
 
@@ -1085,14 +1085,14 @@
               onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) userMenuOpen = false; }}
             >
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
-                Profile
+                {$t('topbar.profile')}
               </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
-                API Token
+                {$t('topbar.api_token')}
               </button>
               <div class="user-dropdown-divider" role="separator"></div>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { localStorage.removeItem('gyre_auth_token'); hasToken = false; userMenuOpen = false; }}>
-                Sign out
+                {$t('topbar.sign_out')}
               </button>
             </div>
           {/if}
@@ -1299,7 +1299,7 @@
         title={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
       >
         <span class="ws-dot" aria-hidden="true"></span>
-        {wsStatus === 'connected' ? 'Live' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline' : 'Connecting'}
+        {wsStatus === 'connected' ? $t('status_bar.live') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline') : $t('status_bar.connecting')}
       </span>
     </footer>
   </div>
@@ -1344,23 +1344,23 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1">
       <div class="shortcuts-header">
-        <h2>Keyboard Shortcuts</h2>
-        <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
+        <h2>{$t('shortcuts.title')}</h2>
+        <button onclick={() => (shortcutsOpen = false)} aria-label={$t('common.close')}>✕</button>
       </div>
       <div class="shortcuts-body">
         <dl class="shortcuts-list">
-          <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>Global search</dd></div>
-          <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>Go to workspace home</dd></div>
-          <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>Workspace settings</dd></div>
-          <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>Agent rules</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>Specs tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>Architecture tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>Decisions tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>Code tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>Settings tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / return to workspace home</dd></div>
-          <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>Focus search</dd></div>
-          <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>{$t('shortcuts.global_search')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>{$t('shortcuts.workspace_home')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>{$t('shortcuts.workspace_settings')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>{$t('shortcuts.agent_rules')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>{$t('shortcuts.specs_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>{$t('shortcuts.architecture_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>{$t('shortcuts.decisions_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>{$t('shortcuts.code_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>{$t('shortcuts.settings_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>{$t('shortcuts.close_panel')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>{$t('shortcuts.focus_search')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>{$t('shortcuts.toggle_shortcuts')}</dd></div>
         </dl>
       </div>
     </div>
