@@ -20,12 +20,14 @@
   } = $props();
 
   const TABS = [
-    { id: 'users',    labelKey: 'tenant_settings.tabs.users' },
-    { id: 'compute',  labelKey: 'tenant_settings.tabs.compute' },
-    { id: 'budget',   labelKey: 'tenant_settings.tabs.budget' },
-    { id: 'audit',    labelKey: 'tenant_settings.tabs.audit' },
-    { id: 'health',   labelKey: 'tenant_settings.tabs.health' },
-    { id: 'jobs',     labelKey: 'tenant_settings.tabs.jobs' },
+    { id: 'users',      labelKey: 'tenant_settings.tabs.users' },
+    { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
+    { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
+    { id: 'policies',   label: 'Policies' },
+    { id: 'analytics',  label: 'Analytics' },
+    { id: 'audit',      labelKey: 'tenant_settings.tabs.audit' },
+    { id: 'health',     labelKey: 'tenant_settings.tabs.health' },
+    { id: 'jobs',       labelKey: 'tenant_settings.tabs.jobs' },
   ];
 
   let activeTab = $state('users');
@@ -61,6 +63,32 @@
   let jobsLoading = $state(false);
   let jobsError = $state(null);
   let runningJob = $state(null);
+
+  // ── Compute CRUD ─────────────────────────────────────────────────────
+  let showComputeForm = $state(false);
+  let newComputeName = $state('');
+  let newComputeType = $state('local');
+  let computeCreating = $state(false);
+  let computeDeleting = $state(null);
+
+  // ── Policies (ABAC) ──────────────────────────────────────────────────
+  let policies = $state([]);
+  let policiesLoading = $state(false);
+  let policiesError = $state(null);
+  let policyDecisions = $state([]);
+  let policyDecisionsLoading = $state(false);
+
+  // ── Analytics ────────────────────────────────────────────────────────
+  let analyticsTop = $state([]);
+  let analyticsLoading = $state(false);
+  let analyticsError = $state(null);
+  let costSummary = $state([]);
+  let costLoading = $state(false);
+  let activityLog = $state([]);
+  let activityLoading = $state(false);
+
+  // ── Audit detail expansion ───────────────────────────────────────────
+  let expandedAuditId = $state(null);
 
   // ── Sorting (per-table) ───────────────────────────────────────────────
   let computeSortCol = $state('name');
@@ -112,6 +140,12 @@
     }
     if (tab === 'jobs') {
       if (untrack(() => jobs.length === 0 && !jobsLoading)) loadJobs();
+    }
+    if (tab === 'policies') {
+      if (untrack(() => policies.length === 0 && !policiesLoading)) loadPolicies();
+    }
+    if (tab === 'analytics') {
+      if (untrack(() => analyticsTop.length === 0 && !analyticsLoading)) loadAnalytics();
     }
   });
 
@@ -210,6 +244,86 @@
     }
   }
 
+  // ── Compute CRUD ───────────────────────────────────────────────────────
+  async function createComputeTarget() {
+    if (!newComputeName.trim()) return;
+    computeCreating = true;
+    try {
+      await api.computeCreate({ name: newComputeName.trim(), target_type: newComputeType, config: {} });
+      showToast('Compute target created', { type: 'success' });
+      newComputeName = '';
+      showComputeForm = false;
+      computeTargets = [];
+      await loadCompute();
+    } catch (e) {
+      showToast(`Failed to create: ${e?.message ?? 'Unknown error'}`, { type: 'error' });
+    } finally {
+      computeCreating = false;
+    }
+  }
+
+  async function deleteComputeTarget(id) {
+    computeDeleting = id;
+    try {
+      await api.computeDelete(id);
+      showToast('Compute target deleted', { type: 'success' });
+      computeTargets = computeTargets.filter(ct => ct.id !== id);
+    } catch (e) {
+      showToast(`Failed to delete: ${e?.message ?? 'Unknown error'}`, { type: 'error' });
+    } finally {
+      computeDeleting = null;
+    }
+  }
+
+  // ── Policies ──────────────────────────────────────────────────────────
+  async function loadPolicies() {
+    policiesLoading = true;
+    policiesError = null;
+    try {
+      const [pols, decs] = await Promise.all([
+        api.policies().catch(() => []),
+        api.policyDecisions({ limit: 20 }).catch(() => []),
+      ]);
+      policies = Array.isArray(pols) ? pols : (pols?.items ?? []);
+      policyDecisions = Array.isArray(decs) ? decs : (decs?.items ?? []);
+    } catch (e) {
+      policiesError = e?.message ?? 'Failed to load policies';
+    } finally {
+      policiesLoading = false;
+    }
+  }
+
+  // ── Analytics ─────────────────────────────────────────────────────────
+  async function loadAnalytics() {
+    analyticsLoading = true;
+    analyticsError = null;
+    try {
+      const [top, costs, activity] = await Promise.all([
+        api.analyticsTop({ limit: 10 }).catch(() => []),
+        api.costSummary().catch(() => []),
+        api.activity(20).catch(() => []),
+      ]);
+      analyticsTop = Array.isArray(top) ? top : (top?.items ?? []);
+      costSummary = Array.isArray(costs) ? costs : (costs?.items ?? []);
+      activityLog = Array.isArray(activity) ? activity : (activity?.items ?? []);
+    } catch (e) {
+      analyticsError = e?.message ?? 'Failed to load analytics';
+    } finally {
+      analyticsLoading = false;
+    }
+  }
+
+  function fmtTimestamp(ts) {
+    if (!ts) return '—';
+    const d = typeof ts === 'number' ? new Date(ts < 1e12 ? ts * 1000 : ts) : new Date(ts);
+    return d.toLocaleString();
+  }
+
+  function shortId(id) {
+    if (!id || typeof id !== 'string') return '—';
+    return id.length > 12 ? id.slice(0, 8) + '…' : id;
+  }
+
   // ── Tab keyboard navigation ────────────────────────────────────────────
   let tabListEl = $state(null);
 
@@ -265,7 +379,7 @@
         onclick={() => { activeTab = tab.id; }}
         data-testid="tenant-settings-tab-{tab.id}"
       >
-        {$t(tab.labelKey)}
+        {tab.labelKey ? $t(tab.labelKey) : tab.label}
       </button>
     {/each}
   </div>
@@ -326,6 +440,26 @@
           <p class="panel-desc">{$t('tenant_settings.compute.desc')}</p>
         </div>
 
+        <!-- Create compute target -->
+        <div class="action-bar">
+          {#if showComputeForm}
+            <div class="inline-form">
+              <input type="text" class="form-input" bind:value={newComputeName} placeholder="Target name" disabled={computeCreating} />
+              <select class="filter-select" bind:value={newComputeType} disabled={computeCreating}>
+                <option value="local">Local</option>
+                <option value="ssh">SSH</option>
+                <option value="container">Container</option>
+              </select>
+              <button class="run-btn" onclick={createComputeTarget} disabled={computeCreating || !newComputeName.trim()}>
+                {computeCreating ? 'Creating…' : 'Create'}
+              </button>
+              <button class="run-btn" onclick={() => { showComputeForm = false; }}>Cancel</button>
+            </div>
+          {:else}
+            <button class="run-btn" onclick={() => { showComputeForm = true; }}>+ Add Compute Target</button>
+          {/if}
+        </div>
+
         {#if computeLoading}
           <div class="panel-loading" aria-live="polite">{$t('tenant_settings.compute.loading')}</div>
         {:else if computeError}
@@ -340,19 +474,25 @@
                 <th scope="col" aria-sort={computeSortCol === 'kind' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('kind', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_kind')}{sortArrow('kind', computeSortCol, computeSortDir)}</button></th>
                 <th scope="col" aria-sort={computeSortCol === 'status' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_status')}{sortArrow('status', computeSortCol, computeSortDir)}</button></th>
                 <th scope="col" aria-sort={computeSortCol === 'capacity' ? (computeSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('capacity', computeSortCol, computeSortDir, v => computeSortCol = v, v => computeSortDir = v)}>{$t('tenant_settings.compute.col_capacity')}{sortArrow('capacity', computeSortCol, computeSortDir)}</button></th>
+                <th scope="col">Actions</th>
               </tr>
             </thead>
             <tbody>
               {#each sortedBy(computeTargets, computeSortCol, computeSortDir) as ct (ct.id ?? ct.name)}
                 <tr>
                   <td class="td-name">{ct.name ?? '—'}</td>
-                  <td>{ct.kind ?? ct.type ?? '—'}</td>
+                  <td>{ct.kind ?? ct.target_type ?? ct.type ?? '—'}</td>
                   <td>
                     <span class="status-pill" class:status-ok={ct.status === 'healthy' || ct.status === 'active'} class:status-warn={ct.status === 'degraded'} class:status-err={ct.status === 'error' || ct.status === 'offline'}>
                       {ct.status ?? '—'}
                     </span>
                   </td>
                   <td>{ct.capacity ?? ct.max_agents ?? '—'}</td>
+                  <td>
+                    <button class="delete-btn" onclick={() => deleteComputeTarget(ct.id)} disabled={computeDeleting === ct.id} title="Delete {ct.name}">
+                      {computeDeleting === ct.id ? '…' : '✕'}
+                    </button>
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -477,12 +617,33 @@
             </thead>
             <tbody>
               {#each sortedBy(auditEvents, auditSortCol, auditSortDir) as ev (ev.id ?? ev.timestamp)}
-                <tr>
-                  <td class="td-mono">{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : '—'}</td>
-                  <td><span class="event-type">{ev.event_type ?? ev.kind ?? '—'}</span></td>
+                {@const evId = ev.id ?? ev.timestamp}
+                <tr class="clickable-row" onclick={() => { expandedAuditId = expandedAuditId === evId ? null : evId; }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') expandedAuditId = expandedAuditId === evId ? null : evId; }}>
+                  <td class="td-mono">{fmtTimestamp(ev.timestamp)}</td>
+                  <td><span class="event-type">{(ev.event_type ?? ev.kind ?? '—').replace(/_/g, ' ')}</span></td>
                   <td>{ev.actor ?? ev.user ?? '—'}</td>
                   <td class="td-detail">{ev.detail ?? ev.message ?? '—'}</td>
                 </tr>
+                {#if expandedAuditId === evId}
+                  <tr class="audit-detail-row">
+                    <td colspan="4">
+                      <div class="audit-detail-content">
+                        <dl class="audit-dl">
+                          {#if ev.id}<dt>ID</dt><dd class="mono">{ev.id}</dd>{/if}
+                          {#if ev.event_type}<dt>Event</dt><dd>{ev.event_type}</dd>{/if}
+                          {#if ev.actor}<dt>Actor</dt><dd>{ev.actor}</dd>{/if}
+                          {#if ev.ip_address}<dt>IP</dt><dd class="mono">{ev.ip_address}</dd>{/if}
+                          {#if ev.resource_type}<dt>Resource</dt><dd>{ev.resource_type}{ev.resource_id ? ': ' + shortId(ev.resource_id) : ''}</dd>{/if}
+                          {#if ev.workspace_id}<dt>Workspace</dt><dd class="mono">{shortId(ev.workspace_id)}</dd>{/if}
+                          {#if ev.detail ?? ev.message}<dt>Detail</dt><dd class="audit-full-detail">{ev.detail ?? ev.message}</dd>{/if}
+                          {#if ev.metadata}
+                            <dt>Metadata</dt><dd><pre class="audit-meta-pre">{JSON.stringify(ev.metadata, null, 2)}</pre></dd>
+                          {/if}
+                        </dl>
+                      </div>
+                    </td>
+                  </tr>
+                {/if}
               {/each}
             </tbody>
           </table>
@@ -569,6 +730,166 @@
               {/each}
             </tbody>
           </table>
+        {/if}
+      </div>
+
+    <!-- ── Policies (ABAC) ─────────────────────────────────────────────── -->
+    {:else if activeTab === 'policies'}
+      <div id="tab-panel-policies" role="tabpanel" aria-label="Policies" class="tab-panel" data-testid="tenant-tab-policies">
+        <div class="panel-header">
+          <h2 class="panel-title">Access Policies (ABAC)</h2>
+          <p class="panel-desc">Attribute-based access control policies governing agent actions, git push, and resource access across the tenant.</p>
+        </div>
+
+        {#if policiesLoading}
+          <div class="panel-loading" aria-live="polite">Loading policies…</div>
+        {:else if policiesError}
+          <div class="panel-error" role="alert">{policiesError}</div>
+        {:else}
+          {#if policies.length > 0}
+            <h3 class="sub-heading">Active Policies ({policies.length})</h3>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th scope="col"><button class="sort-btn">Name</button></th>
+                  <th scope="col"><button class="sort-btn">Scope</button></th>
+                  <th scope="col"><button class="sort-btn">Effect</button></th>
+                  <th scope="col"><button class="sort-btn">Actions</button></th>
+                  <th scope="col"><button class="sort-btn">Resources</button></th>
+                  <th scope="col"><button class="sort-btn">Priority</button></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each policies as policy (policy.id ?? policy.name)}
+                  <tr>
+                    <td class="td-name">{policy.name ?? '—'}</td>
+                    <td>{policy.scope ?? '—'}</td>
+                    <td>
+                      <span class="status-pill" class:status-ok={policy.effect === 'allow'} class:status-err={policy.effect === 'deny'}>
+                        {policy.effect ?? '—'}
+                      </span>
+                    </td>
+                    <td class="mono">{(policy.actions ?? []).join(', ') || '—'}</td>
+                    <td class="mono">{(policy.resource_types ?? []).join(', ') || '—'}</td>
+                    <td>{policy.priority ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {:else}
+            <div class="panel-empty">No ABAC policies configured.</div>
+          {/if}
+
+          {#if policyDecisions.length > 0}
+            <h3 class="sub-heading" style="margin-top: var(--space-6)">Recent Decisions ({policyDecisions.length})</h3>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th scope="col"><button class="sort-btn">Time</button></th>
+                  <th scope="col"><button class="sort-btn">Decision</button></th>
+                  <th scope="col"><button class="sort-btn">Subject</button></th>
+                  <th scope="col"><button class="sort-btn">Action</button></th>
+                  <th scope="col"><button class="sort-btn">Resource</button></th>
+                  <th scope="col"><button class="sort-btn">Policy</button></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each policyDecisions as dec (dec.id ?? dec.timestamp)}
+                  <tr>
+                    <td class="td-mono">{fmtTimestamp(dec.timestamp ?? dec.evaluated_at)}</td>
+                    <td>
+                      <span class="status-pill" class:status-ok={dec.decision === 'allow'} class:status-err={dec.decision === 'deny'}>
+                        {dec.decision ?? '—'}
+                      </span>
+                    </td>
+                    <td class="mono">{dec.subject?.type ? `${dec.subject.type}:${shortId(dec.subject.id)}` : (dec.subject_id ?? '—')}</td>
+                    <td>{dec.action ?? '—'}</td>
+                    <td>{dec.resource?.type ?? dec.resource_type ?? '—'}</td>
+                    <td class="mono">{dec.matched_policy ?? dec.policy_name ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        {/if}
+      </div>
+
+    <!-- ── Analytics ──────────────────────────────────────────────────── -->
+    {:else if activeTab === 'analytics'}
+      <div id="tab-panel-analytics" role="tabpanel" aria-label="Analytics" class="tab-panel" data-testid="tenant-tab-analytics">
+        <div class="panel-header">
+          <h2 class="panel-title">Analytics & Activity</h2>
+          <p class="panel-desc">Platform usage, cost tracking, and recent activity across all workspaces.</p>
+        </div>
+
+        {#if analyticsLoading}
+          <div class="panel-loading" aria-live="polite">Loading analytics…</div>
+        {:else if analyticsError}
+          <div class="panel-error" role="alert">{analyticsError}</div>
+        {:else}
+          <!-- Cost Summary -->
+          {#if costSummary.length > 0}
+            <h3 class="sub-heading">Cost by Agent</h3>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th scope="col"><button class="sort-btn">Agent</button></th>
+                  <th scope="col"><button class="sort-btn">Total Cost</button></th>
+                  <th scope="col"><button class="sort-btn">Tokens</button></th>
+                  <th scope="col"><button class="sort-btn">Entries</button></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each costSummary as entry (entry.agent_id ?? entry.id)}
+                  <tr>
+                    <td class="mono">{shortId(entry.agent_id ?? entry.id)}</td>
+                    <td>{entry.total_cost != null ? `$${entry.total_cost.toFixed(4)}` : '—'}</td>
+                    <td>{entry.total_tokens?.toLocaleString() ?? entry.tokens?.toLocaleString() ?? '—'}</td>
+                    <td>{entry.count ?? entry.entries ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+
+          <!-- Top Event Types -->
+          {#if analyticsTop.length > 0}
+            <h3 class="sub-heading" style="margin-top: var(--space-6)">Top Event Types</h3>
+            <div class="analytics-bars">
+              {#each analyticsTop as item (item.event_name ?? item.name)}
+                {@const maxCount = Math.max(...analyticsTop.map(i => i.count ?? 0))}
+                {@const pct = maxCount > 0 ? Math.round(((item.count ?? 0) / maxCount) * 100) : 0}
+                <div class="analytics-bar-row">
+                  <span class="analytics-bar-label">{(item.event_name ?? item.name ?? '—').replace(/\./g, ' ')}</span>
+                  <div class="analytics-bar-track">
+                    <div class="analytics-bar-fill" style="width: {pct}%"></div>
+                  </div>
+                  <span class="analytics-bar-count">{(item.count ?? 0).toLocaleString()}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- Recent Activity -->
+          {#if activityLog.length > 0}
+            <h3 class="sub-heading" style="margin-top: var(--space-6)">Recent Activity</h3>
+            <div class="activity-list">
+              {#each activityLog as entry (entry.id ?? entry.timestamp)}
+                <div class="activity-item">
+                  <span class="activity-time">{fmtTimestamp(entry.timestamp ?? entry.created_at)}</span>
+                  <span class="event-type">{(entry.event_type ?? entry.kind ?? '—').replace(/_/g, ' ')}</span>
+                  {#if entry.actor ?? entry.user_id ?? entry.agent_id}
+                    <span class="activity-actor mono">{entry.actor ?? shortId(entry.user_id ?? entry.agent_id)}</span>
+                  {/if}
+                  {#if entry.detail ?? entry.message ?? entry.description}
+                    <span class="activity-detail">{entry.detail ?? entry.message ?? entry.description}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {:else if costSummary.length === 0 && analyticsTop.length === 0}
+            <div class="panel-empty">No analytics data available yet. Activity will appear here as agents work.</div>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -1056,6 +1377,190 @@
   .run-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  /* ── Inline forms ────────────────────────────────────────────────────── */
+  .action-bar {
+    margin-bottom: var(--space-4);
+  }
+
+  .inline-form {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .form-input {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    min-width: 200px;
+  }
+
+  .form-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .delete-btn {
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .delete-btn:hover:not(:disabled) {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Clickable audit rows ──────────────────────────────────────────── */
+  .clickable-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .clickable-row:hover td { background: var(--color-surface-elevated); }
+
+  .audit-detail-row td {
+    background: var(--color-surface-elevated);
+    padding: var(--space-4) !important;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .audit-detail-content { max-width: 600px; }
+
+  .audit-dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+  }
+
+  .audit-dl dt {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .audit-dl dd {
+    color: var(--color-text-secondary);
+    margin: 0;
+    word-break: break-word;
+  }
+
+  .audit-full-detail { white-space: pre-wrap; }
+
+  .audit-meta-pre {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: var(--color-surface);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    margin: 0;
+    overflow-x: auto;
+    max-height: 200px;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  /* ── Analytics ─────────────────────────────────────────────────────── */
+  .analytics-bars {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .analytics-bar-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .analytics-bar-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    width: 140px;
+    flex-shrink: 0;
+    text-transform: capitalize;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .analytics-bar-track {
+    flex: 1;
+    height: 8px;
+    background: var(--color-border);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+  }
+
+  .analytics-bar-fill {
+    height: 100%;
+    background: var(--color-primary);
+    border-radius: var(--radius-full);
+    transition: width 0.3s ease;
+  }
+
+  .analytics-bar-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    width: 50px;
+    text-align: right;
+  }
+
+  /* ── Activity list ─────────────────────────────────────────────────── */
+  .activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .activity-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-left: 2px solid var(--color-border);
+    font-size: var(--text-sm);
+  }
+
+  .activity-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .activity-actor {
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+  }
+
+  .activity-detail {
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* ── Responsive ──────────────────────────────────────────────────────── */
