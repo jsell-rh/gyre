@@ -694,30 +694,13 @@ pub async fn get_diff(
         None => return Ok(Json(mock_diff_response())),
     };
 
-    // For merged MRs, the source and target branches may point to the same
-    // commit (fast-forward merge), producing an empty diff. Use merge-base
-    // to find the pre-merge fork point and diff from there.
+    // For merged MRs, source and target may point to the same commit after
+    // fast-forward merge, producing an empty diff. Diff the source branch
+    // against its parent commit to show what the MR actually changed.
+    // This works for single-commit branches (the common agent case) and
+    // is a reasonable approximation for multi-commit branches.
     let diff_from = if mr.status == gyre_domain::MrStatus::Merged {
-        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-        let mb = tokio::process::Command::new(&git_bin)
-            .arg("-C")
-            .arg(&repo.path)
-            .arg("merge-base")
-            .arg(&mr.target_branch)
-            .arg(&mr.source_branch)
-            .output()
-            .await
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8(o.stdout)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            });
-        mb.unwrap_or_else(|| mr.target_branch.clone())
+        format!("{}^", mr.source_branch)
     } else {
         mr.target_branch.clone()
     };
