@@ -20,6 +20,7 @@
   let error = $state(null);
   let expandedId = $state(null);
   let showDismissed = $state(false);
+  let filterType = $state('all');
   let actionStates = $state({});
   let workspaceMap = $state({});
 
@@ -120,8 +121,17 @@
   let displayLimit = $state(PAGE_SIZE);
 
   let allVisibleNotifications = $derived(
-    notifications.filter(n => showDismissed || !n.dismissed_at)
+    notifications.filter(n => {
+      if (!showDismissed && n.dismissed_at) return false;
+      if (filterType !== 'all' && n.notification_type !== filterType) return false;
+      return true;
+    })
   );
+
+  let availableTypes = $derived.by(() => {
+    const types = new Set(notifications.map(n => n.notification_type).filter(Boolean));
+    return ['all', ...Array.from(types).sort()];
+  });
 
   let visibleNotifications = $derived(
     allVisibleNotifications.slice(0, displayLimit)
@@ -274,6 +284,19 @@
         {/if}
       </div>
       <div class="inbox-header-actions">
+        {#if availableTypes.length > 2}
+          <select
+            class="type-filter"
+            value={filterType}
+            onchange={(e) => { filterType = e.target.value; }}
+            aria-label="Filter by notification type"
+            data-testid="inbox-type-filter"
+          >
+            {#each availableTypes as t}
+              <option value={t}>{t === 'all' ? 'All types' : (TYPE_LABELS[t] ?? t)}</option>
+            {/each}
+          </select>
+        {/if}
         <label class="dismissed-toggle">
           <input type="checkbox" bind:checked={showDismissed} />
           Show Dismissed
@@ -661,6 +684,29 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
+  }
+
+  .type-filter {
+    appearance: none;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-5) var(--space-1) var(--space-2);
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right var(--space-1) center;
+    background-size: var(--space-3);
+  }
+
+  .type-filter:hover { border-color: var(--color-primary); }
+
+  .type-filter:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .dismissed-toggle {

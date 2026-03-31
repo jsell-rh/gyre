@@ -128,9 +128,7 @@
     if (filterKind !== 'all') {
       result = result.filter((s) => (s.kind || 'feature') === filterKind);
     }
-    if (scope !== 'repo') {
-      result = sortList(result, sortCol, sortDir);
-    }
+    result = sortList(result, sortCol, sortDir);
     return result;
   });
 
@@ -315,47 +313,76 @@
       {/if}
 
     {:else if scope === 'repo'}
-      <!-- Repo scope: progress bar list -->
-      <ul class="spec-list" role="listbox" aria-label="Specs">
-        {#each filtered as spec (spec.path)}
-          {@const pct = Math.round(progressFraction(spec.path) * 100)}
-          {@const label = progressLabel(spec.path)}
-          <li
-            class="spec-row"
-            role="option"
-            class:selected={selectedPath === spec.path}
-            tabindex="0"
-            aria-selected={selectedPath === spec.path}
-            onclick={() => handleRowClick(spec)}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
-              if (e.key === 'ArrowDown') { e.preventDefault(); const next = e.currentTarget.nextElementSibling; if (next) next.focus(); }
-              if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
-            }}
-          >
-            <span class="spec-path" title={spec.path}>{spec.path}</span>
-            <span class="spec-status-inline {statusColor(spec.approval_status)}">
-              <span aria-hidden="true">{statusIcon(spec.approval_status)}</span> {spec.approval_status ?? 'unknown'}
-            </span>
-            {#if label}
-              <span class="progress-label-text">{label}</span>
-              <div
-                class="progress-bar-wrap"
-                title="{pct}% complete"
-                role="progressbar"
-                aria-valuenow={pct}
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-label="{spec.path} progress: {pct}%"
-              >
-                <div class="progress-bar">
-                  <div class="progress-fill" style="width: {pct}%"></div>
-                </div>
-              </div>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+      <!-- Repo scope: sortable table with progress -->
+      <table class="specs-table repo-specs-table" role="grid" aria-label="Specs">
+        <thead>
+          <tr>
+            <th scope="col" aria-sort={sortCol === 'path' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('path')}>
+                Path
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('path')}</span>
+              </button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'approval_status' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('approval_status')}>
+                Status
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('approval_status')}</span>
+              </button>
+            </th>
+            <th scope="col">Progress</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each filtered as spec (spec.path)}
+            {@const pct = Math.round(progressFraction(spec.path) * 100)}
+            {@const label = progressLabel(spec.path)}
+            <tr
+              class:selected={selectedPath === spec.path}
+              onclick={() => handleRowClick(spec)}
+              tabindex="0"
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
+                if (e.key === 'ArrowDown') { e.preventDefault(); const next = e.currentTarget.nextElementSibling; if (next) next.focus(); }
+                if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
+              }}
+              aria-selected={selectedPath === spec.path}
+              aria-label="Spec: {spec.path}"
+            >
+              <td class="col-path">
+                <span class="spec-path" title={spec.path}>{spec.path}</span>
+              </td>
+              <td>
+                <Badge
+                  value={spec.approval_status ?? 'unknown'}
+                  color={statusColor(spec.approval_status)}
+                />
+              </td>
+              <td class="col-progress">
+                {#if label}
+                  <div class="progress-cell">
+                    <span class="progress-label-text">{label}</span>
+                    <div
+                      class="progress-bar-wrap"
+                      title="{pct}% complete"
+                      role="progressbar"
+                      aria-valuenow={pct}
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                      aria-label="{spec.path} progress: {pct}%"
+                    >
+                      <div class="progress-bar">
+                        <div class="progress-fill" style="width: {pct}%"></div>
+                      </div>
+                    </div>
+                  </div>
+                {:else}
+                  <span class="col-time">—</span>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
 
     {:else}
       <!-- Workspace / tenant scope: sortable table -->
@@ -710,6 +737,16 @@
     flex-shrink: 0;
     min-width: 70px;
     text-align: right;
+  }
+
+  .progress-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .col-progress {
+    min-width: 150px;
   }
 
   .progress-bar-wrap {
