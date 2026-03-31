@@ -111,7 +111,7 @@
     if (type === 'agent') {
       result.push(
         { id: 'chat',    label: $t('detail_panel.tabs.chat') },
-        { id: 'history', label: $t('detail_panel.tabs.history') },
+        { id: 'history', label: 'Logs' },
         { id: 'trace',   label: $t('detail_panel.tabs.trace') },
       );
       if (data.conversation_sha !== undefined) {
@@ -508,10 +508,12 @@
       agentWorkloadLoading = true;
       Promise.all([
         api.agent(id).then(normalizeAgent).catch(() => null),
-        api.agentContainer(id).catch(() => null),
-        api.agentWorkload(id).catch(() => null),
-      ]).then(([ag, container, workload]) => {
-        agentWorkload = { agent: ag, container, workload };
+        api.agentLogs(id, 500, 0).catch(() => []),
+      ]).then(([ag, logs]) => {
+        agentWorkload = { agent: ag };
+        if (!agentLogs || agentLogs.length < 5) {
+          agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
+        }
       }).catch(() => { agentWorkload = null; })
         .finally(() => { agentWorkloadLoading = false; });
     }
@@ -1990,77 +1992,23 @@
               </div>
             {:else if agentWorkload}
               {@const ag = normalizeAgent(agentWorkload.agent) ?? agentDetail ?? entity.data ?? {}}
-              {@const container = agentWorkload.container}
-              {@const wl = agentWorkload.workload}
-              <span class="progress-section-label">Lifecycle</span>
-              <dl class="entity-meta">
-                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' ? 'info' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
-                {#if ag.created_at}
-                  <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
-                {/if}
-                {#if ag.completed_at}
-                  <dt>Completed</dt><dd>{fmtDate(ag.completed_at)}</dd>
-                  {@const dur = ag.completed_at - ag.created_at}
-                  <dt>Duration</dt><dd>{dur < 60 ? `${Math.round(dur)}s` : dur < 3600 ? `${Math.round(dur / 60)}m` : `${Math.round(dur / 3600)}h ${Math.round((dur % 3600) / 60)}m`}</dd>
-                {/if}
-                {#if ag.task_id}
-                  <dt>Task</dt><dd><button class="entity-link" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{entityName('task', ag.task_id)}</button></dd>
-                {/if}
-                {#if ag.mr_id}
-                  <dt>Result MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
-                {/if}
-              </dl>
-              {#if wl}
-                <span class="progress-section-label">Runtime Environment</span>
-                <dl class="entity-meta">
-                  {#if wl.compute_target}
-                    <dt>Compute</dt><dd>{wl.compute_target}</dd>
-                  {/if}
-                  {#if wl.hostname}
-                    <dt>Host</dt><dd class="mono">{wl.hostname}</dd>
-                  {/if}
-                  {#if wl.pid}
-                    <dt>PID</dt><dd class="mono">{wl.pid}</dd>
-                  {/if}
-                  {#if wl.alive !== undefined}
-                    <dt>Alive</dt><dd><Badge value={wl.alive ? 'yes' : 'no'} variant={wl.alive ? 'success' : 'muted'} /></dd>
-                  {/if}
-                  {#if wl.attested_at}
-                    <dt>Attested</dt><dd>{fmtDate(wl.attested_at)}</dd>
-                  {/if}
-                  {#if wl.last_verified_at}
-                    <dt>Last verified</dt><dd>{fmtDate(wl.last_verified_at)}</dd>
-                  {/if}
-                  {#if wl.stack_fingerprint}
-                    <dt>Stack</dt><dd class="mono" title={wl.stack_fingerprint}>{shortId(wl.stack_fingerprint)}</dd>
-                  {/if}
-                </dl>
-              {/if}
-              {#if container}
-                <span class="progress-section-label">Container</span>
-                <dl class="entity-meta">
-                  {#if container.container_id}
-                    <dt>Container</dt><dd class="mono">{shortId(container.container_id)}</dd>
-                  {/if}
-                  {#if container.image}
-                    <dt>Image</dt><dd class="mono">{container.image}</dd>
-                  {/if}
-                  {#if container.runtime}
-                    <dt>Runtime</dt><dd>{container.runtime}</dd>
-                  {/if}
-                  {#if container.exit_code !== undefined && container.exit_code !== null}
-                    <dt>Exit code</dt><dd><Badge value={String(container.exit_code)} variant={container.exit_code === 0 ? 'success' : 'danger'} /></dd>
-                  {/if}
-                  {#if container.started_at}
-                    <dt>Started</dt><dd>{fmtDate(container.started_at)}</dd>
-                  {/if}
-                  {#if container.stopped_at}
-                    <dt>Stopped</dt><dd>{fmtDate(container.stopped_at)}</dd>
-                  {/if}
-                </dl>
+              <!-- Agent execution logs (full log stream) -->
+              {#if Array.isArray(agentLogs) && agentLogs.length > 0}
+                <div class="trace-list">
+                  {#each agentLogs as entry}
+                    <div class="trace-entry">
+                      {#if entry.timestamp || entry.created_at}
+                        <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                      {/if}
+                      <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="no-data">No execution logs available for this agent</p>
               {/if}
             {:else}
-              <p class="no-data">No lifecycle details available</p>
+              <p class="no-data">No log data available</p>
             {/if}
           {:else}
             <EmptyState title={$t('detail_panel.no_history')} description={$t('detail_panel.no_history_desc')} />
