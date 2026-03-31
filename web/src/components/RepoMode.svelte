@@ -99,9 +99,37 @@
     return () => { aborted = true; };
   });
 
+  // ── Human-friendly entity name cache ──────────────────────────────────
+  let entityNameCache = $state({});
+
+  function queueNameResolution(type, id) {
+    if (!id) return;
+    const key = `${type}:${id}`;
+    if (entityNameCache[key] !== undefined) return;
+    queueMicrotask(() => {
+      if (entityNameCache[key] !== undefined) return;
+      entityNameCache = { ...entityNameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'task' ? api.task(id).then(t => t?.title) :
+                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) entityNameCache = { ...entityNameCache, [key]: name };
+      }).catch(() => {});
+    });
+  }
+
+  function entityName(type, id) {
+    if (!id) return '';
+    const cached = entityNameCache[`${type}:${id}`];
+    if (cached) return cached;
+    queueNameResolution(type, id);
+    return shortId(id);
+  }
+
   function shortId(id) {
     if (!id) return '';
-    return id.length > 12 ? id.slice(0, 8) : id;
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
   }
 
   function fmtRelTime(ts) {
@@ -282,8 +310,8 @@
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
-                  <td class="cell-mono">{task.spec_path ? task.spec_path.split('/').pop() : ''}</td>
-                  <td class="cell-mono">{task.assigned_to ? shortId(task.assigned_to) : ''}</td>
+                  <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id ?? repo?.id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
+                  <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                   <td class="cell-time">{fmtRelTime(task.updated_at ?? task.created_at)}</td>
                 </tr>
               {/each}
@@ -308,6 +336,7 @@
                 <th>Title</th>
                 <th>Branch</th>
                 <th>Agent</th>
+                <th>Spec</th>
                 <th>Changes</th>
                 <th>Updated</th>
               </tr>
@@ -317,8 +346,9 @@
                 <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
                   <td><Badge value={mr.status ?? 'open'} variant={mrStatusVariant(mr.status)} /></td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
-                  <td class="cell-mono">{mr.source_branch ?? ''}</td>
-                  <td class="cell-mono">{mr.author_agent_id ? shortId(mr.author_agent_id) : ''}</td>
+                  <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
+                  <td class="cell-mono">{#if mr.author_agent_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{:else}{''}{/if}</td>
+                  <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr.diff_stats}
                       <span class="diff-stat-compact">
@@ -867,8 +897,53 @@
     gap: var(--space-1);
   }
 
-  .diff-ins { color: var(--color-success); }
-  .diff-del { color: var(--color-danger); }
+  .diff-ins { color: var(--color-success); font-weight: 600; }
+  .diff-del { color: var(--color-danger); font-weight: 600; }
+
+  /* ── Entity link buttons in tables ──────────────────────────────────── */
+  .entity-link-btn {
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-link, var(--color-primary));
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 130px;
+    display: inline-block;
+    vertical-align: middle;
+    text-align: left;
+  }
+
+  .entity-link-btn:hover {
+    text-decoration: underline;
+    color: var(--color-primary);
+  }
+
+  .entity-link-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+    border-radius: var(--radius-sm);
+  }
+
+  .branch-ref {
+    max-width: 100px;
+    display: inline-block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+
+  .branch-arrow {
+    color: var(--color-text-muted);
+    margin: 0 2px;
+    font-size: var(--text-xs);
+  }
 
   /* ── Responsive ─────────────────────────────────────────────────────── */
   @media (max-width: 768px) {
