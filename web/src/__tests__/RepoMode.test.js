@@ -25,12 +25,14 @@ describe('RepoMode', () => {
     expect(() => render(RepoMode, { props: { workspace: ws, repo } })).not.toThrow();
   });
 
-  it('renders tab bar with all five tabs', () => {
+  it('renders tab bar with all seven tabs', () => {
     const { container } = render(RepoMode, { props: { workspace: ws, repo } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(5);
+    expect(tabs.length).toBe(7);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('Specs');
+    expect(labels).toContain('Tasks');
+    expect(labels).toContain('MRs');
     expect(labels).toContain('Architecture');
     expect(labels).toContain('Decisions');
     expect(labels).toContain('Code');
@@ -102,7 +104,7 @@ describe('RepoMode', () => {
     });
     const tablist = container.querySelector('[role="tablist"]');
     await fireEvent.keyDown(tablist, { key: 'ArrowRight' });
-    expect(onTabChange).toHaveBeenCalledWith('architecture');
+    expect(onTabChange).toHaveBeenCalledWith('tasks');
   });
 
   it('ArrowLeft wraps around to last tab from first', async () => {

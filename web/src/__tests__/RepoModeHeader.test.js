@@ -316,12 +316,12 @@ describe('Agent panel', () => {
 // ── Tab bar ────────────────────────────────────────────────────────────
 
 describe('Tab bar', () => {
-  it('renders all 5 tabs', () => {
+  it('renders all 7 tabs', () => {
     const { container } = render(RepoMode, {
       props: { workspace: mockWorkspace, repo: mockRepo, activeTab: 'specs' },
     });
     const tabs = container.querySelectorAll('.tab-btn');
-    expect(tabs.length).toBe(5);
+    expect(tabs.length).toBe(7);
   });
 
   it('marks the active tab with aria-selected=true', () => {
