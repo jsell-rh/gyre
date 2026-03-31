@@ -118,7 +118,7 @@ specs:
 
   # Personas (not implementation contracts)
   - path: personas/ceo.md
-    title: CEO Agent Persona
+    title: Workspace Orchestrator Persona
     owner: user:jsell
     approval:
       mode: human_only  # Personas define agent behavior - human must approve
