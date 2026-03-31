@@ -838,7 +838,8 @@ This spec **supersedes or refines** the following:
 - **Admin Panel** (`admin-panel.md`): admin panel gains tenant-level scope, persona management, budget dashboards
 - **Spec Lifecycle** (`spec-lifecycle.md`): cross-repo spec escalation protocol defined here
 - **Manager Agent** (`development/manager-agent.md`): split into workspace orchestrator + repo orchestrator
-- **Repo Orchestrator Persona** (`personas/repo-orchestrator.md`): repo-orchestrator persona (formerly CEO)
+- **Workspace Orchestrator Persona** (`personas/workspace-orchestrator.md`): workspace orchestrator persona
+- **Repo Orchestrator Persona** (`personas/repo-orchestrator.md`): repo orchestrator persona
 
 This spec **depends on:**
 - **Source Control** (`source-control.md`): repos, MRs, merge queue
