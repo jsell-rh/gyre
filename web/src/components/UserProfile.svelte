@@ -270,7 +270,7 @@
               <div class="membership-info">
                 <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? ws.id}</span>
                 {#if ws.role}
-                  <Badge value={ws.role} color="neutral" />
+                  <Badge value={ws.role} variant="muted" />
                 {/if}
               </div>
               {#if ws.trust_level}
@@ -298,7 +298,7 @@
           {#each judgments as j}
             <div class="ledger-item">
               <div class="ledger-row">
-                <Badge value={judgmentLabel(j)} color={judgmentEventColor(judgmentLabel(j))} />
+                <Badge value={judgmentLabel(j)} variant={judgmentEventColor(judgmentLabel(j))} />
                 <span class="ledger-target mono" title={judgmentTarget(j)}>{judgmentTarget(j)}</span>
                 <span class="ledger-time muted">{rel(j.timestamp ?? j.created_at ?? j.approved_at)}</span>
               </div>
