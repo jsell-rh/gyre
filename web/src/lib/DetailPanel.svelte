@@ -1110,6 +1110,36 @@
     }
     return JSON.stringify(detail);
   }
+
+  /** Parse unified diff patch into line objects with line numbers */
+  function parsePatchLines(patch) {
+    if (!patch) return [];
+    const lines = patch.split('\n');
+    let oldLine = 0;
+    let newLine = 0;
+    return lines.map(line => {
+      const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (hunkMatch) {
+        oldLine = parseInt(hunkMatch[1], 10);
+        newLine = parseInt(hunkMatch[2], 10);
+        return { text: line, type: 'hunk', oldNum: '', newNum: '' };
+      }
+      if (line.startsWith('+')) {
+        const result = { text: line, type: 'add', oldNum: '', newNum: newLine };
+        newLine++;
+        return result;
+      }
+      if (line.startsWith('-')) {
+        const result = { text: line, type: 'del', oldNum: oldLine, newNum: '' };
+        oldLine++;
+        return result;
+      }
+      // Context line
+      const result = { text: line, type: 'ctx', oldNum: oldLine, newNum: newLine };
+      if (line.length > 0 || oldLine > 0) { oldLine++; newLine++; }
+      return result;
+    });
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -2256,8 +2286,17 @@
                       {/if}
                     </summary>
                     {#if file.patch}
-                      <div class="diff-patch">{#each file.patch.split('\n') as line}<span class={line.startsWith('+') ? 'diff-line-add' : line.startsWith('-') ? 'diff-line-del' : line.startsWith('@@') ? 'diff-line-hunk' : 'diff-line'}>{line}
-</span>{/each}</div>
+                      <table class="diff-table">
+                        <tbody>
+                          {#each parsePatchLines(file.patch) as pline}
+                            <tr class="diff-tr diff-tr-{pline.type}">
+                              <td class="diff-gutter diff-gutter-old">{pline.oldNum}</td>
+                              <td class="diff-gutter diff-gutter-new">{pline.newNum}</td>
+                              <td class="diff-code">{pline.text}</td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
                     {:else}
                       <p class="diff-no-patch">Binary file or no patch data available</p>
                     {/if}
@@ -3787,23 +3826,46 @@
     flex-shrink: 0;
   }
 
-  .diff-patch {
-    margin: 0;
-    padding: var(--space-2) var(--space-3);
+  .diff-table {
+    width: 100%;
+    border-collapse: collapse;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    line-height: 1.6;
+    line-height: 1.5;
+    max-height: 500px;
+    overflow-y: auto;
+    display: block;
+  }
+  .diff-table tbody { display: table; width: 100%; }
+  .diff-tr { border: none; }
+  .diff-gutter {
+    width: 1px;
+    min-width: 40px;
+    padding: 0 var(--space-2);
+    text-align: right;
+    color: var(--color-text-muted);
+    user-select: none;
+    white-space: nowrap;
+    vertical-align: top;
+    border-right: 1px solid var(--color-border);
+    opacity: 0.6;
+  }
+  .diff-gutter-old { border-right: none; }
+  .diff-code {
+    padding: 0 var(--space-3);
     white-space: pre-wrap;
     word-break: break-all;
     color: var(--color-text);
-    max-height: 400px;
-    overflow-y: auto;
   }
-
-  .diff-line { display: block; }
-  .diff-line-add { display: block; background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
-  .diff-line-del { display: block; background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
-  .diff-line-hunk { display: block; color: var(--color-info); font-weight: 500; background: color-mix(in srgb, var(--color-info) 8%, transparent); }
+  .diff-tr-add .diff-code { background: color-mix(in srgb, var(--color-success) 10%, transparent); color: var(--color-success); }
+  .diff-tr-add .diff-gutter { background: color-mix(in srgb, var(--color-success) 6%, transparent); }
+  .diff-tr-del .diff-code { background: color-mix(in srgb, var(--color-danger) 10%, transparent); color: var(--color-danger); }
+  .diff-tr-del .diff-gutter { background: color-mix(in srgb, var(--color-danger) 6%, transparent); }
+  .diff-tr-hunk .diff-code { color: var(--color-info); font-weight: 500; background: color-mix(in srgb, var(--color-info) 6%, transparent); }
+  .diff-tr-hunk .diff-gutter { background: color-mix(in srgb, var(--color-info) 4%, transparent); }
+  .diff-tr-ctx:hover .diff-code,
+  .diff-tr-add:hover .diff-code,
+  .diff-tr-del:hover .diff-code { filter: brightness(0.95); }
 
   /* ── MR Gates tab ────────────────────────────────────────────────────────── */
   .gates-list {
