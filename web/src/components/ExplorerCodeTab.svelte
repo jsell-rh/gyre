@@ -98,8 +98,14 @@
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
             const total = arr.length;
-            return { id: mr.id, passed, failed, total };
-          }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0 }))
+            const details = arr.map(g => ({
+              name: g.name ?? g.gate_name ?? 'Gate',
+              status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
+              gate_type: g.gate_type,
+              required: g.required,
+            }));
+            return { id: mr.id, passed, failed, total, details };
+          }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0, details: [] }))
         );
         const gateResults = await Promise.all(gatePromises);
         const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
@@ -407,9 +413,18 @@
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
                 <td>
                   {#if mr._gates?.total > 0}
-                    <span class="gate-summary" class:gate-all-pass={mr._gates.failed === 0 && mr._gates.passed === mr._gates.total} class:gate-has-fail={mr._gates.failed > 0}>
-                      {mr._gates.passed}/{mr._gates.total}
-                    </span>
+                    <div class="gate-cell" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''}>
+                      <span class="gate-summary" class:gate-all-pass={mr._gates.failed === 0 && mr._gates.passed === mr._gates.total} class:gate-has-fail={mr._gates.failed > 0}>
+                        {mr._gates.passed}/{mr._gates.total}
+                      </span>
+                      {#if mr._gates.details?.length > 0}
+                        <span class="gate-names">
+                          {#each mr._gates.details as g}
+                            <span class="gate-name-tag gate-name-{g.status}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
+                          {/each}
+                        </span>
+                      {/if}
+                    </div>
                   {:else}
                     <span class="secondary">—</span>
                   {/if}
@@ -1023,6 +1038,41 @@
     background: color-mix(in srgb, var(--color-danger) 10%, transparent);
     border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
     color: var(--color-danger);
+  }
+
+  .gate-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .gate-names {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+
+  .gate-name-tag {
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: var(--radius);
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+
+  .gate-name-passed {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+  }
+
+  .gate-name-failed {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  }
+
+  .gate-name-pending {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
   }
 
   /* Agent link in commit table */

@@ -101,8 +101,14 @@
             const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-            return { id: mr.id, passed, failed, total: arr.length };
-          }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0 }))
+            const details = arr.map(g => ({
+              name: g.name ?? g.gate_name ?? 'Gate',
+              status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
+              gate_type: g.gate_type,
+              required: g.required,
+            }));
+            return { id: mr.id, passed, failed, total: arr.length, details };
+          }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0, details: [] }))
         );
         const gateResults = await Promise.all(gatePromises);
         if (aborted) return;
@@ -368,17 +374,26 @@
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
-                      <span class="gate-summary-compact">
-                        {#if mr._gates.failed > 0}
-                          <span class="gate-fail-compact" title="{mr._gates.failed} failed">✗{mr._gates.failed}</span>
+                      <div class="gate-cell-repo" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''}>
+                        <span class="gate-summary-compact">
+                          {#if mr._gates.failed > 0}
+                            <span class="gate-fail-compact">✗{mr._gates.failed}</span>
+                          {/if}
+                          {#if mr._gates.passed > 0}
+                            <span class="gate-pass-compact">✓{mr._gates.passed}</span>
+                          {/if}
+                          {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}
+                            <span class="gate-pending-compact">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>
+                          {/if}
+                        </span>
+                        {#if mr._gates.details?.length > 0}
+                          <span class="gate-names-repo">
+                            {#each mr._gates.details as g}
+                              <span class="gate-tag gate-tag-{g.status}">{g.name}</span>
+                            {/each}
+                          </span>
                         {/if}
-                        {#if mr._gates.passed > 0}
-                          <span class="gate-pass-compact" title="{mr._gates.passed} passed">✓{mr._gates.passed}</span>
-                        {/if}
-                        {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}
-                          <span class="gate-pending-compact" title="{mr._gates.total - mr._gates.passed - mr._gates.failed} pending">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>
-                        {/if}
-                      </span>
+                      </div>
                     {/if}
                   </td>
                   <td>
@@ -945,6 +960,19 @@
   .gate-pass-compact { color: var(--color-success); font-weight: 600; }
   .gate-fail-compact { color: var(--color-danger); font-weight: 600; }
   .gate-pending-compact { color: var(--color-text-muted); }
+
+  .gate-cell-repo { display: flex; flex-direction: column; gap: 2px; }
+  .gate-names-repo { display: flex; flex-wrap: wrap; gap: 2px; }
+  .gate-tag {
+    font-size: 10px;
+    padding: 0 3px;
+    border-radius: var(--radius);
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+  .gate-tag-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-tag-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-tag-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
 
   /* ── Entity link buttons in tables ──────────────────────────────────── */
   .entity-link-btn {
