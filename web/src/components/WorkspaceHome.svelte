@@ -539,6 +539,129 @@
         </div>
       </section>
 
+      <!-- ── Specs (§2: second section — cross-repo spec overview) ────── -->
+      <section class="home-section" aria-labelledby="section-specs" data-testid="section-specs">
+        <div class="section-header">
+          <h2 class="section-title" id="section-specs">{$t('workspace_home.sections.specs')}</h2>
+          <div class="header-controls">
+            <select
+              class="filter-select"
+              value={specsStatusFilter}
+              onchange={(e) => { specsStatusFilter = e.target.value; }}
+              aria-label="Filter specs by status"
+              data-testid="specs-status-filter"
+            >
+              <option value="">{$t('workspace_home.all_statuses')}</option>
+              <option value="draft">Draft</option>
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="implemented">Implemented</option>
+            </select>
+          </div>
+        </div>
+        <div class="section-body">
+          {#if specsLoading}
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+          {:else if specsError}
+            <div class="error-row" role="alert">
+              <p class="error-text">{specsError}</p>
+              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">{$t('common.retry')}</button>
+            </div>
+          {:else if filteredSpecs.length === 0}
+            <p class="empty-text" data-testid="specs-empty">
+              {specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}
+            </p>
+          {:else}
+            <table class="specs-table" data-testid="specs-table">
+              <thead>
+                <tr>
+                  <th scope="col" aria-sort={specsSortCol === 'repo' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>{$t('workspace_home.sections.repos')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+                  </th>
+                  <th scope="col">Progress</th>
+                  <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Last activity <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each filteredSpecs as spec (spec.id ?? spec.path)}
+                  <tr
+                    class="spec-row"
+                    onclick={() => navigateToSpec(spec)}
+                    role="button"
+                    tabindex="0"
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }}
+                    data-testid="spec-row"
+                    aria-label="Open spec {spec.path}"
+                  >
+                    <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
+                    <td class="spec-path">{spec.path}</td>
+                    <td class="spec-status">
+                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.status] ?? '•'}</span>
+                      {spec.status ?? '—'}
+                    </td>
+                    <td class="spec-progress">
+                      {#if spec.tasks_total != null}
+                        {spec.tasks_done ?? 0}/{spec.tasks_total}
+                      {:else}
+                        —
+                      {/if}
+                    </td>
+                    <td class="spec-activity">{relTime(spec.updated_at)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+      </section>
+
+      <!-- ── Architecture ────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
+        <button
+          class="arch-toggle-header"
+          onclick={toggleArch}
+          aria-expanded={archExpanded}
+          aria-controls="arch-body"
+          data-testid="arch-toggle"
+        >
+          <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
+          <span class="arch-toggle-label" aria-hidden="true">
+            {archExpanded ? '▾ ' + $t('workspace_home.hide_workspace_graph') : '▸ ' + $t('workspace_home.show_workspace_graph')}
+          </span>
+        </button>
+        {#if archExpanded}
+          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
+            {#if archLoading}
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            {:else if archError}
+              <div class="error-row" role="alert">
+                <p class="error-text">{archError}</p>
+                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">{$t('common.retry')}</button>
+              </div>
+            {:else if archGraph}
+              <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                <ExplorerCanvas
+                  nodes={archGraph.nodes ?? []}
+                  edges={archGraph.edges ?? []}
+                  workspaceId={workspace.id}
+                  scope="workspace"
+                />
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </section>
+
       <!-- ── Repos ─────────────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
         <div class="section-header">
@@ -689,44 +812,6 @@
         </div>
       </section>
 
-      <!-- ── Architecture ────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
-        <button
-          class="arch-toggle-header"
-          onclick={toggleArch}
-          aria-expanded={archExpanded}
-          aria-controls="arch-body"
-          data-testid="arch-toggle"
-        >
-          <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
-          <span class="arch-toggle-label" aria-hidden="true">
-            {archExpanded ? '▾ ' + $t('workspace_home.hide_workspace_graph') : '▸ ' + $t('workspace_home.show_workspace_graph')}
-          </span>
-        </button>
-        {#if archExpanded}
-          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
-            {#if archLoading}
-              <div class="skeleton-row"></div>
-              <div class="skeleton-row"></div>
-            {:else if archError}
-              <div class="error-row" role="alert">
-                <p class="error-text">{archError}</p>
-                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">{$t('common.retry')}</button>
-              </div>
-            {:else if archGraph}
-              <div class="arch-canvas-wrap" data-testid="arch-canvas">
-                <ExplorerCanvas
-                  nodes={archGraph.nodes ?? []}
-                  edges={archGraph.edges ?? []}
-                  workspaceId={workspace.id}
-                  scope="workspace"
-                />
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </section>
-
       <!-- ── Briefing ──────────────────────────────────────────────────── -->
       <section class="home-section home-section-briefing" aria-labelledby="section-briefing" data-testid="section-briefing">
         <div class="section-header">
@@ -734,91 +819,6 @@
         </div>
         <div class="section-body section-body-briefing">
           <Briefing workspaceId={workspace.id} scope="workspace" workspaceName={workspace.name} />
-        </div>
-      </section>
-
-      <!-- ── Specs ─────────────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-specs" data-testid="section-specs">
-        <div class="section-header">
-          <h2 class="section-title" id="section-specs">{$t('workspace_home.sections.specs')}</h2>
-          <div class="header-controls">
-            <select
-              class="filter-select"
-              value={specsStatusFilter}
-              onchange={(e) => { specsStatusFilter = e.target.value; }}
-              aria-label="Filter specs by status"
-              data-testid="specs-status-filter"
-            >
-              <option value="">{$t('workspace_home.all_statuses')}</option>
-              <option value="draft">Draft</option>
-              <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
-              <option value="implemented">Implemented</option>
-            </select>
-          </div>
-        </div>
-        <div class="section-body">
-          {#if specsLoading}
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-          {:else if specsError}
-            <div class="error-row" role="alert">
-              <p class="error-text">{specsError}</p>
-              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">{$t('common.retry')}</button>
-            </div>
-          {:else if filteredSpecs.length === 0}
-            <p class="empty-text" data-testid="specs-empty">
-              {specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}
-            </p>
-          {:else}
-            <table class="specs-table" data-testid="specs-table">
-              <thead>
-                <tr>
-                  <th scope="col" aria-sort={specsSortCol === 'repo' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>{$t('workspace_home.sections.repos')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
-                  </th>
-                  <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
-                  </th>
-                  <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
-                  </th>
-                  <th scope="col">Progress</th>
-                  <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Last activity <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each filteredSpecs as spec (spec.id ?? spec.path)}
-                  <tr
-                    class="spec-row"
-                    onclick={() => navigateToSpec(spec)}
-                    role="button"
-                    tabindex="0"
-                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }}
-                    data-testid="spec-row"
-                    aria-label="Open spec {spec.path}"
-                  >
-                    <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
-                    <td class="spec-path">{spec.path}</td>
-                    <td class="spec-status">
-                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.status] ?? '•'}</span>
-                      {spec.status ?? '—'}
-                    </td>
-                    <td class="spec-progress">
-                      {#if spec.tasks_total != null}
-                        {spec.tasks_done ?? 0}/{spec.tasks_total}
-                      {:else}
-                        —
-                      {/if}
-                    </td>
-                    <td class="spec-activity">{relTime(spec.updated_at)}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
         </div>
       </section>
 
