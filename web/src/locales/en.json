@@ -125,7 +125,8 @@
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
       "suggested_link": "Suggested Link"
-    }
+    },
+    "go_to_repo_decisions": "Go to {name} decisions"
   },
   "repo_mode": {
     "tabs": {
