@@ -518,25 +518,25 @@
             {#if briefing.metrics.mrs_count != null}
               <div class="metric-cell" data-testid="metric-mrs">
                 <span class="metric-val">{briefing.metrics.mrs_count}</span>
-                <span class="metric-label">MRs</span>
+                <span class="metric-label">{$t('briefing.metric_mrs')}</span>
               </div>
             {/if}
             {#if briefing.metrics.runs_count != null}
               <div class="metric-cell" data-testid="metric-runs">
                 <span class="metric-val">{briefing.metrics.runs_count}</span>
-                <span class="metric-label">runs</span>
+                <span class="metric-label">{$t('briefing.metric_runs')}</span>
               </div>
             {/if}
             {#if briefing.metrics.cost_usd != null}
               <div class="metric-cell" data-testid="metric-cost">
                 <span class="metric-val">${briefing.metrics.cost_usd.toFixed(2)}</span>
-                <span class="metric-label">cost</span>
+                <span class="metric-label">{$t('briefing.metric_cost')}</span>
               </div>
             {/if}
             {#if briefing.metrics.budget_pct != null}
               <div class="metric-cell" data-testid="metric-budget">
                 <span class="metric-val">{briefing.metrics.budget_pct}%</span>
-                <span class="metric-label">budget</span>
+                <span class="metric-label">{$t('briefing.metric_budget')}</span>
               </div>
             {/if}
           </div>

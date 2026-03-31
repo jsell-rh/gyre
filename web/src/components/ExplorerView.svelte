@@ -304,7 +304,7 @@
                 {/if}
               </div>
             </div>
-            <span class="ws-repo-explore">Explore &rarr;</span>
+            <span class="ws-repo-explore">{$t('explorer_view.explore_arrow')}</span>
           </button>
         {/each}
       </div>
@@ -336,7 +336,7 @@
               onchange={onRepoChange}
               aria-label="Select repository to explore"
             >
-              <option value="">Select a repository…</option>
+              <option value="">{$t('explorer_view.select_repo')}</option>
               {#each repos as repo}
                 <option value={repo.id}>{repo.name}</option>
               {/each}
@@ -524,11 +524,11 @@
         {#if !selectedRepoId}
           <div class="empty-state-wrap">
             <EmptyState
-              title="Select a repository"
-              description="Choose a repository above to explore its realized architecture — types, traits, functions, endpoints, and their relationships."
+              title={$t('explorer_view.select_repo')}
+              description={$t('explorer_view.select_repo_desc')}
             />
             {#if repos.length === 0 && !reposLoading}
-              <p class="hint">No repositories found. Create a project and repository to get started.</p>
+              <p class="hint">{$t('explorer_view.no_repos_hint')}</p>
               <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>{$t('explorer_view.go_to_settings')}</button>
             {/if}
           </div>
@@ -544,7 +544,7 @@
         {:else if loading}
           <div class="loading-wrap">
             <Skeleton lines={8} />
-            <p class="loading-msg">Fetching knowledge graph…</p>
+            <p class="loading-msg">{$t('explorer_view.fetching_graph')}</p>
           </div>
 
         {:else if graphError}
