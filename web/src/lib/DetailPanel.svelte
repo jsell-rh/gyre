@@ -954,9 +954,18 @@
 
   function fmtDate(ts) {
     if (!ts) return '—';
-    return new Date(ts * 1000).toLocaleString([], {
-      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-    });
+    const ms = ts > 1e12 ? ts : ts * 1000; // handle both seconds and ms
+    const d = new Date(ms);
+    const now = Date.now();
+    const diff = Math.round((now - ms) / 1000);
+    // Show relative time for recent events, absolute for older ones
+    let rel = '';
+    if (diff < 60) rel = 'just now';
+    else if (diff < 3600) rel = `${Math.floor(diff / 60)}m ago`;
+    else if (diff < 86400) rel = `${Math.floor(diff / 3600)}h ago`;
+    else if (diff < 604800) rel = `${Math.floor(diff / 86400)}d ago`;
+    const abs = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return rel ? `${rel} (${abs})` : abs;
   }
 
   /** Truncate a UUID/SHA to 8 chars for display. Full value shown in title. */
