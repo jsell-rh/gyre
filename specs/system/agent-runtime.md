@@ -54,6 +54,8 @@ The workspace orchestrator's job is **cross-repo impact analysis and delegation*
 4. For dependent repos: creates **coordination tasks** — tasks in each affected repo notifying their orchestrators that a dependency changed. These may result in documentation updates, spec amendments, or re-implementation depending on the repo orchestrator's judgment.
 5. For cross-workspace dependencies: creates priority-4 notifications for dependent workspace admins (per HSI §8).
 
+**Coordination task processing:** Coordination tasks (`task_type: Coordination`) are handled by the same repo orchestrator mechanism as delegation tasks — the task scheduler detects `Coordination` tasks and spawns the repo orchestrator, which reads the coordination task, assesses the impact of the dependency change, and may create sub-tasks (documentation updates, spec amendments, re-implementation) or mark the coordination task as `Completed` if no action is needed.
+
 The workspace orchestrator **only creates tasks** (via `task.create` MCP tool). It never spawns agents, never touches code, never interacts with compute targets. It thinks in tasks.
 
 **Orchestrator spawn and message routing:** Both orchestrators use the workspace's configured compute target (§3). The workspace orchestrator has a workspace-scoped JWT. It completes after processing its inbox. The `SpecApproved` message uses `Destination::Workspace(workspace_id)` routing (amends `message-bus.md` scoping rules). The server maintains an **orchestrator registry** per workspace: if an active workspace orchestrator exists, the message is delivered to its inbox. If none exists, the server spawns one and delivers the message to the new agent's inbox before it starts processing. This is an internal server mechanism, not a message bus feature — the server intercepts workspace-destined `SpecApproved` messages and ensures exactly-one-active-orchestrator semantics via a per-workspace mutex. Concurrent `SpecApproved` events are serialized: the second message waits in the inbox until the first is processed (or until a new session is spawned if the orchestrator completed between messages).
@@ -144,6 +146,13 @@ When the agent signals completion:
 2. Retries up to 3 times with exponential backoff (1s, 5s, 30s)
 3. If all retries fail: task marked `Blocked`, orchestrator notified, priority-1 notification created for workspace admins ("Compute target unavailable: {target_name}")
 4. No fallback to a different compute target — the workspace's selected target is authoritative
+
+**Spec rejection mid-flight:** If a spec is rejected (`POST /specs/:path/reject` per HSI §8) while agents are implementing it, the approval handler:
+1. Sets all in-flight tasks referencing that `spec_ref` to `Cancelled` status
+2. Sends a shutdown message to all active agents working on those tasks
+3. Agents have 60 seconds to commit current work (same grace period as budget exhaustion), then are killed and marked `Stopped`
+4. The delegation task (if any) is also `Cancelled`
+5. A priority-2 "Spec rejected" notification is created for workspace Admin/Developer members
 
 **Key property:** Each iteration is a fresh session. The agent has no memory of previous attempts — only the gate failure messages and the current state of the code on its branch. This is deliberate: fresh context prevents the agent from repeating the same mistakes and forces it to reason from first principles each time.
 
