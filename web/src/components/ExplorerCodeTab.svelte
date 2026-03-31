@@ -308,7 +308,17 @@
                 </td>
                 <td class="mono secondary">{mr.source_branch ?? '—'}</td>
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
-                <td class="secondary">{relativeTime(mr.updated_at)}</td>
+                <td class="secondary">
+                  <div class="mr-updated-cell">
+                    <span>{relativeTime(mr.updated_at)}</span>
+                    {#if mr.diff_stats}
+                      <span class="mr-diff-stats">
+                        <span class="mr-diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                        <span class="mr-diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                      </span>
+                    {/if}
+                  </div>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -646,6 +656,23 @@
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
   }
+
+  /* MR updated cell with diff stats */
+  .mr-updated-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .mr-diff-stats {
+    display: flex;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .mr-diff-ins { color: var(--color-success); }
+  .mr-diff-del { color: var(--color-danger); }
 
   @media (prefers-reduced-motion: reduce) {
     .subtab-btn, .sort-btn, .table-row { transition: none; }
