@@ -445,6 +445,23 @@ pub async fn approve_spec(
             entry.approval_status = ApprovalStatus::Approved;
             entry.updated_at = now;
             let _ = state.spec_ledger.save(&entry).await;
+
+            // Emit SpecApproved event on the message bus (agent-runtime.md §1).
+            // This is the single trigger for all agent work via the signal chain:
+            // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
+            state
+                .emit_event(
+                    None, // workspace_id resolved by orchestrator registry
+                    gyre_common::message::Destination::Broadcast,
+                    gyre_common::message::MessageKind::SpecApproved,
+                    Some(serde_json::json!({
+                        "spec_path": spec_path,
+                        "spec_sha": req.sha,
+                        "approved_by": event.approver_id,
+                        "approval_id": event.id,
+                    })),
+                )
+                .await;
         }
     }
 
@@ -571,6 +588,57 @@ pub async fn reject_spec(
             mr.status = gyre_domain::MrStatus::Closed;
             mr.updated_at = now;
             let _ = state.merge_requests.update(&mr).await;
+        }
+    }
+
+    // Spec rejection mid-flight (agent-runtime.md §1): cancel all in-flight tasks
+    // referencing this spec and shutdown active agents working on those tasks.
+    {
+        let spec_tasks = state
+            .tasks
+            .list_by_spec_path(&spec_path)
+            .await
+            .unwrap_or_default();
+        let cancel_reason = format!("spec rejected: {}", req.reason);
+        for mut task in spec_tasks {
+            // Only cancel tasks that are still in-flight (Backlog, InProgress, Review, Blocked).
+            if matches!(
+                task.status,
+                gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+            ) {
+                continue;
+            }
+            let _ = task.cancel(Some(cancel_reason.clone()), now);
+            let _ = state.tasks.update(&task).await;
+
+            // If an agent is working on this task, stop it.
+            let agents = state.agents.list().await.unwrap_or_default();
+            for mut agent in agents {
+                if agent.current_task_id.as_ref() == Some(&task.id)
+                    && matches!(
+                        agent.status,
+                        gyre_domain::AgentStatus::Active | gyre_domain::AgentStatus::Blocked
+                    )
+                {
+                    let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
+                    let _ = state.agents.update(&agent).await;
+
+                    // Send shutdown message to agent's inbox.
+                    state
+                        .emit_event(
+                            None,
+                            gyre_common::message::Destination::Agent(agent.id.clone()),
+                            gyre_common::message::MessageKind::StatusUpdate,
+                            Some(serde_json::json!({
+                                "action": "shutdown",
+                                "reason": cancel_reason,
+                                "spec_path": spec_path,
+                                "grace_period_secs": 60,
+                            })),
+                        )
+                        .await;
+                }
+            }
         }
     }
 
