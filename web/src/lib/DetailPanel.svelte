@@ -784,7 +784,7 @@
             {/if}
 
             <div class="llm-input-area">
-              <div class="recipient-line">Edit spec: "{entity.data?.title || entity.id}" ▸</div>
+              <div class="recipient-line">{$t('detail_panel.edit_spec_recipient', { values: { name: entity.data?.title || entity.id } })}</div>
               <div class="llm-row">
                 <textarea
                   class="llm-textarea"
@@ -910,7 +910,7 @@
 
       {:else if activeTab === 'spec'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.spec_not_loaded')} description="Spec content for {entity.data?.spec_path ?? 'this entity'} is not available in this context." />
+          <EmptyState title={$t('detail_panel.spec_not_loaded')} description={$t('detail_panel.spec_not_loaded_desc', { values: { path: entity.data?.spec_path ?? '' } })} />
         </div>
 
       {:else if activeTab === 'chat'}

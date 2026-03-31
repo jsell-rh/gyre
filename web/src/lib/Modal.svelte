@@ -1,5 +1,6 @@
 <script>
   import { tick } from 'svelte';
+  import { t } from 'svelte-i18n';
 
   let {
     open = $bindable(false),
@@ -97,7 +98,7 @@
     >
       <div class="modal-header">
         <h3 class="modal-title" id={titleId}>{title}</h3>
-        <button class="modal-close" onclick={close} aria-label="Close {title}">
+        <button class="modal-close" onclick={close} aria-label={$t('common.close_title', { values: { title } })}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
             <path d="M18 6L6 18M6 6l12 12"/>
           </svg>

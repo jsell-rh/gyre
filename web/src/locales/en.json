@@ -134,6 +134,7 @@
     "go_to_repo_decisions": "Go to {name} decisions",
     "scope_tenant": "Tenant",
     "scope_workspace": "Workspace",
+    "rule_required_label": "Required",
     "decisions_badge_label": "{count} decisions",
     "retry_loading_decisions": "Retry loading decisions",
     "retry_loading_repos": "Retry loading repos",
@@ -563,6 +564,8 @@
     "loaded": "specs loaded",
     "filter_by_status": "Filter by status",
     "filter_by_kind": "Filter by kind",
+    "filter_owner_me": "My specs",
+    "search_placeholder": "Search specs\u2026",
     "specs_registry": "Specs registry",
     "spec_label": "Spec: {path}"
   },
@@ -1077,7 +1080,9 @@
     "save_failed": "Save failed: {error}",
     "conversation_unavailable": "Conversation unavailable",
     "collapse_label": "Collapse",
-    "pop_out_label": "Pop Out"
+    "pop_out_label": "Pop Out",
+    "spec_not_loaded_desc": "Spec content for {path} is not available in this context.",
+    "edit_spec_recipient": "Edit spec: \"{name}\" \u25B8"
   },
   "explorer_canvas": {
     "no_graph": "No graph data",
@@ -1156,6 +1161,7 @@
     "navigate_to_spec": "Navigate to spec",
     "loading_spec": "Loading spec content\u2026",
     "spec_editor": "Spec content editor",
+    "arch_preview": "Architecture preview canvas",
     "ghost_new": "+ new",
     "ghost_modified": "~ modified",
     "ghost_removed": "\u2212 removed",
@@ -1645,6 +1651,8 @@
     "time_days_ago": "{count}d ago",
     "enter_workspace": "Enter Workspace",
     "filter_placeholder": "Filter\u2026",
+    "close_title": "Close {title}",
+    "dismiss_notification": "Dismiss notification: {message}",
     "resolved": "Resolved",
     "status": {
       "active": "Active",

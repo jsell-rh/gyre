@@ -1,4 +1,5 @@
 <script>
+  import { t } from 'svelte-i18n';
   let {
     width = '100%',
     height = '1rem',
@@ -8,7 +9,7 @@
 </script>
 
 {#if lines > 1}
-  <div class="skeleton-lines" role="status" aria-label="Loading">
+  <div class="skeleton-lines" role="status" aria-label={$t('common.loading')}>
     {#each Array(lines) as _, i}
       <div
         class="skeleton"
@@ -21,7 +22,7 @@
   <div
     class="skeleton"
     role="status"
-    aria-label="Loading"
+    aria-label={$t('common.loading')}
     style="width:{width}; height:{height}; border-radius:{radius}"
   ></div>
 {/if}

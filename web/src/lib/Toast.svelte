@@ -1,5 +1,6 @@
 <script>
   import { fly } from 'svelte/transition';
+  import { t as i18n } from 'svelte-i18n';
   import { getToasts, dismiss } from './toast.svelte.js';
 
   const prefersReducedMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -27,7 +28,7 @@
         {/if}
       </span>
       <span class="toast-message">{t.message}</span>
-      <button class="toast-dismiss" onclick={() => dismiss(t.id)} aria-label="Dismiss notification: {t.message}">
+      <button class="toast-dismiss" onclick={() => dismiss(t.id)} aria-label={$i18n('common.dismiss_notification', { values: { message: t.message } })}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
     </div>

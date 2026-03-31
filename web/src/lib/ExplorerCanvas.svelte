@@ -849,7 +849,7 @@
       <div class="layout-switcher" role="group" aria-label={$t('explorer_canvas.layout_engine_label')}>
         {#each Object.entries(LAYOUT_LABELS) as [eng, label]}
           <button class="layout-btn" class:active={layoutEngine === eng}
-            onclick={() => (layoutEngine = eng)} aria-pressed={layoutEngine === eng} title="Switch to {label} layout" aria-label="Switch to {label} layout">
+            onclick={() => (layoutEngine = eng)} aria-pressed={layoutEngine === eng} title={$t('explorer_canvas.switch_to_layout', { values: { label } })} aria-label={$t('explorer_canvas.switch_to_layout', { values: { label } })}>
             {label}
           </button>
         {/each}
