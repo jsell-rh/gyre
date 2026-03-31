@@ -439,7 +439,7 @@
     if (activeTab === 'timeline' && !mrTimeline && !mrTimelineLoading) {
       mrTimelineLoading = true;
       api.mrTimeline(id)
-        .then((d) => { mrTimeline = Array.isArray(d) ? d : []; })
+        .then((d) => { mrTimeline = Array.isArray(d) ? d : (d?.events ?? []); })
         .catch(() => { mrTimeline = []; })
         .finally(() => { mrTimelineLoading = false; });
     }
@@ -1467,7 +1467,21 @@
               {@const tk = taskDetail ?? entity.data ?? {}}
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
-                <dt>Status</dt><dd><Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} /></dd>
+                <dt>Status</dt>
+                <dd>
+                  <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
+                  {#if tk.status && tk.status !== 'backlog'}
+                    <span class="status-story">
+                      <span class="status-step status-step-info">Created</span>
+                      <span class="status-step-arrow">→</span>
+                      {#if tk.assigned_to}
+                        <span class="status-step status-step-warning">Assigned</span>
+                        <span class="status-step-arrow">→</span>
+                      {/if}
+                      <span class="status-step status-step-{taskStatusColor(tk.status)}">{tk.status}</span>
+                    </span>
+                  {/if}
+                </dd>
                 <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
                 {#if tk.priority}
                   <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
