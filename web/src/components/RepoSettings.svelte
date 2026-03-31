@@ -15,12 +15,13 @@
     repo = null,
   } = $props();
 
-  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'audit', 'danger-zone'];
+  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'release', 'audit', 'danger-zone'];
   const TAB_KEYS = {
     'general': 'repo_settings.tabs.general',
     'gates': 'repo_settings.tabs.gates',
     'policies': 'repo_settings.tabs.policies',
     'budget': 'repo_settings.tabs.budget',
+    'release': 'Release',
     'audit': 'repo_settings.tabs.audit',
     'danger-zone': 'repo_settings.tabs.danger_zone',
   };
@@ -75,6 +76,11 @@
   let repoBudget = $state(null);
   let repoBudgetLoading = $state(false);
   let repoBudgetError = $state(null);
+
+  // ── Release ───────────────────────────────────────────────────────────
+  let releaseData = $state(null);
+  let releaseLoading = $state(false);
+  let releaseError = $state(null);
 
   // ── Audit ─────────────────────────────────────────────────────────────
   let auditEvents = $state([]);
@@ -133,6 +139,9 @@
     }
     if (activeTab === 'budget') {
       if (untrack(() => !repoBudget && !repoBudgetLoading)) loadRepoBudget(repoId);
+    }
+    if (activeTab === 'release') {
+      // Don't auto-load — user initiates preparation
     }
     if (activeTab === 'audit') {
       // Track auditFilterType so changes trigger a reload
@@ -248,6 +257,20 @@
       repoBudget = null;
     }
     finally { repoBudgetLoading = false; }
+  }
+
+  async function prepareRelease() {
+    if (!repo?.id || releaseLoading) return;
+    releaseLoading = true;
+    releaseError = null;
+    try {
+      releaseData = await api.releasePrep(repo.id);
+    } catch (e) {
+      releaseError = e.message ?? 'Release preparation failed';
+      releaseData = null;
+    } finally {
+      releaseLoading = false;
+    }
   }
 
   async function loadAudit(repoId) {
@@ -745,6 +768,54 @@
                 </div>
               </div>
             {/if}
+          </div>
+        {/if}
+      </div>
+
+    <!-- Release tab -->
+    {:else if activeTab === 'release'}
+      <div class="tab-body" data-testid="repo-release-tab">
+        <h2 class="tab-title">Release Preparation</h2>
+        <p class="tab-desc">Generate a release summary with changelog, version recommendation, and attestation status for all merged changes.</p>
+
+        {#if !releaseData && !releaseLoading}
+          <div class="action-row action-row-left">
+            <button class="btn-primary" onclick={prepareRelease} disabled={releaseLoading}>
+              Prepare Release
+            </button>
+          </div>
+        {/if}
+
+        {#if releaseLoading}
+          <p class="loading-text">Analyzing commits and generating changelog...</p>
+        {:else if releaseError}
+          <div class="error-text" role="alert">{releaseError}</div>
+          <div class="action-row action-row-left">
+            <button class="btn-secondary" onclick={prepareRelease}>Retry</button>
+          </div>
+        {:else if releaseData}
+          <div class="release-result">
+            <dl class="release-meta">
+              <dt>Suggested version</dt>
+              <dd class="release-version">{releaseData.next_version ?? 'N/A'}</dd>
+              {#if releaseData.current_version}
+                <dt>Current version</dt>
+                <dd class="mono">{releaseData.current_version}</dd>
+              {/if}
+              {#if releaseData.commit_count != null}
+                <dt>Commits since last release</dt>
+                <dd>{releaseData.commit_count}</dd>
+              {/if}
+            </dl>
+            {#if releaseData.changelog}
+              <div class="release-changelog">
+                <h3 class="release-section-title">Changelog</h3>
+                <pre class="release-changelog-pre">{releaseData.changelog}</pre>
+              </div>
+            {/if}
+            <div class="action-row action-row-left">
+              <button class="btn-secondary" onclick={prepareRelease}>Regenerate</button>
+            </div>
           </div>
         {/if}
       </div>
@@ -1413,6 +1484,50 @@
 
   /* ── Danger Zone ──────────────────────────────────────────────────── */
   .danger-title { color: var(--color-danger); }
+
+  /* Release tab */
+  .release-result {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .release-meta {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-1) var(--space-4);
+    font-size: var(--text-sm);
+  }
+
+  .release-meta dt {
+    color: var(--color-text-muted);
+    font-weight: 600;
+  }
+
+  .release-version {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+  }
+
+  .release-section-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    margin: 0 0 var(--space-2);
+  }
+
+  .release-changelog-pre {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+  }
 
   .danger-card {
     background: var(--color-surface);
