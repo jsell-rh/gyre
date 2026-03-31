@@ -30,7 +30,7 @@ describe('ArchPreviewCanvas — core rendering', () => {
 
   it('shows empty state when nodes is empty', () => {
     const { getByText } = render(ArchPreviewCanvas, { props: { nodes: [], edges: [] } });
-    expect(getByText('No architecture data')).toBeTruthy();
+    expect(getByText('No graph data')).toBeTruthy();
   });
 
   it('renders SVG canvas when nodes present', () => {
@@ -295,7 +295,7 @@ describe('ArchPreviewCanvas — size modes', () => {
 describe('ArchPreviewCanvas — empty state', () => {
   it('shows empty state title', () => {
     const { getByText } = render(ArchPreviewCanvas, { props: { nodes: [], edges: [] } });
-    expect(getByText('No architecture data')).toBeTruthy();
+    expect(getByText('No graph data')).toBeTruthy();
   });
 
   it('does not render the arch canvas SVG when nodes is empty', () => {
@@ -306,7 +306,7 @@ describe('ArchPreviewCanvas — empty state', () => {
 
   it('shows empty state description', () => {
     const { container } = render(ArchPreviewCanvas, { props: { nodes: [], edges: [] } });
-    expect(container.innerHTML).toContain('No graph nodes available');
+    expect(container.innerHTML).toContain('Select a repository to view its knowledge graph');
   });
 });
 

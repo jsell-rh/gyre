@@ -170,7 +170,7 @@ describe('Architecture tab — graph load and node filtering', () => {
     });
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    expect(screen.queryByText(/No architecture data/i)).toBeTruthy();
+    expect(screen.queryByText(/No graph data/i)).toBeTruthy();
   });
 
   it('only spec-internal edges appear in the canvas', async () => {
