@@ -28,6 +28,12 @@ pub struct CreateTaskRequest {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Option<Vec<String>>,
+    /// Spec path this task implements (e.g. "system/hello-world.md").
+    pub spec_path: Option<String>,
+    /// Workspace ID to scope this task to.
+    pub workspace_id: Option<String>,
+    /// Repository ID this task targets.
+    pub repo_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -185,6 +191,13 @@ pub async fn create_task(
         .into_iter()
         .map(Id::new)
         .collect();
+    task.spec_path = req.spec_path;
+    if let Some(ws_id) = req.workspace_id {
+        task.workspace_id = Id::new(ws_id);
+    }
+    if let Some(repo_id) = req.repo_id {
+        task.repo_id = Id::new(repo_id);
+    }
     state.tasks.create(&task).await?;
     // Index for search.
     let mut facets = HashMap::new();

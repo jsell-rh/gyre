@@ -1071,6 +1071,23 @@ pub async fn complete_agent(
         now,
     );
     mr.author_agent_id = Some(agent.id.clone());
+
+    // Propagate spec_ref from the task to the MR for provenance linkage.
+    // If the task has a spec_path, build a spec_ref in "path@sha" format
+    // by looking up the current SHA from the spec ledger.
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if let Some(ref spec_path) = task.spec_path {
+                if let Ok(Some(entry)) = state.spec_ledger.find_by_path(spec_path).await {
+                    mr.spec_ref = Some(format!("{}@{}", spec_path, entry.current_sha));
+                } else {
+                    // Spec not in ledger — use path without SHA.
+                    mr.spec_ref = Some(spec_path.clone());
+                }
+            }
+        }
+    }
+
     state.merge_requests.create(&mr).await?;
 
     // Transition task to Review (navigate through intermediate states as needed)
