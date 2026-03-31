@@ -243,6 +243,92 @@
     if (!entity) expanded = false;
   });
 
+  // ── MR entity tab state ─────────────────────────────────────────────────────
+  let mrDetail = $state(null);
+  let mrDetailLoading = $state(false);
+  let mrDiff = $state(null);
+  let mrDiffLoading = $state(false);
+  let mrGates = $state(null);
+  let mrGatesLoading = $state(false);
+  let mrAttestation = $state(null);
+  let mrAttestationLoading = $state(false);
+
+  // ── Agent entity tab state ─────────────────────────────────────────────────
+  let agentDetail = $state(null);
+  let agentDetailLoading = $state(false);
+  let agentLogs = $state(null);
+  let agentLogsLoading = $state(false);
+
+  // Reset MR/agent data when entity changes
+  $effect(() => {
+    if (entity?.type === 'mr') {
+      mrDetail = null;
+      mrDiff = null;
+      mrGates = null;
+      mrAttestation = null;
+    }
+    if (entity?.type === 'agent') {
+      agentDetail = null;
+      agentLogs = null;
+    }
+  });
+
+  // Load MR data per tab
+  $effect(() => {
+    if (entity?.type !== 'mr') return;
+    const id = entity.id;
+
+    if (activeTab === 'info' && !mrDetail && !mrDetailLoading) {
+      mrDetailLoading = true;
+      api.mergeRequest(id)
+        .then((d) => { mrDetail = d; })
+        .catch(() => { mrDetail = null; })
+        .finally(() => { mrDetailLoading = false; });
+    }
+    if (activeTab === 'diff' && !mrDiff && !mrDiffLoading) {
+      mrDiffLoading = true;
+      api.mrDiff(id)
+        .then((d) => { mrDiff = d; })
+        .catch(() => { mrDiff = null; })
+        .finally(() => { mrDiffLoading = false; });
+    }
+    if (activeTab === 'gates' && !mrGates && !mrGatesLoading) {
+      mrGatesLoading = true;
+      api.mrGates(id)
+        .then((d) => { mrGates = Array.isArray(d) ? d : (d?.gates ?? []); })
+        .catch(() => { mrGates = []; })
+        .finally(() => { mrGatesLoading = false; });
+    }
+    if (activeTab === 'attestation' && !mrAttestation && !mrAttestationLoading) {
+      mrAttestationLoading = true;
+      api.mrAttestation(id)
+        .then((d) => { mrAttestation = d; })
+        .catch(() => { mrAttestation = null; })
+        .finally(() => { mrAttestationLoading = false; });
+    }
+  });
+
+  // Load agent data per tab
+  $effect(() => {
+    if (entity?.type !== 'agent') return;
+    const id = entity.id;
+
+    if (activeTab === 'info' && !agentDetail && !agentDetailLoading) {
+      agentDetailLoading = true;
+      api.agent(id)
+        .then((d) => { agentDetail = d; })
+        .catch(() => { agentDetail = null; })
+        .finally(() => { agentDetailLoading = false; });
+    }
+    if (activeTab === 'trace' && !agentLogs && !agentLogsLoading) {
+      agentLogsLoading = true;
+      api.agentLogs(id)
+        .then((d) => { agentLogs = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []); })
+        .catch(() => { agentLogs = []; })
+        .finally(() => { agentLogsLoading = false; });
+    }
+  });
+
   // ── Spec entity tab state (S4.5) ────────────────────────────────────────────
   // Lazy-loaded data for each tab when entity.type === 'spec'
   let specDetail = $state(null);
@@ -644,19 +730,89 @@
     <div class="panel-content" id="detail-panel-content" role="tabpanel" aria-labelledby="tab-{activeTab}">
       {#if activeTab === 'info'}
         <div class="tab-pane">
-          <dl class="entity-meta">
-            <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
-            <dt>{$t('detail_panel.id')}</dt><dd class="mono">{entity.id}</dd>
-            {#if entity.data?.status}
-              <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
+          {#if entity.type === 'mr'}
+            {#if mrDetailLoading && !entity.data}
+              <div class="spec-skeleton">
+                {#each Array(5) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+              </div>
+            {:else}
+              {@const mr = mrDetail ?? entity.data ?? {}}
+              <dl class="entity-meta">
+                <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
+                <dt>Status</dt><dd><Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} /></dd>
+                <dt>ID</dt><dd class="mono">{entity.id}</dd>
+                {#if mr.source_branch}
+                  <dt>Branch</dt><dd class="mono">{mr.source_branch}</dd>
+                {/if}
+                {#if mr.target_branch}
+                  <dt>Target</dt><dd class="mono">{mr.target_branch}</dd>
+                {/if}
+                {#if mr.author_id}
+                  <dt>Author</dt><dd class="mono">{mr.author_id}</dd>
+                {/if}
+                {#if mr.spec_ref}
+                  <dt>Spec Ref</dt><dd class="mono">{mr.spec_ref}</dd>
+                {/if}
+                {#if mr.agent_id}
+                  <dt>Agent</dt><dd class="mono">{mr.agent_id}</dd>
+                {/if}
+                {#if mr.created_at}
+                  <dt>Created</dt><dd>{fmtDate(mr.created_at)}</dd>
+                {/if}
+                {#if mr.merged_at}
+                  <dt>Merged</dt><dd>{fmtDate(mr.merged_at)}</dd>
+                {/if}
+              </dl>
             {/if}
-            {#if entity.data?.created_at}
-              <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
+          {:else if entity.type === 'agent'}
+            {#if agentDetailLoading && !entity.data}
+              <div class="spec-skeleton">
+                {#each Array(5) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+              </div>
+            {:else}
+              {@const ag = agentDetail ?? entity.data ?? {}}
+              <dl class="entity-meta">
+                <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
+                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
+                <dt>ID</dt><dd class="mono">{entity.id}</dd>
+                {#if ag.task_id}
+                  <dt>Task</dt><dd class="mono">{ag.task_id}</dd>
+                {/if}
+                {#if ag.repo_id}
+                  <dt>Repo</dt><dd class="mono">{ag.repo_id}</dd>
+                {/if}
+                {#if ag.branch}
+                  <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
+                {/if}
+                {#if ag.agent_type}
+                  <dt>Type</dt><dd>{ag.agent_type}</dd>
+                {/if}
+                {#if ag.created_at}
+                  <dt>Created</dt><dd>{fmtDate(ag.created_at)}</dd>
+                {/if}
+                {#if ag.completed_at}
+                  <dt>Completed</dt><dd>{fmtDate(ag.completed_at)}</dd>
+                {/if}
+                {#if ag.mr_id}
+                  <dt>MR</dt><dd class="mono">{ag.mr_id}</dd>
+                {/if}
+              </dl>
             {/if}
-            {#if entity.data?.spec_path}
-              <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
-            {/if}
-          </dl>
+          {:else}
+            <dl class="entity-meta">
+              <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
+              <dt>{$t('detail_panel.id')}</dt><dd class="mono">{entity.id}</dd>
+              {#if entity.data?.status}
+                <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
+              {/if}
+              {#if entity.data?.created_at}
+                <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
+              {/if}
+              {#if entity.data?.spec_path}
+                <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
+              {/if}
+            </dl>
+          {/if}
         </div>
 
       {:else if activeTab === 'content'}
@@ -1001,22 +1157,148 @@
 
       {:else if activeTab === 'diff'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.diff_not_available')} description={$t('detail_panel.diff_not_available_desc')} />
+          {#if mrDiffLoading}
+            <div class="spec-skeleton">
+              {#each Array(6) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+            </div>
+          {:else if mrDiff}
+            <div class="diff-summary">
+              <span class="diff-stat">{mrDiff.files_changed ?? 0} files changed</span>
+              <span class="diff-ins">+{mrDiff.insertions ?? 0}</span>
+              <span class="diff-del">-{mrDiff.deletions ?? 0}</span>
+            </div>
+            {#if mrDiff.files?.length > 0}
+              <div class="diff-file-list">
+                {#each mrDiff.files as file}
+                  <div class="diff-file">
+                    <div class="diff-file-header">
+                      <Badge value={file.status ?? 'modified'} variant={file.status === 'added' ? 'success' : file.status === 'deleted' ? 'danger' : 'info'} />
+                      <span class="diff-file-path mono">{file.path}</span>
+                      {#if file.insertions != null || file.deletions != null}
+                        <span class="diff-file-stats">
+                          {#if file.insertions}<span class="diff-ins">+{file.insertions}</span>{/if}
+                          {#if file.deletions}<span class="diff-del">-{file.deletions}</span>{/if}
+                        </span>
+                      {/if}
+                    </div>
+                    {#if file.patch}
+                      <pre class="diff-patch">{file.patch}</pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data">No file details available</p>
+            {/if}
+          {:else}
+            <p class="no-data">No diff data available</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'gates'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_gates')} description={$t('detail_panel.no_gates_desc')} />
+          {#if mrGatesLoading}
+            <div class="spec-skeleton">
+              {#each Array(3) as _}<Skeleton width="100%" height="2rem" />{/each}
+            </div>
+          {:else if Array.isArray(mrGates) && mrGates.length > 0}
+            <ul class="gates-list">
+              {#each mrGates as gate}
+                <li class="gate-item">
+                  <div class="gate-row">
+                    <Badge
+                      value={gate.status ?? 'unknown'}
+                      variant={gate.status === 'passed' ? 'success' : gate.status === 'failed' ? 'danger' : gate.status === 'running' ? 'warning' : 'muted'}
+                    />
+                    <span class="gate-name">{gate.name ?? gate.gate_name ?? 'Gate'}</span>
+                    {#if gate.duration_ms}
+                      <span class="gate-duration">{gate.duration_ms}ms</span>
+                    {/if}
+                  </div>
+                  {#if gate.command}
+                    <code class="gate-cmd mono">{gate.command}</code>
+                  {/if}
+                  {#if gate.output}
+                    <pre class="gate-output">{gate.output}</pre>
+                  {/if}
+                  {#if gate.error}
+                    <pre class="gate-output gate-error">{gate.error}</pre>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="no-data">No gates configured for this merge request</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'attestation'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_attestation')} description={$t('detail_panel.no_attestation_desc')} />
+          {#if mrAttestationLoading}
+            <div class="spec-skeleton">
+              {#each Array(4) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+            </div>
+          {:else if mrAttestation}
+            {@const att = mrAttestation.attestation ?? mrAttestation}
+            <div class="attestation-block">
+              <div class="attestation-header">
+                <Badge value="Signed" variant="success" />
+                {#if att.attestation_version}
+                  <span class="att-version">v{att.attestation_version}</span>
+                {/if}
+              </div>
+              <dl class="entity-meta">
+                {#if att.merge_commit_sha}
+                  <dt>Merge SHA</dt><dd class="mono">{att.merge_commit_sha}</dd>
+                {/if}
+                {#if att.spec_ref}
+                  <dt>Spec Ref</dt><dd class="mono">{att.spec_ref}</dd>
+                {/if}
+                {#if att.author_agent_id}
+                  <dt>Agent</dt><dd class="mono">{att.author_agent_id}</dd>
+                {/if}
+                {#if att.mr_id}
+                  <dt>MR</dt><dd class="mono">{att.mr_id}</dd>
+                {/if}
+                {#if att.task_id}
+                  <dt>Task</dt><dd class="mono">{att.task_id}</dd>
+                {/if}
+                {#if att.repo_id}
+                  <dt>Repo</dt><dd class="mono">{att.repo_id}</dd>
+                {/if}
+              </dl>
+              {#if mrAttestation.signature}
+                <div class="att-sig-block">
+                  <span class="att-sig-label">Ed25519 Signature</span>
+                  <code class="att-sig-value mono">{mrAttestation.signature}</code>
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <p class="no-data">No attestation bundle available for this merge request</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'trace'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_trace')} description={$t('detail_panel.no_trace_desc')} />
+          {#if agentLogsLoading}
+            <div class="spec-skeleton">
+              {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else if Array.isArray(agentLogs) && agentLogs.length > 0}
+            <div class="trace-list">
+              {#each agentLogs as entry}
+                <div class="trace-entry">
+                  {#if entry.timestamp || entry.created_at}
+                    <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                  {/if}
+                  <span class="trace-msg">{entry.message ?? entry.content ?? JSON.stringify(entry)}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="no-data">No trace logs available for this agent</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'ask-why'}
@@ -1868,5 +2150,207 @@
     padding: var(--space-2) var(--space-3);
     border-top: 1px solid var(--color-border);
     flex-shrink: 0;
+  }
+
+  /* ── MR Diff tab ─────────────────────────────────────────────────────────── */
+  .diff-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .diff-stat { font-weight: 600; color: var(--color-text); }
+  .diff-ins { color: var(--color-success); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .diff-del { color: var(--color-danger); font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  .diff-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .diff-file {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .diff-file-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .diff-file-path {
+    flex: 1;
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .diff-file-stats {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .diff-patch {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--color-text);
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  /* ── MR Gates tab ────────────────────────────────────────────────────────── */
+  .gates-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gate-item {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gate-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .gate-name {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+    flex: 1;
+  }
+
+  .gate-duration {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .gate-cmd {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border-radius: var(--radius-sm);
+    display: block;
+  }
+
+  .gate-output {
+    margin: 0;
+    padding: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    max-height: 150px;
+    overflow-y: auto;
+  }
+
+  .gate-error { color: var(--color-danger); }
+
+  /* ── MR Attestation tab ──────────────────────────────────────────────────── */
+  .attestation-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .attestation-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .att-version {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .att-sig-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .att-sig-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .att-sig-value {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    word-break: break-all;
+    line-height: 1.5;
+  }
+
+  /* ── Agent Trace tab ─────────────────────────────────────────────────────── */
+  .trace-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .trace-entry {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+  }
+
+  .trace-entry:last-child { border-bottom: none; }
+
+  .trace-time {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .trace-msg {
+    color: var(--color-text);
+    word-break: break-word;
   }
 </style>
