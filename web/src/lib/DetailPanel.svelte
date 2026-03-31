@@ -1938,10 +1938,19 @@
               <span class="diff-del">-{mrDiff.deletions ?? 0}</span>
             </div>
             {#if mrDiff.files?.length > 0}
-              <div class="diff-file-list">
+              <!-- File tree summary (like GitHub) -->
+              <div class="diff-file-tree">
                 {#each mrDiff.files as file}
-                  <div class="diff-file">
-                    <div class="diff-file-header">
+                  <span class="diff-tree-item">
+                    <span class="diff-tree-status diff-tree-status-{file.status ?? 'modified'}">{file.status === 'added' ? '+' : file.status === 'deleted' ? '-' : '~'}</span>
+                    <span class="diff-tree-path mono">{file.path}</span>
+                  </span>
+                {/each}
+              </div>
+              <div class="diff-file-list">
+                {#each mrDiff.files as file, idx}
+                  <details class="diff-file" open={mrDiff.files.length <= 5}>
+                    <summary class="diff-file-header">
                       <Badge value={file.status ?? 'modified'} variant={file.status === 'added' ? 'success' : file.status === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
                       {#if file.insertions != null || file.deletions != null}
@@ -1950,12 +1959,14 @@
                           {#if file.deletions}<span class="diff-del">-{file.deletions}</span>{/if}
                         </span>
                       {/if}
-                    </div>
+                    </summary>
                     {#if file.patch}
                       <div class="diff-patch">{#each file.patch.split('\n') as line}<span class={line.startsWith('+') ? 'diff-line-add' : line.startsWith('-') ? 'diff-line-del' : line.startsWith('@@') ? 'diff-line-hunk' : 'diff-line'}>{line}
 </span>{/each}</div>
+                    {:else}
+                      <p class="diff-no-patch">Binary file or no patch data available</p>
                     {/if}
-                  </div>
+                  </details>
                 {/each}
               </div>
             {:else}
@@ -3205,6 +3216,51 @@
   .diff-ins { color: var(--color-success); font-family: var(--font-mono); font-size: var(--text-xs); }
   .diff-del { color: var(--color-danger); font-family: var(--font-mono); font-size: var(--text-xs); }
 
+  /* ── Diff file tree (GitHub-style summary) ─────────────────────────────── */
+  .diff-file-tree {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+  }
+
+  .diff-tree-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+  }
+
+  .diff-tree-status {
+    font-weight: 700;
+    width: 12px;
+    text-align: center;
+  }
+
+  .diff-tree-status-added { color: var(--color-success); }
+  .diff-tree-status-deleted { color: var(--color-danger); }
+  .diff-tree-status-modified { color: var(--color-info); }
+
+  .diff-tree-path {
+    color: var(--color-text-muted);
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .diff-no-patch {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+    padding: var(--space-2) var(--space-3);
+    margin: 0;
+  }
+
   .diff-file-list {
     display: flex;
     flex-direction: column;
@@ -3223,7 +3279,19 @@
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
     background: var(--color-surface-elevated);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .diff-file-header::-webkit-details-marker { display: none; }
+  .diff-file-header::marker { content: ''; }
+
+  .diff-file[open] .diff-file-header {
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .diff-file-header:hover {
+    background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-border));
   }
 
   .diff-file-path {
