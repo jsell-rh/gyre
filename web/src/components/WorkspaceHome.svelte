@@ -255,7 +255,20 @@
     mrsLoading = true;
     try {
       const data = await api.mergeRequests({ workspace_id: workspace.id });
-      wsMrs = Array.isArray(data) ? data : [];
+      const mrList = Array.isArray(data) ? data : [];
+      // Enrich first 10 MRs with gate results (best-effort)
+      const toEnrich = mrList.slice(0, 10);
+      const gatePromises = toEnrich.map(mr =>
+        api.mrGates(mr.id).then(gates => {
+          const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
+          const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
+          const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
+          return { id: mr.id, passed, failed, total: arr.length };
+        }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0 }))
+      );
+      const gateResults = await Promise.all(gatePromises);
+      const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
+      wsMrs = mrList.map(mr => gateMap[mr.id] ? { ...mr, _gates: gateMap[mr.id] } : mr);
     } catch {
       wsMrs = [];
     } finally {
@@ -1005,6 +1018,7 @@
                   <th>Title</th>
                   <th>Branch</th>
                   <th>Agent</th>
+                  <th>Gates</th>
                   <th>Changes</th>
                   <th>Spec</th>
                   <th>Repo</th>
@@ -1017,6 +1031,15 @@
                     <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
+                    <td>
+                      {#if mr._gates?.total > 0}
+                        <span class="gate-summary-inline">
+                          {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
+                          {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
+                          {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}<span class="gate-pending-inline">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>{/if}
+                        </span>
+                      {/if}
+                    </td>
                     <td class="ws-cell-diff">
                       {#if mr.diff_stats}
                         <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
@@ -2242,6 +2265,18 @@
     font-weight: 600;
     margin-left: var(--space-1);
   }
+
+  .gate-summary-inline {
+    display: inline-flex;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+
+  .gate-pass-inline { color: var(--color-success); font-weight: 600; }
+  .gate-fail-inline { color: var(--color-danger); font-weight: 600; }
+  .gate-pending-inline { color: var(--color-text-muted); }
 
   .branch-ref {
     max-width: 100px;
