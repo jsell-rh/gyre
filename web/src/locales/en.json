@@ -318,6 +318,52 @@
       "saved": "Token saved"
     }
   },
+  "briefing": {
+    "title": "Briefing",
+    "since": "Since {label}",
+    "scope_all": "All workspaces",
+    "scope_repo": "Repository",
+    "trust_label": "Trust: {level}",
+    "time_ranges": {
+      "last_visit": "Since last visit",
+      "24h": "Last 24h",
+      "7d": "Last 7d",
+      "30d": "Last 30d",
+      "custom": "Custom range"
+    },
+    "range_labels": {
+      "24h": "24 hours",
+      "7d": "7 days",
+      "30d": "30 days",
+      "custom": "custom range",
+      "last_visit": "last visit"
+    },
+    "apply": "Apply",
+    "retry": "Retry",
+    "error_cached": "Could not load live briefing: {error}. Showing cached data.",
+    "error_full": "Unable to load briefing data: {error}. Check your connection.",
+    "loading": "Loading briefing\u2026",
+    "loaded": "Briefing loaded",
+    "section_completed": "COMPLETED",
+    "section_in_progress": "IN PROGRESS",
+    "section_cross_workspace": "CROSS-WORKSPACE",
+    "section_exceptions": "EXCEPTIONS",
+    "section_metrics": "METRICS",
+    "mrs_merged": "{count} MR{count, plural, one {} other {s}} merged. All gates passed.",
+    "decision_label": "Decision: {text}",
+    "confidence": "confidence: {level}",
+    "gate_failure": "Gate failure:",
+    "view_spec": "View spec",
+    "review_changes": "Review changes",
+    "view_diff": "View Diff",
+    "view_output": "View Output",
+    "override": "Override",
+    "close_mr": "Close MR",
+    "respond_to": "Respond to {agent}",
+    "all_caught_up": "All caught up",
+    "no_activity": "No activity in the {window} window.",
+    "item_dismissed": "Item dismissed"
+  },
   "decisions": {
     "title": "Decisions",
     "all_types": "All types",
