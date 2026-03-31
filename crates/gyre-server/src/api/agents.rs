@@ -66,11 +66,14 @@ impl From<Agent> for AgentResponse {
 
 fn parse_agent_status(s: &str) -> Result<AgentStatus, ApiError> {
     match s.to_lowercase().as_str() {
-        "idle" => Ok(AgentStatus::Idle),
         "active" => Ok(AgentStatus::Active),
-        "blocked" => Ok(AgentStatus::Blocked),
-        "error" => Ok(AgentStatus::Error),
+        "idle" => Ok(AgentStatus::Idle),
+        "failed" => Ok(AgentStatus::Failed),
+        "stopped" => Ok(AgentStatus::Stopped),
         "dead" => Ok(AgentStatus::Dead),
+        // Legacy status mappings.
+        "blocked" | "error" => Ok(AgentStatus::Failed),
+        "paused" => Ok(AgentStatus::Stopped),
         _ => Err(ApiError::InvalidInput(format!("unknown agent status: {s}"))),
     }
 }

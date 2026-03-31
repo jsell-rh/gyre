@@ -3,11 +3,10 @@
 
   /* Map common status strings to badge variants */
   const STATUS_MAP = {
-    // Agent
+    // Agent (per agent-runtime.md §1: Active, Idle, Failed, Stopped, Dead)
     Active: 'success', active: 'success',
     Idle: 'muted', idle: 'muted',
-    Blocked: 'blocked', blocked: 'blocked',
-    Error: 'danger', error: 'danger',
+    Stopped: 'warning', stopped: 'warning',
     Dead: 'muted', dead: 'muted',
     // Task
     Backlog: 'muted', backlog: 'muted',
