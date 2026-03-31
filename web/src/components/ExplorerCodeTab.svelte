@@ -351,7 +351,7 @@
             {#each filteredCommits as commit}
               {@const commitSha = commit.sha ?? commit.id ?? ''}
               {@const commitAgent = agentCommits[commitSha]}
-              <tr class="table-row" onclick={() => onRowClick(commit, 'commit')} tabindex="0" role="button" aria-label="Commit {commitSha}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(commit, 'commit'); } }}>
+              <tr class="table-row" onclick={() => onRowClick(commitAgent ? { ...commit, agent_id: commitAgent } : commit, 'commit')} tabindex="0" role="button" aria-label="Commit {commitSha}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(commitAgent ? { ...commit, agent_id: commitAgent } : commit, 'commit'); } }}>
                 <td class="mono">{commitSha.slice(0, 7)}</td>
                 <td class="commit-msg" title={commit.message ?? commit.summary ?? ''}>{commit.message ?? commit.summary ?? '—'}</td>
                 <td class="secondary">
