@@ -148,7 +148,7 @@
   // /workspaces/:slug/r/:repo/settings         → settings tab
   // /profile                                   → user profile
 
-  const REPO_TABS = ['specs', 'architecture', 'decisions', 'code', 'settings'];
+  const REPO_TABS = ['specs', 'tasks', 'mrs', 'architecture', 'decisions', 'code', 'settings'];
 
   export function parseUrl(pathname) {
     const raw = pathname.split('/').filter(Boolean).map(p => {
@@ -499,19 +499,27 @@
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('specs');
             return;
-          case '2': // g 2 → Architecture tab (repo mode only)
+          case '2': // g 2 → Tasks tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('tasks');
+            return;
+          case '3': // g 3 → MRs tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('mrs');
+            return;
+          case '4': // g 4 → Architecture tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('architecture');
             return;
-          case '3': // g 3 → Decisions tab (repo mode only)
+          case '5': // g 5 → Decisions tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('decisions');
             return;
-          case '4': // g 4 → Code tab (repo mode only)
+          case '6': // g 6 → Code tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('code');
             return;
-          case '5': // g 5 → Settings tab (repo mode only)
+          case '7': // g 7 → Settings tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('settings');
             return;
