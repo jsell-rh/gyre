@@ -24,6 +24,8 @@ struct SpecLedgerRow {
     drift_status: String,
     created_at: i64,
     updated_at: i64,
+    repo_id: Option<String>,
+    workspace_id: Option<String>,
 }
 
 impl SpecLedgerRow {
@@ -48,6 +50,8 @@ impl SpecLedgerRow {
             drift_status: self.drift_status,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
+            repo_id: self.repo_id,
+            workspace_id: self.workspace_id,
         }
     }
 }
@@ -67,6 +71,8 @@ struct NewSpecLedgerRow<'a> {
     drift_status: &'a str,
     created_at: i64,
     updated_at: i64,
+    repo_id: Option<&'a str>,
+    workspace_id: Option<&'a str>,
 }
 
 fn approval_status_str(s: &ApprovalStatus) -> &'static str {
@@ -130,6 +136,8 @@ impl SpecLedgerRepository for SqliteStorage {
                 drift_status: &e.drift_status,
                 created_at: e.created_at as i64,
                 updated_at: e.updated_at as i64,
+                repo_id: e.repo_id.as_deref(),
+                workspace_id: e.workspace_id.as_deref(),
             };
             diesel::insert_into(spec_ledger_entries::table)
                 .values(&row)
@@ -146,6 +154,8 @@ impl SpecLedgerRepository for SqliteStorage {
                     spec_ledger_entries::linked_mrs.eq(row.linked_mrs),
                     spec_ledger_entries::drift_status.eq(row.drift_status),
                     spec_ledger_entries::updated_at.eq(row.updated_at),
+                    spec_ledger_entries::repo_id.eq(row.repo_id),
+                    spec_ledger_entries::workspace_id.eq(row.workspace_id),
                 ))
                 .execute(&mut *conn)
                 .context("upsert spec ledger entry")?;
