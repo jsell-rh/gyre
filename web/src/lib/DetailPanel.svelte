@@ -31,6 +31,7 @@
     expanded = $bindable(false),
     onclose = undefined,
     onpopout = undefined,
+    onback = undefined,
   } = $props();
 
   let activeTab = $state('info');
@@ -178,7 +179,9 @@
   function handleKeydown(e) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      close();
+      // Escape goes back if there's history, otherwise closes
+      if (onback) onback();
+      else close();
       return;
     }
     if (e.key === 'Tab' && panelEl) {
@@ -851,9 +854,21 @@
     />
   {:else if entity}
     <div class="panel-header">
+      {#if onback}
+        <button
+          class="panel-btn panel-back"
+          onclick={onback}
+          aria-label="Go back"
+          title="Go back to previous entity"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+      {/if}
       <div class="panel-entity">
         <span class="entity-type">{entity.type}</span>
-        <span class="entity-id">{entity.data?.name ?? entity.id}</span>
+        <span class="entity-id">{entity.data?.name ?? entity.data?.title ?? entity.id}</span>
       </div>
       <div class="panel-actions">
         <button
@@ -1891,6 +1906,10 @@
   .panel-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  .panel-back {
+    flex-shrink: 0;
   }
 
   .panel-close:hover {

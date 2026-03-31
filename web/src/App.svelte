@@ -356,6 +356,7 @@
     repoId: currentRepo?.id,
   }));
   setContext('openDetailPanel', openDetailPanel);
+  setContext('goBackDetailPanel', goBackDetailPanel);
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
@@ -369,14 +370,31 @@
     goToRepoTab(tab);
   });
 
-  // ── Detail panel ──────────────────────────────────────────────────────
+  // ── Detail panel (with navigation history stack) ──────────────────────
+  let detailHistory = [];
+
   function openDetailPanel(entity) {
+    // Push current entity to history stack before navigating
+    if (detailPanel.open && detailPanel.entity) {
+      detailHistory = [...detailHistory, detailPanel.entity];
+    }
     detailPanel = { open: true, entity };
   }
 
   function closeDetailPanel() {
     detailPanel = { open: false, entity: null };
     detailExpanded = false;
+    detailHistory = [];
+  }
+
+  function goBackDetailPanel() {
+    if (detailHistory.length > 0) {
+      const prev = detailHistory[detailHistory.length - 1];
+      detailHistory = detailHistory.slice(0, -1);
+      detailPanel = { open: true, entity: prev };
+    } else {
+      closeDetailPanel();
+    }
   }
 
   // ── Workspace dropdown keyboard navigation ────────────────────────────
@@ -1259,6 +1277,7 @@
       entity={detailPanel.open ? detailPanel.entity : null}
       bind:expanded={detailExpanded}
       onclose={closeDetailPanel}
+      onback={detailHistory.length > 0 ? goBackDetailPanel : undefined}
     />
     </div>
 
