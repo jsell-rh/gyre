@@ -38,9 +38,41 @@ impl LanguageExtractor for PythonExtractor {
     }
 
     fn detect(&self, repo_root: &Path) -> bool {
-        repo_root.join("pyproject.toml").is_file()
+        // Check root-level markers first (fast path).
+        if repo_root.join("pyproject.toml").is_file()
             || repo_root.join("setup.py").is_file()
             || repo_root.join("requirements.txt").is_file()
+        {
+            return true;
+        }
+        // Check one level of subdirectories for monorepos (e.g. src/api/pyproject.toml).
+        if let Ok(entries) = std::fs::read_dir(repo_root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if p.join("pyproject.toml").is_file()
+                        || p.join("setup.py").is_file()
+                        || p.join("requirements.txt").is_file()
+                    {
+                        return true;
+                    }
+                    // Check one more level (e.g. src/api/)
+                    if let Ok(sub_entries) = std::fs::read_dir(&p) {
+                        for sub in sub_entries.flatten() {
+                            let sp = sub.path();
+                            if sp.is_dir()
+                                && (sp.join("pyproject.toml").is_file()
+                                    || sp.join("setup.py").is_file()
+                                    || sp.join("requirements.txt").is_file())
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {
