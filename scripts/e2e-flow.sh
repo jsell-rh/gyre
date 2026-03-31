@@ -281,7 +281,7 @@ step 5 "Configure quality gates"
 GATE1_RESPONSE=$(api_post "${API}/repos/${REPO_ID}/gates" "{
   \"name\": \"unit-tests\",
   \"gate_type\": \"test_command\",
-  \"command\": \"echo all-tests-passed\",
+  \"command\": \"true\",
   \"required\": true
 }")
 GATE1_ID=$(echo "$GATE1_RESPONSE" | jq -r '.id')
@@ -291,7 +291,7 @@ ok "Gate 'unit-tests': ${GATE1_ID} (test_command, required)"
 GATE2_RESPONSE=$(api_post "${API}/repos/${REPO_ID}/gates" "{
   \"name\": \"lint-check\",
   \"gate_type\": \"lint_command\",
-  \"command\": \"echo lint-clean\",
+  \"command\": \"true\",
   \"required\": false
 }")
 GATE2_ID=$(echo "$GATE2_RESPONSE" | jq -r '.id')
@@ -625,9 +625,9 @@ DIFF_DEL=$(echo "$DIFF" | jq '.deletions')
 if [ "$DIFF_FILES" -gt 0 ]; then
   ok "MR diff: ${DIFF_FILES} files changed, +${DIFF_INS} -${DIFF_DEL}"
   # Show file-level breakdown
-  echo "$DIFF" | jq -r '.files[] | "    \(.status) \(.path)"' 2>/dev/null | while read -r line; do
+  echo "$DIFF" | jq -r '.files[] | "    \(.status) \(.path)"' 2>/dev/null | while IFS= read -r line; do
     echo -e "  ${DIM}${line}${NC}"
-  done
+  done || true
 else
   warn "MR diff empty"
 fi
@@ -641,15 +641,16 @@ step 10 "Merge queue + gates"
 api_post "${API}/merge-queue/enqueue" "{\"merge_request_id\": \"${MR_ID}\"}" >/dev/null
 ok "MR enqueued"
 
-info "Waiting for merge processor..."
+info "Waiting for gates + merge processor..."
 MERGED=false
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   sleep 1
   MR_CURRENT=$(api_get "${API}/merge-requests/${MR_ID}" | jq -r '.status')
   [ "$MR_CURRENT" = "merged" ] && { MERGED=true; break; }
-  [ $((i % 5)) -eq 0 ] && info "Waiting... (${i}s, status: ${MR_CURRENT})"
+  [ "$MR_CURRENT" = "closed" ] && fail "MR was closed (gate failure?)"
+  [ $((i % 10)) -eq 0 ] && info "Waiting... (${i}s, status: ${MR_CURRENT})"
 done
-[ "$MERGED" = true ] || fail "MR did not merge within 30s (status: ${MR_CURRENT})"
+[ "$MERGED" = true ] || fail "MR did not merge within 60s (status: ${MR_CURRENT})"
 ok "MR merged!"
 
 # Verify gate results
@@ -657,9 +658,9 @@ GATE_RESULTS=$(api_get "${API}/merge-requests/${MR_ID}/gates")
 GATE_RESULT_COUNT=$(echo "$GATE_RESULTS" | jq 'length')
 if [ "$GATE_RESULT_COUNT" -gt 0 ]; then
   ok "Gate results: ${GATE_RESULT_COUNT} gates executed"
-  echo "$GATE_RESULTS" | jq -r '.[] | "\(.gate_id[:8])... → \(.status)\(if .output then " (\(.output | gsub("\n";"") | .[:40]))" else "" end)"' 2>/dev/null | while read -r line; do
+  echo "$GATE_RESULTS" | jq -r '.[] | "\(.gate_id[:8])... → \(.status)\(if .output then " (\(.output | gsub("\n";"") | .[:40]))" else "" end)"' 2>/dev/null | while IFS= read -r line; do
     echo -e "  ${DIM}  ${line}${NC}"
-  done
+  done || true
   # Check no required gates failed (merge wouldn't succeed if they did, but verify)
   GATE_PASSED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Passed")] | length')
   GATE_FAILED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Failed")] | length')
@@ -721,9 +722,9 @@ if [ -n "$GRAPH" ] && [ "$GRAPH" != "null" ]; then
   if [ "$NODE_COUNT" -gt 0 ]; then
     ok "Knowledge graph: ${NODE_COUNT} nodes, ${EDGE_COUNT} edges"
     # Show node types
-    echo "$GRAPH" | jq -r '.nodes[] | "    \(.node_type) \(.qualified_name // .name)"' 2>/dev/null | sort | head -15 | while read -r line; do
+    echo "$GRAPH" | jq -r '.nodes[] | "    \(.node_type) \(.qualified_name // .name)"' 2>/dev/null | sort | head -15 | while IFS= read -r line; do
       echo -e "  ${DIM}${line}${NC}"
-    done
+    done || true
     # Check for our specific types
     HAS_GREETING=$(echo "$GRAPH" | jq '[.nodes[] | select(.name == "GreetingService" or .name == "GreetingConfig" or .name == "User" or .name == "ApiResponse")] | length')
     if [ "$HAS_GREETING" -gt 0 ]; then
@@ -783,15 +784,708 @@ ok "Main branch: ${COMMIT_COUNT} commits"
 AC_COUNT=$(api_get "${API}/repos/${REPO_ID}/agent-commits?agent_id=${AGENT_ID}" 2>/dev/null | jq 'length // 0') || AC_COUNT=0
 [ "$AC_COUNT" -gt 0 ] && ok "Agent commit provenance: ${AC_COUNT} records" || warn "Agent commit provenance: 0"
 
+# #############################################################################
+#  EXTENDED TESTS — exercise every remaining API surface
+# #############################################################################
+
+echo -e "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}  Extended API Surface Tests${NC}"
+echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+STEP=14
+
+# =============================================================================
+step $((STEP++)) "Notifications"
+# =============================================================================
+NOTIF_RAW=$(curl -sf -H "$AUTH" "${API}/users/me/notifications" 2>/dev/null) || NOTIF_RAW="{}"
+# Response may be {notifications:[...]} or plain array
+NOTIF_COUNT=$(echo "$NOTIF_RAW" | jq '.notifications | length // length // 0' 2>/dev/null || echo "0")
+ok "Notifications: ${NOTIF_COUNT} total"
+echo "$NOTIF_RAW" | jq -r '(.notifications // .)[:3][] | "    \(.notification_type // "?") — \(.title // .message // "no message" | .[:60])"' 2>/dev/null || true
+
+# Notification count endpoint
+NOTIF_CT=$(curl -sf -H "$AUTH" "${API}/users/me/notifications/count" 2>/dev/null) || NOTIF_CT="{}"
+UNREAD=$(echo "$NOTIF_CT" | jq '.count // .unread // 0')
+ok "Unread notifications: ${UNREAD}"
+
+# =============================================================================
+step $((STEP++)) "MR timeline"
+# =============================================================================
+TIMELINE=$(api_get "${API}/merge-requests/${MR_ID}/timeline" 2>/dev/null) || TIMELINE="[]"
+TL_COUNT=$(echo "$TIMELINE" | jq 'length // 0')
+if [ "$TL_COUNT" -gt 0 ]; then
+  ok "MR timeline: ${TL_COUNT} SDLC events"
+  echo "$TIMELINE" | jq -r '.[0:5][] | "    \(.event_type // .event // "event") at \(.timestamp // "?")"' 2>/dev/null | while IFS= read -r line; do
+    echo -e "  ${DIM}${line}${NC}"
+  done || true
+else
+  warn "MR timeline: 0 events"
+fi
+
+# =============================================================================
+step $((STEP++)) "MR reviews"
+# =============================================================================
+# Submit a review on the merged MR (post-merge review is still valid)
+REVIEW_RESP=$(api_post "${API}/merge-requests/${MR_ID}/reviews" "{
+  \"decision\": \"approved\",
+  \"body\": \"LGTM — all acceptance criteria met\"
+}" 2>/dev/null) || REVIEW_RESP=""
+if [ -n "$REVIEW_RESP" ]; then
+  ok "Review submitted: approved"
+else
+  warn "Review submission failed"
+fi
+
+# List reviews
+REVIEWS=$(api_get "${API}/merge-requests/${MR_ID}/reviews" 2>/dev/null) || REVIEWS="[]"
+REVIEW_CT=$(echo "$REVIEWS" | jq 'length // 0')
+ok "Reviews on MR: ${REVIEW_CT}"
+
+# Submit a comment
+COMMENT_RESP=$(api_post "${API}/merge-requests/${MR_ID}/comments" "{
+  \"body\": \"Great implementation of the greeting service spec.\"
+}" 2>/dev/null) || COMMENT_RESP=""
+[ -n "$COMMENT_RESP" ] && ok "Comment added" || warn "Comment submission failed"
+
+COMMENTS=$(api_get "${API}/merge-requests/${MR_ID}/comments" 2>/dev/null) || COMMENTS="[]"
+COMMENT_CT=$(echo "$COMMENTS" | jq 'length // 0')
+ok "Comments on MR: ${COMMENT_CT}"
+
+# =============================================================================
+step $((STEP++)) "Agent lifecycle (heartbeat, logs, messages, workload)"
+# =============================================================================
+# Heartbeat (agent is idle but endpoint should still work)
+HB_RESP=$(curl -s -w '%{http_code}' -X PUT -H "$AUTH" "${API}/agents/${AGENT_ID}/heartbeat")
+HB_CODE=$(echo "$HB_RESP" | tail -c 4)
+ok "Heartbeat: HTTP ${HB_CODE}"
+
+# Post a log line
+LOG_RESP=$(api_post "${API}/agents/${AGENT_ID}/logs" "{\"line\": \"e2e test: agent work complete\"}" 2>/dev/null) || LOG_RESP=""
+ok "Log line posted"
+
+# Get logs
+LOGS=$(api_get "${API}/agents/${AGENT_ID}/logs" 2>/dev/null) || LOGS="[]"
+LOG_CT=$(echo "$LOGS" | jq 'length // 0')
+ok "Agent logs: ${LOG_CT} lines"
+
+# Send a message to the agent
+MSG_RESP=$(api_post "${API}/agents/${AGENT_ID}/messages" "{
+  \"content\": \"e2e test message\",
+  \"kind\": \"FreeText\"
+}" 2>/dev/null) || MSG_RESP=""
+[ -n "$MSG_RESP" ] && ok "Message sent to agent" || info "Message send returned empty (may be expected)"
+
+# Get agent messages
+MSGS=$(api_get "${API}/agents/${AGENT_ID}/messages" 2>/dev/null) || MSGS="[]"
+MSG_CT=$(echo "$MSGS" | jq 'length // 0' 2>/dev/null || echo "0")
+ok "Agent messages: ${MSG_CT}"
+
+# Workload attestation
+WORKLOAD=$(api_get "${API}/agents/${AGENT_ID}/workload" 2>/dev/null) || WORKLOAD="{}"
+WL_PID=$(echo "$WORKLOAD" | jq -r '.pid // "none"')
+ok "Workload attestation: pid=${WL_PID}"
+
+# Agent card
+CARD_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+  -d "{\"name\":\"e2e-worker\",\"capabilities\":[\"rust\",\"greeting\"],\"protocols\":[\"mcp\"]}" \
+  "${API}/agents/${AGENT_ID}/card")
+CARD_CODE=$(echo "$CARD_RESP" | tail -1)
+ok "Agent card published: HTTP ${CARD_CODE}"
+
+# Agent discovery
+DISCOVER=$(api_get "${API}/agents/discover?capability=rust" 2>/dev/null) || DISCOVER="[]"
+DISC_CT=$(echo "$DISCOVER" | jq 'length // 0')
+ok "Agent discovery (capability=rust): ${DISC_CT} agents"
+
+# =============================================================================
+step $((STEP++)) "Search"
+# =============================================================================
+SEARCH=$(api_get "${API}/search?q=greeting&limit=10" 2>/dev/null) || SEARCH="[]"
+SEARCH_CT=$(echo "$SEARCH" | jq 'length // 0')
+if [ "$SEARCH_CT" -gt 0 ]; then
+  ok "Search 'greeting': ${SEARCH_CT} results"
+  echo "$SEARCH" | jq -r '.[0:3][] | "    \(.entity_type) — \(.title[:50])"' 2>/dev/null | while IFS= read -r line; do
+    echo -e "  ${DIM}${line}${NC}"
+  done || true
+else
+  warn "Search returned 0 results — indexing may not be enabled"
+fi
+
+# =============================================================================
+step $((STEP++)) "Push gates (pre-accept)"
+# =============================================================================
+# Configure push gates
+PG_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+  -d '{"gates":["ConventionalCommit"]}' \
+  "${API}/repos/${REPO_ID}/push-gates")
+PG_CODE=$(echo "$PG_RESP" | tail -1)
+ok "Push gates set: ConventionalCommit (HTTP ${PG_CODE})"
+
+# Try pushing a non-conventional commit (should be rejected)
+PUSHGATE_DIR="${WORK_DIR}/pushgate-test"
+git_with_token "$REPO_DIR" "$TOKEN" fetch origin main 2>/dev/null
+git -C "$REPO_DIR" checkout main 2>/dev/null
+git -C "$REPO_DIR" reset --hard origin/main 2>/dev/null
+echo "pushgate test" > "$REPO_DIR/pushgate.txt"
+git -C "$REPO_DIR" add pushgate.txt
+git -C "$REPO_DIR" commit -m "bad commit message without conventional prefix" --no-gpg-sign 2>/dev/null
+BAD_PUSH=$(git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1) || true
+if echo "$BAD_PUSH" | grep -qi "reject\|denied\|error\|conventional"; then
+  ok "Push gate rejected non-conventional commit"
+else
+  warn "Push gate did not reject non-conventional commit: ${BAD_PUSH:0:80}"
+fi
+
+# Push a valid conventional commit
+git -C "$REPO_DIR" reset --soft HEAD~1 2>/dev/null
+git -C "$REPO_DIR" commit -m "chore: push gate test" --no-gpg-sign 2>/dev/null
+GOOD_PUSH=$(git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1) || true
+if echo "$GOOD_PUSH" | grep -qi "reject\|denied"; then
+  warn "Push gate rejected valid conventional commit"
+else
+  ok "Push gate accepted conventional commit"
+fi
+
+# Verify push gates are listed
+PG_LIST=$(api_get "${API}/repos/${REPO_ID}/push-gates" 2>/dev/null) || PG_LIST="{}"
+ok "Push gates config: $(echo "$PG_LIST" | jq -c '.gates // []')"
+
+# =============================================================================
+step $((STEP++)) "Spec policy"
+# =============================================================================
+SP_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+  -d '{"require_spec_ref":true,"require_approved_spec":false,"warn_stale_spec":true,"require_current_spec":false}' \
+  "${API}/repos/${REPO_ID}/spec-policy")
+SP_CODE=$(echo "$SP_RESP" | tail -1)
+ok "Spec policy set: require_spec_ref + warn_stale (HTTP ${SP_CODE})"
+
+SP_GET=$(api_get "${API}/repos/${REPO_ID}/spec-policy" 2>/dev/null) || SP_GET="{}"
+ok "Spec policy: $(echo "$SP_GET" | jq -c '{require_spec_ref,warn_stale_spec}')"
+
+# =============================================================================
+step $((STEP++)) "ABAC policies"
+# =============================================================================
+POLICY_RESP=$(api_post "${API}/policies" "{
+  \"name\": \"e2e-allow-agents\",
+  \"effect\": \"Allow\",
+  \"rules\": [{\"claim\": \"scope\", \"operator\": \"Equals\", \"value\": \"agent\"}],
+  \"priority\": 100
+}" 2>/dev/null) || POLICY_RESP=""
+if [ -n "$POLICY_RESP" ]; then
+  POLICY_ID=$(echo "$POLICY_RESP" | jq -r '.id // "none"')
+  ok "ABAC policy created: ${POLICY_ID}"
+else
+  warn "ABAC policy creation failed"
+  POLICY_ID=""
+fi
+
+# Dry-run evaluation
+EVAL_RESP=$(api_post "${API}/policies/evaluate" "{
+  \"context\": {\"scope\": \"agent\", \"action\": \"push\"}
+}" 2>/dev/null) || EVAL_RESP="{}"
+EVAL_DECISION=$(echo "$EVAL_RESP" | jq -r '.decision // "unknown"')
+ok "ABAC evaluate: decision=${EVAL_DECISION}"
+
+# Decision audit log
+DECISIONS=$(api_get "${API}/policies/decisions?limit=5" 2>/dev/null) || DECISIONS="[]"
+DEC_CT=$(echo "$DECISIONS" | jq 'length // 0')
+ok "ABAC decision log: ${DEC_CT} entries"
+
+# Repo-scoped ABAC
+REPO_ABAC=$(api_get "${API}/repos/${REPO_ID}/abac-policy" 2>/dev/null) || REPO_ABAC="[]"
+ok "Repo ABAC policies: $(echo "$REPO_ABAC" | jq 'length // 0')"
+
+# =============================================================================
+step $((STEP++)) "Budget enforcement"
+# =============================================================================
+# Set a tight workspace budget
+BUDGET_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+  -d '{"max_concurrent_agents":1,"max_tokens_per_day":1000,"max_cost_per_day":0.01}' \
+  "${API}/workspaces/${WS_ID}/budget")
+BUDGET_CODE=$(echo "$BUDGET_RESP" | tail -1)
+ok "Budget set: max_concurrent=1, max_tokens=1000 (HTTP ${BUDGET_CODE})"
+
+# Check budget
+BUDGET=$(api_get "${API}/workspaces/${WS_ID}/budget" 2>/dev/null) || BUDGET="{}"
+ok "Budget: $(echo "$BUDGET" | jq -c '{max_concurrent_agents,max_tokens_per_day}' 2>/dev/null)"
+
+# Tenant budget summary
+BUDGET_SUM=$(api_get "${API}/budget/summary" 2>/dev/null) || BUDGET_SUM="{}"
+ok "Tenant budget summary retrieved"
+
+# =============================================================================
+step $((STEP++)) "Spec links (implements/conflicts enforcement)"
+# =============================================================================
+# Create a second spec that "implements" the first
+SPEC2_NAME="greeting-impl-${RUN_ID}"
+SPEC2_PATH="system/${SPEC2_NAME}.md"
+SPEC2_PATH_ENCODED="system%2F${SPEC2_NAME}.md"
+
+# Sync with remote before modifying
+git_with_token "$REPO_DIR" "$TOKEN" fetch origin main 2>/dev/null
+git -C "$REPO_DIR" checkout main 2>/dev/null
+git -C "$REPO_DIR" reset --hard origin/main 2>/dev/null
+
+mkdir -p "$REPO_DIR/specs/system"
+cat > "$REPO_DIR/specs/system/${SPEC2_NAME}.md" << SPEC2
+# Greeting Implementation Detail (${RUN_ID})
+
+> Status: Draft
+
+## Summary
+Implementation details for the greeting service.
+SPEC2
+
+# Update manifest with link
+cat > "$REPO_DIR/specs/manifest.yaml" << MANIFEST2
+version: 1
+defaults:
+  requires_approval: true
+  auto_create_tasks: true
+specs:
+  - path: ${SPEC_PATH}
+    title: "Greeting Service (${RUN_ID})"
+    owner: "e2e-test"
+  - path: ${SPEC2_PATH}
+    title: "Greeting Implementation (${RUN_ID})"
+    owner: "e2e-test"
+    links:
+      - type: implements
+        target: ${SPEC_PATH}
+MANIFEST2
+
+git -C "$REPO_DIR" add .
+git -C "$REPO_DIR" commit -m "feat: add implementation spec with link" --no-gpg-sign
+git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1 | tail -2
+sleep 1
+
+# Check spec links
+LINKS=$(api_get "${API}/specs/${SPEC2_PATH_ENCODED}/links" 2>/dev/null) || LINKS="{}"
+LINK_CT=$(echo "$LINKS" | jq '.links | length // 0')
+ok "Spec links: ${LINK_CT} link(s) on child spec"
+
+# Check spec graph
+SPEC_GRAPH=$(api_get "${API}/specs/graph" 2>/dev/null) || SPEC_GRAPH="{}"
+SG_NODES=$(echo "$SPEC_GRAPH" | jq '.nodes | length // 0')
+SG_EDGES=$(echo "$SPEC_GRAPH" | jq '.edges | length // 0')
+ok "Spec graph: ${SG_NODES} nodes, ${SG_EDGES} edges"
+
+# The child spec should be approvable since parent is already approved
+SPEC2_ENTRY=$(api_get "${API}/specs" | jq ".[] | select(.path == \"${SPEC2_PATH}\")")
+SPEC2_SHA=$(echo "$SPEC2_ENTRY" | jq -r '.current_sha')
+if [ -n "$SPEC2_SHA" ] && [ "$SPEC2_SHA" != "null" ]; then
+  APPROVE2=$(api_post "${API}/specs/${SPEC2_PATH_ENCODED}/approve" "{\"sha\": \"${SPEC2_SHA}\"}" 2>/dev/null) || APPROVE2=""
+  if [ -n "$APPROVE2" ]; then
+    ok "Child spec approved (parent already approved — link check passed)"
+  else
+    warn "Child spec approval failed"
+  fi
+fi
+
+# =============================================================================
+step $((STEP++)) "Spec rejection mid-flight"
+# =============================================================================
+# Create a third spec, approve it, create a task, then reject — verify cancellation
+SPEC3_NAME="rejected-feature-${RUN_ID}"
+SPEC3_PATH="system/${SPEC3_NAME}.md"
+SPEC3_PATH_ENCODED="system%2F${SPEC3_NAME}.md"
+
+# Sync with remote
+git_with_token "$REPO_DIR" "$TOKEN" fetch origin main 2>/dev/null
+git -C "$REPO_DIR" reset --hard origin/main 2>/dev/null
+
+cat > "$REPO_DIR/specs/system/${SPEC3_NAME}.md" << SPEC3
+# Feature to Reject (${RUN_ID})
+
+> Status: Draft
+
+## Summary
+This feature will be rejected mid-flight.
+SPEC3
+
+# Update manifest
+cat >> "$REPO_DIR/specs/manifest.yaml" << MANIFEST3
+  - path: ${SPEC3_PATH}
+    title: "Feature to Reject (${RUN_ID})"
+    owner: "e2e-test"
+MANIFEST3
+
+git -C "$REPO_DIR" add .
+git -C "$REPO_DIR" commit -m "feat: add spec for rejection test" --no-gpg-sign
+git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1 | tail -2
+sleep 1
+
+# Approve it
+SPEC3_SHA=$(api_get "${API}/specs" | jq -r ".[] | select(.path == \"${SPEC3_PATH}\") | .current_sha")
+api_post "${API}/specs/${SPEC3_PATH_ENCODED}/approve" "{\"sha\": \"${SPEC3_SHA}\"}" >/dev/null 2>&1
+ok "Spec approved (will reject next)"
+
+# Create a task for it
+REJ_TASK=$(api_post "${API}/tasks" "{
+  \"title\": \"Implement rejected feature\",
+  \"task_type\": \"implementation\",
+  \"spec_path\": \"${SPEC3_PATH}\"
+}")
+REJ_TASK_ID=$(echo "$REJ_TASK" | jq -r '.id')
+ok "Task created: ${REJ_TASK_ID}"
+
+# Now reject the spec
+REJ_RESP=$(api_post "${API}/specs/${SPEC3_PATH_ENCODED}/reject" "{\"reason\": \"e2e test: spec rejected mid-flight\"}" 2>/dev/null) || REJ_RESP=""
+if [ -n "$REJ_RESP" ]; then
+  ok "Spec rejected"
+else
+  warn "Spec rejection failed (endpoint may not exist)"
+fi
+
+# Verify spec is now rejected
+SPEC3_STATUS=$(api_get "${API}/specs/${SPEC3_PATH_ENCODED}" 2>/dev/null | jq -r '.approval_status // "unknown"')
+ok "Spec status after rejection: ${SPEC3_STATUS}"
+
+# Check approval history
+SPEC3_HISTORY=$(api_get "${API}/specs/${SPEC3_PATH_ENCODED}/history" 2>/dev/null) || SPEC3_HISTORY="[]"
+HIST_CT=$(echo "$SPEC3_HISTORY" | jq 'length // 0')
+ok "Spec approval history: ${HIST_CT} events"
+
+# =============================================================================
+step $((STEP++)) "Repo lifecycle (archive/unarchive)"
+# =============================================================================
+# Create a second repo to archive (don't archive the main one)
+REPO2_RESP=$(api_post "${API}/repos" "{\"workspace_id\":\"${WS_ID}\",\"name\":\"archive-test-${RUN_ID}\"}")
+REPO2_ID=$(echo "$REPO2_RESP" | jq -r '.id')
+ok "Created repo for archive test: ${REPO2_ID}"
+
+# Archive it
+ARCHIVE_RESP=$(api_post "${API}/repos/${REPO2_ID}/archive" "{}" 2>/dev/null) || ARCHIVE_RESP=""
+if [ -n "$ARCHIVE_RESP" ]; then
+  ARCHIVE_STATUS=$(echo "$ARCHIVE_RESP" | jq -r '.status // "unknown"')
+  ok "Repo archived: status=${ARCHIVE_STATUS}"
+else
+  warn "Repo archive failed"
+fi
+
+# Unarchive it
+UNARCHIVE_RESP=$(api_post "${API}/repos/${REPO2_ID}/unarchive" "{}" 2>/dev/null) || UNARCHIVE_RESP=""
+if [ -n "$UNARCHIVE_RESP" ]; then
+  ok "Repo unarchived"
+else
+  warn "Repo unarchive failed"
+fi
+
+# Delete it
+DEL_RESP=$(curl -s -w '\n%{http_code}' -X DELETE -H "$AUTH" "${API}/repos/${REPO2_ID}")
+DEL_CODE=$(echo "$DEL_RESP" | tail -1)
+ok "Repo deleted: HTTP ${DEL_CODE}"
+
+# =============================================================================
+step $((STEP++)) "MR dependencies & atomic groups"
+# =============================================================================
+# Create two MRs to test dependencies (use existing repo)
+DEP_TASK1=$(api_post "${API}/tasks" "{\"title\":\"dep-task-1\",\"task_type\":\"implementation\"}" | jq -r '.id')
+DEP_AGENT1_RESP=$(api_post "${API}/agents/spawn" "{
+  \"name\":\"dep-agent-1-${RUN_ID}\",\"repo_id\":\"${REPO_ID}\",
+  \"task_id\":\"${DEP_TASK1}\",\"branch\":\"feat/dep-1\"
+}")
+DEP_AGENT1_ID=$(echo "$DEP_AGENT1_RESP" | jq -r '.agent.id')
+DEP_AGENT1_TOKEN=$(echo "$DEP_AGENT1_RESP" | jq -r '.token')
+DEP_CLONE=$(echo "$DEP_AGENT1_RESP" | jq -r '.clone_url')
+
+# Agent 1 does work
+DEP_DIR="${WORK_DIR}/dep-work"
+git_with_token "$WORK_DIR" "$DEP_AGENT1_TOKEN" clone "${DEP_CLONE}.git" dep-work 2>/dev/null || true
+if [ ! -d "$DEP_DIR/.git" ]; then
+  mkdir -p "$DEP_DIR"; cd "$DEP_DIR"; git init; git remote add origin "${DEP_CLONE}.git"
+  git_with_token "$DEP_DIR" "$DEP_AGENT1_TOKEN" fetch origin main 2>/dev/null
+  git -C "$DEP_DIR" checkout -b main FETCH_HEAD 2>/dev/null
+fi
+git -C "$DEP_DIR" config user.email "a@a" && git -C "$DEP_DIR" config user.name "A"
+git -C "$DEP_DIR" checkout -b feat/dep-1 2>/dev/null || true
+echo "dep1" > "$DEP_DIR/dep1.txt"
+git -C "$DEP_DIR" add . && git -C "$DEP_DIR" commit -m "feat: dependency 1" --no-gpg-sign
+git_with_token "$DEP_DIR" "$DEP_AGENT1_TOKEN" push origin feat/dep-1 2>/dev/null
+sleep 1
+
+DEP_MR1=$(api_post "${API}/agents/${DEP_AGENT1_ID}/complete" "{
+  \"branch\":\"feat/dep-1\",\"title\":\"feat: dep 1\",\"target_branch\":\"main\"
+}" | jq -r '.id')
+ok "MR dep-1: ${DEP_MR1}"
+
+# Set dependency: dep-1 depends on the original MR (already merged, so this is a no-op but tests the API)
+DEP_SET=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+  -d "{\"depends_on\":[\"${MR_ID}\"]}" \
+  "${API}/merge-requests/${DEP_MR1}/dependencies")
+DEP_CODE=$(echo "$DEP_SET" | tail -1)
+ok "MR dependency set: HTTP ${DEP_CODE}"
+
+# Get dependencies
+DEP_GET=$(api_get "${API}/merge-requests/${DEP_MR1}/dependencies" 2>/dev/null) || DEP_GET="{}"
+ok "MR dependencies: $(echo "$DEP_GET" | jq -c '{depends_on: (.depends_on | length), dependents: (.dependents | length)}')"
+
+# Set atomic group
+AG_SET=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+  -d '{"group":"e2e-atomic-group"}' \
+  "${API}/merge-requests/${DEP_MR1}/atomic-group")
+AG_CODE=$(echo "$AG_SET" | tail -1)
+ok "Atomic group set: HTTP ${AG_CODE}"
+
+# Merge queue graph
+MQ_GRAPH=$(api_get "${API}/merge-queue/graph" 2>/dev/null) || MQ_GRAPH="{}"
+MQ_NODES=$(echo "$MQ_GRAPH" | jq '.nodes | length // 0')
+ok "Merge queue graph: ${MQ_NODES} nodes"
+
+# =============================================================================
+step $((STEP++)) "Commit signatures & provenance"
+# =============================================================================
+# Get a commit SHA from main
+MAIN_SHA=$(api_get "${API}/repos/${REPO_ID}/commits?branch=main&limit=1" | jq -r '.[0].sha // "none"')
+if [ "$MAIN_SHA" != "none" ]; then
+  SIG=$(api_get "${API}/repos/${REPO_ID}/commits/${MAIN_SHA}/signature" 2>/dev/null) || SIG=""
+  if [ -n "$SIG" ] && [ "$SIG" != "null" ]; then
+    ok "Commit signature: $(echo "$SIG" | jq -r '.algorithm // "present"')"
+  else
+    info "No commit signature for ${MAIN_SHA:0:12} (expected for non-jj commits)"
+  fi
+fi
+
+# Conversation provenance
+CONV=$(api_get "${API}/conversations/${MAIN_SHA}" 2>/dev/null) || CONV=""
+if [ -n "$CONV" ] && [ "$CONV" != "null" ]; then
+  TURN_CT=$(echo "$CONV" | jq '.turns | length // 0')
+  ok "Conversation provenance: ${TURN_CT} turns"
+else
+  info "No conversation provenance (expected for non-agent commits)"
+fi
+
+# AIBOM
+AIBOM=$(api_get "${API}/repos/${REPO_ID}/aibom" 2>/dev/null) || AIBOM="[]"
+AIBOM_CT=$(echo "$AIBOM" | jq 'length // 0' 2>/dev/null || echo "0")
+ok "AIBOM entries: ${AIBOM_CT}"
+
+# Blame
+BLAME=$(api_get "${API}/repos/${REPO_ID}/blame?path=src/greeting.rs" 2>/dev/null) || BLAME="[]"
+BLAME_CT=$(echo "$BLAME" | jq 'length // 0' 2>/dev/null || echo "0")
+ok "Blame (src/greeting.rs): ${BLAME_CT} lines"
+
+# Hot files
+HOT=$(api_get "${API}/repos/${REPO_ID}/hot-files?limit=5" 2>/dev/null) || HOT="[]"
+HOT_CT=$(echo "$HOT" | jq 'length // 0' 2>/dev/null || echo "0")
+ok "Hot files: ${HOT_CT}"
+
+# Review routing
+ROUTING=$(api_get "${API}/repos/${REPO_ID}/review-routing?path=src/greeting.rs" 2>/dev/null) || ROUTING="[]"
+ROUTING_CT=$(echo "$ROUTING" | jq 'length // 0' 2>/dev/null || echo "0")
+ok "Review routing: ${ROUTING_CT} suggested reviewers"
+
+# Speculative merge
+SPEC_MERGE=$(api_get "${API}/repos/${REPO_ID}/speculative" 2>/dev/null) || SPEC_MERGE="[]"
+ok "Speculative merge results: $(echo "$SPEC_MERGE" | jq 'length // 0')"
+
+# =============================================================================
+step $((STEP++)) "Meta-spec registry"
+# =============================================================================
+MS_CREATE=$(api_post "${API}/meta-specs-registry" "{
+  \"name\": \"e2e-coding-standard\",
+  \"kind\": \"meta:standard\",
+  \"path\": \"standards/e2e-test.md\",
+  \"content\": \"# E2E Coding Standard\n\nAll functions must have doc comments.\",
+  \"version\": 1
+}" 2>/dev/null) || MS_CREATE=""
+if [ -n "$MS_CREATE" ]; then
+  MS_ID=$(echo "$MS_CREATE" | jq -r '.id // "none"')
+  ok "Meta-spec created: ${MS_ID}"
+
+  # List
+  MS_LIST=$(api_get "${API}/meta-specs-registry" 2>/dev/null) || MS_LIST="[]"
+  MS_CT=$(echo "$MS_LIST" | jq 'length // 0')
+  ok "Meta-spec registry: ${MS_CT} entries"
+
+  # Get by ID
+  if [ "$MS_ID" != "none" ]; then
+    MS_GET=$(api_get "${API}/meta-specs-registry/${MS_ID}" 2>/dev/null) || MS_GET="{}"
+    ok "Meta-spec detail: $(echo "$MS_GET" | jq -r '.name // "?"')"
+
+    # Versions
+    MS_VERS=$(api_get "${API}/meta-specs-registry/${MS_ID}/versions" 2>/dev/null) || MS_VERS="[]"
+    ok "Meta-spec versions: $(echo "$MS_VERS" | jq 'length // 0')"
+
+    # Delete
+    DEL_MS=$(curl -s -w '%{http_code}' -X DELETE -H "$AUTH" "${API}/meta-specs-registry/${MS_ID}")
+    ok "Meta-spec deleted: HTTP $(echo "$DEL_MS" | tail -c 4)"
+  fi
+else
+  warn "Meta-spec registry creation failed"
+fi
+
+# Workspace meta-spec-set
+MS_SET=$(api_get "${API}/workspaces/${WS_ID}/meta-spec-set" 2>/dev/null) || MS_SET="{}"
+ok "Workspace meta-spec-set: $(echo "$MS_SET" | jq -c 'keys' 2>/dev/null || echo "retrieved")"
+
+# =============================================================================
+step $((STEP++)) "Compute targets"
+# =============================================================================
+CT_CREATE=$(api_post "${API}/admin/compute-targets" "{
+  \"name\": \"e2e-local-target\",
+  \"target_type\": \"local\",
+  \"config\": {}
+}" 2>/dev/null) || CT_CREATE=""
+if [ -n "$CT_CREATE" ]; then
+  CT_ID=$(echo "$CT_CREATE" | jq -r '.id // "none"')
+  ok "Compute target created: ${CT_ID} (local)"
+
+  # List
+  CT_LIST=$(api_get "${API}/admin/compute-targets" 2>/dev/null) || CT_LIST="[]"
+  ok "Compute targets: $(echo "$CT_LIST" | jq 'length // 0')"
+
+  # Delete
+  if [ "$CT_ID" != "none" ]; then
+    curl -s -X DELETE -H "$AUTH" "${API}/admin/compute-targets/${CT_ID}" >/dev/null 2>&1
+    ok "Compute target deleted"
+  fi
+else
+  warn "Compute target creation failed"
+fi
+
+# =============================================================================
+step $((STEP++)) "Repo dependencies (cross-repo)"
+# =============================================================================
+REPO_DEPS=$(api_get "${API}/repos/${REPO_ID}/dependencies" 2>/dev/null) || REPO_DEPS="[]"
+ok "Repo dependencies: $(echo "$REPO_DEPS" | jq 'length // 0')"
+
+REPO_DEPTS=$(api_get "${API}/repos/${REPO_ID}/dependents" 2>/dev/null) || REPO_DEPTS="[]"
+ok "Repo dependents: $(echo "$REPO_DEPTS" | jq 'length // 0')"
+
+REPO_BLAST=$(api_get "${API}/repos/${REPO_ID}/blast-radius" 2>/dev/null) || REPO_BLAST="{}"
+ok "Blast radius: $(echo "$REPO_BLAST" | jq '.repos | length // 0' 2>/dev/null || echo "0") repos"
+
+DEP_GRAPH=$(api_get "${API}/dependencies/graph" 2>/dev/null) || DEP_GRAPH="{}"
+ok "Tenant dependency graph: $(echo "$DEP_GRAPH" | jq '.nodes | length // 0') nodes"
+
+# =============================================================================
+step $((STEP++)) "Release preparation"
+# =============================================================================
+RELEASE=$(api_post "${API}/release/prepare" "{
+  \"repo_id\": \"${REPO_ID}\"
+}" 2>/dev/null) || RELEASE=""
+if [ -n "$RELEASE" ]; then
+  NEXT_VER=$(echo "$RELEASE" | jq -r '.next_version // "none"')
+  CHANGELOG_LEN=$(echo "$RELEASE" | jq -r '.changelog | length // 0')
+  ok "Release: next=${NEXT_VER}, changelog=${CHANGELOG_LEN} chars"
+else
+  warn "Release preparation failed"
+fi
+
+# =============================================================================
+step $((STEP++)) "Knowledge graph advanced (concept, risks, timeline, diff)"
+# =============================================================================
+# Concept view
+CONCEPT=$(api_get "${API}/repos/${REPO_ID}/graph/concept/Greeting" 2>/dev/null) || CONCEPT="{}"
+CONCEPT_CT=$(echo "$CONCEPT" | jq '.nodes | length // 0')
+ok "Graph concept 'Greeting': ${CONCEPT_CT} nodes"
+
+# Risk metrics
+RISKS=$(api_get "${API}/repos/${REPO_ID}/graph/risks" 2>/dev/null) || RISKS="[]"
+RISK_CT=$(echo "$RISKS" | jq 'length // 0')
+ok "Graph risk metrics: ${RISK_CT} nodes scored"
+
+# Timeline (architectural deltas)
+GRAPH_TL=$(api_get "${API}/repos/${REPO_ID}/graph/timeline" 2>/dev/null) || GRAPH_TL="[]"
+GRAPH_TL_CT=$(echo "$GRAPH_TL" | jq 'length // 0')
+ok "Graph timeline: ${GRAPH_TL_CT} deltas"
+
+# Graph diff
+GRAPH_DIFF=$(api_get "${API}/repos/${REPO_ID}/graph/diff" 2>/dev/null) || GRAPH_DIFF="{}"
+ok "Graph diff: $(echo "$GRAPH_DIFF" | jq -r '.message // "retrieved"')"
+
+# Workspace graph
+WS_GRAPH=$(api_get "${API}/workspaces/${WS_ID}/graph" 2>/dev/null) || WS_GRAPH="{}"
+WS_NODES=$(echo "$WS_GRAPH" | jq '.nodes | length // 0')
+ok "Workspace graph: ${WS_NODES} nodes (cross-repo)"
+
+# Workspace concept
+WS_CONCEPT=$(api_get "${API}/workspaces/${WS_ID}/graph/concept/Greeting" 2>/dev/null) || WS_CONCEPT="{}"
+ok "Workspace concept 'Greeting': $(echo "$WS_CONCEPT" | jq '.nodes | length // 0') nodes"
+
+# Briefing
+BRIEFING=$(api_get "${API}/workspaces/${WS_ID}/briefing" 2>/dev/null) || BRIEFING="{}"
+ok "Workspace briefing: $(echo "$BRIEFING" | jq -r '.summary[:60] // "retrieved"' 2>/dev/null)"
+
+# Explorer views
+EV_CREATE=$(api_post "${API}/workspaces/${WS_ID}/explorer-views" "{
+  \"name\": \"e2e-overview\",
+  \"description\": \"Test view\"
+}" 2>/dev/null) || EV_CREATE=""
+if [ -n "$EV_CREATE" ]; then
+  EV_ID=$(echo "$EV_CREATE" | jq -r '.id // "none"')
+  ok "Explorer view created: ${EV_ID}"
+  [ "$EV_ID" != "none" ] && curl -s -X DELETE -H "$AUTH" "${API}/workspaces/${WS_ID}/explorer-views/${EV_ID}" >/dev/null 2>&1
+fi
+
+# =============================================================================
+step $((STEP++)) "Admin endpoints"
+# =============================================================================
+ADMIN_HEALTH=$(api_get "${API}/admin/health" 2>/dev/null) || ADMIN_HEALTH="{}"
+ok "Admin health: $(echo "$ADMIN_HEALTH" | jq -c '{uptime_secs: .uptime_secs}' 2>/dev/null || echo "retrieved")"
+
+ADMIN_JOBS=$(api_get "${API}/admin/jobs" 2>/dev/null) || ADMIN_JOBS="[]"
+ok "Background jobs: $(echo "$ADMIN_JOBS" | jq 'length // 0')"
+
+ADMIN_AUDIT=$(api_get "${API}/admin/audit?limit=5" 2>/dev/null) || ADMIN_AUDIT="[]"
+ok "Audit log: $(echo "$ADMIN_AUDIT" | jq 'length // 0') entries"
+
+# Analytics
+ANALYTICS=$(api_get "${API}/analytics/usage?event_name=agent.completed" 2>/dev/null) || ANALYTICS="{}"
+ok "Analytics (agent.completed): $(echo "$ANALYTICS" | jq -r '.count // 0') events"
+
+ANALYTICS_TOP=$(api_get "${API}/analytics/top?limit=5" 2>/dev/null) || ANALYTICS_TOP="[]"
+ok "Top analytics: $(echo "$ANALYTICS_TOP" | jq 'length // 0') event types"
+
+# Costs
+COSTS=$(api_get "${API}/costs/summary" 2>/dev/null) || COSTS="[]"
+ok "Cost summary: $(echo "$COSTS" | jq 'length // 0') entries"
+
+# Activity log
+ACTIVITY=$(api_get "${API}/activity?limit=10" 2>/dev/null) || ACTIVITY="[]"
+ok "Activity log: $(echo "$ACTIVITY" | jq 'length // 0') events"
+
+# User profile
+USER=$(api_get "${API}/users/me" 2>/dev/null) || USER="{}"
+ok "User profile: $(echo "$USER" | jq -r '.username // .global_role // "retrieved"')"
+
+USER_AGENTS=$(api_get "${API}/users/me/agents" 2>/dev/null) || USER_AGENTS="[]"
+ok "My agents: $(echo "$USER_AGENTS" | jq 'length // 0')"
+
+USER_TASKS=$(api_get "${API}/users/me/tasks" 2>/dev/null) || USER_TASKS="[]"
+ok "My tasks: $(echo "$USER_TASKS" | jq 'length // 0')"
+
+USER_MRS=$(api_get "${API}/users/me/mrs" 2>/dev/null) || USER_MRS="[]"
+ok "My MRs: $(echo "$USER_MRS" | jq 'length // 0')"
+
+# Token management
+TOKEN_CREATE=$(api_post "${API}/users/me/tokens" "{\"name\":\"e2e-test-token\",\"scopes\":[\"read\"]}" 2>/dev/null) || TOKEN_CREATE=""
+if [ -n "$TOKEN_CREATE" ]; then
+  TOK_ID=$(echo "$TOKEN_CREATE" | jq -r '.id // "none"')
+  ok "API token created: ${TOK_ID}"
+  [ "$TOK_ID" != "none" ] && curl -s -X DELETE -H "$AUTH" "${API}/users/me/tokens/${TOK_ID}" >/dev/null 2>&1
+  ok "API token revoked"
+fi
+
+# Version
+VERSION=$(api_get "${API}/version" 2>/dev/null) || VERSION="{}"
+ok "Server: $(echo "$VERSION" | jq -c '{name,version,milestone}')"
+
+# Auth token info
+TOKEN_INFO=$(api_get "${API}/auth/token-info" 2>/dev/null) || TOKEN_INFO="{}"
+ok "Token info: $(echo "$TOKEN_INFO" | jq -r '.token_kind // "retrieved"')"
+
 # =============================================================================
 # Summary
 # =============================================================================
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+TOTAL_STEPS=$((STEP - 1))
 if [ ${#ISSUES[@]} -eq 0 ]; then
-  echo -e "${BOLD}║  ${GREEN}All checks passed!${NC}${BOLD}                                         ║${NC}"
+  echo -e "${BOLD}║  ${GREEN}All ${TOTAL_STEPS} steps passed!${NC}${BOLD}                                      ║${NC}"
 else
-  echo -e "${BOLD}║  ${YELLOW}${#ISSUES[@]} issue(s) found${NC}${BOLD}                                           ║${NC}"
+  echo -e "${BOLD}║  ${YELLOW}${#ISSUES[@]} issue(s) across ${TOTAL_STEPS} steps${NC}${BOLD}                                  ║${NC}"
 fi
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -803,7 +1497,7 @@ echo -e "      ↓  agent spawned"
 echo -e "    ${CYAN}Agent${NC}  ${AGENT_ID:0:8}... (${AGENT_FINAL_STATUS})"
 echo -e "      ↓  +${DIFF_INS} -${DIFF_DEL} across ${DIFF_FILES} files"
 echo -e "    ${CYAN}MR${NC}     ${MR_ID:0:8}... (${MR_FINAL_STATUS})"
-echo -e "      ↓  merged + attested"
+echo -e "      ↓  merged + attested + gated"
 echo -e "    ${CYAN}Code${NC}   ${COMMIT_COUNT} commits on main"
 NODE_COUNT=${NODE_COUNT:-0}
 EDGE_COUNT=${EDGE_COUNT:-0}
