@@ -14,7 +14,16 @@
     onSelectNode = undefined,
     conceptFilterIds = null,
     conceptQuery = '',
+    categoryFilters = null,
   } = $props();
+
+  // Category → node_type mapping for filter panel integration
+  const CATEGORY_NODE_TYPES = {
+    boundaries: new Set(['Module', 'Crate', 'Boundary', 'Container', 'System']),
+    interfaces: new Set(['Trait', 'Interface', 'Function', 'Endpoint', 'Method']),
+    data: new Set(['Struct', 'Enum', 'Type', 'ValueObject', 'Entity']),
+    specs: new Set(['Spec']),
+  };
 
   let activeView = $state('graph'); // 'graph' | 'list' | 'timeline' | 'flow'
 
@@ -28,10 +37,24 @@
     return ['', ...Array.from(types).sort()];
   });
 
-  // Nodes/edges visible in the current concept filter
+  // Nodes/edges visible in the current concept + category filters
+  function passesCategoryFilter(node) {
+    if (!categoryFilters?.categories) return true;
+    const cats = categoryFilters.categories;
+    // If all categories selected, no filtering needed
+    if (cats.length >= Object.keys(CATEGORY_NODE_TYPES).length) return true;
+    const nodeType = node.node_type ?? '';
+    const activeSets = cats.map(c => CATEGORY_NODE_TYPES[c]).filter(Boolean);
+    // Show node if its type matches any active category, or if type is unknown
+    if (activeSets.length === 0) return true;
+    return activeSets.some(s => s.has(nodeType));
+  }
+
   let displayNodes = $derived.by(() => {
-    if (!conceptFilterIds) return nodes;
-    return nodes.filter(n => conceptFilterIds.has(n.id));
+    let result = nodes;
+    if (conceptFilterIds) result = result.filter(n => conceptFilterIds.has(n.id));
+    if (categoryFilters?.categories) result = result.filter(passesCategoryFilter);
+    return result;
   });
 
   let displayEdges = $derived.by(() => {
@@ -47,6 +70,7 @@
     let result = conceptFilterIds
       ? nodes.filter(n => conceptFilterIds.has(n.id))
       : nodes;
+    if (categoryFilters?.categories) result = result.filter(passesCategoryFilter);
     if (filterType) result = result.filter(n => n.node_type === filterType);
     const dir = sortDir === 'asc' ? 1 : -1;
     return [...result].sort((a, b) => {
