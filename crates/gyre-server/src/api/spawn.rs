@@ -302,7 +302,12 @@ pub async fn spawn_agent(
                         .to_string(),
                 ));
             }
-            None => { /* backward compat: allow tasks without task_type */ }
+            None => {
+                return Err(ApiError::InvalidInput(
+                    "tasks without a task_type (pre-approval push-hook tasks) cannot trigger agent spawning; set task_type to 'implementation' first"
+                        .to_string(),
+                ));
+            }
         }
     }
 
@@ -1334,7 +1339,7 @@ mod tests {
     }
 
     async fn create_task(app: Router, title: &str) -> (Router, String) {
-        let body = serde_json::json!({"title": title});
+        let body = serde_json::json!({"title": title, "task_type": "implementation"});
         let resp = app
             .clone()
             .oneshot(

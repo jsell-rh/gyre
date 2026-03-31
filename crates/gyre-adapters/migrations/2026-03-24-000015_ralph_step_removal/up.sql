@@ -1,7 +1,7 @@
 -- Remove the ralph_step column from agent_commits.
 -- The RalphStep enum (Spec|Implement|Review|Merge) is incompatible with the Ralph loop
--- as defined in specs/system/ralph-loop.md. Provenance is now tracked via task_id +
--- task status history. See specs/system/ralph-loop.md §Required code changes.
+-- as defined in specs/system/agent-runtime.md. Provenance is now tracked via task_id +
+-- task status history. See specs/system/agent-runtime.md §1.
 
 -- SQLite does not support DROP COLUMN directly in older versions.
 -- We recreate the table without the ralph_step column.
