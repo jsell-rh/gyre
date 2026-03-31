@@ -102,9 +102,9 @@
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Approved' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.approved') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('decisions.approval_failed') } };
     }
   }
 
@@ -117,9 +117,9 @@
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Rejected' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.rejected') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('decisions.rejection_failed') } };
     }
   }
 
@@ -129,9 +129,9 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Re-queued' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.re_queued') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('decisions.retry_failed') } };
     }
   }
 
@@ -141,7 +141,7 @@
       await api.markNotificationRead(n.id);
       notifications = notifications.filter(item => item.id !== n.id);
     } catch {
-      toastError('Dismiss failed — please try again.');
+      toastError($t('decisions.dismiss_failed'));
     }
     actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
