@@ -84,6 +84,7 @@ export const api = {
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
   task: (id) => request(`/tasks/${id}`),
+  updateTaskStatus: (id, status) => request(`/tasks/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   repos: ({ workspaceId } = {}) => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/repos${qs}`);
