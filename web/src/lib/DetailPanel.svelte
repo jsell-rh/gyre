@@ -39,6 +39,7 @@
   let previousFocus = null;
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
+  let enqueueing = $state(false);
 
   // Editor Split pop-out (spec entities only)
   let showEditorSplit = $state(false);
@@ -776,6 +777,25 @@
     return shortId(id);
   }
 
+  async function enqueueMr() {
+    if (!entity || enqueueing) return;
+    enqueueing = true;
+    try {
+      await api.enqueue(entity.id);
+      toastSuccess('MR enqueued for merge');
+      // Reload MR detail to reflect new status
+      const updated = await api.mergeRequest(entity.id).catch(() => null);
+      if (updated) {
+        mrDetail = updated;
+        if (entity.data) entity = { ...entity, data: { ...entity.data, ...updated } };
+      }
+    } catch (e) {
+      toastError('Failed to enqueue: ' + (e.message ?? e));
+    } finally {
+      enqueueing = false;
+    }
+  }
+
   async function submitComment() {
     if (!newCommentText.trim() || !entity || submittingComment) return;
     submittingComment = true;
@@ -1022,6 +1042,15 @@
                       </span>
                     {/if}
                   </div>
+                </div>
+              {/if}
+
+              <!-- MR Actions -->
+              {#if mr.status === 'open'}
+                <div class="mr-actions">
+                  <Button variant="primary" onclick={enqueueMr} disabled={enqueueing}>
+                    {enqueueing ? 'Enqueueing...' : 'Enqueue for Merge'}
+                  </Button>
                 </div>
               {/if}
             {/if}
@@ -3200,6 +3229,15 @@
   .review-decision-select:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  /* ── MR Actions ──────────────────────────────────────────────────────── */
+  .mr-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
   }
 
   /* ── Provenance chain ─────────────────────────────────────────────────── */
