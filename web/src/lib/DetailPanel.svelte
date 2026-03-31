@@ -482,9 +482,10 @@
         api.agentContainer(id).catch(() => null),
         api.agentWorkload(id).catch(() => null),
         api.agentTouchedPaths(id).catch(() => null),
-      ]).then(([d, logs, container, workload, touchedPaths]) => {
+        api.agentCard(id).catch(() => null),
+      ]).then(([d, logs, container, workload, touchedPaths, card]) => {
         const norm = normalizeAgent(d);
-        agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths } : norm;
+        agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths, _card: card } : norm;
         // Pre-cache a few recent logs for the info view
         if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
       }).catch(() => { agentDetail = null; })
@@ -1355,6 +1356,25 @@
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
+                {/if}
+                {#if ag._card?.description}
+                  <dt>Description</dt><dd class="task-description">{ag._card.description}</dd>
+                {/if}
+                {#if ag._card?.capabilities?.length > 0}
+                  <dt>Capabilities</dt>
+                  <dd class="agent-caps">
+                    {#each ag._card.capabilities as cap}
+                      <span class="cap-tag">{cap}</span>
+                    {/each}
+                  </dd>
+                {/if}
+                {#if ag._card?.protocols?.length > 0}
+                  <dt>Protocols</dt>
+                  <dd class="agent-caps">
+                    {#each ag._card.protocols as proto}
+                      <span class="cap-tag cap-proto">{proto}</span>
+                    {/each}
+                  </dd>
                 {/if}
                 {#if ag.branch}
                   <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
@@ -2620,6 +2640,30 @@
   .entity-meta dd.mono {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+  }
+
+  .agent-caps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    white-space: normal;
+  }
+
+  .cap-tag {
+    display: inline-block;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-primary-bg, rgba(59, 130, 246, 0.1));
+    color: var(--color-primary, #3b82f6);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    border: 1px solid var(--color-primary-border, rgba(59, 130, 246, 0.2));
+  }
+
+  .cap-proto {
+    background: var(--color-surface-alt, rgba(139, 92, 246, 0.1));
+    color: var(--color-text-secondary, #8b5cf6);
+    border-color: rgba(139, 92, 246, 0.2);
   }
 
   .copyable {
