@@ -64,6 +64,7 @@
   let loading = $state(true);
   let error = $state(null);
   let filterQuery = $state('');
+  let investigateLoading = $state(null); // commit SHA being investigated
 
   // Sort state
   let sortField = $state('name');
@@ -220,6 +221,50 @@
   function shortName(id) {
     if (!id) return '';
     return id.length > 12 ? id.slice(0, 8) : id;
+  }
+
+  async function investigateLine(line) {
+    const sha = line.sha ?? line.commit_sha;
+    const agentId = line.agent_id ?? line.agent;
+    if (!sha || !repoId) return;
+    investigateLoading = sha;
+    try {
+      // Look up the task from the original agent to get context
+      let taskId = null;
+      if (agentId) {
+        try {
+          const ag = await api.agent(agentId);
+          taskId = ag?.task_id ?? ag?.current_task_id;
+        } catch { /* best effort */ }
+      }
+      if (!taskId) {
+        // Create a lightweight investigation task
+        const task = await api.createTask({
+          title: `Investigate ${selectedFile}:${line.line_number ?? '?'}`,
+          description: `Investigation of code at ${selectedFile} line ${line.line_number ?? '?'}, commit ${sha.slice(0, 7)}`,
+          task_type: 'investigation',
+          repo_id: repoId,
+        });
+        taskId = task.id;
+      }
+      const result = await api.spawnAgent({
+        name: `investigate-${sha.slice(0, 8)}`,
+        repo_id: repoId,
+        task_id: taskId,
+        branch: `investigate/${sha.slice(0, 8)}`,
+        agent_type: 'interrogation',
+        conversation_sha: line.conversation_sha ?? sha,
+      });
+      const newAgentId = result?.agent?.id;
+      if (newAgentId) {
+        showToast('Investigation agent spawned', { type: 'success' });
+        openDetailPanel?.({ type: 'agent', id: newAgentId, data: result.agent });
+      }
+    } catch (e) {
+      showToast(`Failed to spawn: ${e?.message ?? 'Unknown error'}`, { type: 'error' });
+    } finally {
+      investigateLoading = null;
+    }
   }
 
   function toggleSort(field) {
@@ -500,6 +545,7 @@
                     <th scope="col" class="blame-col-agent">Agent</th>
                     <th scope="col" class="blame-col-sha">Commit</th>
                     <th scope="col" class="blame-col-spec">Spec</th>
+                    <th scope="col" class="blame-col-action"></th>
                     <th scope="col" class="blame-col-content">Content</th>
                   </tr>
                 </thead>
@@ -536,6 +582,18 @@
                           </button>
                         {:else}
                           <span class="secondary">—</span>
+                        {/if}
+                      </td>
+                      <td class="blame-action">
+                        {#if agentId && (line.sha ?? line.commit_sha)}
+                          <button
+                            class="investigate-btn"
+                            onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
+                            disabled={investigateLoading === (line.sha ?? line.commit_sha)}
+                            title="Spawn investigation agent at this code's conversation context"
+                          >
+                            {investigateLoading === (line.sha ?? line.commit_sha) ? '…' : '?'}
+                          </button>
                         {/if}
                       </td>
                       <td class="blame-content mono"><pre class="blame-line-pre">{line.content ?? line.text ?? ''}</pre></td>
@@ -1495,6 +1553,40 @@
     white-space: pre;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+  }
+
+  .blame-action {
+    width: 24px;
+    padding: 0 2px !important;
+  }
+
+  .blame-col-action { width: 24px; }
+
+  .investigate-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 700;
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .investigate-btn:hover:not(:disabled) {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  }
+
+  .investigate-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .entity-link-sm {
