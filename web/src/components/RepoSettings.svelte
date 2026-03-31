@@ -345,6 +345,27 @@
     return new Date(typeof ts === 'number' ? ts * 1000 : ts).toLocaleString();
   }
 
+  /** Format audit event details — handles objects, strings, and null */
+  function fmtAuditDetail(detail) {
+    if (!detail) return '';
+    if (typeof detail === 'string') return detail;
+    if (typeof detail !== 'object') return String(detail);
+    // Extract human-readable summary from common audit detail shapes
+    const parts = [];
+    if (detail.path) parts.push(detail.path);
+    if (detail.branch) parts.push(`branch: ${detail.branch}`);
+    if (detail.sha) parts.push(detail.sha.slice(0, 7));
+    if (detail.agent_id) parts.push(`agent: ${detail.agent_id.slice(0, 8)}`);
+    if (detail.address || detail.remote_addr) parts.push(detail.address ?? detail.remote_addr);
+    if (detail.reason) parts.push(detail.reason);
+    if (detail.name) parts.push(detail.name);
+    if (detail.gate) parts.push(`gate: ${detail.gate}`);
+    if (detail.status) parts.push(detail.status);
+    if (parts.length > 0) return parts.join(' · ');
+    // Fallback: compact JSON
+    return JSON.stringify(detail);
+  }
+
   const repoBudgetPct = $derived.by(() => {
     if (!repoBudget) return null;
     const used = repoBudget.used_credits ?? 0;
@@ -773,7 +794,7 @@
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
-                <span class="audit-detail">{evt.details ?? evt.message ?? ''}</span>
+                <span class="audit-detail">{fmtAuditDetail(evt.details ?? evt.message)}</span>
                 <span class="audit-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
               </div>
             {/each}
