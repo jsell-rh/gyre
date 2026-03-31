@@ -949,6 +949,54 @@
                   <dt>{mr.status === 'merged' ? 'Merged' : 'Updated'}</dt><dd>{fmtDate(mr.merged_at ?? mr.updated_at)}</dd>
                 {/if}
               </dl>
+
+              <!-- Provenance chain -->
+              {@const specPath = mr.spec_ref?.split('@')[0]}
+              {@const agentId = mr.author_agent_id ?? mr.agent_id}
+              {#if specPath || mr.task_id || agentId}
+                <div class="provenance-chain">
+                  <span class="provenance-label">Provenance</span>
+                  <div class="provenance-flow">
+                    {#if specPath}
+                      <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })} title={specPath}>
+                        <span class="provenance-icon">&#x1F4C4;</span>
+                        <span class="provenance-type">Spec</span>
+                        <span class="provenance-name">{specPath.split('/').pop()}</span>
+                      </button>
+                      <span class="provenance-arrow">\u2192</span>
+                    {/if}
+                    {#if mr.task_id}
+                      <button class="provenance-node provenance-task" onclick={() => navigateTo('task', mr.task_id)} title={mr.task_id}>
+                        <span class="provenance-icon">&#x2611;</span>
+                        <span class="provenance-type">Task</span>
+                        <span class="provenance-name">{entityName('task', mr.task_id)}</span>
+                      </button>
+                      <span class="provenance-arrow">\u2192</span>
+                    {/if}
+                    {#if agentId}
+                      <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', agentId)} title={agentId}>
+                        <span class="provenance-icon">&#x2699;</span>
+                        <span class="provenance-type">Agent</span>
+                        <span class="provenance-name">{entityName('agent', agentId)}</span>
+                      </button>
+                      <span class="provenance-arrow">\u2192</span>
+                    {/if}
+                    <span class="provenance-node provenance-mr provenance-current">
+                      <span class="provenance-icon">&#x1F500;</span>
+                      <span class="provenance-type">MR</span>
+                      <span class="provenance-name">{mr.status ?? 'open'}</span>
+                    </span>
+                    {#if mr.status === 'merged' && mr.diff_stats}
+                      <span class="provenance-arrow">\u2192</span>
+                      <span class="provenance-node provenance-code">
+                        <span class="provenance-icon">&#x1F4BB;</span>
+                        <span class="provenance-type">Code</span>
+                        <span class="provenance-name">+{mr.diff_stats.insertions ?? 0} -{mr.diff_stats.deletions ?? 0}</span>
+                      </span>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
             {/if}
           {:else if entity.type === 'agent'}
             {#if agentDetailLoading && !entity.data}
@@ -3121,6 +3169,92 @@
   .review-decision-select:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  /* ── Provenance chain ─────────────────────────────────────────────────── */
+  .provenance-chain {
+    margin-top: var(--space-3);
+    padding: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .provenance-label {
+    display: block;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-2);
+  }
+
+  .provenance-flow {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .provenance-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--space-2);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    font: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    min-width: 56px;
+  }
+
+  button.provenance-node:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+  }
+
+  button.provenance-node:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .provenance-current {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    cursor: default;
+  }
+
+  .provenance-icon {
+    font-size: var(--text-base);
+    line-height: 1;
+  }
+
+  .provenance-type {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+  }
+
+  .provenance-name {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+  }
+
+  .provenance-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    flex-shrink: 0;
   }
 
   /* ── Spec history reason ────────────────────────────────────────────────── */
