@@ -1292,9 +1292,9 @@ step $((STEP++)) "Meta-spec registry"
 MS_CREATE=$(api_post "${API}/meta-specs-registry" "{
   \"name\": \"e2e-coding-standard\",
   \"kind\": \"meta:standard\",
-  \"path\": \"standards/e2e-test.md\",
-  \"content\": \"# E2E Coding Standard\n\nAll functions must have doc comments.\",
-  \"version\": 1
+  \"scope\": \"Global\",
+  \"prompt\": \"All functions must have doc comments.\",
+  \"required\": false
 }" 2>/dev/null) || MS_CREATE=""
 if [ -n "$MS_CREATE" ]; then
   MS_ID=$(echo "$MS_CREATE" | jq -r '.id // "none"')
