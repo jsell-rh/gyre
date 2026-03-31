@@ -116,11 +116,11 @@
       <button
         class="agent-count-btn"
         onclick={() => { agentPanelOpen = true; }}
-        aria-label="{agentsLoading ? 'Loading agents' : activeAgents.length + ' agents active'} — click to view"
+        aria-label="{agentsLoading ? $t('repo_mode.loading_agents') : activeAgents.length + ' agents active'} — click to view"
         data-testid="agent-count-btn"
       >
         {#if agentsLoading}
-          <span class="meta-value">loading agents…</span>
+          <span class="meta-value">{$t('repo_mode.loading_agents')}</span>
         {:else}
           <span class="meta-value">{activeAgents.length} agent{activeAgents.length === 1 ? '' : 's'} active</span>
         {/if}
@@ -129,7 +129,7 @@
       <!-- Budget % -->
       {#if budgetPct !== null}
         <span class="meta-sep" aria-hidden="true">·</span>
-        <span class="budget-display" data-testid="budget-display">Budget: {budgetPct}%</span>
+        <span class="budget-display" data-testid="budget-display">{$t('repo_mode.budget_label', { values: { pct: budgetPct } })}</span>
       {/if}
 
       <!-- Clone URL -->
@@ -190,7 +190,7 @@
         <ExplorerCodeTab repoId={repo.id} {repo} />
       {:else}
         <div class="tab-placeholder">
-          <p>No repo selected.</p>
+          <p>{$t('repo_mode.no_repo_selected')}</p>
         </div>
       {/if}
     {:else if activeTab === 'settings'}
@@ -220,7 +220,7 @@
       data-testid="agent-panel"
     >
       <div class="agent-panel-header">
-        <h2 class="agent-panel-title">Active Agents</h2>
+        <h2 class="agent-panel-title">{$t('repo_mode.active_agents')}</h2>
         <button
           class="panel-close-btn"
           onclick={() => { agentPanelOpen = false; }}
@@ -231,9 +231,9 @@
 
       <div class="agent-panel-body">
         {#if agentsLoading}
-          <p class="agent-panel-loading">Loading agents…</p>
+          <p class="agent-panel-loading">{$t('repo_mode.loading_agents_panel')}</p>
         {:else if activeAgents.length === 0}
-          <p class="agent-panel-empty">No active agents in this repo.</p>
+          <p class="agent-panel-empty">{$t('repo_mode.no_active_agents')}</p>
         {:else}
           {#each activeAgents as agent}
             <button
@@ -249,7 +249,7 @@
                 <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
               </div>
               {#if agent.task_id}
-                <span class="agent-row-task">Task: {agent.task_id}</span>
+                <span class="agent-row-task">{$t('repo_mode.task_label', { values: { id: agent.task_id } })}</span>
               {/if}
             </button>
             {#if selectedAgentId === agent.id}
