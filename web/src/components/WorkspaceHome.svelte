@@ -91,6 +91,39 @@
     }
   }
 
+  function taskStatusTooltip(status) {
+    switch (status) {
+      case 'backlog': return 'Task is waiting to be assigned to an agent';
+      case 'in_progress': return 'An agent is actively working on this task';
+      case 'done': return 'Task has been completed — MR created or code merged';
+      case 'blocked': return 'Task is blocked by a dependency or external factor';
+      case 'cancelled': return 'Task was cancelled — the linked spec may have been rejected';
+      default: return '';
+    }
+  }
+
+  function mrStatusTooltip(mr) {
+    if (mr.queue_position != null) return `MR is position ${mr.queue_position + 1} in the merge queue — gates will run before merge`;
+    switch (mr.status) {
+      case 'open': return 'MR is open and ready to be enqueued for merge';
+      case 'merged': return 'MR passed all required gates and was merged to the target branch';
+      case 'closed': return 'MR was closed without merging — may have failed gates or been superseded';
+      default: return '';
+    }
+  }
+
+  function agentStatusTooltip(status) {
+    switch (status) {
+      case 'active': return 'Agent is currently running — implementing code, running tests, or communicating';
+      case 'idle': return 'Agent has completed its work — MR should have been created';
+      case 'completed': return 'Agent finished successfully';
+      case 'failed': return 'Agent encountered an error during execution';
+      case 'dead': return 'Agent was killed by an administrator';
+      case 'stopped': return 'Agent was stopped gracefully';
+      default: return '';
+    }
+  }
+
   // ── Decisions state ────────────────────────────────────────────────────
   let decisionsLoading = $state(true);
   let decisionsError = $state(null);
@@ -1152,7 +1185,7 @@
               <tbody>
                 {#each wsTasks.slice(0, 10) as task}
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'task', id: task.id, data: task }); }}>
-                    <td><span class="status-badge status-{task.status ?? 'backlog'}">{task.status ?? 'backlog'}</span></td>
+                    <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task.status)}>{task.status ?? 'backlog'}</span></td>
                     <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
                     <td>{#if task.priority}<span class="priority-badge priority-{task.priority}">{task.priority}</span>{/if}</td>
                     <td class="ws-cell-type">{task.task_type ?? ''}</td>
@@ -1201,7 +1234,7 @@
               <tbody>
                 {#each wsMrs.slice(0, 10) as mr}
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
-                    <td><span class="status-badge status-{mr.queue_position != null ? 'queued' : (mr.status ?? 'open')}">{mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')}</span></td>
+                    <td><span class="status-badge status-{mr.queue_position != null ? 'queued' : (mr.status ?? 'open')}" title={mrStatusTooltip(mr)}>{mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')}</span></td>
                     <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
@@ -1279,7 +1312,7 @@
                   {@const taskId = agent.task_id ?? agent.current_task_id}
                   {@const spawnedAt = agent.created_at ?? agent.spawned_at}
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>
-                    <td><span class="status-badge status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span></td>
+                    <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span></td>
                     <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: taskId, data: {} }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
