@@ -242,14 +242,14 @@ const taskPrompt = process.env.GYRE_TASK_PROMPT ||
 - Task ID: ${taskId}
 - Branch: ${branch}
 - Repo ID: ${repoId || 'unknown'}
-- Working directory: /workspace/repo
+- Working directory: ${process.cwd()}
 
 You have been spawned to complete the task assigned to you. Your working directory
 contains a checked-out git clone of the repository on your branch.
 
 Instructions:
 1. Use \`gyre_list_tasks\` to read your assigned task (id: ${taskId}) for full details.
-2. Implement the task requirements by editing files in /workspace/repo.
+2. Implement the task requirements by editing files in ${process.cwd()}.
 3. Commit your changes with a descriptive conventional-commit message.
 4. Push your changes: \`git push origin ${branch}\`
 5. Use \`gyre_agent_complete\` to signal completion (agent_id: "${agentId}"). Include a summary with decisions and uncertainties.
