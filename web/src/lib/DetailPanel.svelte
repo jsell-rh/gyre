@@ -10,6 +10,7 @@
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import { api } from './api.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
+  import { detectLang, highlightLine } from './syntaxHighlight.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -2354,13 +2355,14 @@
                       {/if}
                     </summary>
                     {#if file.patch}
+                      {@const lang = detectLang(file.path ?? '')}
                       <table class="diff-table">
                         <tbody>
                           {#each parsePatchLines(file.patch) as pline}
                             <tr class="diff-tr diff-tr-{pline.type}">
                               <td class="diff-gutter diff-gutter-old">{pline.oldNum}</td>
                               <td class="diff-gutter diff-gutter-new">{pline.newNum}</td>
-                              <td class="diff-code">{pline.text}</td>
+                              <td class="diff-code">{#if pline.type === 'hunk'}<span class="diff-hunk-text">{pline.text}</span>{:else}<span class="diff-prefix">{pline.text.charAt(0)}</span>{@html highlightLine(pline.text.slice(1), lang)}{/if}</td>
                             </tr>
                           {/each}
                         </tbody>
@@ -3925,15 +3927,30 @@
     word-break: break-all;
     color: var(--color-text);
   }
-  .diff-tr-add .diff-code { background: color-mix(in srgb, var(--color-success) 10%, transparent); color: var(--color-success); }
+  .diff-prefix {
+    user-select: none;
+    color: var(--color-text-muted);
+    display: inline-block;
+    width: 1ch;
+  }
+  .diff-hunk-text { font-style: italic; }
+  .diff-tr-add .diff-code { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .diff-tr-add .diff-prefix { color: var(--color-success); font-weight: 600; }
   .diff-tr-add .diff-gutter { background: color-mix(in srgb, var(--color-success) 6%, transparent); }
-  .diff-tr-del .diff-code { background: color-mix(in srgb, var(--color-danger) 10%, transparent); color: var(--color-danger); }
+  .diff-tr-del .diff-code { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .diff-tr-del .diff-prefix { color: var(--color-danger); font-weight: 600; }
   .diff-tr-del .diff-gutter { background: color-mix(in srgb, var(--color-danger) 6%, transparent); }
   .diff-tr-hunk .diff-code { color: var(--color-info); font-weight: 500; background: color-mix(in srgb, var(--color-info) 6%, transparent); }
   .diff-tr-hunk .diff-gutter { background: color-mix(in srgb, var(--color-info) 4%, transparent); }
   .diff-tr-ctx:hover .diff-code,
   .diff-tr-add:hover .diff-code,
   .diff-tr-del:hover .diff-code { filter: brightness(0.95); }
+
+  /* Syntax highlighting tokens in diffs */
+  .diff-code :global(.hl-kw) { color: #c678dd; }
+  .diff-code :global(.hl-str) { color: #98c379; }
+  .diff-code :global(.hl-cmt) { color: #5c6370; font-style: italic; }
+  .diff-code :global(.hl-num) { color: #d19a66; }
 
   /* ── MR Gates tab ────────────────────────────────────────────────────────── */
   .gates-list {
