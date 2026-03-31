@@ -128,6 +128,8 @@
       if (untrack(() => !repoBudget && !repoBudgetLoading)) loadRepoBudget(repoId);
     }
     if (activeTab === 'audit') {
+      // Track auditFilterType so changes trigger a reload
+      void auditFilterType;
       loadAudit(repoId);
     }
   });
