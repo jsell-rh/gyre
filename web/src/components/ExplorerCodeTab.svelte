@@ -14,6 +14,7 @@
   const SUB_TABS = [
     { id: 'branches', labelKey: 'code_tab.branches' },
     { id: 'commits', labelKey: 'code_tab.commits' },
+    { id: 'files', label: 'Files' },
     { id: 'merge-requests', labelKey: 'code_tab.merge_requests' },
     { id: 'merge-queue', labelKey: 'code_tab.merge_queue' },
     { id: 'hot-files', label: 'Hot Files' },
@@ -54,6 +55,12 @@
   let hotFiles = $state([]);
   let aibomEntries = $state([]);
   let agentCommitRecords = $state([]);
+  // Files sub-tab state
+  let fileTree = $state([]);
+  let selectedFile = $state(null);
+  let blameData = $state(null);
+  let blameLoading = $state(false);
+  let reviewRouting = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let filterQuery = $state('');
@@ -127,6 +134,35 @@
         const all = await api.tasks({ repoId });
         // Client-side filter: only show tasks explicitly linked to this repo
         tasks = (Array.isArray(all) ? all : []).filter(t => t.repo_id === repoId);
+      } else if (tab === 'files') {
+        // Build file tree from hot-files + agent-commits data
+        const [hf, acList] = await Promise.all([
+          api.repoHotFiles(repoId, 100).catch(() => []),
+          api.repoAgentCommits(repoId).catch(() => []),
+        ]);
+        const hotMap = new Map();
+        for (const f of (Array.isArray(hf) ? hf : [])) {
+          const p = f.path ?? f.file;
+          if (p) hotMap.set(p, f);
+        }
+        // Collect unique file paths from agent commits
+        const pathSet = new Set(hotMap.keys());
+        for (const ac of (Array.isArray(acList) ? acList : [])) {
+          if (ac.files) ac.files.forEach(f => pathSet.add(f));
+          if (ac.path) pathSet.add(ac.path);
+        }
+        // Build flat file list with hot-file metadata
+        fileTree = [...pathSet].sort().map(p => {
+          const hot = hotMap.get(p);
+          return {
+            path: p,
+            change_count: hot?.change_count ?? hot?.commits ?? 0,
+            author_count: hot?.author_count ?? hot?.authors ?? 0,
+            last_modified: hot?.last_modified ?? hot?.updated_at,
+          };
+        });
+        selectedFile = null;
+        blameData = null;
       } else if (tab === 'hot-files') {
         hotFiles = await api.repoHotFiles(repoId, 30).catch(() => []);
         if (!Array.isArray(hotFiles)) hotFiles = [];
@@ -273,6 +309,25 @@
     return rows;
   });
 
+  async function selectFile(path) {
+    selectedFile = path;
+    blameData = null;
+    blameLoading = true;
+    reviewRouting = [];
+    try {
+      const [blame, routing] = await Promise.all([
+        api.repoBlame(repoId, path).catch(() => null),
+        api.repoReviewRouting(repoId, path).catch(() => []),
+      ]);
+      blameData = blame;
+      reviewRouting = Array.isArray(routing) ? routing : [];
+    } catch {
+      blameData = null;
+    } finally {
+      blameLoading = false;
+    }
+  }
+
   function relativeTime(ts) {
     if (!ts) return '';
     const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
@@ -394,6 +449,107 @@
                   {/if}
                 </td>
                 <td class="secondary">{relativeTime(commit.timestamp ?? commit.authored_at ?? commit.date)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    {:else if subTab === 'files'}
+      {#if fileTree.length === 0}
+        <EmptyState title="No files tracked" message="File data appears after agents commit code. Try viewing Hot Files or Provenance for available data." />
+      {:else if selectedFile}
+        <!-- File blame view -->
+        <div class="file-blame-view">
+          <div class="file-blame-header">
+            <button class="back-to-files" onclick={() => { selectedFile = null; blameData = null; }}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
+              Back to files
+            </button>
+            <span class="file-blame-path mono">{selectedFile}</span>
+          </div>
+
+          {#if reviewRouting.length > 0}
+            <div class="review-routing-bar">
+              <span class="routing-label">Suggested reviewers:</span>
+              {#each reviewRouting.slice(0, 3) as reviewer}
+                <button class="routing-agent" onclick={() => { if (reviewer.agent_id) onRowClick({ id: reviewer.agent_id }, 'agent'); }} title={reviewer.agent_id ?? reviewer.name}>
+                  <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                  {reviewer.name ?? resolveEntityName('agent', reviewer.agent_id) ?? shortName(reviewer.agent_id)}
+                  {#if reviewer.commit_count}<span class="routing-count">({reviewer.commit_count} commits)</span>{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          {#if blameLoading}
+            <Skeleton lines={10} />
+          {:else if blameData}
+            {@const lines = Array.isArray(blameData) ? blameData : (blameData.lines ?? blameData.blame ?? [])}
+            {#if lines.length > 0}
+              <table class="blame-table">
+                <thead>
+                  <tr>
+                    <th scope="col" class="blame-col-line">#</th>
+                    <th scope="col" class="blame-col-agent">Agent</th>
+                    <th scope="col" class="blame-col-sha">Commit</th>
+                    <th scope="col" class="blame-col-content">Content</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each lines as line, i}
+                    {@const agentId = line.agent_id ?? line.agent}
+                    <tr class="blame-row" class:blame-agent-row={!!agentId}>
+                      <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
+                      <td class="blame-agent">
+                        {#if agentId}
+                          <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title={agentId}>
+                            <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                            {resolveEntityName('agent', agentId)}
+                          </button>
+                        {:else}
+                          <span class="secondary">{line.author ?? '—'}</span>
+                        {/if}
+                      </td>
+                      <td class="blame-sha mono">
+                        {#if line.sha ?? line.commit_sha}
+                          <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId }, 'commit')} title={line.sha ?? line.commit_sha}>
+                            {(line.sha ?? line.commit_sha).slice(0, 7)}
+                          </button>
+                        {:else}
+                          —
+                        {/if}
+                      </td>
+                      <td class="blame-content mono"><pre class="blame-line-pre">{line.content ?? line.text ?? ''}</pre></td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}
+              <p class="no-data">No blame data available for this file</p>
+            {/if}
+          {:else}
+            <p class="no-data">Blame data not available. File may not have been committed by an agent.</p>
+          {/if}
+        </div>
+      {:else}
+        <!-- File tree list -->
+        <table class="code-table">
+          <thead>
+            <tr>
+              <th scope="col">File</th>
+              <th scope="col">Changes</th>
+              <th scope="col">Contributors</th>
+              <th scope="col">Last Modified</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each fileTree.filter(matchesFilter) as file}
+              <tr class="table-row" onclick={() => selectFile(file.path)} tabindex="0" role="button" aria-label="View blame for {file.path}" onkeydown={(e) => { if (e.key === 'Enter') selectFile(file.path); }}>
+                <td class="mono">{file.path}</td>
+                <td>{file.change_count || '—'}</td>
+                <td class="secondary">{file.author_count || '—'}</td>
+                <td class="secondary">{relativeTime(file.last_modified)}</td>
               </tr>
             {/each}
           </tbody>
@@ -1141,6 +1297,170 @@
     color: var(--color-text-muted);
     margin: 0;
     padding: 0 var(--space-4);
+  }
+
+  /* Files / Blame view */
+  .file-blame-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .file-blame-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .back-to-files {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: none;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .back-to-files:hover {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .file-blame-path {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .review-routing-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--color-info) 5%, transparent);
+    border-bottom: 1px solid var(--color-border);
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+
+  .routing-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 600;
+  }
+
+  .routing-agent {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--text-xs);
+    padding: 2px var(--space-2);
+  }
+
+  .routing-agent:hover { background: var(--color-surface-hover); }
+
+  .routing-count {
+    color: var(--color-text-muted);
+    font-size: 10px;
+  }
+
+  .blame-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-xs);
+    overflow: auto;
+    flex: 1;
+  }
+
+  .blame-table thead {
+    position: sticky;
+    top: 0;
+    background: var(--color-surface-elevated);
+    z-index: 1;
+  }
+
+  .blame-table th {
+    padding: var(--space-1) var(--space-2);
+    text-align: left;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .blame-col-line { width: 40px; text-align: right; }
+  .blame-col-agent { width: 120px; }
+  .blame-col-sha { width: 70px; }
+
+  .blame-row td {
+    padding: 0 var(--space-2);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 30%, transparent);
+    vertical-align: top;
+    line-height: 1.6;
+  }
+
+  .blame-row.blame-agent-row {
+    background: color-mix(in srgb, var(--color-info) 3%, transparent);
+  }
+
+  .blame-line-num {
+    text-align: right;
+    color: var(--color-text-muted);
+    user-select: none;
+    font-family: var(--font-mono);
+  }
+
+  .blame-agent { white-space: nowrap; }
+
+  .blame-sha { white-space: nowrap; }
+
+  .blame-content {
+    overflow-x: auto;
+    max-width: 600px;
+  }
+
+  .blame-line-pre {
+    margin: 0;
+    white-space: pre;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .entity-link-sm {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--color-primary) 40%, transparent);
+  }
+
+  .entity-link-sm:hover { text-decoration-color: var(--color-primary); }
+
+  .no-data {
+    padding: var(--space-4);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    text-align: center;
   }
 
   @media (prefers-reduced-motion: reduce) {
