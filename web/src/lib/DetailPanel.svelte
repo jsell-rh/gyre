@@ -671,6 +671,12 @@
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     });
   }
+
+  /** Truncate a UUID/SHA to 8 chars for display. Full value shown in title. */
+  function shortId(id) {
+    if (!id) return '—';
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -749,27 +755,43 @@
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
                 <dt>Status</dt><dd><Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} /></dd>
-                <dt>ID</dt><dd class="mono">{entity.id}</dd>
+                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
                 {#if mr.source_branch}
-                  <dt>Branch</dt><dd class="mono">{mr.source_branch}</dd>
+                  <dt>Branch</dt><dd class="mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</dd>
                 {/if}
-                {#if mr.target_branch}
-                  <dt>Target</dt><dd class="mono">{mr.target_branch}</dd>
-                {/if}
-                {#if mr.author_id}
-                  <dt>Author</dt><dd class="mono">{mr.author_id}</dd>
+                {#if mr.diff_stats}
+                  <dt>Changes</dt>
+                  <dd>
+                    <span class="diff-stat-inline">{mr.diff_stats.files_changed ?? 0} files</span>
+                    <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                    <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                  </dd>
                 {/if}
                 {#if mr.spec_ref}
-                  <dt>Spec Ref</dt><dd class="mono">{mr.spec_ref}</dd>
+                  <dt>Spec</dt><dd class="mono" title={mr.spec_ref}>{mr.spec_ref}</dd>
                 {/if}
-                {#if mr.agent_id}
-                  <dt>Agent</dt><dd class="mono">{mr.agent_id}</dd>
+                {#if mr.author_agent_id}
+                  <dt>Agent</dt><dd class="mono" title={mr.author_agent_id}>{shortId(mr.author_agent_id)}</dd>
+                {:else if mr.agent_id}
+                  <dt>Agent</dt><dd class="mono" title={mr.agent_id}>{shortId(mr.agent_id)}</dd>
+                {/if}
+                {#if mr.author_id && mr.author_id !== mr.author_agent_id}
+                  <dt>Author</dt><dd class="mono" title={mr.author_id}>{shortId(mr.author_id)}</dd>
+                {/if}
+                {#if mr.has_conflicts}
+                  <dt>Conflicts</dt><dd><Badge value="conflicts" variant="danger" /></dd>
+                {/if}
+                {#if mr.depends_on?.length}
+                  <dt>Depends on</dt><dd class="mono">{mr.depends_on.map(shortId).join(', ')}</dd>
+                {/if}
+                {#if mr.atomic_group}
+                  <dt>Atomic group</dt><dd class="mono">{mr.atomic_group}</dd>
                 {/if}
                 {#if mr.created_at}
                   <dt>Created</dt><dd>{fmtDate(mr.created_at)}</dd>
                 {/if}
-                {#if mr.merged_at}
-                  <dt>Merged</dt><dd>{fmtDate(mr.merged_at)}</dd>
+                {#if mr.merged_at ?? mr.updated_at}
+                  <dt>{mr.status === 'merged' ? 'Merged' : 'Updated'}</dt><dd>{fmtDate(mr.merged_at ?? mr.updated_at)}</dd>
                 {/if}
               </dl>
             {/if}
@@ -783,27 +805,30 @@
               <dl class="entity-meta">
                 <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
                 <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
-                <dt>ID</dt><dd class="mono">{entity.id}</dd>
-                {#if ag.task_id}
-                  <dt>Task</dt><dd class="mono">{ag.task_id}</dd>
-                {/if}
-                {#if ag.repo_id}
-                  <dt>Repo</dt><dd class="mono">{ag.repo_id}</dd>
+                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                {#if ag.agent_type}
+                  <dt>Type</dt><dd>{ag.agent_type}</dd>
                 {/if}
                 {#if ag.branch}
                   <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
                 {/if}
-                {#if ag.agent_type}
-                  <dt>Type</dt><dd>{ag.agent_type}</dd>
+                {#if ag.task_id}
+                  <dt>Task</dt><dd class="mono" title={ag.task_id}>{shortId(ag.task_id)}</dd>
+                {/if}
+                {#if ag.repo_id}
+                  <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{shortId(ag.repo_id)}</dd>
+                {/if}
+                {#if ag.mr_id}
+                  <dt>MR</dt><dd class="mono" title={ag.mr_id}>{shortId(ag.mr_id)}</dd>
                 {/if}
                 {#if ag.created_at}
                   <dt>Created</dt><dd>{fmtDate(ag.created_at)}</dd>
                 {/if}
                 {#if ag.completed_at}
                   <dt>Completed</dt><dd>{fmtDate(ag.completed_at)}</dd>
-                {/if}
-                {#if ag.mr_id}
-                  <dt>MR</dt><dd class="mono">{ag.mr_id}</dd>
+                {:else if ag.created_at}
+                  {@const elapsed = Math.round((Date.now() / 1000 - ag.created_at) / 60)}
+                  <dt>Running</dt><dd>{elapsed < 60 ? `${elapsed}m` : `${Math.round(elapsed / 60)}h ${elapsed % 60}m`}</dd>
                 {/if}
               </dl>
             {/if}
@@ -1279,28 +1304,28 @@
               </div>
               <dl class="entity-meta">
                 {#if att.merge_commit_sha}
-                  <dt>Merge SHA</dt><dd class="mono">{att.merge_commit_sha}</dd>
+                  <dt>Merge commit</dt><dd class="mono" title={att.merge_commit_sha}>{att.merge_commit_sha.slice(0, 12)}...</dd>
                 {/if}
                 {#if att.spec_ref}
-                  <dt>Spec Ref</dt><dd class="mono">{att.spec_ref}</dd>
+                  <dt>Spec</dt><dd class="mono" title={att.spec_ref}>{att.spec_ref}</dd>
                 {/if}
                 {#if att.author_agent_id}
-                  <dt>Agent</dt><dd class="mono">{att.author_agent_id}</dd>
+                  <dt>Agent</dt><dd class="mono" title={att.author_agent_id}>{shortId(att.author_agent_id)}</dd>
                 {/if}
                 {#if att.mr_id}
-                  <dt>MR</dt><dd class="mono">{att.mr_id}</dd>
+                  <dt>MR</dt><dd class="mono" title={att.mr_id}>{shortId(att.mr_id)}</dd>
                 {/if}
                 {#if att.task_id}
-                  <dt>Task</dt><dd class="mono">{att.task_id}</dd>
+                  <dt>Task</dt><dd class="mono" title={att.task_id}>{shortId(att.task_id)}</dd>
                 {/if}
                 {#if att.repo_id}
-                  <dt>Repo</dt><dd class="mono">{att.repo_id}</dd>
+                  <dt>Repo</dt><dd class="mono" title={att.repo_id}>{shortId(att.repo_id)}</dd>
                 {/if}
               </dl>
               {#if mrAttestation.signature}
                 <div class="att-sig-block">
                   <span class="att-sig-label">Ed25519 Signature</span>
-                  <code class="att-sig-value mono">{mrAttestation.signature}</code>
+                  <code class="att-sig-value mono" title={mrAttestation.signature}>{mrAttestation.signature.slice(0, 24)}...</code>
                 </div>
               {/if}
             </div>
@@ -2193,6 +2218,7 @@
   }
 
   .diff-stat { font-weight: 600; color: var(--color-text); }
+  .diff-stat-inline { font-size: var(--text-xs); color: var(--color-text-secondary); margin-right: var(--space-1); }
   .diff-ins { color: var(--color-success); font-family: var(--font-mono); font-size: var(--text-xs); }
   .diff-del { color: var(--color-danger); font-family: var(--font-mono); font-size: var(--text-xs); }
 
