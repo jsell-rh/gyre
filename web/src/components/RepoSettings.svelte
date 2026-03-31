@@ -8,6 +8,7 @@
   import { untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { toastError } from '../lib/toast.svelte.js';
 
   let {
     workspace = null,
@@ -203,7 +204,9 @@
       await api.setRepoSpecPolicy(repo.id, specPolicy);
       specPolicySaved = true;
       setTimeout(() => { specPolicySaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) {
+      toastError($t('repo_settings.policies.policy_save_failed', { values: { error: e?.message ?? 'unknown error' } }));
+    }
     finally { specPolicySaving = false; }
   }
 
