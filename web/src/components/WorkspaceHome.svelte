@@ -400,7 +400,11 @@
   });
 
   // ── Derived: meta-spec aggregates ─────────────────────────────────────
-  let allMetaSpecs = $derived([...globalMetaSpecs, ...workspaceMetaSpecs]);
+  // Tag each meta-spec with its scope for badge display
+  let allMetaSpecs = $derived([
+    ...globalMetaSpecs.map(m => ({ ...m, _scope: 'tenant' })),
+    ...workspaceMetaSpecs.map(m => ({ ...m, _scope: 'workspace' })),
+  ]);
   let requiredMetaSpecs = $derived(allMetaSpecs.filter(m => m.required));
   let recentlyUpdated = $derived(
     allMetaSpecs.filter(m => {
@@ -860,6 +864,7 @@
                   <li class="rule-item" data-testid="rule-item">
                     <span class="rule-lock" aria-label="Required" aria-hidden="true">🔒</span>
                     <span class="rule-name">{ms.name}</span>
+                    <span class="rule-scope" data-testid="rule-scope">{ms._scope === 'tenant' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}</span>
                     {#if ms.kind}
                       <span class="rule-kind">{ms.kind.replace('meta:', '')}</span>
                     {/if}
@@ -1546,6 +1551,17 @@
     color: var(--color-text);
     flex: 1;
     min-width: 0;
+  }
+
+  .rule-scope {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
+    border-radius: var(--radius);
+    border: 1px solid color-mix(in srgb, var(--color-info) 25%, transparent);
+    text-transform: capitalize;
+    flex-shrink: 0;
   }
 
   .rule-kind {
