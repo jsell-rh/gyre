@@ -39,6 +39,15 @@
     { id: 'settings',     labelKey: 'repo_mode.tabs.settings', titleKey: 'repo_mode.settings_title' },
   ];
 
+  // ── Notification count for decisions tab badge ─────────────────────────
+  let decisionsCount = $state(0);
+  $effect(() => {
+    const wsId = workspace?.id;
+    if (wsId) {
+      api.notificationCount(wsId).then(c => { decisionsCount = c; }).catch(() => {});
+    }
+  });
+
   // ── Active agents for this repo ────────────────────────────────────────
   let activeAgents = $state([]);
   let agentsLoading = $state(false);
@@ -351,7 +360,7 @@
         onclick={() => onTabChange?.(tab.id)}
         title={tab.titleKey ? $t(tab.titleKey) : $t(tab.labelKey)}
       >
-        {$t(tab.labelKey)}
+        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{/if}
       </button>
     {/each}
   </div>
@@ -745,6 +754,20 @@
   .tab-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: -2px;
+  }
+
+  .tab-badge {
+    font-size: 10px;
+    background: var(--color-danger);
+    color: #fff;
+    border-radius: 8px;
+    padding: 0 5px;
+    margin-left: 4px;
+    min-width: 16px;
+    text-align: center;
+    line-height: 16px;
+    display: inline-block;
+    vertical-align: middle;
   }
 
   /* ── Tab content ────────────────────────────────────────────────────── */
