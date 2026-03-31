@@ -71,7 +71,7 @@ The repo orchestrator:
    - `spec_ref` pointing to the approved spec SHA
    - `parent_task_id` linking to the delegation task
    - `order: u32` — execution priority (lower = first). Tasks with the same order can run in parallel.
-   - `depends_on: Vec<Id>` — task IDs that must complete before this task starts (optional, for explicit dependencies)
+   - `depends_on: Vec<Id>` — task IDs that must complete before this task starts (optional, for explicit dependencies). `depends_on` takes precedence over `order` — if a task has `order: 1` but `depends_on: [task_with_order_3]`, it waits for the dependency regardless of order. Tasks at the same `order` with no `depends_on` conflicts run in parallel.
 4. Marks the delegation task as `Completed`
 5. Completes
 
@@ -262,7 +262,7 @@ A background job (or check on spec access) detects when a spec pins an old meta-
 - System creates a soft notification (Inbox priority 6, "Meta-spec drift alert"):
   - "Spec X uses persona v3, but v5 is available. Review and update pin."
 - Human updates the pin → spec metadata changes → spec SHA changes → spec needs re-approval
-- Approved → orchestrator receives `SpecChanged` → re-decomposes → agents re-implement with new prompts
+- Approved → `SpecApproved` event → orchestrator creates delegation task → agents re-implement with new prompts
 
 The invalidation cascades through the existing spec lifecycle. No new mechanism needed.
 
@@ -489,6 +489,7 @@ The **task context** is assembled at spawn time from the task, spec, and any gat
 | `meta-spec-reconciliation.md` | Meta-spec registry model (tenant/workspace levels, `required` flag, DB-backed versioning) defined here. Reconciliation spec defers to this for registry semantics. The `PUT /api/v1/workspaces/{id}/meta-spec-set` endpoint is replaced by updating `required` flags and spec-level bindings via the meta-spec API. Reconciliation is triggered when a required meta-spec's approved version changes — the meta-spec approval handler (on `PUT /api/v1/meta-specs/:id` with `approval_status: Approved`) checks if the meta-spec is `required` and if so, enqueues a reconciliation sweep for affected workspaces. The `MetaSpecSnapshot` from reconciliation spec uses `content_hash` (from this spec) instead of git SHA — struct fields become `{meta_spec_id: Id, kind: String, content_hash: String, version: u32}` tuples instead of `path@sha` strings. The `MetaSpecPolicy` (§9 of reconciliation spec) is retained — it controls merge-time drift enforcement and is stored as a workspace-level setting. Drift detection compares the `meta_specs_used` array in merge attestations against current required meta-spec versions. |
 | `platform-model.md` §2 Persona | The `Persona` struct gains `required: bool` field from this spec. Existing fields (`id`, `name`, `scope`, `scope_id`, `prompt`, `version`, `content_hash`, `owner`, `approval_status`, `approved_by`, `approved_at`, `created_at`, `updated_at`) are preserved — `prompt` holds the prompt text, `content_hash` holds the SHA-256, `version` is already incremented on changes. The bootstrap persona list in `platform-model.md` §2 is superseded by the bootstrap table in this spec §2 (which also covers bootstrap step 5 in `platform-model.md` §8). Bootstrap meta-specs are seeded with `approval_status: Approved` (pre-approved, same as platform-model.md §2's built-in personas). The `/api/v1/personas` endpoints from `platform-model.md` §2 are **removed** — replaced entirely by `/api/v1/meta-specs?kind=meta:persona`. No migration path needed (greenfield). |
 | `platform-model.md` §1 or §3 Agent entity | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`, `Dead`. Add `status: AgentStatus` field to the Agent entity (not currently defined as a struct in platform-model — define it alongside Task/MR/Repository). Add `task_id: Id` field — every agent is bound to exactly one task (the system creates the binding mechanically). |
+| `agent-gates.md` spec approval | The `POST /api/v1/specs/:path/approve` endpoint handler must emit `SpecApproved` on the message bus after recording the approval in the ledger. This is the trigger for the entire agent lifecycle chain. The endpoint is defined in `agent-gates.md` (spec approval ledger) — this spec adds the message bus emission as a side effect. |
 | `agent-gates.md` | Gate failure → Ralph loop re-spawn defined here. `agent-gates.md` retains gate type definitions and execution mechanics. `MergeAttestation` amended to include `meta_specs_used` array. |
 | `abac-policy-engine.md` §Resource attributes | Add `meta_spec` (attributes: `scope`, `scope_id`, `kind`) and `compute_target` (attributes: `tenant_id`) to the resource type list. Add `archive` to the action attribute table (used by repo archive/unarchive endpoints). |
 | `hierarchy-enforcement.md` §4 | Add compute target CRUD endpoints and meta-spec CRUD endpoints to route table. Compute target routes use tenant context from auth (no path param). Meta-spec routes use `scope_id` from query param/body. Add `meta_spec_versions`, `meta_spec_bindings`, `compute_targets` tables to tenant-filter configuration. |
