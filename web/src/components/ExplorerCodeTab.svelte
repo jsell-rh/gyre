@@ -188,7 +188,7 @@
   {/if}
 
   <!-- Sub-tab bar -->
-  <div class="subtab-bar" role="tablist" aria-label="Code sub-tabs">
+  <div class="subtab-bar" role="tablist" aria-label={$t('code_tab.sub_tabs_label')}>
     {#each SUB_TABS as st}
       <button
         class="subtab-btn {subTab === st.id ? 'active' : ''}"
@@ -312,7 +312,7 @@
           </thead>
           <tbody>
             {#each filteredQueue as entry}
-              <tr class="table-row" onclick={() => onRowClick(entry, 'mr')} tabindex="0" role="button" aria-label="View queue entry" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(entry, 'mr'); } }}>
+              <tr class="table-row" onclick={() => onRowClick(entry, 'mr')} tabindex="0" role="button" aria-label={$t('code_tab.view_queue_entry')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(entry, 'mr'); } }}>
                 <td class="mono">{entry.merge_request_id ?? entry.mr_id ?? '—'}</td>
                 <td>{entry.priority ?? '—'}</td>
                 <td><span class="status-badge">{entry.status ?? 'queued'}</span></td>

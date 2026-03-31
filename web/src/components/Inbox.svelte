@@ -273,7 +273,7 @@
       <div class="inbox-title-row">
         <h1 class="inbox-title">{$t('decisions.title')}</h1>
         {#if unresolvedCount > 0}
-          <span class="inbox-badge" aria-label="{unresolvedCount} unresolved items"
+          <span class="inbox-badge" aria-label={$t('decisions.unresolved_label', { values: { count: unresolvedCount } })}
             >{unresolvedCount}</span
           >
         {/if}
@@ -316,7 +316,7 @@
     {:else if visibleNotifications.length === 0}
       <EmptyState title={$t('decisions.all_caught_up')} description={$t('decisions.no_pending')} />
     {:else}
-      <div class="inbox-list" role="list" aria-label="Notifications">
+      <div class="inbox-list" role="list" aria-label={$t('decisions.notifications_label')}>
         {#each visibleNotifications as n (n.id)}
           {@const body = getBody(n)}
           {@const isExpanded = expandedId === n.id}
@@ -344,7 +344,7 @@
                 <span
                   class="priority-badge"
                   data-priority={n.priority}
-                  aria-label="Priority {n.priority}"
+                  aria-label={$t('decisions.priority_label', { values: { level: n.priority } })}
                 >
                   P{n.priority}
                 </span>

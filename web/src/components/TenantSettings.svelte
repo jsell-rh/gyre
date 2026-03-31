@@ -121,7 +121,7 @@
     try {
       currentUser = await api.me();
     } catch (e) {
-      usersError = e?.message ?? 'Failed to load user info';
+      usersError = e?.message ?? $t('tenant_settings.error_load_users');
     } finally {
       usersLoading = false;
     }
@@ -134,7 +134,7 @@
       const data = await api.computeList();
       computeTargets = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
-      computeError = e?.message ?? 'Failed to load compute targets';
+      computeError = e?.message ?? $t('tenant_settings.error_load_compute');
     } finally {
       computeLoading = false;
     }
@@ -146,7 +146,7 @@
     try {
       budgetSummary = await api.budgetSummary();
     } catch (e) {
-      budgetError = e?.message ?? 'Failed to load budget summary';
+      budgetError = e?.message ?? $t('tenant_settings.error_load_budget');
     } finally {
       budgetLoading = false;
     }
@@ -160,7 +160,7 @@
       const data = await api.adminAudit(params);
       auditEvents = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
-      auditError = e?.message ?? 'Failed to load audit log';
+      auditError = e?.message ?? $t('tenant_settings.error_load_audit');
     } finally {
       auditLoading = false;
     }
@@ -177,7 +177,7 @@
     try {
       health = await api.adminHealth();
     } catch (e) {
-      healthError = e?.message ?? 'Failed to load health status';
+      healthError = e?.message ?? $t('tenant_settings.error_load_health');
     } finally {
       healthLoading = false;
     }
@@ -190,7 +190,7 @@
       const data = await api.adminJobs();
       jobs = Array.isArray(data) ? data : (data?.jobs ?? []);
     } catch (e) {
-      jobsError = e?.message ?? 'Failed to load jobs';
+      jobsError = e?.message ?? $t('tenant_settings.error_load_jobs');
     } finally {
       jobsLoading = false;
     }
@@ -248,7 +248,7 @@
   <div
     class="tab-bar"
     role="tablist"
-    aria-label="Tenant administration sections"
+    aria-label={$t('tenant_settings.sections_label')}
     tabindex="-1"
     bind:this={tabListEl}
     onkeydown={onTabKeydown}

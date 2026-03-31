@@ -279,7 +279,7 @@
               <button
                 class="btn-switch"
                 onclick={() => switchWorkspace(ws)}
-                aria-label="Switch to {ws.name ?? ws.id} workspace"
+                aria-label={$t('user_profile.switch_workspace', { values: { name: ws.name ?? ws.id } })}
               >
                 {$t('user_profile.switch')}
               </button>
@@ -326,7 +326,7 @@
                 type="checkbox"
                 class="pref-checkbox"
                 bind:checked={notifPrefs[nt.id]}
-                aria-label="Enable {nt.label} notifications"
+                aria-label={$t('user_profile.enable_notification', { values: { label: nt.label } })}
               />
               <span class="pref-label">{$t(nt.labelKey)}</span>
             </label>
@@ -350,13 +350,13 @@
                 <Badge variant={notifColor(notif.notification_type)} value={notif.notification_type ?? 'info'} />
                 <span class="notif-time muted">{rel(notif.created_at)}</span>
                 {#if !notif.read}
-                  <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label="Mark as read">
+                  <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label={$t('user_profile.mark_as_read')}>
                     <span aria-hidden="true">✓</span>
                   </button>
                 {/if}
               </div>
               <p class="notif-msg">{notif.message ?? notif.title ?? ''}</p>
-              <button class="notif-view-btn" onclick={() => { goToWorkspaceHome?.(); }} aria-label="View in Inbox">
+              <button class="notif-view-btn" onclick={() => { goToWorkspaceHome?.(); }} aria-label={$t('user_profile.view_in_inbox_label')}>
                 {$t('user_profile.view_in_inbox')}
               </button>
             </div>

@@ -109,7 +109,7 @@
     try {
       archGraph = await api.workspaceGraph(workspace.id);
     } catch (e) {
-      archError = e.message || 'Failed to load workspace graph';
+      archError = e.message || $t('workspace_home.error_load_graph');
       archGraph = { nodes: [], edges: [] };
     } finally {
       archLoading = false;
@@ -332,7 +332,7 @@
       newRepoDescription = '';
       await loadRepos();
     } catch (e) {
-      newRepoError = e.message || 'Failed to create repository';
+      newRepoError = e.message || $t('workspace_home.error_create_repo');
     } finally {
       newRepoLoading = false;
     }
@@ -470,7 +470,7 @@
           <h2 class="section-title" id="section-decisions">
             {$t('workspace_home.sections.decisions')}
             {#if notifications.length > 0}
-              <span class="section-badge" aria-label="{notifications.length} decisions">{notifications.length}</span>
+              <span class="section-badge" aria-label={$t('workspace_home.decisions_badge_label', { values: { count: notifications.length } })}>{notifications.length}</span>
             {/if}
           </h2>
           {#if notifications.length > 0}
@@ -484,7 +484,7 @@
           {:else if decisionsError}
             <div class="error-row" role="alert">
               <p class="error-text">{decisionsError}</p>
-              <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">{$t('common.retry')}</button>
+              <button class="retry-btn" onclick={loadDecisions} aria-label={$t('workspace_home.retry_loading_decisions')}>{$t('common.retry')}</button>
             </div>
           {:else if notifications.length === 0}
             <p class="empty-text" data-testid="decisions-empty">{$t('workspace_home.decisions_empty')}</p>
@@ -560,7 +560,7 @@
           {:else if reposError}
             <div class="error-row" role="alert">
               <p class="error-text">{reposError}</p>
-              <button class="retry-btn" onclick={loadRepos} aria-label="Retry loading repos">{$t('common.retry')}</button>
+              <button class="retry-btn" onclick={loadRepos} aria-label={$t('workspace_home.retry_loading_repos')}>{$t('common.retry')}</button>
             </div>
           {:else if repos.length === 0}
             <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
@@ -572,7 +572,7 @@
                   <button
                     class="repo-btn"
                     onclick={() => onSelectRepo?.(repo)}
-                    aria-label="Open repository {repo.name}"
+                    aria-label={$t('workspace_home.open_repo', { values: { name: repo.name } })}
                     data-testid="repo-link"
                   >
                     <span class="repo-name">{repo.name}</span>
@@ -584,7 +584,7 @@
                         <span class="repo-stat">{$t('workspace_home.repo_agents_count', { values: { count: repo.active_agents } })}</span>
                       {/if}
                     </span>
-                    <span class="repo-health health-{health}" aria-label="Status: {health}" data-testid="repo-health">
+                    <span class="repo-health health-{health}" aria-label={$t('workspace_home.repo_status', { values: { status: health } })} data-testid="repo-health">
                       {#if health === 'healthy'}● {$t('workspace_home.repo_health_healthy')}
                       {:else if health === 'gate'}⚠ {$t('workspace_home.repo_health_gate')}
                       {:else}○ {$t('workspace_home.repo_health_idle')}
@@ -717,7 +717,7 @@
               class="filter-select"
               value={specsStatusFilter}
               onchange={(e) => { specsStatusFilter = e.target.value; }}
-              aria-label="Filter specs by status"
+              aria-label={$t('workspace_home.filter_specs_by_status')}
               data-testid="specs-status-filter"
             >
               <option value="">{$t('workspace_home.all_statuses')}</option>
@@ -735,7 +735,7 @@
           {:else if specsError}
             <div class="error-row" role="alert">
               <p class="error-text">{specsError}</p>
-              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">{$t('common.retry')}</button>
+              <button class="retry-btn" onclick={loadSpecs} aria-label={$t('workspace_home.retry_loading_specs')}>{$t('common.retry')}</button>
             </div>
           {:else if filteredSpecs.length === 0}
             <p class="empty-text" data-testid="specs-empty">
@@ -771,7 +771,7 @@
                     tabindex="0"
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }}
                     data-testid="spec-row"
-                    aria-label="Open spec {spec.path}"
+                    aria-label={$t('workspace_home.open_spec', { values: { path: spec.path } })}
                   >
                     <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
                     <td class="spec-path">{spec.path}</td>
@@ -817,7 +817,7 @@
             {:else if archError}
               <div class="error-row" role="alert">
                 <p class="error-text">{archError}</p>
-                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">{$t('common.retry')}</button>
+                <button class="retry-btn" onclick={loadArchGraph} aria-label={$t('workspace_home.retry_loading_graph')}>{$t('common.retry')}</button>
               </div>
             {:else if archGraph}
               <div class="arch-canvas-wrap" data-testid="arch-canvas">
@@ -849,7 +849,7 @@
           {:else if rulesError}
             <div class="error-row" role="alert">
               <p class="error-text">{rulesError}</p>
-              <button class="retry-btn" onclick={loadRules} aria-label="Retry loading agent rules">{$t('common.retry')}</button>
+              <button class="retry-btn" onclick={loadRules} aria-label={$t('workspace_home.retry_loading_rules')}>{$t('common.retry')}</button>
             </div>
           {:else}
             <p class="rules-summary" data-testid="rules-summary">

@@ -263,7 +263,7 @@
 
   <!-- ── Filter bar ─────────────────────────────────────────────────────────── -->
   <div class="filter-bar">
-    <div class="filter-group" role="group" aria-label="Filter by status">
+    <div class="filter-group" role="group" aria-label={$t('spec_dashboard.filter_by_status')}>
       {#each STATUS_FILTERS as f}
         <button
           class="pill"
@@ -277,7 +277,7 @@
     </div>
 
     {#if allKinds.length > 2}
-      <div class="filter-group" role="group" aria-label="Filter by kind">
+      <div class="filter-group" role="group" aria-label={$t('spec_dashboard.filter_by_kind')}>
         <span class="filter-label">{$t('spec_dashboard.filter_kind')}</span>
         {#each allKinds as k}
           <button
@@ -414,7 +414,7 @@
 
     {:else}
       <!-- Workspace / tenant scope: sortable table -->
-      <table class="specs-table" role="grid" aria-label="Specs registry">
+      <table class="specs-table" role="grid" aria-label={$t('spec_dashboard.specs_registry')}>
         <thead>
           <tr>
             {#each TABLE_COLS as [col, labelKey]}
@@ -439,7 +439,7 @@
                 if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
               }}
               aria-selected={selectedPath === spec.path}
-              aria-label="Spec: {spec.path}"
+              aria-label={$t('spec_dashboard.spec_label', { values: { path: spec.path } })}
             >
               <td class="col-path">
                 <span class="spec-path" title={spec.path}>{spec.path}</span>
