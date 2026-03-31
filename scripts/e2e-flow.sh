@@ -1487,11 +1487,19 @@ ok "Token info: $(echo "$TOKEN_INFO" | jq -r '.token_kind // "retrieved"')"
 #  LLM-POWERED TESTS — requires LLM credentials
 # #############################################################################
 
-# Probe: check if LLM is configured by hitting briefing/ask. If 503, skip.
-LLM_PROBE=$(curl -s -w '\n%{http_code}' -H "$AUTH" -H "$CT" \
-  -d '{"question":"test"}' \
-  "${API}/workspaces/${WS_ID}/briefing/ask" --max-time 5 2>/dev/null)
+# Probe: check if LLM is configured by checking the LLM config endpoint.
+# The briefing/ask SSE endpoint is unreliable for probing (streams data).
+# Instead, try to get the effective LLM config — if it returns a model name, LLM is configured.
+LLM_PROBE=$(curl -s -w '\n%{http_code}' -H "$AUTH" \
+  "${API}/workspaces/${WS_ID}/llm/config/briefing-ask" --max-time 5 2>/dev/null)
 LLM_PROBE_CODE=$(echo "$LLM_PROBE" | tail -1)
+# 503 = LLM unavailable, 200 = configured, 404 = no override but default may exist
+# Treat anything except 503 as "available" (the server has LLM if it doesn't 503)
+if [ "$LLM_PROBE_CODE" = "503" ]; then
+  LLM_PROBE_CODE="503"
+else
+  LLM_PROBE_CODE="200"
+fi
 
 if [ "$LLM_PROBE_CODE" = "503" ]; then
   step $((STEP++)) "Real agent spawn (Claude Agent SDK)"
