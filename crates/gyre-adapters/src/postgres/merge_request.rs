@@ -55,6 +55,7 @@ struct MergeRequestRow {
     workspace_id: String,
     reverted_at: Option<i64>,
     revert_mr_id: Option<String>,
+    spec_ref: Option<String>,
 }
 
 impl MergeRequestRow {
@@ -85,7 +86,7 @@ impl MergeRequestRow {
             reviewers: reviewer_strs.into_iter().map(Id::new).collect(),
             diff_stats,
             has_conflicts: self.has_conflicts.map(|v| v != 0),
-            spec_ref: None,
+            spec_ref: self.spec_ref,
             depends_on: depends_on_strs.into_iter().map(Id::new).collect(),
             atomic_group: self.atomic_group,
             created_at: self.created_at as u64,
@@ -120,6 +121,7 @@ struct NewMergeRequestRow<'a> {
     workspace_id: &'a str,
     reverted_at: Option<i64>,
     revert_mr_id: Option<&'a str>,
+    spec_ref: Option<&'a str>,
 }
 
 #[async_trait]
@@ -154,6 +156,7 @@ impl MergeRequestRepository for PgStorage {
                 workspace_id: m.workspace_id.as_str(),
                 reverted_at: m.reverted_at.map(|v| v as i64),
                 revert_mr_id: m.revert_mr_id.as_ref().map(|id| id.as_str()),
+                spec_ref: m.spec_ref.as_deref(),
             };
             diesel::insert_into(merge_requests::table)
                 .values(&row)
@@ -176,6 +179,7 @@ impl MergeRequestRepository for PgStorage {
                     merge_requests::workspace_id.eq(row.workspace_id),
                     merge_requests::reverted_at.eq(row.reverted_at),
                     merge_requests::revert_mr_id.eq(row.revert_mr_id),
+                    merge_requests::spec_ref.eq(row.spec_ref),
                 ))
                 .execute(&mut *conn)
                 .context("insert merge_request")?;
@@ -281,6 +285,7 @@ impl MergeRequestRepository for PgStorage {
                     merge_requests::atomic_group.eq(m.atomic_group.as_deref()),
                     merge_requests::reverted_at.eq(m.reverted_at.map(|v| v as i64)),
                     merge_requests::revert_mr_id.eq(m.revert_mr_id.as_ref().map(|id| id.as_str())),
+                    merge_requests::spec_ref.eq(m.spec_ref.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("update merge_request")?;
