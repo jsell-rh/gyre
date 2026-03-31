@@ -9,6 +9,7 @@
    *   ui-navigation.md §10 (Cross-Workspace View)
    */
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
@@ -34,13 +35,13 @@
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
       const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
-      toastSuccess(`Workspace "${name}" created.`);
+      toastSuccess($t('cross_workspace.ws_created', { values: { name } }));
       createWsOpen = false;
       createWsForm = { name: '', description: '' };
       await loadWorkspaces();
       if (newWs && onSelectWorkspace) onSelectWorkspace(newWs);
     } catch (e) {
-      toastError('Failed to create workspace: ' + (e.message || e));
+      toastError($t('cross_workspace.ws_create_failed', { values: { error: e.message || e } }));
     } finally {
       createWsSaving = false;
     }
@@ -68,12 +69,11 @@
     merged: '✅',
   };
 
-  const KIND_LABELS = {
-    Persona: 'Persona',
-    Principle: 'Principle',
-    Standard: 'Standard',
-    Process: 'Process',
-  };
+  function kindLabel(kind) {
+    const key = `cross_workspace.kind_labels.${kind}`;
+    const val = $t(key);
+    return val !== key ? val : kind;
+  }
 
   // ── Workspace name lookup map ────────────────────────────────────────────
   let workspaceNameMap = $state({});
@@ -146,18 +146,11 @@
     actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
 
-  const TYPE_LABELS = {
-    agent_clarification: 'Clarification',
-    spec_approval: 'Spec Approval',
-    gate_failure: 'Gate Failure',
-    cross_workspace_change: 'Cross-WS Change',
-    conflicting_interpretations: 'Conflict',
-    meta_spec_drift: 'Meta Drift',
-    budget_warning: 'Budget',
-    trust_suggestion: 'Trust',
-    spec_assertion_failure: 'Assertion Fail',
-    suggested_link: 'Suggested Link',
-  };
+  function typeLabel(type) {
+    const key = `cross_workspace.type_labels.${type}`;
+    const val = $t(key);
+    return val !== key ? val : type;
+  }
 
   // ── Workspaces state ────────────────────────────────────────────────────
   let workspacesLoading = $state(true);
@@ -320,15 +313,15 @@
 <div class="cross-workspace-home" data-testid="cross-workspace-home">
   <div class="cwh-header">
     <div class="cwh-header-text">
-      <h1 class="cwh-title">All Workspaces</h1>
-      <p class="cwh-subtitle">Tenant-scope overview — decisions, workspaces, specs, briefing, and agent rules across your organization.</p>
+      <h1 class="cwh-title">{$t('cross_workspace.title')}</h1>
+      <p class="cwh-subtitle">{$t('cross_workspace.subtitle')}</p>
     </div>
     {#if onSettings}
       <button
         class="tenant-gear-btn"
         onclick={() => onSettings?.()}
-        aria-label="Tenant administration"
-        title="Tenant administration (/all/settings)"
+        aria-label={$t('cross_workspace.tenant_admin')}
+        title={$t('cross_workspace.tenant_admin_title')}
         data-testid="tenant-gear-btn"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -343,19 +336,19 @@
   <section class="cwh-section" data-testid="section-decisions" aria-labelledby="decisions-heading">
     <div class="section-header">
       <h2 class="section-title" id="decisions-heading">
-        Decisions
+        {$t('cross_workspace.sections.decisions')}
         {#if notifications.length > 0}
-          <span class="section-badge" aria-label="{notifications.length} pending">{notifications.length}</span>
+          <span class="section-badge" aria-label={$t('cross_workspace.pending_label', { values: { count: notifications.length } })}>{notifications.length}</span>
         {/if}
       </h2>
     </div>
 
     {#if decisionsLoading}
-      <div class="section-loading" aria-live="polite">Loading decisions…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_decisions')}</div>
     {:else if decisionsError}
       <div class="section-error" role="alert">{decisionsError}</div>
     {:else if notifications.length === 0}
-      <p class="section-empty">No decisions needed — system is running autonomously.</p>
+      <p class="section-empty">{$t('cross_workspace.decisions_empty')}</p>
     {:else}
       <ul class="decisions-list" role="list">
         {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as notif (notif.id)}
@@ -365,8 +358,8 @@
             <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[notif.notification_type] ?? '•'}</span>
             <div class="decision-body">
               <div class="decision-content">
-                <span class="decision-type">{TYPE_LABELS[notif.notification_type] ?? notif.notification_type}</span>
-                <span class="decision-desc">{notif.message ?? notif.title ?? 'Decision pending'}</span>
+                <span class="decision-type">{typeLabel(notif.notification_type)}</span>
+                <span class="decision-desc">{notif.message ?? notif.title ?? $t('cross_workspace.decision_pending')}</span>
               </div>
               {#if notif.workspace_id && workspaceNameMap[notif.workspace_id]}
                 <span class="decision-ws-badge">{workspaceNameMap[notif.workspace_id]}</span>
@@ -379,12 +372,12 @@
                 <span class="action-feedback">…</span>
               {:else}
                 {#if notif.notification_type === 'spec_approval' && body.spec_path && body.spec_sha}
-                  <button class="inline-btn approve" onclick={() => handleApproveSpec(notif)} aria-label="Approve spec">Approve</button>
-                  <button class="inline-btn reject" onclick={() => handleRejectSpec(notif)} aria-label="Reject spec">Reject</button>
+                  <button class="inline-btn approve" onclick={() => handleApproveSpec(notif)} aria-label={$t('cross_workspace.approve_spec')}>{$t('cross_workspace.approve')}</button>
+                  <button class="inline-btn reject" onclick={() => handleRejectSpec(notif)} aria-label={$t('cross_workspace.reject_spec')}>{$t('cross_workspace.reject')}</button>
                 {:else if notif.notification_type === 'gate_failure' && body.mr_id}
-                  <button class="inline-btn" onclick={() => handleRetry(notif)} aria-label="Retry gate">Retry</button>
+                  <button class="inline-btn" onclick={() => handleRetry(notif)} aria-label={$t('cross_workspace.retry_gate')}>{$t('cross_workspace.retry')}</button>
                 {/if}
-                <button class="inline-btn secondary" onclick={() => handleDismiss(notif)} aria-label="Dismiss">Dismiss</button>
+                <button class="inline-btn secondary" onclick={() => handleDismiss(notif)} aria-label={$t('cross_workspace.dismiss')}>{$t('cross_workspace.dismiss')}</button>
               {/if}
             </div>
           </li>
@@ -393,7 +386,7 @@
       {#if notifications.length > 5}
         <div class="section-footer">
           <button class="view-all-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>
-            {showAllDecisions ? 'Show fewer' : `View all ${notifications.length} decisions`}
+            {showAllDecisions ? $t('cross_workspace.show_fewer') : $t('cross_workspace.view_all_decisions', { values: { count: notifications.length } })}
           </button>
         </div>
       {/if}
@@ -403,22 +396,22 @@
   <!-- ── Workspaces ────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-workspaces" aria-labelledby="workspaces-heading">
     <div class="section-header">
-      <h2 class="section-title" id="workspaces-heading">Workspaces</h2>
+      <h2 class="section-title" id="workspaces-heading">{$t('cross_workspace.sections.workspaces')}</h2>
       <button
         class="new-ws-btn"
         onclick={() => { createWsForm = { name: '', description: '' }; createWsOpen = true; }}
         data-testid="create-workspace-btn"
       >
-        + New Workspace
+        {$t('cross_workspace.new_workspace')}
       </button>
     </div>
 
     {#if workspacesLoading}
-      <div class="section-loading" aria-live="polite">Loading workspaces…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_workspaces')}</div>
     {:else if workspacesError}
       <div class="section-error" role="alert">{workspacesError}</div>
     {:else if workspaces.length === 0}
-      <p class="section-empty">No workspaces found.</p>
+      <p class="section-empty">{$t('cross_workspace.workspaces_empty')}</p>
     {:else}
       <ul class="workspace-list" role="list">
         {#each workspaces as ws (ws.id)}
@@ -431,10 +424,10 @@
               <span class="workspace-name">{ws.name}</span>
               <span class="workspace-meta">
                 {#if ws.agent_count != null}
-                  <span>{ws.agent_count} agents</span>
+                  <span>{$t('cross_workspace.agents_count', { values: { count: ws.agent_count } })}</span>
                 {/if}
                 {#if ws.budget_pct != null}
-                  <span>Budget: {ws.budget_pct}%</span>
+                  <span>{$t('cross_workspace.budget_pct', { values: { pct: ws.budget_pct } })}</span>
                 {/if}
                 {#if ws.health}
                   <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
@@ -452,25 +445,25 @@
   <!-- ── Specs ─────────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-specs" aria-labelledby="specs-heading">
     <div class="section-header">
-      <h2 class="section-title" id="specs-heading">Specs</h2>
+      <h2 class="section-title" id="specs-heading">{$t('cross_workspace.sections.specs')}</h2>
     </div>
 
     {#if specsLoading}
-      <div class="section-loading" aria-live="polite">Loading specs…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_specs')}</div>
     {:else if specsError}
       <div class="section-error" role="alert">{specsError}</div>
     {:else if specs.length === 0}
-      <p class="section-empty">No specs found across workspaces.</p>
+      <p class="section-empty">{$t('cross_workspace.specs_empty')}</p>
     {:else}
       <table class="specs-table" data-testid="specs-table">
         <thead>
           <tr>
             <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-              <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>{$t('cross_workspace.col_path')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
             </th>
-            <th scope="col">Workspace / Repo</th>
+            <th scope="col">{$t('cross_workspace.col_workspace_repo')}</th>
             <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-              <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('cross_workspace.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
             </th>
           </tr>
         </thead>
@@ -501,7 +494,7 @@
       {#if sortedSpecs.length > 10}
         <div class="section-footer">
           <button class="view-all-btn" onclick={() => { specsShowAll = !specsShowAll; }}>
-            {specsShowAll ? 'Show fewer' : `Show all ${sortedSpecs.length} specs`}
+            {specsShowAll ? $t('cross_workspace.show_fewer') : $t('cross_workspace.show_all_specs', { values: { count: sortedSpecs.length } })}
           </button>
         </div>
       {/if}
@@ -511,16 +504,16 @@
   <!-- ── Briefing ─────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-briefing" aria-labelledby="briefing-heading">
     <div class="section-header">
-      <h2 class="section-title" id="briefing-heading">Briefing</h2>
-      <span class="section-scope-tag">Aggregated</span>
+      <h2 class="section-title" id="briefing-heading">{$t('cross_workspace.sections.briefing')}</h2>
+      <span class="section-scope-tag">{$t('cross_workspace.scope_aggregated')}</span>
     </div>
 
     {#if briefingLoading}
-      <div class="section-loading" aria-live="polite">Loading briefing…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_briefing')}</div>
     {:else if briefingError}
       <div class="section-error" role="alert">{briefingError}</div>
     {:else if briefingSummaries.length === 0}
-      <p class="section-empty">No briefing data available across workspaces.</p>
+      <p class="section-empty">{$t('cross_workspace.briefing_empty')}</p>
     {:else}
       <ul class="briefing-list" role="list">
         {#each briefingSummaries as item (item.workspaceName)}
@@ -536,26 +529,26 @@
   <!-- ── Agent Rules ────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-agent-rules" aria-labelledby="agent-rules-heading">
     <div class="section-header">
-      <h2 class="section-title" id="agent-rules-heading">Agent Rules</h2>
-      <span class="section-scope-tag">Tenant-level</span>
+      <h2 class="section-title" id="agent-rules-heading">{$t('cross_workspace.sections.agent_rules')}</h2>
+      <span class="section-scope-tag">{$t('cross_workspace.scope_tenant_level')}</span>
     </div>
 
     {#if rulesLoading}
-      <div class="section-loading" aria-live="polite">Loading agent rules…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_agent_rules')}</div>
     {:else if rulesError}
       <div class="section-error" role="alert">{rulesError}</div>
     {:else if globalMetaSpecs.length === 0}
-      <p class="section-empty">No tenant-level agent rules defined.</p>
+      <p class="section-empty">{$t('cross_workspace.agent_rules_empty')}</p>
     {:else}
       {#each Object.entries(specsByKind) as [kind, items] (kind)}
         <div class="rules-group">
-          <h3 class="rules-group-title">{KIND_LABELS[kind] ?? kind}</h3>
+          <h3 class="rules-group-title">{kindLabel(kind)}</h3>
           <ul class="rules-list" role="list">
             {#each items as ms (ms.id)}
               <li class="rule-row">
                 <span class="rule-name">{ms.name ?? ms.path ?? '—'}</span>
                 {#if ms.required}
-                  <span class="rule-required" aria-label="Required">🔒</span>
+                  <span class="rule-required" aria-label={$t('cross_workspace.rule_required')}>🔒</span>
                 {/if}
                 <span class="rule-version">v{ms.version ?? 1}</span>
                 <span class="rule-status" class:status-approved={ms.status === 'Approved'}>
@@ -571,32 +564,32 @@
 </div>
 
 <!-- Create Workspace modal -->
-<Modal bind:open={createWsOpen} title="New Workspace" size="sm">
+<Modal bind:open={createWsOpen} title={$t('cross_workspace.new_workspace')} size="sm">
   <div class="create-ws-form">
-    <label class="create-ws-label">Name *
+    <label class="create-ws-label">{$t('cross_workspace.create_ws_name_label')}
       <input
         class="create-ws-input"
         bind:value={createWsForm.name}
-        placeholder="e.g. Backend Team"
+        placeholder={$t('cross_workspace.create_ws_name_placeholder')}
         onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
       />
     </label>
-    <label class="create-ws-label">Description
+    <label class="create-ws-label">{$t('cross_workspace.create_ws_desc_label')}
       <input
         class="create-ws-input"
         bind:value={createWsForm.description}
-        placeholder="What is this workspace for?"
+        placeholder={$t('cross_workspace.create_ws_desc_placeholder')}
         onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
       />
     </label>
     <div class="create-ws-actions">
-      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>Cancel</button>
+      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>{$t('cross_workspace.create_ws_cancel')}</button>
       <button
         class="create-ws-submit"
         onclick={handleCreateWorkspace}
         disabled={createWsSaving || !createWsForm.name?.trim()}
       >
-        {createWsSaving ? 'Creating…' : 'Create Workspace'}
+        {createWsSaving ? $t('cross_workspace.create_ws_creating') : $t('cross_workspace.create_ws_submit')}
       </button>
     </div>
   </div>

@@ -6,6 +6,7 @@
    * Rendered inside RepoMode when the ⚙ tab is active.
    */
   import { untrack } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
 
   let {
@@ -13,14 +14,16 @@
     repo = null,
   } = $props();
 
-  const TABS = [
-    { id: 'general',     label: 'General' },
-    { id: 'gates',       label: 'Gates' },
-    { id: 'policies',    label: 'Policies' },
-    { id: 'budget',      label: 'Budget' },
-    { id: 'audit',       label: 'Audit' },
-    { id: 'danger-zone', label: 'Danger Zone' },
-  ];
+  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'audit', 'danger-zone'];
+  const TAB_KEYS = {
+    'general': 'repo_settings.tabs.general',
+    'gates': 'repo_settings.tabs.gates',
+    'policies': 'repo_settings.tabs.policies',
+    'budget': 'repo_settings.tabs.budget',
+    'audit': 'repo_settings.tabs.audit',
+    'danger-zone': 'repo_settings.tabs.danger_zone',
+  };
+  const TABS = $derived(TAB_IDS.map(id => ({ id, label: $t(TAB_KEYS[id]) })));
 
   let activeTab = $state('general');
 
@@ -96,7 +99,7 @@
   let deleteError = $state(null);
 
   const archiveConfirmMsg = $derived(
-    `This will archive ${repo?.name ?? 'this repo'}. Agents will be stopped and new agents cannot be spawned.`
+    $t('repo_settings.danger_zone.archive_confirm', { values: { name: repo?.name ?? 'this repo' } })
   );
   const deleteConfirmRequired = $derived(repo?.name ?? '');
   const deleteReady = $derived(deleteConfirmName === deleteConfirmRequired && deleteConfirmRequired !== '');
@@ -266,7 +269,7 @@
 <div class="repo-settings" data-testid="repo-settings">
   <!-- ── Inner tab bar ───────────────────────────────────────────────── -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="inner-tab-bar" role="tablist" aria-label="Repo settings sections" data-testid="repo-settings-tabs" onkeydown={handleTabKeydown}>
+  <div class="inner-tab-bar" role="tablist" aria-label={$t('repo_settings.tab_bar_label')} data-testid="repo-settings-tabs" onkeydown={handleTabKeydown}>
     {#each TABS as tab}
       <button
         class="inner-tab-btn"
@@ -296,41 +299,41 @@
     <!-- General tab -->
     {#if activeTab === 'general'}
       <div class="tab-body" data-testid="repo-general-tab">
-        <h2 class="tab-title">General</h2>
+        <h2 class="tab-title">{$t('repo_settings.general.title')}</h2>
 
         <div class="field-card">
           <div class="field">
-            <span class="field-label">Repository Name</span>
+            <span class="field-label">{$t('repo_settings.general.repo_name')}</span>
             <div class="field-value" data-testid="repo-name-display">{repo?.name ?? '—'}</div>
-            <p class="field-hint">Repository names cannot be changed after creation.</p>
+            <p class="field-hint">{$t('repo_settings.general.repo_name_hint')}</p>
           </div>
 
           <div class="field">
-            <label class="field-label" for="repo-desc-input">Description</label>
+            <label class="field-label" for="repo-desc-input">{$t('repo_settings.general.description')}</label>
             <textarea
               id="repo-desc-input"
               class="field-textarea"
               rows="3"
-              placeholder="Describe this repository…"
+              placeholder={$t('repo_settings.general.description_placeholder')}
               bind:value={repoDescription}
               data-testid="repo-desc-input"
             ></textarea>
           </div>
 
           <div class="field">
-            <label class="field-label" for="repo-branch-input">Default Branch</label>
+            <label class="field-label" for="repo-branch-input">{$t('repo_settings.general.default_branch')}</label>
             <input
               id="repo-branch-input"
               class="field-input"
               type="text"
-              placeholder="main"
+              placeholder={$t('repo_settings.general.default_branch_placeholder')}
               bind:value={repoDefaultBranch}
               data-testid="repo-branch-input"
             />
           </div>
 
           <div class="field">
-            <label class="field-label" for="repo-max-agents-input">Max Concurrent Agents</label>
+            <label class="field-label" for="repo-max-agents-input">{$t('repo_settings.general.max_concurrent_agents')}</label>
             <input
               id="repo-max-agents-input"
               class="field-input field-input-sm"
@@ -340,7 +343,7 @@
               bind:value={repoMaxConcurrent}
               data-testid="repo-max-agents-input"
             />
-            <p class="field-hint">Maximum number of agents allowed to work on this repo simultaneously.</p>
+            <p class="field-hint">{$t('repo_settings.general.max_concurrent_agents_hint')}</p>
           </div>
         </div>
 
@@ -355,7 +358,7 @@
             disabled={generalSaving}
             data-testid="save-general-btn"
           >
-            {#if generalSaving}Saving…{:else if generalSaved}Saved ✓{:else}Save Changes{/if}
+            {#if generalSaving}{$t('repo_settings.general.saving')}{:else if generalSaved}{$t('repo_settings.general.saved')}{:else}{$t('repo_settings.general.save_changes')}{/if}
           </button>
         </div>
       </div>
@@ -363,15 +366,15 @@
     <!-- Gates tab -->
     {:else if activeTab === 'gates'}
       <div class="tab-body" data-testid="repo-gates-tab">
-        <h2 class="tab-title">Gates</h2>
-        <p class="tab-desc">Gate chain configuration — the checks agents must pass before merging.</p>
+        <h2 class="tab-title">{$t('repo_settings.gates.title')}</h2>
+        <p class="tab-desc">{$t('repo_settings.gates.description')}</p>
 
         {#if gatesLoading}
-          <p class="loading-text">Loading gates…</p>
+          <p class="loading-text">{$t('repo_settings.gates.loading')}</p>
         {:else if gatesError}
           <p class="error-text" role="alert">{gatesError}</p>
         {:else if gates.length === 0}
-          <p class="empty-text">No gates configured for this repository.</p>
+          <p class="empty-text">{$t('repo_settings.gates.empty')}</p>
         {:else}
           <div class="gates-list" data-testid="gates-list">
             {#each gates as gate}
@@ -383,7 +386,7 @@
                   {/if}
                   {#if gate.required !== undefined}
                     <span class="gate-required" class:required={gate.required}>
-                      {gate.required ? 'Required' : 'Optional'}
+                      {gate.required ? $t('repo_settings.gates.required') : $t('repo_settings.gates.optional')}
                     </span>
                   {/if}
                 </div>
@@ -402,15 +405,15 @@
     <!-- Policies tab -->
     {:else if activeTab === 'policies'}
       <div class="tab-body" data-testid="repo-policies-tab">
-        <h2 class="tab-title">Policies</h2>
-        <p class="tab-desc">Spec enforcement and merge policies for this repository.</p>
+        <h2 class="tab-title">{$t('repo_settings.policies.title')}</h2>
+        <p class="tab-desc">{$t('repo_settings.policies.description')}</p>
 
         {#if specPolicyLoading}
-          <p class="loading-text">Loading policies…</p>
+          <p class="loading-text">{$t('repo_settings.policies.loading')}</p>
         {:else if specPolicyError}
           <p class="error-text" role="alert">{specPolicyError}</p>
         {:else if !specPolicy}
-          <p class="empty-text">No spec policy configured for this repository.</p>
+          <p class="empty-text">{$t('repo_settings.policies.empty')}</p>
         {:else}
           <div class="field-card" data-testid="spec-policy-form">
             <div class="field">
@@ -421,8 +424,8 @@
                   data-testid="toggle-require-spec-ref"
                 />
                 <span class="toggle-label">
-                  <span class="toggle-name">Require spec reference</span>
-                  <span class="toggle-hint">MRs must reference a spec before merging.</span>
+                  <span class="toggle-name">{$t('repo_settings.policies.require_spec_ref')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.require_spec_ref_hint')}</span>
                 </span>
               </label>
             </div>
@@ -435,8 +438,8 @@
                   data-testid="toggle-require-approval"
                 />
                 <span class="toggle-label">
-                  <span class="toggle-name">Require spec approval</span>
-                  <span class="toggle-hint">Specs must be approved before agents can implement them.</span>
+                  <span class="toggle-name">{$t('repo_settings.policies.require_approval')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.require_approval_hint')}</span>
                 </span>
               </label>
             </div>
@@ -449,8 +452,8 @@
                   data-testid="toggle-stale-warning"
                 />
                 <span class="toggle-label">
-                  <span class="toggle-name">Stale spec warning</span>
-                  <span class="toggle-hint">Warn when a spec has not been updated in 30+ days.</span>
+                  <span class="toggle-name">{$t('repo_settings.policies.stale_warning')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.stale_warning_hint')}</span>
                 </span>
               </label>
             </div>
@@ -463,7 +466,7 @@
               disabled={specPolicySaving}
               data-testid="save-spec-policy-btn"
             >
-              {#if specPolicySaving}Saving…{:else if specPolicySaved}Saved ✓{:else}Save Policies{/if}
+              {#if specPolicySaving}{$t('repo_settings.policies.saving')}{:else if specPolicySaved}{$t('repo_settings.policies.saved')}{:else}{$t('repo_settings.policies.save_policies')}{/if}
             </button>
           </div>
         {/if}
@@ -472,28 +475,28 @@
     <!-- Budget tab -->
     {:else if activeTab === 'budget'}
       <div class="tab-body" data-testid="repo-budget-tab">
-        <h2 class="tab-title">Budget</h2>
-        <p class="tab-desc">Credit allocation for agents in this repository. Cannot exceed the workspace budget.</p>
+        <h2 class="tab-title">{$t('repo_settings.budget.title')}</h2>
+        <p class="tab-desc">{$t('repo_settings.budget.description')}</p>
 
         {#if repoBudgetLoading}
-          <p class="loading-text">Loading budget…</p>
+          <p class="loading-text">{$t('repo_settings.budget.loading')}</p>
         {:else if repoBudgetError}
-          <p class="empty-text" data-testid="budget-unavailable">Budget data unavailable — this feature may not be configured.</p>
+          <p class="empty-text" data-testid="budget-unavailable">{$t('repo_settings.budget.unavailable')}</p>
         {:else if !repoBudget}
-          <p class="empty-text">No budget allocation configured for this repository.</p>
+          <p class="empty-text">{$t('repo_settings.budget.empty')}</p>
         {:else}
           <div class="budget-card" data-testid="repo-budget-card">
             <div class="budget-stat-row">
               <div class="budget-stat">
-                <span class="budget-stat-label">Allocated</span>
+                <span class="budget-stat-label">{$t('repo_settings.budget.allocated')}</span>
                 <span class="budget-stat-value">{repoBudget.total_credits ?? '—'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Used</span>
+                <span class="budget-stat-label">{$t('repo_settings.budget.used')}</span>
                 <span class="budget-stat-value">{repoBudget.used_credits ?? '—'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Remaining</span>
+                <span class="budget-stat-label">{$t('repo_settings.budget.remaining')}</span>
                 <span class="budget-stat-value">
                   {repoBudget.total_credits != null && repoBudget.used_credits != null
                     ? repoBudget.total_credits - repoBudget.used_credits
@@ -505,7 +508,7 @@
             {#if repoBudgetPct !== null}
               <div class="budget-bar-wrap">
                 <div class="budget-bar-label">
-                  <span>Usage</span>
+                  <span>{$t('repo_settings.budget.usage')}</span>
                   <span>{repoBudgetPct}%</span>
                 </div>
                 <div
@@ -514,7 +517,7 @@
                   aria-valuenow={repoBudgetPct}
                   aria-valuemin="0"
                   aria-valuemax="100"
-                  aria-label="Budget {repoBudgetPct}% used"
+                  aria-label={$t('repo_settings.budget.budget_pct_used', { values: { pct: repoBudgetPct } })}
                   data-testid="repo-budget-bar"
                 >
                   <div
@@ -534,16 +537,16 @@
     <!-- Audit tab -->
     {:else if activeTab === 'audit'}
       <div class="tab-body" data-testid="repo-audit-tab">
-        <h2 class="tab-title">Audit Log</h2>
+        <h2 class="tab-title">{$t('repo_settings.audit.title')}</h2>
 
         <div class="audit-filter-bar">
           <select
             class="filter-select"
             bind:value={auditFilterType}
-            aria-label="Filter by event type"
+            aria-label={$t('repo_settings.audit.filter_by_event_type')}
             data-testid="audit-filter-select"
           >
-            <option value="">All event types</option>
+            <option value="">{$t('repo_settings.audit.all_event_types')}</option>
             {#each AUDIT_EVENT_TYPES as et}
               <option value={et}>{et}</option>
             {/each}
@@ -554,23 +557,23 @@
             disabled={auditLoading}
             data-testid="audit-refresh-btn"
           >
-            {auditLoading ? 'Loading…' : 'Refresh'}
+            {auditLoading ? $t('repo_settings.audit.loading') : $t('repo_settings.audit.refresh')}
           </button>
         </div>
 
         {#if auditLoading}
-          <p class="loading-text">Loading audit events…</p>
+          <p class="loading-text">{$t('repo_settings.audit.loading_events')}</p>
         {:else if auditError}
           <p class="error-text" role="alert">{auditError}</p>
         {:else if auditEvents.length === 0}
-          <p class="empty-text">No audit events found for this repository.</p>
+          <p class="empty-text">{$t('repo_settings.audit.empty')}</p>
         {:else}
           <div class="audit-list" data-testid="repo-audit-list">
             <div class="audit-row audit-header">
-              <button class="audit-sort-btn" aria-label="Sort by type {auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('event_type')}>Type{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
-              <button class="audit-sort-btn" aria-label="Sort by actor {auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('actor')}>Actor{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
-              <button class="audit-sort-btn" aria-label="Sort by detail {auditSortCol === 'details' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('details')}>Detail{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
-              <button class="audit-sort-btn" aria-label="Sort by time {auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : ''}" onclick={() => toggleAuditSort('timestamp')}>Time{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="{$t('repo_settings.audit.sort_by_type')} {auditSortCol === 'event_type' ? (auditSortDir === 1 ? $t('repo_settings.audit.ascending') : $t('repo_settings.audit.descending')) : ''}" onclick={() => toggleAuditSort('event_type')}>{$t('repo_settings.audit.col_type')}{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="{$t('repo_settings.audit.sort_by_actor')} {auditSortCol === 'actor' ? (auditSortDir === 1 ? $t('repo_settings.audit.ascending') : $t('repo_settings.audit.descending')) : ''}" onclick={() => toggleAuditSort('actor')}>{$t('repo_settings.audit.col_actor')}{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="{$t('repo_settings.audit.sort_by_detail')} {auditSortCol === 'details' ? (auditSortDir === 1 ? $t('repo_settings.audit.ascending') : $t('repo_settings.audit.descending')) : ''}" onclick={() => toggleAuditSort('details')}>{$t('repo_settings.audit.col_detail')}{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-label="{$t('repo_settings.audit.sort_by_time')} {auditSortCol === 'timestamp' ? (auditSortDir === 1 ? $t('repo_settings.audit.ascending') : $t('repo_settings.audit.descending')) : ''}" onclick={() => toggleAuditSort('timestamp')}>{$t('repo_settings.audit.col_time')}{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
             </div>
             {#each sortedAuditEvents as evt}
               <div class="audit-row" data-testid="audit-row">
@@ -587,17 +590,15 @@
     <!-- Danger Zone tab -->
     {:else if activeTab === 'danger-zone'}
       <div class="tab-body" data-testid="repo-danger-tab">
-        <h2 class="tab-title danger-title">Danger Zone</h2>
+        <h2 class="tab-title danger-title">{$t('repo_settings.danger_zone.title')}</h2>
 
         <!-- Archive -->
         <div class="danger-card" data-testid="archive-section">
           <div class="danger-card-content">
             <div class="danger-card-info">
-              <h3 class="danger-card-title">Archive Repository</h3>
+              <h3 class="danger-card-title">{$t('repo_settings.danger_zone.archive_title')}</h3>
               <p class="danger-card-desc">
-                Archiving stops all active agents and prevents new agent spawns.
-                The repository remains readable but no further development work can proceed.
-                You can unarchive at any time.
+                {$t('repo_settings.danger_zone.archive_desc')}
               </p>
             </div>
             <button
@@ -605,7 +606,7 @@
               onclick={() => { archiveConfirm = !archiveConfirm; deleteConfirmName = ''; }}
               data-testid="archive-btn"
             >
-              Archive
+              {$t('repo_settings.danger_zone.archive_btn')}
             </button>
           </div>
 
@@ -620,7 +621,7 @@
                   class="btn-secondary"
                   onclick={() => { archiveConfirm = false; archiveError = null; }}
                 >
-                  Cancel
+                  {$t('repo_settings.danger_zone.cancel')}
                 </button>
                 <button
                   class="btn-danger"
@@ -628,7 +629,7 @@
                   disabled={archiving}
                   data-testid="archive-confirm-btn"
                 >
-                  {archiving ? 'Archiving…' : 'Confirm Archive'}
+                  {archiving ? $t('repo_settings.danger_zone.archiving') : $t('repo_settings.danger_zone.confirm_archive')}
                 </button>
               </div>
             </div>
@@ -641,34 +642,32 @@
             <!-- Repo must be archived before it can be deleted -->
             <div class="danger-card-content">
               <div class="danger-card-info">
-                <h3 class="danger-card-title">Delete Repository</h3>
+                <h3 class="danger-card-title">{$t('repo_settings.danger_zone.delete_title')}</h3>
                 <p class="danger-card-desc">
-                  Permanently deletes this repository and all associated data including specs,
-                  agents, merge requests, and history.
-                  <strong>This action cannot be undone.</strong>
+                  {$t('repo_settings.danger_zone.delete_desc')}
+                  <strong>{$t('repo_settings.danger_zone.delete_irreversible')}</strong>
                 </p>
                 <p class="danger-card-prereq" data-testid="delete-archive-required">
-                  Archive this repository first before deleting it.
+                  {$t('repo_settings.danger_zone.delete_prereq')}
                 </p>
               </div>
               <button
                 class="btn-danger"
                 disabled
                 data-testid="delete-btn"
-                title="Archive this repository first"
+                title={$t('repo_settings.danger_zone.delete_prereq_tooltip')}
               >
-                Delete
+                {$t('repo_settings.danger_zone.delete_btn')}
               </button>
             </div>
           {:else}
             <!-- Repo is archived — deletion is allowed -->
             <div class="danger-card-content">
               <div class="danger-card-info">
-                <h3 class="danger-card-title">Delete Repository</h3>
+                <h3 class="danger-card-title">{$t('repo_settings.danger_zone.delete_title')}</h3>
                 <p class="danger-card-desc">
-                  Permanently deletes this repository and all associated data including specs,
-                  agents, merge requests, and history.
-                  <strong>This action cannot be undone.</strong>
+                  {$t('repo_settings.danger_zone.delete_desc')}
+                  <strong>{$t('repo_settings.danger_zone.delete_irreversible')}</strong>
                 </p>
               </div>
               <button
@@ -676,14 +675,14 @@
                 onclick={() => { deleteConfirmName = ''; archiveConfirm = false; deleteError = null; }}
                 data-testid="delete-btn"
               >
-                Delete
+                {$t('repo_settings.danger_zone.delete_btn')}
               </button>
             </div>
 
             {#if deleteConfirmName !== undefined && !archiveConfirm}
               <div class="confirm-box" data-testid="delete-confirm-box">
                 <p class="confirm-msg">
-                  To confirm deletion, type the repository name:
+                  {$t('repo_settings.danger_zone.delete_confirm_prompt')}
                   <strong>{deleteConfirmRequired}</strong>
                 </p>
                 <input
@@ -691,7 +690,7 @@
                   type="text"
                   placeholder={deleteConfirmRequired}
                   bind:value={deleteConfirmName}
-                  aria-label="Type repository name to confirm deletion"
+                  aria-label={$t('repo_settings.danger_zone.delete_confirm_aria')}
                   data-testid="delete-confirm-input"
                 />
                 {#if deleteError}
@@ -702,7 +701,7 @@
                     class="btn-secondary"
                     onclick={() => { deleteConfirmName = ''; deleteError = null; }}
                   >
-                    Cancel
+                    {$t('repo_settings.danger_zone.cancel')}
                   </button>
                   <button
                     class="btn-danger"
@@ -710,7 +709,7 @@
                     disabled={!deleteReady || deleting}
                     data-testid="delete-confirm-btn"
                   >
-                    {deleting ? 'Deleting…' : 'Delete Repository'}
+                    {deleting ? $t('repo_settings.danger_zone.deleting') : $t('repo_settings.danger_zone.delete_repository')}
                   </button>
                 </div>
               </div>
