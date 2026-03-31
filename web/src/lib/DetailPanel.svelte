@@ -903,6 +903,15 @@
     return id.length > 12 ? id.slice(0, 8) + '...' : id;
   }
 
+  /** Copy text to clipboard and show a toast. */
+  async function copyId(value) {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      toastSuccess('Copied to clipboard');
+    } catch { /* clipboard unavailable */ }
+  }
+
   /** Navigate to an entity in the detail panel. */
   function navigateTo(type, id, data) {
     openDetailPanel?.({ type, id, data: data ?? {} });
@@ -1164,7 +1173,10 @@
                     </span>
                   {/if}
                 </dd>
-                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
+                {#if mr.description}
+                  <dt>Description</dt><dd class="task-description">{mr.description}</dd>
+                {/if}
                 {#if mr.source_branch}
                   <dt>Branch</dt><dd class="mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</dd>
                 {/if}
@@ -1340,7 +1352,7 @@
               <dl class="entity-meta">
                 <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
                 <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} /></dd>
-                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
                 {/if}
@@ -1503,7 +1515,7 @@
                     </span>
                   {/if}
                 </dd>
-                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if tk.priority}
                   <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
                 {/if}
@@ -2190,7 +2202,7 @@
               </div>
               <dl class="entity-meta">
                 {#if att.merge_commit_sha}
-                  <dt>Merge commit</dt><dd class="mono" title={att.merge_commit_sha}>{att.merge_commit_sha.slice(0, 12)}...</dd>
+                  <dt>Merge commit</dt><dd class="mono copyable" title="Click to copy: {att.merge_commit_sha}" onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 12)}...</dd>
                 {/if}
                 {#if att.merged_at}
                   <dt>Merged at</dt><dd>{fmtDate(att.merged_at)}</dd>
@@ -2226,7 +2238,7 @@
               {#if mrAttestation.signature}
                 <div class="att-sig-block">
                   <span class="att-sig-label">Ed25519 Signature</span>
-                  <code class="att-sig-value mono" title={mrAttestation.signature}>{mrAttestation.signature.slice(0, 24)}...</code>
+                  <code class="att-sig-value mono copyable" title="Click to copy full signature" onclick={() => copyId(mrAttestation.signature)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mrAttestation.signature); }}>{mrAttestation.signature.slice(0, 24)}...</code>
                 </div>
               {/if}
             </div>
@@ -2608,6 +2620,22 @@
   .entity-meta dd.mono {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+  }
+
+  .copyable {
+    cursor: pointer;
+    transition: color var(--transition-fast);
+    position: relative;
+  }
+
+  .copyable:hover {
+    color: var(--color-primary);
+    text-decoration: underline;
+    text-decoration-style: dotted;
+  }
+
+  .copyable:active {
+    color: var(--color-link);
   }
 
   /* Placeholder text for tabs implemented by other slices */
@@ -3652,6 +3680,52 @@
   .trace-msg {
     color: var(--color-text);
     word-break: break-word;
+  }
+
+  /* ── Agent messages ─────────────────────────────────────────────── */
+  .messages-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .message-item {
+    padding: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+  }
+
+  .message-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .message-sender {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .message-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .message-body {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    margin: 0;
+    word-break: break-word;
+  }
+
+  .message-form {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
   }
 
   /* ── Clickable entity links ─────────────────────────────────────────────── */
