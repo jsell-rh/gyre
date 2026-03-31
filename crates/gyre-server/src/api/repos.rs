@@ -291,10 +291,7 @@ pub async fn archive_repo(
             .as_ref()
             .map(|tid| repo_task_ids.contains(tid.as_str()))
             .unwrap_or(false);
-        let stoppable = matches!(
-            agent.status,
-            AgentStatus::Active | AgentStatus::Idle
-        );
+        let stoppable = matches!(agent.status, AgentStatus::Active | AgentStatus::Idle);
         if is_repo_task && stoppable {
             agent.status = AgentStatus::Dead;
             state.agents.update(&agent).await?;

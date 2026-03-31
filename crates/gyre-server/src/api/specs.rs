@@ -457,14 +457,17 @@ pub async fn approve_spec(
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
             // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
             let dest = match entry.workspace_id.as_deref() {
-                Some(ws_id) => gyre_common::message::Destination::Workspace(
-                    gyre_common::Id::new(ws_id),
-                ),
+                Some(ws_id) => {
+                    gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id))
+                }
                 None => gyre_common::message::Destination::Broadcast,
             };
             state
                 .emit_event(
-                    entry.workspace_id.as_ref().map(|ws| gyre_common::Id::new(ws.as_str())),
+                    entry
+                        .workspace_id
+                        .as_ref()
+                        .map(|ws| gyre_common::Id::new(ws.as_str())),
                     dest,
                     gyre_common::message::MessageKind::SpecApproved,
                     Some(serde_json::json!({
@@ -629,10 +632,7 @@ pub async fn reject_spec(
             let agents = state.agents.list().await.unwrap_or_default();
             for mut agent in agents {
                 if agent.current_task_id.as_ref() == Some(&task.id)
-                    && matches!(
-                        agent.status,
-                        gyre_domain::AgentStatus::Active
-                    )
+                    && matches!(agent.status, gyre_domain::AgentStatus::Active)
                 {
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
                     let _ = state.agents.update(&agent).await;

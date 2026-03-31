@@ -20,7 +20,10 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
     let agents = state.agents.list().await?;
     for mut agent in agents {
         // Skip agents in terminal states.
-        if matches!(agent.status, AgentStatus::Dead | AgentStatus::Stopped | AgentStatus::Failed) {
+        if matches!(
+            agent.status,
+            AgentStatus::Dead | AgentStatus::Stopped | AgentStatus::Failed
+        ) {
             continue;
         }
         if agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS) {
