@@ -1,0 +1,2 @@
+-- SQLite does not support DROP COLUMN before 3.35.0; recreate table if needed.
+-- For simplicity, these columns are nullable/defaulted, so this is a no-op rollback.

@@ -59,6 +59,9 @@ diesel::table! {
         repo_id -> Text,
         cancelled_at -> Nullable<BigInt>,
         cancelled_reason -> Nullable<Text>,
+        task_type -> Nullable<Text>,
+        order -> Nullable<Integer>,
+        depends_on -> Text,
     }
 }
 
