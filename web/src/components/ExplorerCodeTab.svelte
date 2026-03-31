@@ -168,7 +168,7 @@
 </script>
 
 <div class="code-tab">
-  <span class="sr-only" aria-live="polite">{loading ? "" : "code view loaded"}</span>
+  <span class="sr-only" aria-live="polite">{loading ? "" : $t('code_tab.loaded')}</span>
 
   <!-- Clone URL header -->
   {#if cloneUrl}

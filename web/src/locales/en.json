@@ -424,6 +424,7 @@
   "decisions": {
     "title": "Decisions",
     "all_types": "All types",
+    "notification_count": "{count} {count, plural, one {notification} other {notifications}}",
     "show_dismissed": "Show Dismissed",
     "all_caught_up": "All caught up!",
     "no_pending": "No pending notifications.",
@@ -507,7 +508,14 @@
     "markdown_source": "Markdown source",
     "spec_created": "Spec created — MR #{mr_id} created",
     "create_failed": "Create failed: {error}",
-    "filter_kind": "Kind:"
+    "filter_kind": "Kind:",
+    "filter_all": "All",
+    "filter_draft": "Draft",
+    "filter_pending": "Pending",
+    "filter_approved": "Approved",
+    "filter_deprecated": "Deprecated",
+    "progress_tasks": "{done}/{total} tasks",
+    "loaded": "specs loaded"
   },
   "code_tab": {
     "clone": "Clone",
@@ -547,7 +555,8 @@
     "time_just_now": "just now",
     "time_minutes_ago": "{count}m ago",
     "time_hours_ago": "{count}h ago",
-    "time_days_ago": "{count}d ago"
+    "time_days_ago": "{count}d ago",
+    "loaded": "code view loaded"
   },
   "user_profile": {
     "title": "My Profile",
@@ -909,7 +918,11 @@
     "select_repo_desc": "Choose a repository above to explore its realized architecture \u2014 types, traits, functions, endpoints, and their relationships.",
     "no_repos_hint": "No repositories found. Create a project and repository to get started.",
     "fetching_graph": "Fetching knowledge graph\u2026",
-    "graph_error": "Failed to load graph: {error}"
+    "graph_error": "Failed to load graph: {error}",
+    "ask_request_failed": "Request failed: {status}",
+    "ask_llm_failed": "LLM connection failed",
+    "repos_load_failed": "Failed to load repositories: {error}",
+    "concept_search_failed": "Concept search failed: {error}"
   },
   "detail_panel": {
     "tabs": {
@@ -1569,7 +1582,8 @@
     "budget": "Budget",
     "trust_default": "Standard",
     "enter_workspace": "Enter Workspace",
-    "filter_workspaces": "Filter workspaces"
+    "filter_workspaces": "Filter workspaces",
+    "workspaces_shown": "{count} {count, plural, one {workspace} other {workspaces}} shown"
   },
   "search": {
     "placeholder": "Search tasks, agents, specs, MRs\u2026",

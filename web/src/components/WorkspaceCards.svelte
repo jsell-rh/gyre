@@ -158,7 +158,7 @@
   {:else}
     <div class="ws-filter-wrap">
       <input type="text" bind:value={wsFilter} placeholder={$t('workspace_cards.filter_workspaces')} class="ws-filter" aria-label={$t('workspace_cards.filter_workspaces')} />
-      <span class="sr-only" aria-live="polite" role="status">{visibleWs.length} workspace{visibleWs.length === 1 ? '' : 's'} shown</span>
+      <span class="sr-only" aria-live="polite" role="status">{$t('workspace_cards.workspaces_shown', { values: { count: visibleWs.length } })}</span>
     </div>
     {#if visibleWs.length === 0}
       <div class="empty-wrap">
