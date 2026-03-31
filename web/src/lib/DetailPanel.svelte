@@ -2157,15 +2157,14 @@
             <ul class="gates-list">
               {#each mrGates as gate}
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
-                <li class="gate-item">
+                {@const gateName = gate.name ?? gate.gate_name ?? (gate.gate_id ? shortId(gate.gate_id) : 'Gate')}
+                {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
+                <li class="gate-item gate-item-{gateStatus}">
                   <div class="gate-row">
-                    <Badge
-                      value={gate.status === 'Passed' || gate.status === 'passed' ? 'passed' : gate.status === 'Failed' || gate.status === 'failed' ? 'failed' : gate.status === 'Running' || gate.status === 'running' ? 'running' : gate.status ?? 'pending'}
-                      variant={gate.status === 'Passed' || gate.status === 'passed' ? 'success' : gate.status === 'Failed' || gate.status === 'failed' ? 'danger' : gate.status === 'Running' || gate.status === 'running' ? 'warning' : 'muted'}
-                    />
-                    <span class="gate-name">{gate.name ?? gate.gate_name ?? 'Gate'}</span>
+                    <span class="gate-status-icon">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
+                    <span class="gate-name" title={gate.gate_id ?? ''}>{gateName}</span>
                     {#if gate.gate_type}
-                      <span class="gate-type-badge">{gate.gate_type}</span>
+                      <span class="gate-type-badge">{gate.gate_type.replace(/_/g, ' ')}</span>
                     {/if}
                     {#if gate.required !== undefined}
                       <span class="gate-required-badge" class:advisory={!gate.required}>
@@ -2173,7 +2172,7 @@
                       </span>
                     {/if}
                     {#if duration}
-                      <span class="gate-duration">{duration}ms</span>
+                      <span class="gate-duration">{duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}</span>
                     {/if}
                   </div>
                   {#if gate.command}
@@ -2183,16 +2182,16 @@
                     </div>
                   {/if}
                   {#if gate.output}
-                    <div class="gate-output-row">
-                      <span class="gate-output-label">Output</span>
+                    <details class="gate-output-details" open={gateStatus === 'failed'}>
+                      <summary class="gate-output-label">Output</summary>
                       <pre class="gate-output">{gate.output}</pre>
-                    </div>
+                    </details>
                   {/if}
                   {#if gate.error}
-                    <div class="gate-output-row">
-                      <span class="gate-output-label">Error</span>
+                    <details class="gate-output-details" open>
+                      <summary class="gate-output-label gate-error-label">Error</summary>
                       <pre class="gate-output gate-error">{gate.error}</pre>
-                    </div>
+                    </details>
                   {/if}
                   {#if gate.started_at}
                     <span class="gate-timing">{fmtDate(gate.started_at)}{#if gate.finished_at} — {fmtDate(gate.finished_at)}{/if}</span>
@@ -3555,7 +3554,30 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    border-left: 3px solid var(--color-border);
   }
+
+  .gate-item-passed { border-left-color: var(--color-success, #22c55e); }
+  .gate-item-failed { border-left-color: var(--color-danger, #ef4444); }
+  .gate-item-running { border-left-color: var(--color-warning, #f59e0b); }
+
+  .gate-status-icon {
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    width: 1.2em;
+    text-align: center;
+  }
+
+  .gate-item-passed .gate-status-icon { color: var(--color-success, #22c55e); }
+  .gate-item-failed .gate-status-icon { color: var(--color-danger, #ef4444); }
+  .gate-item-running .gate-status-icon { color: var(--color-warning, #f59e0b); }
+
+  .gate-output-details summary {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .gate-error-label { color: var(--color-danger, #ef4444); }
 
   .gate-row {
     display: flex;
