@@ -2277,6 +2277,9 @@
               {#each mrTimeline as evt, i}
                 {@const evtType = evt.event_type ?? evt.type ?? evt.event}
                 {@const detailText = timelineDetailText(evt)}
+                {@const prevTime = i > 0 ? (mrTimeline[i-1].timestamp ?? mrTimeline[i-1].created_at) : null}
+                {@const thisTime = evt.timestamp ?? evt.created_at}
+                {@const elapsed = (prevTime && thisTime) ? Math.round(thisTime - prevTime) : null}
                 <div class="timeline-item">
                   <div class="timeline-connector">
                     <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType)}"></div>
@@ -2285,7 +2288,10 @@
                   <div class="timeline-content">
                     <div class="timeline-header">
                       <Badge value={timelineEventLabel(evtType)} variant={timelineEventVariant(evtType)} />
-                      <span class="timeline-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
+                      <span class="timeline-time">{fmtDate(thisTime)}</span>
+                      {#if elapsed && elapsed > 0}
+                        <span class="timeline-elapsed">+{elapsed < 60 ? elapsed + 's' : elapsed < 3600 ? Math.round(elapsed / 60) + 'm' : Math.round(elapsed / 3600) + 'h'}</span>
+                      {/if}
                     </div>
                     {#if evt.actor || evt.actor_id || evt.agent_id}
                       <button class="entity-link timeline-actor mono" onclick={() => navigateTo('agent', evt.actor_id ?? evt.agent_id)} title={evt.actor_id ?? evt.agent_id}>
@@ -2295,11 +2301,15 @@
                     {#if detailText}
                       <p class="timeline-detail">{detailText}</p>
                     {/if}
-                    {#if evt.gate_name}
-                      <span class="timeline-gate-ref mono">{evt.gate_name}</span>
+                    {#if evt.gate_name ?? evt.detail?.gate}
+                      <button class="entity-link timeline-gate-ref mono" onclick={() => { activeTab = 'gates'; }} title="View gate details">{evt.gate_name ?? evt.detail?.gate}</button>
                     {/if}
                     {#if evt.sha || evt.commit_sha}
-                      <span class="timeline-sha mono">{(evt.sha ?? evt.commit_sha).slice(0, 7)}</span>
+                      {@const sha = evt.sha ?? evt.commit_sha}
+                      <span class="timeline-sha mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 7)}</span>
+                    {/if}
+                    {#if evt.mr_id}
+                      <button class="entity-link mono" onclick={() => navigateTo('mr', evt.mr_id)} title={evt.mr_id}>MR {shortId(evt.mr_id)}</button>
                     {/if}
                   </div>
                 </div>
@@ -3900,6 +3910,13 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin-left: auto;
+  }
+
+  .timeline-elapsed {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    opacity: 0.7;
   }
 
   .timeline-actor {
