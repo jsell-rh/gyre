@@ -530,6 +530,8 @@ diesel::table! {
         drift_status -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,
+        repo_id -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
     }
 }
 
