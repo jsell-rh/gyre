@@ -1402,5 +1402,13 @@
       "merged": "Merged",
       "closed": "Closed"
     }
+  },
+  "search": {
+    "placeholder": "Search tasks, agents, specs, MRs\u2026",
+    "search_failed": "Search failed \u2014 check your connection",
+    "no_results": "No results for \"{query}\"",
+    "hint_navigate": "navigate",
+    "hint_select": "select",
+    "hint_close": "close"
   }
 }

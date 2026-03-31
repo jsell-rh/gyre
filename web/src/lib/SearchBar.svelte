@@ -1,5 +1,6 @@
 <script>
   import { api } from './api.js';
+  import { t } from 'svelte-i18n';
 
   let { open = $bindable(false), onnavigate = undefined } = $props();
   let query = $state('');
@@ -13,13 +14,15 @@
 
   const ENTITY_ICONS = { task: 'T', agent: 'G', mr: 'M', spec: 'S' };
 
-  const SHORTCUTS = [
-    { label: 'Decisions', view: 'inbox', icon: '1' },
-    { label: 'Briefing', view: 'briefing', icon: '2' },
-    { label: 'Specs', view: 'specs', icon: '3' },
-    { label: 'Agent Rules', view: 'meta-specs', icon: '4' },
-    { label: 'My Profile', view: 'profile', icon: 'P' },
+  const SHORTCUT_DEFS = [
+    { labelKey: 'workspace_home.sections.decisions', view: 'inbox', icon: '1' },
+    { labelKey: 'workspace_home.sections.briefing', view: 'briefing', icon: '2' },
+    { labelKey: 'workspace_home.sections.specs', view: 'specs', icon: '3' },
+    { labelKey: 'topbar.agent_rules_label', view: 'meta-specs', icon: '4' },
+    { labelKey: 'user_profile.title', view: 'profile', icon: 'P' },
   ];
+
+  let SHORTCUTS = $derived(SHORTCUT_DEFS.map(s => ({ ...s, label: $t(s.labelKey) })));
 
   // Combined results: API entity hits + nav shortcuts.
   let results = $derived(
@@ -156,7 +159,7 @@
         bind:value={query}
         onkeydown={onkeydown}
         type="text"
-        placeholder="Search tasks, agents, specs, MRs..."
+        placeholder={$t('search.placeholder')}
         class="search-input"
         autocomplete="off"
         spellcheck="false"
@@ -203,13 +206,13 @@
         {/each}
       </ul>
     {:else if query.trim().length >= 2 && !searching}
-      <div class="search-empty" role="status">{searchError ? 'Search failed — check your connection' : `No results for "${query}"`}</div>
+      <div class="search-empty" role="status">{searchError ? $t('search.search_failed') : $t('search.no_results', { values: { query } })}</div>
     {/if}
 
     <div class="search-footer" aria-hidden="true">
-      <span><kbd>↑↓</kbd> navigate</span>
-      <span><kbd>↵</kbd> select</span>
-      <span><kbd>Esc</kbd> close</span>
+      <span><kbd>↑↓</kbd> {$t('search.hint_navigate')}</span>
+      <span><kbd>↵</kbd> {$t('search.hint_select')}</span>
+      <span><kbd>Esc</kbd> {$t('search.hint_close')}</span>
     </div>
   </div>
 {/if}
