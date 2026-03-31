@@ -6,21 +6,17 @@
    * Accessed via gear icon ⚙ in workspace header or /workspaces/:slug/settings URL.
    */
   import { untrack } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { toastError } from '../lib/toast.svelte.js';
 
   let {
     workspace = null,
     onBack = undefined,
   } = $props();
 
-  const TABS = [
-    { id: 'general',  label: 'General' },
-    { id: 'trust',    label: 'Trust & Policies' },
-    { id: 'teams',    label: 'Teams' },
-    { id: 'budget',   label: 'Budget' },
-    { id: 'compute',  label: 'Compute' },
-    { id: 'audit',    label: 'Audit' },
-  ];
+  const TAB_IDS = ['general', 'trust', 'teams', 'budget', 'compute', 'audit'];
+  let TABS = $derived(TAB_IDS.map(id => ({ id, label: $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
 
@@ -33,12 +29,12 @@
   let generalSaved = $state(false);
 
   // ── Trust & Policies ─────────────────────────────────────────────────
-  const TRUST_LEVELS = [
-    { id: 'Supervised', label: 'Supervised', desc: 'I review everything before it merges' },
-    { id: 'Guided',     label: 'Guided',     desc: 'Agents merge if gates pass, alert me on failures' },
-    { id: 'Autonomous', label: 'Autonomous', desc: 'Only interrupt me for exceptions' },
-    { id: 'Custom',     label: 'Custom',     desc: 'Configure policies manually' },
-  ];
+  const TRUST_LEVEL_IDS = ['Supervised', 'Guided', 'Autonomous', 'Custom'];
+  let TRUST_LEVELS = $derived(TRUST_LEVEL_IDS.map(id => ({
+    id,
+    label: $t(`workspace_settings.trust.${id.toLowerCase()}`),
+    desc: $t(`workspace_settings.trust.${id.toLowerCase()}_desc`),
+  })));
   let trustLevel = $state(workspace?.trust_level ?? 'Autonomous');
   let trustSaving = $state(false);
   let trustSaved = $state(false);
@@ -51,6 +47,17 @@
   let warnOnDrift = $state(workspace?.meta_spec_policy?.warn_on_drift ?? true);
   let blockOnDrift = $state(workspace?.meta_spec_policy?.block_on_drift ?? false);
   let driftTolerance = $state(workspace?.meta_spec_policy?.drift_tolerance ?? 0);
+
+  // Sync form values when workspace prop changes
+  $effect(() => {
+    if (workspace) {
+      defaultComputeTarget = workspace.default_compute_target ?? '';
+      trustLevel = workspace.trust_level ?? 'Autonomous';
+      warnOnDrift = workspace.meta_spec_policy?.warn_on_drift ?? true;
+      blockOnDrift = workspace.meta_spec_policy?.block_on_drift ?? false;
+      driftTolerance = workspace.meta_spec_policy?.drift_tolerance ?? 0;
+    }
+  });
   let policyDriftSaving = $state(false);
   let policyDriftSaved = $state(false);
 
@@ -58,6 +65,37 @@
   let members = $state([]);
   let membersLoading = $state(false);
   let membersError = $state(null);
+  let membersSortCol = $state('name');
+  let membersSortDir = $state('asc');
+
+  function toggleMembersSort(col) {
+    if (membersSortCol === col) {
+      membersSortDir = membersSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      membersSortCol = col;
+      membersSortDir = 'asc';
+    }
+  }
+
+  function membersSortArrow(col) {
+    if (membersSortCol !== col) return '↕';
+    return membersSortDir === 'asc' ? '↑' : '↓';
+  }
+
+  let sortedMembers = $derived.by(() => {
+    return [...members].sort((a, b) => {
+      let av, bv;
+      if (membersSortCol === 'name') {
+        av = a.name ?? a.username ?? '';
+        bv = b.name ?? b.username ?? '';
+      } else {
+        av = String(a[membersSortCol] ?? '');
+        bv = String(b[membersSortCol] ?? '');
+      }
+      const cmp = av.localeCompare(bv);
+      return membersSortDir === 'asc' ? cmp : -cmp;
+    });
+  });
 
   // ── Budget ────────────────────────────────────────────────────────────
   let budget = $state(null);
@@ -78,6 +116,23 @@
   let auditLoading = $state(false);
   let auditError = $state(null);
   let auditFilterType = $state('');
+  let auditSortCol = $state('timestamp');
+  let auditSortDir = $state(-1);
+
+  function toggleAuditSort(col) {
+    if (col === auditSortCol) { auditSortDir *= -1; }
+    else { auditSortCol = col; auditSortDir = 1; }
+  }
+
+  const sortedAuditEvents = $derived(
+    [...auditEvents].sort((a, b) => {
+      const av = a[auditSortCol] ?? '';
+      const bv = b[auditSortCol] ?? '';
+      if (av < bv) return -1 * auditSortDir;
+      if (av > bv) return 1 * auditSortDir;
+      return 0;
+    })
+  );
 
   const AUDIT_EVENT_TYPES = [
     'spec_approved', 'spec_revoked', 'gate_override', 'trust_changed',
@@ -125,6 +180,20 @@
     finally { policiesLoading = false; }
   }
 
+  let deletingPolicyId = $state(null);
+
+  async function deleteAbacPolicy(policyId) {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    deletingPolicyId = policyId;
+    try {
+      await api.deleteWorkspaceAbacPolicy(wsId, policyId);
+      await loadAbacPolicies(wsId);
+    } catch (e) {
+      toastError($t('workspace_settings.trust.abac_delete_failed', { values: { error: e?.message ?? 'unknown' } }));
+    } finally { deletingPolicyId = null; }
+  }
+
   async function loadMembers(wsId) {
     membersLoading = true;
     membersError = null;
@@ -155,7 +224,7 @@
     if (!wsId) return;
     const total = Number(budgetEditCredits);
     if (!Number.isFinite(total) || total < 0) {
-      budgetSaveError = 'Enter a valid non-negative number.';
+      budgetSaveError = $t('workspace_settings.budget.invalid_number');
       return;
     }
     budgetSaving = true;
@@ -167,7 +236,7 @@
       budgetSaved = true;
       setTimeout(() => { budgetSaved = false; }, 2000);
     } catch (e) {
-      budgetSaveError = e?.message ?? 'Failed to save budget.';
+      budgetSaveError = e?.message ?? $t('workspace_settings.budget.save_failed');
     } finally {
       budgetSaving = false;
     }
@@ -206,7 +275,7 @@
       await api.updateWorkspace(workspace.id, { default_compute_target: defaultComputeTarget });
       generalSaved = true;
       setTimeout(() => { generalSaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_settings')); }
     finally { generalSaving = false; }
   }
 
@@ -217,7 +286,7 @@
       await api.updateWorkspace(workspace.id, { trust_level: trustLevel });
       trustSaved = true;
       setTimeout(() => { trustSaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_trust')); }
     finally { trustSaving = false; }
   }
 
@@ -234,12 +303,12 @@
       });
       policyDriftSaved = true;
       setTimeout(() => { policyDriftSaved = false; }, 2000);
-    } catch { /* ignore */ }
+    } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_drift')); }
     finally { policyDriftSaving = false; }
   }
 
   function handleTabKeydown(e) {
-    const idx = TABS.findIndex(t => t.id === activeTab);
+    const idx = TABS.findIndex(tab => tab.id === activeTab);
     if (idx < 0) return;
     let next = -1;
     if (e.key === 'ArrowRight') next = (idx + 1) % TABS.length;
@@ -274,7 +343,7 @@
     <button
       class="back-btn"
       onclick={() => onBack?.()}
-      aria-label="Back to workspace home"
+      aria-label={$t('workspace_settings.back_label')}
       data-testid="ws-settings-back"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
@@ -282,13 +351,13 @@
       </svg>
     </button>
     <div class="page-title-group">
-      <h1 class="page-title" data-testid="ws-settings-title">{workspace?.name ?? 'Workspace'} Settings</h1>
+      <h1 class="page-title" data-testid="ws-settings-title">{workspace?.name ? $t('workspace_settings.page_title', { values: { name: workspace.name } }) : $t('workspace_settings.page_title_fallback')}</h1>
     </div>
   </div>
 
   <!-- ── Tab bar ────────────────────────────────────────────────────── -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="settings-tab-bar" role="tablist" aria-label="Workspace settings sections" data-testid="ws-settings-tabs" onkeydown={handleTabKeydown}>
+  <div class="settings-tab-bar" role="tablist" aria-label={$t('workspace_settings.tab_bar_label')} data-testid="ws-settings-tabs" onkeydown={handleTabKeydown}>
     {#each TABS as tab}
       <button
         class="settings-tab-btn"
@@ -311,24 +380,24 @@
     <!-- General tab -->
     {#if activeTab === 'general'}
       <div class="settings-section" data-testid="general-tab">
-        <h2 class="section-title">General</h2>
+        <h2 class="section-title">{$t('workspace_settings.general.title')}</h2>
 
         <div class="field-group">
           <div class="field">
-            <label class="field-label">Workspace Name</label>
+            <span class="field-label">{$t('workspace_settings.general.workspace_name')}</span>
             <div class="field-value" data-testid="ws-name">{workspace?.name ?? '—'}</div>
-            <p class="field-hint">Contact your administrator to rename the workspace.</p>
+            <p class="field-hint">{$t('workspace_settings.general.rename_hint')}</p>
           </div>
 
           <div class="field">
-            <label class="field-label">Description</label>
+            <span class="field-label">{$t('workspace_settings.general.description')}</span>
             <div class="field-value">{workspace?.description ?? '—'}</div>
           </div>
 
           <div class="field">
-            <label class="field-label" for="compute-target-select">Default Compute Target</label>
+            <label class="field-label" for="compute-target-select">{$t('workspace_settings.general.default_compute_target')}</label>
             {#if computeLoading}
-              <div class="field-loading">Loading targets…</div>
+              <div class="field-loading">{$t('workspace_settings.general.loading_targets')}</div>
             {:else}
               <select
                 id="compute-target-select"
@@ -336,7 +405,7 @@
                 bind:value={defaultComputeTarget}
                 data-testid="compute-target-select"
               >
-                <option value="">— None (use tenant default) —</option>
+                <option value="">{$t('workspace_settings.general.none_tenant_default')}</option>
                 {#each computeTargets as ct}
                   <option value={ct.id}>{ct.name ?? ct.id}</option>
                 {/each}
@@ -352,7 +421,7 @@
             disabled={generalSaving}
             data-testid="save-general-btn"
           >
-            {#if generalSaving}Saving…{:else if generalSaved}Saved ✓{:else}Save{/if}
+            {#if generalSaving}{$t('workspace_settings.general.saving')}{:else if generalSaved}{$t('workspace_settings.general.saved')}{:else}{$t('workspace_settings.general.save')}{/if}
           </button>
         </div>
       </div>
@@ -360,14 +429,14 @@
     <!-- Trust & Policies tab -->
     {:else if activeTab === 'trust'}
       <div class="settings-section" data-testid="trust-tab">
-        <h2 class="section-title">Trust & Policies</h2>
+        <h2 class="section-title">{$t('workspace_settings.trust.title')}</h2>
 
         <!-- Trust level -->
         <div class="sub-section">
-          <h3 class="sub-title">Trust Level</h3>
-          <p class="sub-desc">Controls how autonomously agents operate in this workspace.</p>
+          <h3 class="sub-title">{$t('workspace_settings.trust.trust_level_title')}</h3>
+          <p class="sub-desc">{$t('workspace_settings.trust.trust_level_desc')}</p>
 
-          <div class="trust-grid" role="radiogroup" aria-label="Trust level">
+          <div class="trust-grid" role="radiogroup" aria-label={$t('workspace_settings.trust.trust_level_label')}>
             {#each TRUST_LEVELS as tl}
               <label
                 class="trust-card"
@@ -394,18 +463,18 @@
               disabled={trustSaving}
               data-testid="save-trust-btn"
             >
-              {#if trustSaving}Saving…{:else if trustSaved}Saved ✓{:else}Save Trust Level{/if}
+              {#if trustSaving}{$t('workspace_settings.trust.saving')}{:else if trustSaved}{$t('workspace_settings.trust.saved')}{:else}{$t('workspace_settings.trust.save_trust_level')}{/if}
             </button>
           </div>
         </div>
 
         <!-- ABAC Policies -->
         <div class="sub-section">
-          <h3 class="sub-title">ABAC Policies</h3>
+          <h3 class="sub-title">{$t('workspace_settings.trust.abac_title')}</h3>
           {#if policiesLoading}
-            <p class="loading-text">Loading policies…</p>
+            <p class="loading-text">{$t('workspace_settings.trust.abac_loading')}</p>
           {:else if abacPolicies.length === 0}
-            <p class="empty-text">No ABAC policies configured for this workspace.</p>
+            <p class="empty-text">{$t('workspace_settings.trust.abac_empty')}</p>
           {:else}
             <div class="policy-list" data-testid="abac-policy-list">
               {#each abacPolicies as policy}
@@ -417,6 +486,15 @@
                   {#if policy.description}
                     <span class="policy-desc">{policy.description}</span>
                   {/if}
+                  <button
+                    class="policy-delete-btn"
+                    onclick={() => deleteAbacPolicy(policy.id)}
+                    disabled={deletingPolicyId === policy.id}
+                    aria-label="{$t('common.delete')} {policy.name ?? policy.id}"
+                    data-testid="delete-abac-policy-btn"
+                  >
+                    {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
+                  </button>
                 </div>
               {/each}
             </div>
@@ -425,28 +503,28 @@
 
         <!-- MetaSpec Drift Policy -->
         <div class="sub-section">
-          <h3 class="sub-title">Meta-Spec Drift Policy</h3>
-          <p class="sub-desc">Controls how the workspace responds when agents produce code under outdated meta-spec versions.</p>
+          <h3 class="sub-title">{$t('workspace_settings.trust.drift_title')}</h3>
+          <p class="sub-desc">{$t('workspace_settings.trust.drift_desc')}</p>
 
           <div class="toggle-group" data-testid="drift-policy-toggles">
             <label class="toggle-row">
               <input type="checkbox" bind:checked={warnOnDrift} data-testid="toggle-warn-on-drift" />
               <span class="toggle-label">
-                <span class="toggle-name">Warn on drift</span>
-                <span class="toggle-hint">Show a warning when code is produced under an older meta-spec version.</span>
+                <span class="toggle-name">{$t('workspace_settings.trust.warn_on_drift')}</span>
+                <span class="toggle-hint">{$t('workspace_settings.trust.warn_on_drift_hint')}</span>
               </span>
             </label>
 
             <label class="toggle-row">
               <input type="checkbox" bind:checked={blockOnDrift} data-testid="toggle-block-on-drift" />
               <span class="toggle-label">
-                <span class="toggle-name">Block on drift</span>
-                <span class="toggle-hint">Block merges when the code was produced under an older meta-spec version.</span>
+                <span class="toggle-name">{$t('workspace_settings.trust.block_on_drift')}</span>
+                <span class="toggle-hint">{$t('workspace_settings.trust.block_on_drift_hint')}</span>
               </span>
             </label>
 
             <div class="field">
-              <label class="field-label" for="drift-tolerance-input">Drift tolerance (versions behind)</label>
+              <label class="field-label" for="drift-tolerance-input">{$t('workspace_settings.trust.drift_tolerance_label')}</label>
               <input
                 id="drift-tolerance-input"
                 class="field-input"
@@ -456,7 +534,7 @@
                 bind:value={driftTolerance}
                 data-testid="drift-tolerance-input"
               />
-              <p class="field-hint">Allow agents to be this many versions behind before triggering warn/block.</p>
+              <p class="field-hint">{$t('workspace_settings.trust.drift_tolerance_hint')}</p>
             </div>
           </div>
 
@@ -467,7 +545,7 @@
               disabled={policyDriftSaving}
               data-testid="save-drift-policy-btn"
             >
-              {#if policyDriftSaving}Saving…{:else if policyDriftSaved}Saved ✓{:else}Save Drift Policy{/if}
+              {#if policyDriftSaving}{$t('workspace_settings.trust.saving')}{:else if policyDriftSaved}{$t('workspace_settings.trust.saved')}{:else}{$t('workspace_settings.trust.save_drift_policy')}{/if}
             </button>
           </div>
         </div>
@@ -476,25 +554,31 @@
     <!-- Teams tab -->
     {:else if activeTab === 'teams'}
       <div class="settings-section" data-testid="teams-tab">
-        <h2 class="section-title">Teams</h2>
+        <h2 class="section-title">{$t('workspace_settings.teams.title')}</h2>
 
         {#if membersLoading}
-          <p class="loading-text">Loading members…</p>
+          <p class="loading-text">{$t('workspace_settings.teams.loading')}</p>
         {:else if membersError}
           <p class="error-text" role="alert">{membersError}</p>
         {:else if members.length === 0}
-          <p class="empty-text">No members found in this workspace.</p>
+          <p class="empty-text">{$t('workspace_settings.teams.empty')}</p>
         {:else}
           <table class="members-table" data-testid="members-table">
             <thead>
               <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Email</th>
-                <th scope="col">Role</th>
+                <th scope="col" aria-sort={membersSortCol === 'name' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button class="sort-btn" onclick={() => toggleMembersSort('name')}>{$t('workspace_settings.teams.col_name')} <span class="sort-arrow" aria-hidden="true">{membersSortArrow('name')}</span></button>
+                </th>
+                <th scope="col" aria-sort={membersSortCol === 'email' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button class="sort-btn" onclick={() => toggleMembersSort('email')}>{$t('workspace_settings.teams.col_email')} <span class="sort-arrow" aria-hidden="true">{membersSortArrow('email')}</span></button>
+                </th>
+                <th scope="col" aria-sort={membersSortCol === 'role' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <button class="sort-btn" onclick={() => toggleMembersSort('role')}>{$t('workspace_settings.teams.col_role')} <span class="sort-arrow" aria-hidden="true">{membersSortArrow('role')}</span></button>
+                </th>
               </tr>
             </thead>
             <tbody>
-              {#each members as member}
+              {#each sortedMembers as member}
                 <tr data-testid="member-row">
                   <td class="member-name">{member.name ?? member.username ?? '—'}</td>
                   <td class="member-email">{member.email ?? '—'}</td>
@@ -509,27 +593,27 @@
     <!-- Budget tab -->
     {:else if activeTab === 'budget'}
       <div class="settings-section" data-testid="budget-tab">
-        <h2 class="section-title">Budget</h2>
+        <h2 class="section-title">{$t('workspace_settings.budget.title')}</h2>
 
         {#if budgetLoading}
-          <p class="loading-text">Loading budget…</p>
+          <p class="loading-text">{$t('workspace_settings.budget.loading')}</p>
         {:else if budgetError}
           <p class="error-text" role="alert">{budgetError}</p>
         {:else if !budget}
-          <p class="empty-text">No budget data available for this workspace.</p>
+          <p class="empty-text">{$t('workspace_settings.budget.empty')}</p>
         {:else}
           <div class="budget-overview" data-testid="budget-overview">
             <div class="budget-stat-row">
               <div class="budget-stat">
-                <span class="budget-stat-label">Token Limit / Day</span>
-                <span class="budget-stat-value">{budget.config?.max_tokens_per_day ?? 'Unlimited'}</span>
+                <span class="budget-stat-label">{$t('workspace_settings.budget.token_limit')}</span>
+                <span class="budget-stat-value">{budget.config?.max_tokens_per_day ?? $t('workspace_settings.budget.unlimited')}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Tokens Used Today</span>
+                <span class="budget-stat-label">{$t('workspace_settings.budget.tokens_used')}</span>
                 <span class="budget-stat-value">{budget.usage?.tokens_used_today ?? '—'}</span>
               </div>
               <div class="budget-stat">
-                <span class="budget-stat-label">Cost Today</span>
+                <span class="budget-stat-label">{$t('workspace_settings.budget.cost_today')}</span>
                 <span class="budget-stat-value">
                   {budget.usage?.cost_today != null ? `$${budget.usage.cost_today.toFixed(4)}` : '—'}
                 </span>
@@ -539,7 +623,7 @@
             {#if budgetPct !== null}
               <div class="budget-bar-wrap">
                 <div class="budget-bar-label">
-                  <span>Usage</span>
+                  <span>{$t('workspace_settings.budget.usage')}</span>
                   <span>{budgetPct}%</span>
                 </div>
                 <div
@@ -548,7 +632,7 @@
                   aria-valuenow={budgetPct}
                   aria-valuemin="0"
                   aria-valuemax="100"
-                  aria-label="Budget {budgetPct}% used"
+                  aria-label={$t('workspace_settings.budget_used_label', { values: { pct: budgetPct } })}
                   data-testid="budget-bar"
                 >
                   <div
@@ -563,13 +647,13 @@
             {/if}
 
             {#if budget.usage?.period_start}
-              <p class="budget-reset">Period started: {fmtDate(budget.usage.period_start)}</p>
+              <p class="budget-reset">{$t('workspace_settings.budget.period_started', { values: { date: fmtDate(budget.usage.period_start) } })}</p>
             {/if}
 
             <div class="budget-edit" data-testid="budget-edit">
-              <h3 class="budget-edit-title">Set Daily Token Limit</h3>
+              <h3 class="budget-edit-title">{$t('workspace_settings.budget.set_daily_limit')}</h3>
               <div class="budget-edit-row">
-                <label for="budget-credits-input" class="budget-edit-label">Max Tokens / Day</label>
+                <label for="budget-credits-input" class="budget-edit-label">{$t('workspace_settings.budget.max_tokens_label')}</label>
                 <input
                   id="budget-credits-input"
                   class="budget-edit-input"
@@ -577,7 +661,7 @@
                   min="0"
                   step="1"
                   bind:value={budgetEditCredits}
-                  placeholder="e.g. 10000"
+                  placeholder={$t('workspace_settings.budget.placeholder_tokens')}
                   data-testid="budget-credits-input"
                   disabled={budgetSaving}
                 />
@@ -587,7 +671,7 @@
                   disabled={budgetSaving}
                   data-testid="budget-save-btn"
                 >
-                  {budgetSaving ? 'Saving…' : budgetSaved ? 'Saved ✓' : 'Save'}
+                  {budgetSaving ? $t('workspace_settings.budget.saving') : budgetSaved ? $t('workspace_settings.budget.saved') : $t('workspace_settings.budget.save')}
                 </button>
               </div>
               {#if budgetSaveError}
@@ -601,15 +685,15 @@
     <!-- Compute tab -->
     {:else if activeTab === 'compute'}
       <div class="settings-section" data-testid="compute-tab">
-        <h2 class="section-title">Compute Targets</h2>
-        <p class="section-desc">Compute targets available for agents in this workspace, configured by your tenant.</p>
+        <h2 class="section-title">{$t('workspace_settings.compute.title')}</h2>
+        <p class="section-desc">{$t('workspace_settings.compute.desc')}</p>
 
         {#if allComputeLoading}
-          <p class="loading-text">Loading compute targets…</p>
+          <p class="loading-text">{$t('workspace_settings.compute.loading')}</p>
         {:else if allComputeError}
           <p class="error-text" role="alert">{allComputeError}</p>
         {:else if allCompute.length === 0}
-          <p class="empty-text">No compute targets configured. Contact your tenant administrator.</p>
+          <p class="empty-text">{$t('workspace_settings.compute.empty')}</p>
         {:else}
           <div class="compute-list" data-testid="compute-list">
             {#each allCompute as ct}
@@ -624,7 +708,7 @@
                   <p class="compute-desc">{ct.description}</p>
                 {/if}
                 {#if ct.id === (defaultComputeTarget || workspace?.default_compute_target)}
-                  <span class="compute-default-badge">Default for this workspace</span>
+                  <span class="compute-default-badge">{$t('workspace_settings.compute.default_badge')}</span>
                 {/if}
               </div>
             {/each}
@@ -635,16 +719,17 @@
     <!-- Audit tab -->
     {:else if activeTab === 'audit'}
       <div class="settings-section" data-testid="audit-tab">
-        <h2 class="section-title">Audit Log</h2>
+        <h2 class="section-title">{$t('workspace_settings.audit.title')}</h2>
 
         <div class="audit-filter-bar">
           <select
             class="filter-select"
             bind:value={auditFilterType}
-            aria-label="Filter by event type"
+            onchange={() => loadAudit(workspace?.id)}
+            aria-label={$t('workspace_settings.audit.filter_label')}
             data-testid="audit-filter-select"
           >
-            <option value="">All event types</option>
+            <option value="">{$t('workspace_settings.audit.all_event_types')}</option>
             {#each AUDIT_EVENT_TYPES as et}
               <option value={et}>{et}</option>
             {/each}
@@ -655,19 +740,25 @@
             disabled={auditLoading}
             data-testid="audit-refresh-btn"
           >
-            {auditLoading ? 'Loading…' : 'Refresh'}
+            {auditLoading ? $t('workspace_settings.audit.loading_btn') : $t('workspace_settings.audit.refresh')}
           </button>
         </div>
 
         {#if auditLoading}
-          <p class="loading-text">Loading audit events…</p>
+          <p class="loading-text">{$t('workspace_settings.audit.loading')}</p>
         {:else if auditError}
           <p class="error-text" role="alert">{auditError}</p>
         {:else if auditEvents.length === 0}
-          <p class="empty-text">No audit events found for this workspace.</p>
+          <p class="empty-text">{$t('workspace_settings.audit.empty')}</p>
         {:else}
           <div class="audit-list" data-testid="audit-list">
-            {#each auditEvents as evt}
+            <div class="audit-row audit-header">
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('event_type')}>{$t('workspace_settings.audit.col_type')}{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('actor')}>{$t('workspace_settings.audit.col_actor')}{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('details')}>{$t('workspace_settings.audit.col_detail')}{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" onclick={() => toggleAuditSort('timestamp')}>{$t('workspace_settings.audit.col_time')}{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+            </div>
+            {#each sortedAuditEvents as evt}
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
@@ -1005,6 +1096,28 @@
     width: 100%;
   }
 
+  .policy-delete-btn {
+    margin-left: auto;
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .policy-delete-btn:hover:not(:disabled) {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .policy-delete-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .policy-delete-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
   /* ── Toggle group ─────────────────────────────────────────────────── */
   .toggle-group {
     display: flex;
@@ -1063,9 +1176,40 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: var(--space-3) var(--space-4);
+    padding: 0;
     background: var(--color-surface-elevated);
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-3) var(--space-4);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
   }
 
   .members-table tbody tr {
@@ -1342,6 +1486,33 @@
     color: var(--color-text-muted);
     white-space: nowrap;
     font-family: var(--font-mono);
+  }
+
+  .audit-header {
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .audit-sort-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    padding: 0;
+    transition: color var(--transition-fast);
+  }
+
+  .audit-sort-btn:hover { color: var(--color-text); }
+
+  .audit-sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Action row ───────────────────────────────────────────────────── */

@@ -22,6 +22,7 @@
   } = $props();
 
   import { onDestroy } from 'svelte';
+  import { t } from 'svelte-i18n';
 
   let inputEl = $state(null);
   let historyEl = $state(null);
@@ -54,19 +55,19 @@
     if (!r) return '';
     switch (type) {
       case 'llm-qa':
-        return `Ask about ${r} ▸`;
+        return $t('inline_chat.ask_about', { values: { recipient: r } });
       case 'spec-edit':
-        return `Edit spec: "${r}" ▸`;
+        return $t('inline_chat.edit_spec', { values: { recipient: r } });
       default:
-        return `Message to ${r} ▸`;
+        return $t('inline_chat.message_to', { values: { recipient: r } });
     }
   }
 
   function buildPlaceholder(type) {
     switch (type) {
-      case 'llm-qa':   return 'Ask a question…';
-      case 'spec-edit': return 'Describe a change…';
-      default:          return 'Type a message…';
+      case 'llm-qa':   return $t('inline_chat.placeholder_qa');
+      case 'spec-edit': return $t('inline_chat.placeholder_edit');
+      default:          return $t('inline_chat.placeholder_message');
     }
   }
 
@@ -172,7 +173,7 @@
 
 <div class="inline-chat">
   {#if messages.length > 0 || streamBuffer}
-    <div class="chat-history" aria-live="polite" aria-label="Chat history" bind:this={historyEl}>
+    <div class="chat-history" aria-live="polite" aria-label={$t('inline_chat.chat_history')} bind:this={historyEl}>
       {#each messages as msg}
         <div class="chat-msg chat-msg-{msg.role}">
           <span class="msg-role" aria-label={msg.role === 'user' ? 'You' : recipient}>
@@ -190,15 +191,15 @@
       {/if}
     </div>
 
-    <button class="clear-btn" onclick={clearHistory} aria-label="Clear conversation">
-      Clear
+    <button class="clear-btn" onclick={clearHistory} aria-label={$t('inline_chat.clear')}>
+      {$t('inline_chat.clear')}
     </button>
   {/if}
 
   {#if error}
     <div class="chat-error" role="alert">
       <span class="chat-error-msg">{error}</span>
-      <button class="chat-error-dismiss" onclick={() => error = null} aria-label="Dismiss error">
+      <button class="chat-error-dismiss" onclick={() => error = null} aria-label={$t('inline_chat.dismiss_error')}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
     </div>
@@ -206,7 +207,7 @@
 
   <div class="chat-input-area" aria-busy={streaming}>
     {#if recipientLabel}
-      <div class="recipient-line" id="inline-chat-recipient" aria-label="Sending to: {recipient}">
+      <div class="recipient-line" id="inline-chat-recipient" aria-label={$t('inline_chat.sending_to', { values: { recipient } })}>
         {recipientLabel}
       </div>
     {/if}
@@ -219,7 +220,7 @@
         placeholder={placeholder ?? defaultPlaceholder}
         rows="1"
         disabled={streaming}
-        aria-label="Message input"
+        aria-label={$t('inline_chat.message_input')}
         aria-describedby={recipientLabel ? 'inline-chat-recipient' : undefined}
         onkeydown={onkeydown}
       ></textarea>
@@ -228,7 +229,7 @@
         class="send-btn"
         onclick={send}
         disabled={!text.trim() || streaming}
-        aria-label="Send message"
+        aria-label={$t('inline_chat.send_message')}
       >
         {#if streaming}
           <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
@@ -245,11 +246,11 @@
     </div>
 
     {#if recipientType === 'agent'}
-      <p class="input-hint">Ctrl+Enter to send · Messages are signed and persisted via message bus</p>
+      <p class="input-hint">{$t('inline_chat.hint_agent')}</p>
     {:else if recipientType === 'llm-qa'}
-      <p class="input-hint">Ctrl+Enter to send · Read-only Q&A — cannot trigger actions</p>
+      <p class="input-hint">{$t('inline_chat.hint_qa')}</p>
     {:else if recipientType === 'spec-edit'}
-      <p class="input-hint">Ctrl+Enter to send · Produces draft suggestions — you accept before saving</p>
+      <p class="input-hint">{$t('inline_chat.hint_edit')}</p>
     {/if}
   </div>
 </div>

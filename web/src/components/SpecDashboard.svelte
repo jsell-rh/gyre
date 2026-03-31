@@ -15,6 +15,7 @@
    */
 
   import { getContext, onMount } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -36,6 +37,8 @@
   // Filters
   let filterStatus = $state('all');
   let filterKind = $state('all');
+  let searchQuery = $state('');
+  let ownerMe = $state(false);
 
   // Sort (workspace/tenant scope)
   let sortCol = $state('path');
@@ -55,13 +58,13 @@
   let pathTouched = $state(false);
 
   // ── Constants ───────────────────────────────────────────────────────────────
-  const STATUS_FILTERS = ['all', 'approved', 'pending', 'deprecated'];
+  const STATUS_FILTERS = ['all', 'draft', 'pending', 'approved', 'deprecated'];
   const TABLE_COLS = [
-    ['path',            'Path'],
-    ['approval_status', 'Status'],
-    ['kind',            'Kind'],
-    ['owner',           'Owner'],
-    ['updated_at',      'Updated'],
+    ['path',            'spec_dashboard.col_path'],
+    ['approval_status', 'spec_dashboard.col_status'],
+    ['kind',            'spec_dashboard.col_kind'],
+    ['owner',           'spec_dashboard.col_owner'],
+    ['updated_at',      'spec_dashboard.col_updated'],
   ];
 
   // ── Load specs ──────────────────────────────────────────────────────────────
@@ -104,13 +107,24 @@
     load();
   });
 
-  // Open "New Spec" modal when navigated here with ?create=true (e.g. from ExplorerCanvas)
+  // Handle URL query params on mount:
+  // - ?create=true opens the "New Spec" modal (e.g. from ExplorerCanvas)
+  // - ?path=<spec_path> opens the spec detail panel (e.g. from workspace home spec click)
   onMount(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.get('create') === 'true') {
       showNewSpec = true;
       url.searchParams.delete('create');
       window.history.replaceState({}, '', url.toString());
+    }
+    const specPath = url.searchParams.get('path');
+    if (specPath) {
+      url.searchParams.delete('path');
+      window.history.replaceState({}, '', url.toString());
+      // Defer so specs have time to load before opening the panel
+      load().then(() => {
+        handleRowClick({ path: specPath, repo_id: repoId });
+      });
     }
   });
 
@@ -128,14 +142,31 @@
     if (filterKind !== 'all') {
       result = result.filter((s) => (s.kind || 'feature') === filterKind);
     }
-    if (scope !== 'repo') {
-      result = sortList(result, sortCol, sortDir);
+    if (ownerMe) {
+      result = result.filter((s) => s.owner === 'me' || s.is_mine);
     }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      result = result.filter((s) =>
+        (s.path ?? '').toLowerCase().includes(q) ||
+        (s.kind ?? '').toLowerCase().includes(q) ||
+        (s.owner ?? '').toLowerCase().includes(q)
+      );
+    }
+    result = sortList(result, sortCol, sortDir);
     return result;
   });
 
   function sortList(list, col, dir) {
     return [...list].sort((a, b) => {
+      if (col === 'progress') {
+        const pa = progressMap[a.path];
+        const pb = progressMap[b.path];
+        const av = pa && pa.total_tasks ? pa.completed_tasks / pa.total_tasks : -1;
+        const bv = pb && pb.total_tasks ? pb.completed_tasks / pb.total_tasks : -1;
+        const cmp = av - bv;
+        return dir === 'asc' ? cmp : -cmp;
+      }
       const av = String(a[col] ?? '');
       const bv = String(b[col] ?? '');
       const cmp = av.localeCompare(bv);
@@ -179,7 +210,7 @@
   function progressLabel(path) {
     const p = progressMap[path];
     if (!p) return null;
-    return `${p.completed_tasks}/${p.total_tasks} tasks`;
+    return $t('spec_dashboard.progress_tasks', { values: { done: p.completed_tasks, total: p.total_tasks } });
   }
 
   // ── New spec ────────────────────────────────────────────────────────────────
@@ -192,13 +223,13 @@
         content: newSpecContent,
         message: `Create ${newSpecPath.trim()} via UI`,
       });
-      toastSuccess(`Spec created — MR #${result.mr_id} created`);
+      toastSuccess($t('spec_dashboard.spec_created', { values: { mr_id: result.mr_id } }));
       showNewSpec = false;
       newSpecPath = '';
       newSpecContent = '# New Spec\n\n## Overview\n\n';
       await load();
     } catch (e) {
-      toastError(`Create failed: ${e.message}`);
+      toastError($t('spec_dashboard.create_failed', { values: { error: e.message } }));
     } finally {
       newSpecSaving = false;
     }
@@ -208,13 +239,15 @@
   function statusColor(s) {
     if (s === 'approved')   return 'success';
     if (s === 'pending')    return 'warning';
-    if (s === 'deprecated') return 'neutral';
-    return 'neutral';
+    if (s === 'draft')      return 'info';
+    if (s === 'deprecated') return 'muted';
+    return 'muted';
   }
 
   function statusIcon(s) {
     if (s === 'approved')   return '✓';
     if (s === 'pending')    return '◐';
+    if (s === 'draft')      return '✎';
     if (s === 'deprecated') return '✗';
     return '?';
   }
@@ -223,38 +256,38 @@
     if (!ts) return '—';
     const diff = Date.now() - ts * 1000;
     const secs = Math.floor(diff / 1000);
-    if (secs < 60) return `${secs}s ago`;
+    if (secs < 60) return $t('common.time_just_now');
     const mins = Math.floor(secs / 60);
-    if (mins < 60) return `${mins}m ago`;
+    if (mins < 60) return $t('common.time_minutes_ago', { values: { count: mins } });
     const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
+    if (hrs < 24) return $t('common.time_hours_ago', { values: { count: hrs } });
+    return $t('common.time_days_ago', { values: { count: Math.floor(hrs / 24) } });
   }
 </script>
 
 <div class="spec-view">
-  <span class="sr-only" aria-live="polite">{loading ? "" : "specs loaded"}</span>
+  <span class="sr-only" aria-live="polite">{loading ? "" : $t('spec_dashboard.loaded')}</span>
   <!-- ── Header ─────────────────────────────────────────────────────────────── -->
   <div class="view-header">
     <div>
-      <h1 class="page-title">Specs</h1>
+      <h1 class="page-title">{$t('spec_dashboard.title')}</h1>
       {#if scope === 'tenant'}
-        <p class="page-desc">All specs across workspaces</p>
+        <p class="page-desc">{$t('spec_dashboard.all_workspace')}</p>
       {:else if scope === 'workspace'}
-        <p class="page-desc">Specs in this workspace</p>
+        <p class="page-desc">{$t('spec_dashboard.in_workspace')}</p>
       {/if}
     </div>
     <div class="header-actions">
       {#if scope === 'repo' && repoId}
-        <Button variant="primary" onclick={() => (showNewSpec = true)}>+ New Spec</Button>
+        <Button variant="primary" onclick={() => (showNewSpec = true)}>{$t('spec_dashboard.new_spec')}</Button>
       {/if}
-      <Button variant="secondary" onclick={load}>Refresh</Button>
+      <Button variant="secondary" onclick={load}>{$t('spec_dashboard.refresh')}</Button>
     </div>
   </div>
 
   <!-- ── Filter bar ─────────────────────────────────────────────────────────── -->
   <div class="filter-bar">
-    <div class="filter-group" role="group" aria-label="Filter by status">
+    <div class="filter-group" role="group" aria-label={$t('spec_dashboard.filter_by_status')}>
       {#each STATUS_FILTERS as f}
         <button
           class="pill"
@@ -262,14 +295,14 @@
           onclick={() => (filterStatus = f)}
           aria-pressed={filterStatus === f}
         >
-          {f.charAt(0).toUpperCase() + f.slice(1)}
+          {$t(`spec_dashboard.filter_${f}`)}
         </button>
       {/each}
     </div>
 
     {#if allKinds.length > 2}
-      <div class="filter-group" role="group" aria-label="Filter by kind">
-        <span class="filter-label">Kind:</span>
+      <div class="filter-group" role="group" aria-label={$t('spec_dashboard.filter_by_kind')}>
+        <span class="filter-label">{$t('spec_dashboard.filter_kind')}</span>
         {#each allKinds as k}
           <button
             class="pill"
@@ -277,11 +310,28 @@
             onclick={() => (filterKind = k)}
             aria-pressed={filterKind === k}
           >
-            {k.charAt(0).toUpperCase() + k.slice(1)}
+            {k === 'all' ? $t('spec_dashboard.filter_all') : k.charAt(0).toUpperCase() + k.slice(1)}
           </button>
         {/each}
       </div>
     {/if}
+
+    <label class="owner-toggle">
+      <input
+        type="checkbox"
+        bind:checked={ownerMe}
+        aria-label={$t('spec_dashboard.filter_owner_me')}
+      />
+      <span class="owner-toggle-label">{$t('spec_dashboard.filter_owner_me')}</span>
+    </label>
+
+    <input
+      class="search-input"
+      type="search"
+      placeholder={$t('spec_dashboard.search_placeholder')}
+      bind:value={searchQuery}
+      aria-label={$t('spec_dashboard.search_placeholder')}
+    />
   </div>
 
   <!-- ── Content area ───────────────────────────────────────────────────────── -->
@@ -296,74 +346,122 @@
     {:else if error}
       <div class="error-banner" role="alert">
         <span>{error}</span>
-        <button onclick={load} class="retry-btn">Retry</button>
+        <button onclick={load} class="retry-btn">{$t('common.retry')}</button>
       </div>
 
     {:else if filtered.length === 0}
       <EmptyState
-        title="No specs found"
+        title={$t('spec_dashboard.no_specs')}
         description={filterStatus === 'all' && filterKind === 'all'
-          ? 'No specs are registered.'
-          : 'No specs match the current filters.'}
+          ? $t('spec_dashboard.no_specs_registered')
+          : $t('spec_dashboard.no_specs_filter')}
       />
-      {#if filterStatus !== 'all' || filterKind !== 'all'}
+      {#if filterStatus !== 'all' || filterKind !== 'all' || ownerMe || searchQuery.trim()}
         <div class="clear-filters-wrap">
-          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; }}>Clear filters</button>
+          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; ownerMe = false; searchQuery = ''; }}>{$t('spec_dashboard.clear_filters')}</button>
         </div>
       {/if}
 
     {:else if scope === 'repo'}
-      <!-- Repo scope: progress bar list -->
-      <ul class="spec-list" role="listbox" aria-label="Specs">
-        {#each filtered as spec (spec.path)}
-          {@const pct = Math.round(progressFraction(spec.path) * 100)}
-          {@const label = progressLabel(spec.path)}
-          <li
-            class="spec-row"
-            role="option"
-            class:selected={selectedPath === spec.path}
-            tabindex="0"
-            aria-selected={selectedPath === spec.path}
-            onclick={() => handleRowClick(spec)}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
-              if (e.key === 'ArrowDown') { e.preventDefault(); const next = e.currentTarget.nextElementSibling; if (next) next.focus(); }
-              if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
-            }}
-          >
-            <span class="spec-path" title={spec.path}>{spec.path}</span>
-            <span class="spec-status-inline {statusColor(spec.approval_status)}">
-              <span aria-hidden="true">{statusIcon(spec.approval_status)}</span> {spec.approval_status ?? 'unknown'}
-            </span>
-            {#if label}
-              <span class="progress-label-text">{label}</span>
-              <div
-                class="progress-bar-wrap"
-                title="{pct}% complete"
-                role="progressbar"
-                aria-valuenow={pct}
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-label="{spec.path} progress: {pct}%"
-              >
-                <div class="progress-bar">
-                  <div class="progress-fill" style="width: {pct}%"></div>
-                </div>
-              </div>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+      <!-- Repo scope: sortable table with progress -->
+      <table class="specs-table repo-specs-table" role="grid" aria-label={$t('spec_dashboard.title')}>
+        <thead>
+          <tr>
+            <th scope="col" aria-sort={sortCol === 'path' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('path')}>
+                {$t('spec_dashboard.col_path')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('path')}</span>
+              </button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'approval_status' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('approval_status')}>
+                {$t('spec_dashboard.col_status')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('approval_status')}</span>
+              </button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'kind' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('kind')}>
+                {$t('spec_dashboard.col_kind')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('kind')}</span>
+              </button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'progress' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('progress')}>
+                {$t('spec_dashboard.col_progress')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('progress')}</span>
+              </button>
+            </th>
+            <th scope="col" aria-sort={sortCol === 'updated_at' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSort('updated_at')}>
+                {$t('spec_dashboard.col_updated')}
+                <span class="sort-arrow" aria-hidden="true">{sortArrow('updated_at')}</span>
+              </button>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each filtered as spec (spec.path)}
+            {@const pct = Math.round(progressFraction(spec.path) * 100)}
+            {@const label = progressLabel(spec.path)}
+            <tr
+              class:selected={selectedPath === spec.path}
+              onclick={() => handleRowClick(spec)}
+              tabindex="0"
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(spec); }
+                if (e.key === 'ArrowDown') { e.preventDefault(); const next = e.currentTarget.nextElementSibling; if (next) next.focus(); }
+                if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
+              }}
+              aria-selected={selectedPath === spec.path}
+              aria-label="{$t('spec_dashboard.title')}: {spec.path}"
+            >
+              <td class="col-path">
+                <span class="spec-path" title={spec.path}>{spec.path}</span>
+              </td>
+              <td>
+                <Badge
+                  value={spec.approval_status ?? 'unknown'}
+                  variant={statusColor(spec.approval_status)}
+                />
+              </td>
+              <td class="col-kind">{spec.kind || '—'}</td>
+              <td class="col-progress">
+                {#if label}
+                  <div class="progress-cell">
+                    <span class="progress-label-text">{label}</span>
+                    <div
+                      class="progress-bar-wrap"
+                      title="{pct}%"
+                      role="progressbar"
+                      aria-valuenow={pct}
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                      aria-label="{$t('spec_dashboard.col_progress')}: {pct}%"
+                    >
+                      <div class="progress-bar">
+                        <div class="progress-fill" style="width: {pct}%"></div>
+                      </div>
+                    </div>
+                  </div>
+                {:else}
+                  <span class="col-time">—</span>
+                {/if}
+              </td>
+              <td class="col-time">{relTime(spec.updated_at)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
 
     {:else}
       <!-- Workspace / tenant scope: sortable table -->
-      <table class="specs-table" role="grid" aria-label="Specs registry">
+      <table class="specs-table" role="grid" aria-label={$t('spec_dashboard.specs_registry')}>
         <thead>
           <tr>
-            {#each TABLE_COLS as [col, label]}
+            {#each TABLE_COLS as [col, labelKey]}
               <th scope="col" aria-sort={sortCol === col ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                 <button class="sort-btn" onclick={() => toggleSort(col)}>
-                  {label}
+                  {$t(labelKey)}
                   <span class="sort-arrow" aria-hidden="true">{sortArrow(col)}</span>
                 </button>
               </th>
@@ -382,7 +480,7 @@
                 if (e.key === 'ArrowUp') { e.preventDefault(); const prev = e.currentTarget.previousElementSibling; if (prev) prev.focus(); }
               }}
               aria-selected={selectedPath === spec.path}
-              aria-label="Spec: {spec.path}"
+              aria-label={$t('spec_dashboard.spec_label', { values: { path: spec.path } })}
             >
               <td class="col-path">
                 <span class="spec-path" title={spec.path}>{spec.path}</span>
@@ -390,7 +488,7 @@
               <td>
                 <Badge
                   value={spec.approval_status ?? 'unknown'}
-                  color={statusColor(spec.approval_status)}
+                  variant={statusColor(spec.approval_status)}
                 />
               </td>
               <td class="col-kind">{spec.kind || '—'}</td>
@@ -405,26 +503,26 @@
 </div>
 
 <!-- ── New Spec modal (Editor Split layout per ui-layout.md §2) ────────────── -->
-<Modal bind:open={showNewSpec} title="New Spec" size="lg">
+<Modal bind:open={showNewSpec} title={$t('spec_dashboard.new_spec_title')} size="lg">
   <div class="new-spec-body">
     <!-- Left: editor -->
     <div class="editor-pane">
-      <label class="field-label" for="new-spec-path">Spec Path</label>
+      <label class="field-label" for="new-spec-path">{$t('spec_dashboard.spec_path_label')}</label>
       <input
         id="new-spec-path"
         class="field-input mono"
         type="text"
         bind:value={newSpecPath}
-        placeholder="system/my-feature.md"
+        placeholder={$t('spec_dashboard.spec_path_placeholder')}
         aria-required="true"
         aria-invalid={pathTouched && !newSpecPath.trim() ? 'true' : 'false'}
         aria-describedby={pathTouched && !newSpecPath.trim() ? 'path-error' : undefined}
         onblur={() => { pathTouched = true; }}
       />
       {#if pathTouched && !newSpecPath.trim()}
-        <span id="path-error" role="alert" style="color: var(--color-danger); font-size: var(--text-xs);">Path is required</span>
+        <span id="path-error" role="alert" style="color: var(--color-danger); font-size: var(--text-xs);">{$t('spec_dashboard.path_required')}</span>
       {/if}
-      <label class="field-label" for="new-spec-content">Content</label>
+      <label class="field-label" for="new-spec-content">{$t('spec_dashboard.spec_content_label')}</label>
       <textarea
         id="new-spec-content"
         class="spec-editor"
@@ -434,19 +532,19 @@
     </div>
     <!-- Right: preview -->
     <div class="preview-pane">
-      <span class="preview-label">Markdown source</span>
+      <span class="preview-label">{$t('spec_dashboard.markdown_source')}</span>
       <pre class="preview-pre">{newSpecContent}</pre>
     </div>
   </div>
   <div class="modal-footer">
-    <Button variant="secondary" onclick={() => { showNewSpec = false; }}>Cancel</Button>
+    <Button variant="secondary" onclick={() => { showNewSpec = false; }}>{$t('common.cancel')}</Button>
     <Button
       variant="primary"
       onclick={saveNewSpec}
       disabled={newSpecSaving || !newSpecPath.trim()}
       aria-busy={newSpecSaving}
     >
-      {newSpecSaving ? 'Saving…' : 'Save & Create MR'}
+      {newSpecSaving ? $t('spec_dashboard.saving') : $t('spec_dashboard.save_create_mr')}
     </Button>
   </div>
 </Modal>
@@ -541,6 +639,51 @@
     border-color: var(--color-link);
     color: var(--color-link);
     font-weight: 500;
+  }
+
+  .owner-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .owner-toggle input[type="checkbox"] {
+    accent-color: var(--color-link);
+    cursor: pointer;
+  }
+
+  .owner-toggle-label {
+    user-select: none;
+  }
+
+  .search-input {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    min-width: 160px;
+    transition: border-color var(--transition-fast);
+  }
+
+  .search-input:focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  .search-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-color: var(--color-focus);
+  }
+
+  .search-input::placeholder {
+    color: var(--color-text-muted);
   }
 
   /* ── Content area ────────────────────────────────────────────────────────── */
@@ -708,6 +851,16 @@
     flex-shrink: 0;
     min-width: 70px;
     text-align: right;
+  }
+
+  .progress-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .col-progress {
+    min-width: 150px;
   }
 
   .progress-bar-wrap {

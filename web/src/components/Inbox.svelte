@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -12,12 +13,15 @@
   // Use shell context API for detail panel — S4.1 app shell manages the split layout
   const openDetailPanel = getContext('openDetailPanel');
   const navigate = getContext('navigate');
+  const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
+  const goToAgentRules = getContext('goToAgentRules');
 
   let notifications = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let expandedId = $state(null);
   let showDismissed = $state(false);
+  let filterType = $state('all');
   let actionStates = $state({});
   let workspaceMap = $state({});
 
@@ -35,19 +39,13 @@
     suggested_link: 'default',
   };
 
-  // Human-readable type labels
-  const TYPE_LABELS = {
-    agent_clarification: 'Clarification',
-    spec_approval: 'Spec Approval',
-    gate_failure: 'Gate Failure',
-    cross_workspace_change: 'Cross-WS Change',
-    conflicting_interpretations: 'Conflict',
-    meta_spec_drift: 'Meta Drift',
-    budget_warning: 'Budget',
-    trust_suggestion: 'Trust',
-    spec_assertion_failure: 'Assertion Fail',
-    suggested_link: 'Suggested Link',
-  };
+  // Human-readable type labels — derived from i18n
+  function typeLabel(typ) {
+    const key = `decisions.type_labels.${typ}`;
+    const val = $t(key);
+    // If i18n returns the key itself, fall back to raw type
+    return val === key ? typ : val;
+  }
 
   async function loadWorkspaceNames() {
     if (scope !== 'tenant') return;
@@ -79,7 +77,7 @@
       // Sort by priority ascending (1 = highest)
       notifications = data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     } catch (e) {
-      error = e.message || 'Failed to load notifications';
+      error = e.message || $t('decisions.load_failed');
       notifications = [];
     } finally {
       if (!isBackground) loading = false;
@@ -98,11 +96,11 @@
     if (!ts) return '';
     const diff = Date.now() - new Date(ts).getTime();
     const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m ago`;
+    if (m < 1) return $t('decisions.time_just_now');
+    if (m < 60) return $t('decisions.time_minutes_ago', { values: { count: m } });
     const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+    if (h < 24) return $t('decisions.time_hours_ago', { values: { count: h } });
+    return $t('decisions.time_days_ago', { values: { count: Math.floor(h / 24) } });
   }
 
   function toggleExpand(id) {
@@ -113,9 +111,28 @@
     openDetailPanel?.(entity);
   }
 
-  let visibleNotifications = $derived(
-    notifications.filter(n => showDismissed || !n.dismissed_at)
+  // Pagination
+  const PAGE_SIZE = 20;
+  let displayLimit = $state(PAGE_SIZE);
+
+  let allVisibleNotifications = $derived(
+    notifications.filter(n => {
+      if (!showDismissed && n.dismissed_at) return false;
+      if (filterType !== 'all' && n.notification_type !== filterType) return false;
+      return true;
+    })
   );
+
+  let availableTypes = $derived.by(() => {
+    const types = new Set(notifications.map(n => n.notification_type).filter(Boolean));
+    return ['all', ...Array.from(types).sort()];
+  });
+
+  let visibleNotifications = $derived(
+    allVisibleNotifications.slice(0, displayLimit)
+  );
+
+  let hasMore = $derived(allVisibleNotifications.length > displayLimit);
 
   let unresolvedCount = $derived(
     notifications.filter(n => !n.resolved_at && !n.dismissed_at).length
@@ -125,14 +142,14 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.markNotificationRead(n.id);
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
+      );
+      if (expandedId === n.id) expandedId = null;
     } catch {
-      toastError('Dismiss failed — change may not be saved.');
+      toastError($t('decisions.dismiss_failed'));
     }
-    notifications = notifications.map(item =>
-      item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
-    );
     actionStates = { ...actionStates, [n.id]: { loading: false } };
-    if (expandedId === n.id) expandedId = null;
   }
 
   // Spec paths in notification bodies may include a leading "specs/" prefix.
@@ -147,17 +164,18 @@
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
     try {
       await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: 'Approved' },
+        [n.id]: { loading: false, success: true, message: $t('decisions.approved') },
       };
     } catch (e) {
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: false, message: e.message || 'Approval failed' },
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.approval_failed') },
       };
     }
   }
@@ -168,17 +186,18 @@
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
     try {
       await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected from inbox');
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: 'Rejected' },
+        [n.id]: { loading: false, success: true, message: $t('decisions.rejected') },
       };
     } catch (e) {
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: false, message: e.message || 'Rejection failed' },
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.rejection_failed') },
       };
     }
   }
@@ -189,14 +208,18 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: 'Re-queued' },
+        [n.id]: { loading: false, success: true, message: $t('decisions.re_queued') },
       };
     } catch (e) {
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: false, message: e.message || 'Retry failed' },
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.retry_failed') },
       };
     }
   }
@@ -222,12 +245,12 @@
   }
 
   async function handleIncreaseTrust(n) {
-    navigate?.('admin');
+    goToWorkspaceSettings?.();
     await handleDismiss(n);
   }
 
   function handleAdjustMetaSpec(n) {
-    navigate?.('meta-specs');
+    goToAgentRules?.();
   }
 
   // Reload when scope/workspaceId/repoId changes, and set up auto-refresh
@@ -237,37 +260,50 @@
     void repoId;
     loadWorkspaceNames();
     loadNotifications();
-    const interval = setInterval(loadNotifications, 60000);
+    const interval = setInterval(() => loadNotifications(true), 60000);
     return () => clearInterval(interval);
   });
 </script>
 
 <div class="inbox" aria-busy={loading}>
   <span class="sr-only" role="status">
-    {#if !loading}{visibleNotifications.length} notification{visibleNotifications.length === 1 ? '' : 's'}{/if}
+    {#if !loading}{$t('decisions.notification_count', { values: { count: visibleNotifications.length } })}{/if}
   </span>
   <div class="inbox-header">
       <div class="inbox-title-row">
-        <h1 class="inbox-title">Inbox</h1>
+        <h1 class="inbox-title">{$t('decisions.title')}</h1>
         {#if unresolvedCount > 0}
-          <span class="inbox-badge" aria-label="{unresolvedCount} unresolved items"
+          <span class="inbox-badge" aria-label={$t('decisions.unresolved_label', { values: { count: unresolvedCount } })}
             >{unresolvedCount}</span
           >
         {/if}
       </div>
       <div class="inbox-header-actions">
+        {#if availableTypes.length > 2}
+          <select
+            class="type-filter"
+            value={filterType}
+            onchange={(e) => { filterType = e.target.value; }}
+            aria-label={$t('decisions.filter_by_type')}
+            data-testid="inbox-type-filter"
+          >
+            {#each availableTypes as typ}
+              <option value={typ}>{typ === 'all' ? $t('decisions.all_types') : (typeLabel(typ))}</option>
+            {/each}
+          </select>
+        {/if}
         <label class="dismissed-toggle">
           <input type="checkbox" bind:checked={showDismissed} />
-          Show Dismissed
+          {$t('decisions.show_dismissed')}
         </label>
-        <Button variant="ghost" size="sm" onclick={loadNotifications}>Refresh</Button>
+        <Button variant="ghost" size="sm" onclick={loadNotifications}>{$t('common.refresh')}</Button>
       </div>
     </div>
 
     {#if error}
       <div class="error-banner" role="alert">
         {error}
-        <button class="retry-btn" onclick={loadNotifications}>Retry</button>
+        <button class="retry-btn" onclick={loadNotifications}>{$t('common.retry')}</button>
       </div>
     {/if}
 
@@ -278,9 +314,9 @@
         {/each}
       </div>
     {:else if visibleNotifications.length === 0}
-      <EmptyState title="All caught up!" description="No pending notifications." />
+      <EmptyState title={$t('decisions.all_caught_up')} description={$t('decisions.no_pending')} />
     {:else}
-      <div class="inbox-list" role="list" aria-label="Notifications">
+      <div class="inbox-list" role="list" aria-label={$t('decisions.notifications_label')}>
         {#each visibleNotifications as n (n.id)}
           {@const body = getBody(n)}
           {@const isExpanded = expandedId === n.id}
@@ -302,25 +338,25 @@
               onclick={() => toggleExpand(n.id)}
               aria-expanded={isExpanded}
               aria-controls="inbox-card-{n.id}"
-              aria-label="{isExpanded ? 'Collapse' : 'Expand'}: {n.title}"
+              aria-label="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
             >
               <div class="card-header-left">
                 <span
                   class="priority-badge"
                   data-priority={n.priority}
-                  aria-label="Priority {n.priority}"
+                  aria-label={$t('decisions.priority_label', { values: { level: n.priority } })}
                 >
                   P{n.priority}
                 </span>
-                {#if isDismissed}<span class="sr-only">(Dismissed)</span>{/if}
+                {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
                 <div class="card-header-text">
                   <span class="card-title">{n.title}</span>
                   {#if body.agent_id || body.mr_title}
                     <span class="card-subtitle">
                       {#if body.agent_id}{body.agent_id}{/if}
-                      {#if body.mr_title} on {body.mr_title}{/if}
+                      {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
                       {#if body.spec_path}
-                        (spec: {body.spec_path.split('/').pop()?.replace('.md', '')})
+                        ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})
                       {/if}
                     </span>
                   {:else if body.spec_path}
@@ -332,13 +368,13 @@
               </div>
               <div class="card-header-right">
                 {#if isResolved}
-                  <Badge value="Resolved" variant="success" />
+                  <Badge value={$t('decisions.status_resolved')} variant="success" />
                 {/if}
                 {#if scope === 'tenant' && n.workspace_id}
                   <Badge value={workspaceMap[n.workspace_id] ?? n.workspace_id} variant="default" />
                 {/if}
                 <Badge
-                  value={TYPE_LABELS[n.notification_type] || n.notification_type}
+                  value={typeLabel(n.notification_type)}
                   variant={TYPE_VARIANTS[n.notification_type] || 'default'}
                 />
                 <span class="card-age">{relativeTime(n.created_at)}</span>
@@ -354,7 +390,7 @@
                 {/if}
                 {#if body.gate_name || body.command}
                   <div class="gate-detail">
-                    {#if body.gate_name}<span class="gate-label">Gate: <strong>{body.gate_name}</strong></span>{/if}
+                    {#if body.gate_name}<span class="gate-label">{$t('decisions.gate_label', { values: { name: body.gate_name } })}</span>{/if}
                     {#if body.command}<code class="gate-command">{body.command}</code>{/if}
                   </div>
                 {/if}
@@ -375,7 +411,7 @@
                       class="ref-link"
                       onclick={() => openDetail({ type: 'spec', id: body.spec_path, data: n })}
                     >
-                      Related spec: {body.spec_path}
+                      {$t('decisions.related_spec', { values: { path: body.spec_path } })}
                     </button>
                   {/if}
                   {#if body.agent_id}
@@ -383,18 +419,18 @@
                       class="ref-link"
                       onclick={() => openDetail({ type: 'agent', id: body.agent_id, data: n })}
                     >
-                      Agent: {body.agent_id}
+                      {$t('decisions.agent_label', { values: { id: body.agent_id } })}
                     </button>
                   {/if}
                   {#if body.persona}
-                    <span class="ref-info">Persona: {body.persona}</span>
+                    <span class="ref-info">{$t('decisions.persona_label', { values: { name: body.persona } })}</span>
                   {/if}
                   {#if body.mr_id}
                     <button
                       class="ref-link"
                       onclick={() => openDetail({ type: 'mr', id: body.mr_id, data: n })}
                     >
-                      MR: {body.mr_title || body.mr_id}
+                      {$t('decisions.mr_label', { values: { title: body.mr_title || body.mr_id } })}
                     </button>
                   {/if}
                 </div>
@@ -415,13 +451,16 @@
                   <div class="card-actions">
                     {#if n.notification_type === 'agent_clarification'}
                       <Button variant="primary" size="sm" onclick={() => handleRespondToAgent(n)}>
-                        Respond to Agent
+                        {$t('decisions.respond_to_agent')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        View Spec
+                        {$t('decisions.view_spec')}
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => { navigate?.('explorer'); handleDismiss(n); }}>
-                        Open in Explorer
+                      <Button variant="ghost" size="sm" onclick={() => {
+                        const b = getBody(n);
+                        openDetail({ type: 'spec', id: b.spec_path || n.entity_ref, data: n, defaultTab: 'architecture' });
+                      }}>
+                        {$t('decisions.view_in_explorer')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -429,7 +468,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'spec_approval'}
                       <Button
@@ -438,7 +477,7 @@
                         disabled={state?.loading}
                         onclick={() => handleApproveSpec(n)}
                       >
-                        {state?.loading && state?.action === 'approve' ? 'Approving…' : 'Approve'}
+                        {state?.loading && state?.action === 'approve' ? $t('decisions.approving') : $t('common.approve')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -446,14 +485,14 @@
                         disabled={state?.loading}
                         onclick={() => handleRejectSpec(n)}
                       >
-                        {state?.loading && state?.action === 'reject' ? 'Rejecting…' : 'Reject'}
+                        {state?.loading && state?.action === 'reject' ? $t('decisions.rejecting') : $t('common.reject')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        Open Spec
+                        {$t('decisions.open_spec')}
                       </Button>
                     {:else if n.notification_type === 'gate_failure'}
                       <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
-                        View MR
+                        {$t('decisions.view_mr')}
                       </Button>
                       <Button
                         variant="primary"
@@ -461,7 +500,7 @@
                         disabled={state?.loading}
                         onclick={() => handleRetry(n)}
                       >
-                        {state?.loading ? 'Retrying…' : 'Retry Gate'}
+                        {state?.loading ? $t('decisions.retrying') : $t('decisions.retry_gate')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -469,11 +508,11 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'cross_workspace_change'}
                       <Button variant="primary" size="sm" onclick={() => handleViewSpec(n)}>
-                        Review Changes
+                        {$t('decisions.review_changes')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -481,12 +520,12 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'conflicting_interpretations'}
-                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>View Both Specs</Button>
-                      <span class="coming-soon-note">Auto-reconciliation coming soon — view both specs above to resolve manually.</span>
-                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>{$t('decisions.view_both_specs')}</Button>
+                      <span class="coming-soon-note">{$t('decisions.reconciliation_note')}</span>
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
                         variant="primary"
@@ -498,19 +537,19 @@
                             data: n,
                           })}
                       >
-                        View Results
+                        {$t('decisions.view_results')}
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
                         onclick={() => handleAdjustMetaSpec(n)}
                       >
-                        Adjust Meta-spec
+                        {$t('decisions.adjust_metaspec')}
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'budget_warning'}
-                      <Button variant="primary" size="sm" onclick={() => navigate?.('admin')}>Increase Limit</Button>
-                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>Dismiss</Button>
+                      <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>{$t('decisions.increase_limit')}</Button>
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
                         variant="primary"
@@ -518,7 +557,7 @@
                         disabled={state?.loading}
                         onclick={() => handleIncreaseTrust(n)}
                       >
-                        Increase Trust
+                        {$t('decisions.increase_trust')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -526,7 +565,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'spec_assertion_failure'}
                       <Button
@@ -534,20 +573,31 @@
                         size="sm"
                         onclick={() => openDetail({ type: 'repo', id: body.repo_id, data: n })}
                       >
-                        View Code
+                        {$t('decisions.view_code')}
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>
-                        Update Spec
+                        {$t('decisions.update_spec')}
                       </Button>
-                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>Dismiss</Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'suggested_link'}
                       <Button
                         variant="primary"
                         size="sm"
                         disabled={state?.loading}
-                        onclick={() => handleDismiss(n)}
+                        onclick={async () => {
+                          actionStates = { ...actionStates, [n.id]: { loading: true } };
+                          try {
+                            await api.resolveNotification(n.id);
+                            notifications = notifications.map(item =>
+                              item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+                            );
+                            actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.accepted') } };
+                          } catch {
+                            actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: $t('decisions.accept_failed') } };
+                          }
+                        }}
                       >
-                        Accept &amp; Dismiss
+                        {$t('decisions.accept')}
                       </Button>
                       <Button
                         variant="ghost"
@@ -555,7 +605,7 @@
                         disabled={state?.loading}
                         onclick={() => handleDismiss(n)}
                       >
-                        Dismiss
+                        {$t('common.dismiss')}
                       </Button>
                     {/if}
                   </div>
@@ -565,6 +615,17 @@
           </div>
         {/each}
       </div>
+      {#if hasMore}
+        <div class="show-more-wrap">
+          <button
+            class="show-more-btn"
+            onclick={() => { displayLimit += PAGE_SIZE; }}
+            aria-label={$t('decisions.show_more_label')}
+          >
+            {$t('decisions.show_more', { values: { count: allVisibleNotifications.length - displayLimit } })}
+          </button>
+        </div>
+      {/if}
     {/if}
   </div>
 
@@ -618,6 +679,29 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
+  }
+
+  .type-filter {
+    appearance: none;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-5) var(--space-1) var(--space-2);
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right var(--space-1) center;
+    background-size: var(--space-3);
+  }
+
+  .type-filter:hover { border-color: var(--color-primary); }
+
+  .type-filter:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .dismissed-toggle {
@@ -930,5 +1014,35 @@
     .card-header,
     .ref-link,
     .retry-btn { transition: none; }
+  }
+
+  /* ── Show more ─────────────────────────────────────────────────────── */
+  .show-more-wrap {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-4) 0;
+  }
+
+  .show-more-btn {
+    padding: var(--space-2) var(--space-6);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .show-more-btn:hover {
+    background: var(--color-surface);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .show-more-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 </style>

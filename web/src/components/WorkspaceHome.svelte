@@ -10,15 +10,45 @@
    *   HSI §8 (notification types + priority table)
    *   HSI §2 (trust-level filtering)
    */
+  import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Briefing from './Briefing.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import Modal from '../lib/Modal.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+
+  const goToAgentRules = getContext('goToAgentRules');
 
   let {
     workspace = null,
     onSelectRepo = undefined,
+    onWorkspaceCreated = undefined,
     decisionsCount = 0,
   } = $props();
+
+  // ── Create Workspace form state ───────────────────────────────────────
+  let createWsOpen = $state(false);
+  let createWsForm = $state({ name: '', description: '' });
+  let createWsSaving = $state(false);
+
+  async function handleCreateWorkspace() {
+    const name = createWsForm.name.trim();
+    if (!name) return;
+    createWsSaving = true;
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
+      toastSuccess($t('workspace_home.ws_created', { values: { name } }));
+      createWsOpen = false;
+      createWsForm = { name: '', description: '' };
+      onWorkspaceCreated?.(newWs);
+    } catch (e) {
+      toastError($t('workspace_home.ws_create_failed', { values: { error: e.message || e } }));
+    } finally {
+      createWsSaving = false;
+    }
+  }
 
   // ── Notification type icons + labels (HSI §8) ─────────────────────────
   const TYPE_ICONS = {
@@ -34,18 +64,11 @@
     suggested_link: '🔗',
   };
 
-  const TYPE_LABELS = {
-    agent_clarification: 'Clarification',
-    spec_approval: 'Spec Approval',
-    gate_failure: 'Gate Failure',
-    cross_workspace_change: 'Cross-WS Change',
-    conflicting_interpretations: 'Conflict',
-    meta_spec_drift: 'Meta Drift',
-    budget_warning: 'Budget',
-    trust_suggestion: 'Trust',
-    spec_assertion_failure: 'Assertion Fail',
-    suggested_link: 'Suggested Link',
-  };
+  function typeLabel(type) {
+    const key = `workspace_home.type_labels.${type}`;
+    const val = $t(key);
+    return val !== key ? val : type;
+  }
 
   const SPEC_STATUS_ICONS = {
     draft: '📝',
@@ -60,6 +83,7 @@
   let decisionsError = $state(null);
   let notifications = $state([]);
   let actionStates = $state({});
+  let showAllDecisions = $state(false);
 
   // ── Repos state ────────────────────────────────────────────────────────
   let reposLoading = $state(true);
@@ -85,7 +109,7 @@
     try {
       archGraph = await api.workspaceGraph(workspace.id);
     } catch (e) {
-      archError = e.message || 'Failed to load workspace graph';
+      archError = e.message || $t('workspace_home.error_load_graph');
       archGraph = { nodes: [], edges: [] };
     } finally {
       archLoading = false;
@@ -205,8 +229,8 @@
     rulesError = null;
     try {
       const [wsData, globalData] = await Promise.all([
-        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }).catch(() => []),
-        api.getMetaSpecs({ scope: 'Global' }).catch(() => []),
+        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
+        api.getMetaSpecs({ scope: 'Global' }),
       ]);
       workspaceMetaSpecs = Array.isArray(wsData) ? wsData : [];
       globalMetaSpecs = Array.isArray(globalData) ? globalData : [];
@@ -227,9 +251,9 @@
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Approved' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_approved') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
     }
   }
 
@@ -242,9 +266,9 @@
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Rejected' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_rejected') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
     }
   }
 
@@ -254,9 +278,12 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Re-queued' } };
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: Date.now() / 1000 } : item
+      );
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_re_queued') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
     }
   }
 
@@ -264,11 +291,11 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.markNotificationRead(n.id);
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.dismissed') } };
+      setTimeout(() => { notifications = notifications.filter(item => item.id !== n.id); }, 600);
     } catch {
-      // best-effort dismiss
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: $t('decisions.dismiss_failed') } };
     }
-    notifications = notifications.filter(item => item.id !== n.id);
-    actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
 
   // ── Spec navigation ────────────────────────────────────────────────────
@@ -305,7 +332,7 @@
       newRepoDescription = '';
       await loadRepos();
     } catch (e) {
-      newRepoError = e.message || 'Failed to create repository';
+      newRepoError = e.message || $t('workspace_home.error_create_repo');
     } finally {
       newRepoLoading = false;
     }
@@ -331,16 +358,58 @@
     }
   }
 
-  // ── Derived: filtered specs ────────────────────────────────────────────
-  let filteredSpecs = $derived(
-    specs.filter(s => {
+  // ── Specs sort state ────────────────────────────────────────────────────
+  let specsSortCol = $state('path');
+  let specsSortDir = $state('asc');
+
+  function toggleSpecsSort(col) {
+    if (specsSortCol === col) {
+      specsSortDir = specsSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      specsSortCol = col;
+      specsSortDir = 'asc';
+    }
+  }
+
+  function specsSortArrow(col) {
+    if (specsSortCol !== col) return '↕';
+    return specsSortDir === 'asc' ? '↑' : '↓';
+  }
+
+  // ── Derived: filtered + sorted specs ──────────────────────────────────
+  let filteredSpecs = $derived.by(() => {
+    let result = specs.filter(s => {
       if (specsStatusFilter && s.status !== specsStatusFilter) return false;
       return true;
-    })
-  );
+    });
+    return [...result].sort((a, b) => {
+      let av, bv;
+      if (specsSortCol === 'repo') {
+        av = repoMap[a.repo_id]?.name ?? a.repo_id ?? '';
+        bv = repoMap[b.repo_id]?.name ?? b.repo_id ?? '';
+      } else if (specsSortCol === 'updated_at') {
+        av = a.updated_at ?? '';
+        bv = b.updated_at ?? '';
+      } else if (specsSortCol === 'progress') {
+        av = a.tasks_total ? (a.tasks_done ?? 0) / a.tasks_total : -1;
+        bv = b.tasks_total ? (b.tasks_done ?? 0) / b.tasks_total : -1;
+        const cmp = av - bv;
+        return specsSortDir === 'asc' ? cmp : -cmp;
+      } else {
+        av = String(a[specsSortCol] ?? '');
+        bv = String(b[specsSortCol] ?? '');
+      }
+      const cmp = String(av).localeCompare(String(bv));
+      return specsSortDir === 'asc' ? cmp : -cmp;
+    });
+  });
 
   // ── Derived: meta-spec aggregates ─────────────────────────────────────
-  let allMetaSpecs = $derived([...globalMetaSpecs, ...workspaceMetaSpecs]);
+  // Tag each meta-spec with its scope for badge display
+  let allMetaSpecs = $derived([
+    ...globalMetaSpecs.map(m => ({ ...m, _scope: 'tenant' })),
+    ...workspaceMetaSpecs.map(m => ({ ...m, _scope: 'workspace' })),
+  ]);
   let requiredMetaSpecs = $derived(allMetaSpecs.filter(m => m.required));
   let recentlyUpdated = $derived(
     allMetaSpecs.filter(m => {
@@ -355,11 +424,11 @@
     if (!ts) return '';
     const diff = Date.now() - new Date(ts).getTime();
     const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m ago`;
+    if (m < 1) return $t('common.time_just_now');
+    if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
     const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+    if (h < 24) return $t('common.time_hours_ago', { values: { count: h } });
+    return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
   }
 
   // ── Load all data when workspace changes ───────────────────────────────
@@ -374,7 +443,7 @@
 
 <div class="workspace-home" data-testid="workspace-home">
   {#if !workspace}
-    <!-- No workspace selected — prompt user to select one -->
+    <!-- No workspace selected — prompt user to select or create one -->
     <div class="no-workspace">
       <div class="no-workspace-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
@@ -382,8 +451,15 @@
           <polyline points="9 22 9 12 15 12 15 22"/>
         </svg>
       </div>
-      <h2 class="no-workspace-title">Select a workspace</h2>
-      <p class="no-workspace-desc">Choose a workspace from the selector above to get started.</p>
+      <h2 class="no-workspace-title">{$t('workspace_home.select_workspace')}</h2>
+      <p class="no-workspace-desc">{$t('workspace_home.select_workspace_desc')}</p>
+      <button
+        class="create-ws-btn"
+        onclick={() => { createWsForm = { name: '', description: '' }; createWsOpen = true; }}
+        data-testid="create-workspace-btn"
+      >
+        {$t('workspace_home.new_workspace')}
+      </button>
     </div>
   {:else}
     <div class="sections">
@@ -392,13 +468,13 @@
       <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
         <div class="section-header">
           <h2 class="section-title" id="section-decisions">
-            Decisions
+            {$t('workspace_home.sections.decisions')}
             {#if notifications.length > 0}
-              <span class="section-badge" aria-label="{notifications.length} decisions">{notifications.length}</span>
+              <span class="section-badge" aria-label={$t('workspace_home.decisions_badge_label', { values: { count: notifications.length } })}>{notifications.length}</span>
             {/if}
           </h2>
           {#if notifications.length > 0}
-            <button class="section-action-btn" onclick={() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>View all</button>
+            <button class="section-action-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>{showAllDecisions ? $t('workspace_home.show_less') : $t('workspace_home.view_all')}</button>
           {/if}
         </div>
         <div class="section-body">
@@ -408,22 +484,26 @@
           {:else if decisionsError}
             <div class="error-row" role="alert">
               <p class="error-text">{decisionsError}</p>
-              <button class="retry-btn" onclick={loadDecisions} aria-label="Retry loading decisions">Retry</button>
+              <button class="retry-btn" onclick={loadDecisions} aria-label={$t('workspace_home.retry_loading_decisions')}>{$t('common.retry')}</button>
             </div>
           {:else if notifications.length === 0}
-            <p class="empty-text" data-testid="decisions-empty">No pending decisions. At Supervised trust, decisions appear when agents need guidance, specs need approval, or gates fail.</p>
+            <p class="empty-text" data-testid="decisions-empty">{$t('workspace_home.decisions_empty')}</p>
           {:else}
             <ul class="decision-list" role="list">
-              {#each notifications.slice(0, 5) as n (n.id)}
+              {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as n (n.id)}
                 {@const body = getBody(n)}
                 {@const state = actionStates[n.id] ?? {}}
                 <li class="decision-item" data-testid="decision-item">
                   <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[n.notification_type] ?? '•'}</span>
                   <div class="decision-content">
-                    <span class="decision-type">{TYPE_LABELS[n.notification_type] ?? n.notification_type}</span>
+                    <span class="decision-type">{typeLabel(n.notification_type)}</span>
                     <span class="decision-desc">{n.message ?? n.description ?? body.description ?? ''}</span>
                     {#if n.repo_id && repoMap[n.repo_id]}
-                      <span class="decision-repo">{repoMap[n.repo_id].name}</span>
+                      <button
+                        class="decision-repo-link"
+                        onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[n.repo_id], 'decisions'); }}
+                        aria-label={$t('workspace_home.go_to_repo_decisions', { values: { name: repoMap[n.repo_id].name } })}
+                      >{repoMap[n.repo_id].name}</button>
                     {/if}
                   </div>
                   <div class="decision-actions">
@@ -437,28 +517,28 @@
                           class="inline-btn approve"
                           onclick={() => handleApproveSpec(n)}
                           data-testid="btn-approve"
-                          aria-label="Approve spec"
-                        >Approve</button>
+                          aria-label={$t('common.approve')}
+                        >{$t('common.approve')}</button>
                         <button
                           class="inline-btn reject"
                           onclick={() => handleRejectSpec(n)}
                           data-testid="btn-reject"
-                          aria-label="Reject spec"
-                        >Reject</button>
+                          aria-label={$t('common.reject')}
+                        >{$t('common.reject')}</button>
                       {:else if n.notification_type === 'gate_failure' && body.mr_id}
                         <button
                           class="inline-btn"
                           onclick={() => handleRetry(n)}
                           data-testid="btn-retry"
-                          aria-label="Retry gate"
-                        >Retry</button>
+                          aria-label={$t('common.retry')}
+                        >{$t('common.retry')}</button>
                       {/if}
                       <button
                         class="inline-btn secondary"
                         onclick={() => handleDismiss(n)}
                         data-testid="btn-dismiss"
-                        aria-label="Dismiss"
-                      >Dismiss</button>
+                        aria-label={$t('common.dismiss')}
+                      >{$t('common.dismiss')}</button>
                     {/if}
                   </div>
                 </li>
@@ -471,7 +551,7 @@
       <!-- ── Repos ─────────────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
         <div class="section-header">
-          <h2 class="section-title" id="section-repos">Repos</h2>
+          <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
         </div>
         <div class="section-body">
           {#if reposLoading}
@@ -480,10 +560,10 @@
           {:else if reposError}
             <div class="error-row" role="alert">
               <p class="error-text">{reposError}</p>
-              <button class="retry-btn" onclick={loadRepos} aria-label="Retry loading repos">Retry</button>
+              <button class="retry-btn" onclick={loadRepos} aria-label={$t('workspace_home.retry_loading_repos')}>{$t('common.retry')}</button>
             </div>
           {:else if repos.length === 0}
-            <p class="empty-text" data-testid="repos-empty">No repositories yet.</p>
+            <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
           {:else}
             <ul class="repo-list" role="list">
               {#each repos as repo (repo.id)}
@@ -492,22 +572,22 @@
                   <button
                     class="repo-btn"
                     onclick={() => onSelectRepo?.(repo)}
-                    aria-label="Open repository {repo.name}"
+                    aria-label={$t('workspace_home.open_repo', { values: { name: repo.name } })}
                     data-testid="repo-link"
                   >
                     <span class="repo-name">{repo.name}</span>
                     <span class="repo-meta">
                       {#if (repo.active_spec_count ?? 0) > 0}
-                        <span class="repo-stat">{repo.active_spec_count} spec{repo.active_spec_count !== 1 ? 's' : ''} active</span>
+                        <span class="repo-stat">{$t('workspace_home.repo_specs_active', { values: { count: repo.active_spec_count } })}</span>
                       {/if}
                       {#if (repo.active_agents ?? 0) > 0}
-                        <span class="repo-stat">{repo.active_agents} agent{repo.active_agents !== 1 ? 's' : ''}</span>
+                        <span class="repo-stat">{$t('workspace_home.repo_agents_count', { values: { count: repo.active_agents } })}</span>
                       {/if}
                     </span>
-                    <span class="repo-health health-{health}" aria-label="Status: {health}" data-testid="repo-health">
-                      {#if health === 'healthy'}● healthy
-                      {:else if health === 'gate'}⚠ gate
-                      {:else}○ idle
+                    <span class="repo-health health-{health}" aria-label={$t('workspace_home.repo_status', { values: { status: health } })} data-testid="repo-health">
+                      {#if health === 'healthy'}● {$t('workspace_home.repo_health_healthy')}
+                      {:else if health === 'gate'}⚠ {$t('workspace_home.repo_health_gate')}
+                      {:else}○ {$t('workspace_home.repo_health_idle')}
                       {/if}
                     </span>
                   </button>
@@ -521,13 +601,13 @@
               data-testid="btn-new-repo"
               onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }}
               aria-expanded={newRepoOpen}
-            >+ New Repo</button>
+            >{$t('workspace_home.new_repo')}</button>
             <button
               class="section-btn"
               data-testid="btn-import-repo"
               onclick={() => { importOpen = !importOpen; importName = ''; newRepoOpen = false; }}
               aria-expanded={importOpen}
-            >Import</button>
+            >{$t('workspace_home.import')}</button>
           </div>
 
           {#if newRepoOpen}
@@ -537,27 +617,27 @@
               onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}
             >
               <div class="inline-form-header">
-                <span class="inline-form-title">New Repository</span>
-                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }} aria-label="Cancel">✕</button>
+                <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }} aria-label="{$t('common.cancel')}">✕</button>
               </div>
-              <label class="inline-form-label" for="new-repo-name">Name <span class="required" aria-hidden="true">*</span></label>
+              <label class="inline-form-label" for="new-repo-name">{$t('workspace_home.new_repo_name_label')} <span class="required" aria-hidden="true">*</span></label>
               <input
                 id="new-repo-name"
                 class="inline-form-input"
                 data-testid="new-repo-name-input"
                 type="text"
-                placeholder="my-repo"
+                placeholder={$t('workspace_home.new_repo_name_placeholder')}
                 bind:value={newRepoName}
                 required
                 disabled={newRepoLoading}
               />
-              <label class="inline-form-label" for="new-repo-desc">Description</label>
+              <label class="inline-form-label" for="new-repo-desc">{$t('workspace_home.new_repo_desc_label')}</label>
               <input
                 id="new-repo-desc"
                 class="inline-form-input"
                 data-testid="new-repo-description-input"
                 type="text"
-                placeholder="Optional description"
+                placeholder={$t('workspace_home.new_repo_desc_placeholder')}
                 bind:value={newRepoDescription}
                 disabled={newRepoLoading}
               />
@@ -566,9 +646,9 @@
               {/if}
               <div class="inline-form-actions">
                 <button type="submit" class="section-btn primary" data-testid="new-repo-submit" disabled={newRepoLoading || !newRepoName.trim()}>
-                  {newRepoLoading ? 'Creating…' : 'Create'}
+                  {newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}
                 </button>
-                <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>Cancel</button>
+                <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
               </div>
             </form>
           {/if}
@@ -580,27 +660,27 @@
               onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}
             >
               <div class="inline-form-header">
-                <span class="inline-form-title">Import Repository</span>
-                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; importName = ''; }} aria-label="Cancel">✕</button>
+                <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; importName = ''; }} aria-label="{$t('common.cancel')}">✕</button>
               </div>
-              <label class="inline-form-label" for="import-url">Repository URL <span class="required" aria-hidden="true">*</span></label>
+              <label class="inline-form-label" for="import-url">{$t('workspace_home.import_url_label')} <span class="required" aria-hidden="true">*</span></label>
               <input
                 id="import-url"
                 class="inline-form-input"
                 data-testid="import-url-input"
                 type="url"
-                placeholder="https://github.com/org/repo"
+                placeholder={$t('workspace_home.import_url_placeholder')}
                 bind:value={importUrl}
                 required
                 disabled={importLoading}
               />
-              <label class="inline-form-label" for="import-name">Name</label>
+              <label class="inline-form-label" for="import-name">{$t('workspace_home.import_name_label')}</label>
               <input
                 id="import-name"
                 class="inline-form-input"
                 data-testid="import-name-input"
                 type="text"
-                placeholder="Auto-derived from URL"
+                placeholder={$t('workspace_home.import_name_placeholder')}
                 bind:value={importName}
                 disabled={importLoading}
               />
@@ -609,80 +689,42 @@
               {/if}
               <div class="inline-form-actions">
                 <button type="submit" class="section-btn primary" data-testid="import-submit" disabled={importLoading || !importUrl.trim()}>
-                  {importLoading ? 'Importing…' : 'Import'}
+                  {importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}
                 </button>
-                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; importName = ''; }}>Cancel</button>
+                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; importName = ''; }}>{$t('common.cancel')}</button>
               </div>
             </form>
           {/if}
         </div>
       </section>
 
-      <!-- ── Architecture ────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
-        <button
-          class="arch-toggle-header"
-          onclick={toggleArch}
-          aria-expanded={archExpanded}
-          aria-controls="arch-body"
-          data-testid="arch-toggle"
-        >
-          <h2 class="section-title" id="section-architecture">Architecture</h2>
-          <span class="arch-toggle-label" aria-hidden="true">
-            {archExpanded ? '▾ Hide workspace graph' : '▸ Show workspace graph'}
-          </span>
-        </button>
-        {#if archExpanded}
-          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
-            {#if archLoading}
-              <div class="skeleton-row"></div>
-              <div class="skeleton-row"></div>
-            {:else if archError}
-              <div class="error-row" role="alert">
-                <p class="error-text">{archError}</p>
-                <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
-              </div>
-            {:else if archGraph}
-              <div class="arch-canvas-wrap" data-testid="arch-canvas">
-                <ExplorerCanvas
-                  nodes={archGraph.nodes ?? []}
-                  edges={archGraph.edges ?? []}
-                  workspaceId={workspace.id}
-                  scope="workspace"
-                />
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </section>
-
       <!-- ── Briefing ──────────────────────────────────────────────────── -->
       <section class="home-section home-section-briefing" aria-labelledby="section-briefing" data-testid="section-briefing">
         <div class="section-header">
-          <h2 class="section-title" id="section-briefing">Briefing</h2>
+          <h2 class="section-title" id="section-briefing">{$t('workspace_home.sections.briefing')}</h2>
         </div>
         <div class="section-body section-body-briefing">
           <Briefing workspaceId={workspace.id} scope="workspace" workspaceName={workspace.name} />
         </div>
       </section>
 
-      <!-- ── Specs ─────────────────────────────────────────────────────── -->
+      <!-- ── Specs (§2: cross-repo spec overview) ────────────────────── -->
       <section class="home-section" aria-labelledby="section-specs" data-testid="section-specs">
         <div class="section-header">
-          <h2 class="section-title" id="section-specs">Specs</h2>
+          <h2 class="section-title" id="section-specs">{$t('workspace_home.sections.specs')}</h2>
           <div class="header-controls">
             <select
               class="filter-select"
               value={specsStatusFilter}
               onchange={(e) => { specsStatusFilter = e.target.value; }}
-              aria-label="Filter specs by status"
+              aria-label={$t('workspace_home.filter_specs_by_status')}
               data-testid="specs-status-filter"
             >
-              <option value="">All statuses</option>
-              <option value="draft">Draft</option>
-              <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
-              <option value="implemented">Implemented</option>
+              <option value="">{$t('workspace_home.all_statuses')}</option>
+              <option value="draft">{$t('workspace_home.status_draft')}</option>
+              <option value="pending">{$t('workspace_home.status_pending')}</option>
+              <option value="approved">{$t('workspace_home.status_approved')}</option>
+              <option value="implemented">{$t('workspace_home.status_implemented')}</option>
             </select>
           </div>
         </div>
@@ -693,21 +735,31 @@
           {:else if specsError}
             <div class="error-row" role="alert">
               <p class="error-text">{specsError}</p>
-              <button class="retry-btn" onclick={loadSpecs} aria-label="Retry loading specs">Retry</button>
+              <button class="retry-btn" onclick={loadSpecs} aria-label={$t('workspace_home.retry_loading_specs')}>{$t('common.retry')}</button>
             </div>
           {:else if filteredSpecs.length === 0}
             <p class="empty-text" data-testid="specs-empty">
-              {specsStatusFilter ? 'No specs with that status.' : 'No specs yet.'}
+              {specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}
             </p>
           {:else}
             <table class="specs-table" data-testid="specs-table">
               <thead>
                 <tr>
-                  <th>Repo</th>
-                  <th>Path</th>
-                  <th>Status</th>
-                  <th>Progress</th>
-                  <th>Last activity</th>
+                  <th scope="col" aria-sort={specsSortCol === 'repo' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>{$t('workspace_home.sections.repos')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>{$t('workspace_home.col_path')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('workspace_home.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'progress' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>{$t('workspace_home.col_progress')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('progress')}</span></button>
+                  </th>
+                  <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -719,7 +771,7 @@
                     tabindex="0"
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }}
                     data-testid="spec-row"
-                    aria-label="Open spec {spec.path}"
+                    aria-label={$t('workspace_home.open_spec', { values: { path: spec.path } })}
                   >
                     <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
                     <td class="spec-path">{spec.path}</td>
@@ -743,25 +795,53 @@
         </div>
       </section>
 
+      <!-- ── Architecture (collapsible) ──────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
+        <button
+          class="arch-toggle-header"
+          onclick={toggleArch}
+          aria-expanded={archExpanded}
+          aria-controls="arch-body"
+          data-testid="arch-toggle"
+        >
+          <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
+          <span class="arch-toggle-label" aria-hidden="true">
+            {archExpanded ? '▾ ' + $t('workspace_home.hide_workspace_graph') : '▸ ' + $t('workspace_home.show_workspace_graph')}
+          </span>
+        </button>
+        {#if archExpanded}
+          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
+            {#if archLoading}
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            {:else if archError}
+              <div class="error-row" role="alert">
+                <p class="error-text">{archError}</p>
+                <button class="retry-btn" onclick={loadArchGraph} aria-label={$t('workspace_home.retry_loading_graph')}>{$t('common.retry')}</button>
+              </div>
+            {:else if archGraph}
+              <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                <ExplorerCanvas
+                  nodes={archGraph.nodes ?? []}
+                  edges={archGraph.edges ?? []}
+                  workspaceId={workspace.id}
+                  scope="workspace"
+                />
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </section>
+
       <!-- ── Agent Rules ───────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
         <div class="section-header">
-          <h2 class="section-title" id="section-agent-rules">Agent Rules</h2>
+          <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
           <button
             class="section-action-btn"
             data-testid="manage-rules-link"
-            onclick={() => {
-              const slug = workspace?.slug ?? workspace?.id;
-              if (slug) {
-                window.history.pushState(
-                  { mode: 'workspace_home', wsId: workspace.id, repoName: null, repoTab: 'specs' },
-                  '',
-                  `/workspaces/${encodeURIComponent(slug)}/agent-rules`
-                );
-              }
-              document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }}
-          >Manage rules</button>
+            onclick={() => goToAgentRules?.()}
+          >{$t('workspace_home.manage_rules')}</button>
         </div>
         <div class="section-body">
           {#if rulesLoading}
@@ -769,19 +849,19 @@
           {:else if rulesError}
             <div class="error-row" role="alert">
               <p class="error-text">{rulesError}</p>
-              <button class="retry-btn" onclick={loadRules} aria-label="Retry loading agent rules">Retry</button>
+              <button class="retry-btn" onclick={loadRules} aria-label={$t('workspace_home.retry_loading_rules')}>{$t('common.retry')}</button>
             </div>
           {:else}
             <p class="rules-summary" data-testid="rules-summary">
-              {allMetaSpecs.length} meta-spec{allMetaSpecs.length !== 1 ? 's' : ''} active
+              {$t('workspace_home.rules_summary', { values: { count: allMetaSpecs.length } })}
               {#if requiredMetaSpecs.length > 0}
-                ({requiredMetaSpecs.length} required)
+                {$t('workspace_home.rules_summary_required', { values: { count: requiredMetaSpecs.length } })}
               {/if}
             </p>
 
             {#if recentlyUpdated.length > 0}
               <div class="reconcile-status" role="status" data-testid="reconcile-status">
-                Reconciling: {recentlyUpdated.length} meta-spec{recentlyUpdated.length !== 1 ? 's' : ''} recently updated
+                {$t('workspace_home.rules_reconciling', { values: { count: recentlyUpdated.length } })}
               </div>
             {/if}
 
@@ -789,8 +869,9 @@
               <ul class="rules-list" role="list" data-testid="rules-list">
                 {#each requiredMetaSpecs as ms (ms.id)}
                   <li class="rule-item" data-testid="rule-item">
-                    <span class="rule-lock" aria-label="Required" aria-hidden="true">🔒</span>
+                    <span class="rule-lock" aria-label={$t('workspace_home.rule_required_label')} aria-hidden="true">🔒</span>
                     <span class="rule-name">{ms.name}</span>
+                    <span class="rule-scope" data-testid="rule-scope">{ms._scope === 'tenant' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}</span>
                     {#if ms.kind}
                       <span class="rule-kind">{ms.kind.replace('meta:', '')}</span>
                     {/if}
@@ -801,7 +882,7 @@
                 {/each}
               </ul>
             {:else if allMetaSpecs.length === 0}
-              <p class="empty-text">No meta-specs configured.</p>
+              <p class="empty-text">{$t('workspace_home.rules_no_metaspecs')}</p>
             {/if}
           {/if}
         </div>
@@ -810,6 +891,38 @@
     </div>
   {/if}
 </div>
+
+<!-- Create Workspace modal -->
+<Modal bind:open={createWsOpen} title={$t('workspace_home.create_ws_title')} size="sm">
+  <div class="create-ws-form">
+    <label class="create-ws-label">{$t('workspace_home.create_ws_name_label')}
+      <input
+        class="create-ws-input"
+        bind:value={createWsForm.name}
+        placeholder={$t('workspace_home.create_ws_name_placeholder')}
+        onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+      />
+    </label>
+    <label class="create-ws-label">{$t('workspace_home.create_ws_desc_label')}
+      <input
+        class="create-ws-input"
+        bind:value={createWsForm.description}
+        placeholder={$t('workspace_home.create_ws_desc_placeholder')}
+        onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+      />
+    </label>
+    <div class="create-ws-actions">
+      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>{$t('workspace_home.create_ws_cancel')}</button>
+      <button
+        class="create-ws-submit"
+        onclick={handleCreateWorkspace}
+        disabled={createWsSaving || !createWsForm.name?.trim()}
+      >
+        {createWsSaving ? $t('workspace_home.create_ws_creating') : $t('workspace_home.create_ws_submit')}
+      </button>
+    </div>
+  </div>
+</Modal>
 
 <style>
   .workspace-home {
@@ -848,6 +961,102 @@
   .no-workspace-desc {
     font-size: var(--text-sm);
     margin: 0;
+  }
+
+  .create-ws-btn {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    margin-top: var(--space-2);
+  }
+
+  .create-ws-btn:hover { background: var(--color-primary-hover); }
+
+  .create-ws-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Create Workspace modal form ───────────────────────────────────── */
+  .create-ws-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .create-ws-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .create-ws-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
+  }
+
+  .create-ws-input:focus:not(:focus-visible) { outline: none; }
+
+  .create-ws-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-color: var(--color-focus);
+  }
+
+  .create-ws-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .create-ws-cancel {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+
+  .create-ws-cancel:hover { border-color: var(--color-text-muted); }
+
+  .create-ws-submit {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .create-ws-submit:hover { background: var(--color-primary-hover); }
+  .create-ws-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .create-ws-cancel:focus-visible,
+  .create-ws-submit:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Sections layout ────────────────────────────────────────────────── */
@@ -1047,10 +1256,25 @@
     text-overflow: ellipsis;
   }
 
-  .decision-repo {
+  .decision-repo-link {
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    color: var(--color-link, var(--color-primary));
     font-family: var(--font-mono);
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-align: left;
+  }
+
+  .decision-repo-link:hover {
+    color: var(--color-link-hover, var(--color-primary));
+  }
+
+  .decision-repo-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .decision-actions {
@@ -1157,7 +1381,7 @@
 
   .specs-table th {
     text-align: left;
-    padding: var(--space-2) var(--space-2);
+    padding: 0;
     font-size: var(--text-xs);
     font-weight: 600;
     color: var(--color-text-muted);
@@ -1165,6 +1389,37 @@
     letter-spacing: 0.05em;
     border-bottom: 1px solid var(--color-border);
     white-space: nowrap;
+  }
+
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-2) var(--space-2);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
   }
 
   .spec-row {
@@ -1303,6 +1558,17 @@
     color: var(--color-text);
     flex: 1;
     min-width: 0;
+  }
+
+  .rule-scope {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
+    border-radius: var(--radius);
+    border: 1px solid color-mix(in srgb, var(--color-info) 25%, transparent);
+    text-transform: capitalize;
+    flex-shrink: 0;
   }
 
   .rule-kind {

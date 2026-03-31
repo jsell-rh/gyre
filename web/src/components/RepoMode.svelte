@@ -8,12 +8,14 @@
    *   - Fixed Decisions tab: passes repoId so Inbox filters to this repo only
    *   - Verified tab prop wiring for all tabs
    */
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import ExplorerView from './ExplorerView.svelte';
   import SpecDashboard from './SpecDashboard.svelte';
   import Inbox from './Inbox.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
   import RepoSettings from './RepoSettings.svelte';
+  import AgentCardPanel from './AgentCardPanel.svelte';
 
   let {
     workspace = null,
@@ -24,11 +26,11 @@
   } = $props();
 
   const TABS = [
-    { id: 'specs',        label: 'Specs' },
-    { id: 'architecture', label: 'Architecture' },
-    { id: 'decisions',    label: 'Decisions' },
-    { id: 'code',         label: 'Code' },
-    { id: 'settings',     label: '⚙', title: 'Settings' },
+    { id: 'specs',        labelKey: 'repo_mode.tabs.specs' },
+    { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
+    { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
+    { id: 'code',         labelKey: 'repo_mode.tabs.code' },
+    { id: 'settings',     labelKey: 'repo_mode.tabs.settings', titleKey: 'repo_mode.settings_title' },
   ];
 
   // ── Active agents for this repo ────────────────────────────────────────
@@ -36,6 +38,7 @@
   let agentsLoading = $state(false);
   let agentPanelOpen = $state(false);
   let agentPanelEl = $state(null);
+  let selectedAgentId = $state(null);
 
   $effect(() => {
     const repoId = repo?.id;
@@ -113,20 +116,20 @@
       <button
         class="agent-count-btn"
         onclick={() => { agentPanelOpen = true; }}
-        aria-label="{agentsLoading ? 'Loading agents' : activeAgents.length + ' agents active'} — click to view"
+        aria-label={$t('repo_mode.agent_count_click', { values: { label: agentsLoading ? $t('repo_mode.loading_agents') : $t('repo_mode.agents_active', { values: { count: activeAgents.length } }) } })}
         data-testid="agent-count-btn"
       >
         {#if agentsLoading}
-          <span class="meta-value">loading agents…</span>
+          <span class="meta-value">{$t('repo_mode.loading_agents')}</span>
         {:else}
-          <span class="meta-value">{activeAgents.length} agent{activeAgents.length === 1 ? '' : 's'} active</span>
+          <span class="meta-value">{$t('repo_mode.agents_active', { values: { count: activeAgents.length } })}</span>
         {/if}
       </button>
 
       <!-- Budget % -->
       {#if budgetPct !== null}
         <span class="meta-sep" aria-hidden="true">·</span>
-        <span class="budget-display" data-testid="budget-display">Budget: {budgetPct}%</span>
+        <span class="budget-display" data-testid="budget-display">{$t('repo_mode.budget_label', { values: { pct: budgetPct } })}</span>
       {/if}
 
       <!-- Clone URL -->
@@ -135,7 +138,7 @@
         <button
           class="clone-btn"
           onclick={copyCloneUrl}
-          aria-label={cloneCopied ? 'Clone URL copied!' : 'Copy clone URL to clipboard'}
+          aria-label={cloneCopied ? $t('repo_mode.clone_url_copied') : $t('repo_mode.copy_clone_url')}
           title={cloneUrl}
           data-testid="clone-url-btn"
         >
@@ -148,7 +151,7 @@
 
   <!-- ── Tab bar ─────────────────────────────────────────────────────── -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="tab-bar" role="tablist" aria-label="Repo navigation" data-testid="repo-tab-bar" onkeydown={handleTabKeydown}>
+  <div class="tab-bar" role="tablist" aria-label={$t('repo_mode.repo_navigation')} data-testid="repo-tab-bar" onkeydown={handleTabKeydown}>
     {#each TABS as tab}
       <button
         class="tab-btn"
@@ -159,9 +162,9 @@
         aria-controls="tabpanel-{tab.id}"
         tabindex={activeTab === tab.id ? 0 : -1}
         onclick={() => onTabChange?.(tab.id)}
-        title={tab.title ?? tab.label}
+        title={tab.titleKey ? $t(tab.titleKey) : $t(tab.labelKey)}
       >
-        {tab.label}
+        {$t(tab.labelKey)}
       </button>
     {/each}
   </div>
@@ -184,10 +187,10 @@
       <Inbox workspaceId={workspace?.id} repoId={repo?.id} scope="repo" />
     {:else if activeTab === 'code'}
       {#if repo?.id}
-        <ExplorerCodeTab repoId={repo.id} />
+        <ExplorerCodeTab repoId={repo.id} {repo} />
       {:else}
         <div class="tab-placeholder">
-          <p>No repo selected.</p>
+          <p>{$t('repo_mode.no_repo_selected')}</p>
         </div>
       {/if}
     {:else if activeTab === 'settings'}
@@ -209,7 +212,7 @@
       class="agent-panel"
       role="dialog"
       aria-modal="true"
-      aria-label="Active agents in {repo?.name ?? 'this repo'}"
+      aria-label={$t('repo_mode.active_agents')}
       tabindex="-1"
       bind:this={agentPanelEl}
       onclick={(e) => e.stopPropagation()}
@@ -217,31 +220,41 @@
       data-testid="agent-panel"
     >
       <div class="agent-panel-header">
-        <h2 class="agent-panel-title">Active Agents</h2>
+        <h2 class="agent-panel-title">{$t('repo_mode.active_agents')}</h2>
         <button
           class="panel-close-btn"
           onclick={() => { agentPanelOpen = false; }}
-          aria-label="Close agent panel"
+          aria-label={$t('common.close')}
           data-testid="agent-panel-close"
         >✕</button>
       </div>
 
       <div class="agent-panel-body">
         {#if agentsLoading}
-          <p class="agent-panel-loading">Loading agents…</p>
+          <p class="agent-panel-loading">{$t('repo_mode.loading_agents_panel')}</p>
         {:else if activeAgents.length === 0}
-          <p class="agent-panel-empty">No active agents in this repo.</p>
+          <p class="agent-panel-empty">{$t('repo_mode.no_active_agents')}</p>
         {:else}
           {#each activeAgents as agent}
-            <div class="agent-row" data-testid="agent-row">
+            <button
+              class="agent-row"
+              class:agent-row-selected={selectedAgentId === agent.id}
+              data-testid="agent-row"
+              onclick={() => { selectedAgentId = selectedAgentId === agent.id ? null : agent.id; }}
+              aria-expanded={selectedAgentId === agent.id}
+              aria-label={$t('repo_mode.agent_label', { values: { name: agent.name ?? agent.id } })}
+            >
               <div class="agent-row-info">
                 <span class="agent-row-name">{agent.name ?? agent.id}</span>
                 <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
               </div>
               {#if agent.task_id}
-                <span class="agent-row-task">Task: {agent.task_id}</span>
+                <span class="agent-row-task">{$t('repo_mode.task_label', { values: { id: agent.task_id } })}</span>
               {/if}
-            </div>
+            </button>
+            {#if selectedAgentId === agent.id}
+              <AgentCardPanel agentId={agent.id} />
+            {/if}
           {/each}
         {/if}
       </div>
@@ -526,6 +539,26 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
+    width: 100%;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    color: var(--color-text);
+    transition: border-color var(--transition-fast);
+  }
+
+  .agent-row:hover {
+    border-color: var(--color-border-strong);
+  }
+
+  .agent-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .agent-row-selected {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface));
   }
 
   .agent-row-info {

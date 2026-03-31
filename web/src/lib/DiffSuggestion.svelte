@@ -9,6 +9,7 @@
    *   ondismiss   — () => void
    */
   import Button from './Button.svelte';
+  import { t } from 'svelte-i18n';
 
   let {
     suggestion = { id: '', content: '' },
@@ -30,17 +31,17 @@
   }
 </script>
 
-<div class="diff-suggestion" role="region" aria-label="Suggested change {suggestion.id}" aria-live="polite">
+<div class="diff-suggestion" role="region" aria-label={$t('diff_suggestion.suggested_change_aria', { values: { id: suggestion.id } })} aria-live="polite">
   <div class="diff-header">
-    <span class="diff-label">Suggested Change</span>
-    <span class="diff-hint">Review before accepting</span>
+    <span class="diff-label">{$t('diff_suggestion.suggested_change')}</span>
+    <span class="diff-hint">{$t('diff_suggestion.review_before_accepting')}</span>
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <pre class="diff-content" tabindex="0">{suggestion.content}</pre>
   <div class="diff-actions">
-    <Button variant="primary" size="sm" onclick={() => handleAction(onaccept)} disabled={acting}>Accept</Button>
-    <Button variant="secondary" size="sm" onclick={() => handleAction(onedit)} disabled={acting}>Edit</Button>
-    <Button variant="secondary" size="sm" onclick={() => handleAction(ondismiss)} disabled={acting}>Dismiss</Button>
+    <Button variant="primary" size="sm" onclick={() => handleAction(onaccept)} disabled={acting}>{$t('diff_suggestion.accept')}</Button>
+    <Button variant="secondary" size="sm" onclick={() => handleAction(onedit)} disabled={acting}>{$t('diff_suggestion.edit')}</Button>
+    <Button variant="secondary" size="sm" onclick={() => handleAction(ondismiss)} disabled={acting}>{$t('diff_suggestion.dismiss')}</Button>
   </div>
 </div>
 
