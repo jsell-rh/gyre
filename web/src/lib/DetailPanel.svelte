@@ -386,6 +386,14 @@
             name: r.gate_name ?? r.name,
           }));
         }
+        // Fetch commit signature for merged MRs
+        const repoId = d?.repository_id ?? d?.repo_id;
+        const mergeSha = d?.merge_commit_sha;
+        if (repoId && mergeSha) {
+          api.commitSignature(repoId, mergeSha).then(sig => {
+            if (sig) mrDetail = { ...mrDetail, _commitSig: sig };
+          }).catch(() => {});
+        }
         // Build mini status story from timeline
         if (mrTimeline.length > 0) {
           const events = mrTimeline.slice(-4).map(evt => {
@@ -1363,6 +1371,12 @@
                   <Badge value="merged" variant="success" />
                   {#if mr.merge_commit_sha}
                     <span class="mono copyable" title="Click to copy merge SHA: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</span>
+                  {/if}
+                  {#if mr._commitSig}
+                    <span class="sig-badge" title="Commit signed with {mr._commitSig.algorithm ?? 'unknown'}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                      signed
+                    </span>
                   {/if}
                 </div>
               {/if}
@@ -4363,6 +4377,19 @@
     gap: var(--space-2);
     margin-top: var(--space-2);
     font-size: var(--text-sm);
+  }
+
+  .sig-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 30%, transparent);
+    color: var(--color-success);
+    font-size: var(--text-xs);
+    font-weight: 500;
   }
 
   /* ── Gate summary bar ──────────────────────────────────────────────────── */
