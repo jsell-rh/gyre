@@ -162,7 +162,7 @@
   {:else}
     {#if size === 'full'}
       <div class="arch-toolbar">
-        <button class="arch-tool-btn" onclick={resetView} aria-label="Reset view">
+        <button class="arch-tool-btn" onclick={resetView} aria-label={$t('explorer_canvas.reset')}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/></svg>
           {$t('explorer_canvas.reset')}
         </button>
@@ -184,7 +184,7 @@
       class:panning={isPanning}
       viewBox="{viewBox.x} {viewBox.y} {viewBox.w} {viewBox.h}"
       role="application"
-      aria-label="Architecture preview canvas"
+      aria-label={$t('explorer_canvas.arch_preview')}
       onmousedown={onMouseDown}
       onmousemove={onMouseMove}
       onmouseup={onMouseUp}

@@ -869,7 +869,7 @@
               <ul class="rules-list" role="list" data-testid="rules-list">
                 {#each requiredMetaSpecs as ms (ms.id)}
                   <li class="rule-item" data-testid="rule-item">
-                    <span class="rule-lock" aria-label="Required" aria-hidden="true">🔒</span>
+                    <span class="rule-lock" aria-label={$t('workspace_home.rule_required_label')} aria-hidden="true">🔒</span>
                     <span class="rule-name">{ms.name}</span>
                     <span class="rule-scope" data-testid="rule-scope">{ms._scope === 'tenant' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}</span>
                     {#if ms.kind}
