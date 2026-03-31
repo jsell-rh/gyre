@@ -1,4 +1,5 @@
 <script>
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -53,7 +54,7 @@
       await api.updateAgentCard(agentId, newCard);
       card = newCard;
       editing = false;
-      toastSuccess('Agent card saved.');
+      toastSuccess($t('agent_card.saved'));
     } catch (e) {
       saveError = e.message;
       toastError(e.message);
@@ -66,56 +67,56 @@
 <div class="card-panel">
   <div class="card-header">
     <div class="card-title-row">
-      <span class="section-label">Agent Card</span>
+      <span class="section-label">{$t('agent_card.title')}</span>
       <span class="protocol-tag">A2A</span>
     </div>
     {#if !editing && card}
-      <button class="edit-btn" aria-label="Edit agent card" onclick={startEdit}>Edit</button>
+      <button class="edit-btn" aria-label="Edit agent card" onclick={startEdit}>{$t('agent_card.edit')}</button>
     {/if}
   </div>
 
   {#if editing}
     <form class="edit-form" onsubmit={(e) => { e.preventDefault(); saveCard(); }}>
       <div class="field">
-        <label class="field-label" for="desc-input">Description</label>
+        <label class="field-label" for="desc-input">{$t('agent_card.description')}</label>
         <textarea
           id="desc-input"
           class="field-textarea"
           bind:value={description}
-          placeholder="What this agent does…"
+          placeholder={$t('agent_card.description_placeholder')}
           rows="3"
         ></textarea>
       </div>
 
       <div class="field">
-        <label class="field-label" for="cap-input">Capabilities</label>
+        <label class="field-label" for="cap-input">{$t('agent_card.capabilities')}</label>
         <input
           id="cap-input"
           class="field-input"
           bind:value={capInput}
-          placeholder="rust, api-design, planning (comma-separated)"
+          placeholder={$t('agent_card.capabilities_placeholder')}
         />
-        <span class="field-hint">Comma-separated list</span>
+        <span class="field-hint">{$t('agent_card.capabilities_hint')}</span>
       </div>
 
       <div class="field">
-        <label class="field-label" for="proto-input">Protocols</label>
+        <label class="field-label" for="proto-input">{$t('agent_card.protocols')}</label>
         <input
           id="proto-input"
           class="field-input"
           bind:value={protocols}
-          placeholder="mcp, a2a"
+          placeholder={$t('agent_card.protocols_placeholder')}
         />
-        <span class="field-hint">Comma-separated list</span>
+        <span class="field-hint">{$t('agent_card.capabilities_hint')}</span>
       </div>
 
       <div class="field">
-        <label class="field-label" for="endpoint-input">Endpoint URL</label>
+        <label class="field-label" for="endpoint-input">{$t('agent_card.endpoint')}</label>
         <input
           id="endpoint-input"
           class="field-input"
           bind:value={endpoint}
-          placeholder="http://agent:3000"
+          placeholder={$t('agent_card.endpoint_placeholder')}
         />
       </div>
 
@@ -124,9 +125,9 @@
       {/if}
 
       <div class="form-actions">
-        <button type="button" class="cancel-btn" onclick={() => (editing = false)}>Cancel</button>
+        <button type="button" class="cancel-btn" onclick={() => (editing = false)}>{$t('common.cancel')}</button>
         <button type="submit" class="save-btn" disabled={saving}>
-          {saving ? 'Saving…' : 'Save Card'}
+          {saving ? $t('agent_card.saving') : $t('agent_card.save_card')}
         </button>
       </div>
     </form>
@@ -139,7 +140,7 @@
 
       {#if card.capabilities?.length > 0}
         <div class="card-section">
-          <span class="section-mini-label">Capabilities</span>
+          <span class="section-mini-label">{$t('agent_card.capabilities')}</span>
           <div class="pill-row">
             {#each card.capabilities as cap}
               <Badge value={cap} variant="info" />
@@ -150,7 +151,7 @@
 
       {#if card.protocols?.length > 0}
         <div class="card-section">
-          <span class="section-mini-label">Protocols</span>
+          <span class="section-mini-label">{$t('agent_card.protocols')}</span>
           <div class="pill-row">
             {#each card.protocols as proto}
               <Badge value={proto} variant="muted" />
@@ -161,12 +162,12 @@
 
       {#if card.endpoint}
         <div class="card-section">
-          <span class="section-mini-label">Endpoint</span>
+          <span class="section-mini-label">{$t('agent_card.endpoint')}</span>
           <code class="endpoint-value">{card.endpoint}</code>
         </div>
       {/if}
 
-      <button class="edit-btn-secondary" onclick={startEdit}>Edit Agent Card</button>
+      <button class="edit-btn-secondary" onclick={startEdit}>{$t('agent_card.edit_agent_card')}</button>
     </div>
 
   {:else if cardLoading}
@@ -180,8 +181,8 @@
         <rect x="2" y="5" width="20" height="14" rx="2"/>
         <path d="M2 10h20"/>
       </svg>
-      <p class="empty-text">No agent card published yet.</p>
-      <button class="publish-btn" onclick={startEdit}>Publish Agent Card</button>
+      <p class="empty-text">{$t('agent_card.no_card')}</p>
+      <button class="publish-btn" onclick={startEdit}>{$t('agent_card.publish_card')}</button>
     </div>
   {/if}
 </div>

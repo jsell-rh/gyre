@@ -403,6 +403,38 @@
     "no_mrs": "No merge requests",
     "queue_empty": "Merge queue empty"
   },
+  "agent_card": {
+    "title": "Agent Card",
+    "edit": "Edit",
+    "description": "Description",
+    "description_placeholder": "What this agent does\u2026",
+    "capabilities": "Capabilities",
+    "capabilities_placeholder": "rust, api-design, planning (comma-separated)",
+    "capabilities_hint": "Comma-separated list",
+    "protocols": "Protocols",
+    "protocols_placeholder": "mcp, a2a",
+    "endpoint": "Endpoint URL",
+    "endpoint_placeholder": "http://agent:3000",
+    "saving": "Saving\u2026",
+    "save_card": "Save Card",
+    "edit_agent_card": "Edit Agent Card",
+    "no_card": "No agent card published yet.",
+    "publish_card": "Publish Agent Card",
+    "saved": "Agent card saved."
+  },
+  "explorer_filter": {
+    "title": "Filters",
+    "categories": "Categories",
+    "boundaries": "Boundaries",
+    "interfaces": "Interfaces",
+    "data": "Data",
+    "specs": "Specs",
+    "visibility": "Visibility",
+    "all": "All",
+    "public_only": "Public only",
+    "private_only": "Private only",
+    "min_churn": "Min churn (30d)"
+  },
   "common": {
     "cancel": "Cancel",
     "close": "Close",

@@ -1,22 +1,26 @@
 <script>
+  import { t } from 'svelte-i18n';
+
   let {
     visible = false,
     onfilterchange = null,
   } = $props();
 
   // Category filters matching system-explorer.md categories
-  const CATEGORIES = [
-    { id: 'boundaries', label: 'Boundaries' },
-    { id: 'interfaces', label: 'Interfaces' },
-    { id: 'data', label: 'Data' },
-    { id: 'specs', label: 'Specs' },
-  ];
+  const CATEGORY_IDS = ['boundaries', 'interfaces', 'data', 'specs'];
+  const CATEGORY_KEYS = {
+    boundaries: 'explorer_filter.boundaries',
+    interfaces: 'explorer_filter.interfaces',
+    data: 'explorer_filter.data',
+    specs: 'explorer_filter.specs',
+  };
 
-  const VISIBILITIES = [
-    { id: 'all', label: 'All' },
-    { id: 'public', label: 'Public only' },
-    { id: 'private', label: 'Private only' },
-  ];
+  const VISIBILITY_IDS = ['all', 'public', 'private'];
+  const VISIBILITY_KEYS = {
+    all: 'explorer_filter.all',
+    public: 'explorer_filter.public_only',
+    private: 'explorer_filter.private_only',
+  };
 
   let activeCategories = $state(new Set(['boundaries', 'interfaces', 'data', 'specs']));
   let visibility = $state('all');
@@ -44,41 +48,41 @@
 {#if visible}
   <div class="filter-panel" role="complementary" aria-label="Explorer filter panel">
     <div class="filter-header">
-      <span class="filter-title">Filters</span>
+      <span class="filter-title">{$t('explorer_filter.title')}</span>
     </div>
 
     <section class="filter-section">
-      <h4 class="section-heading">Categories</h4>
-      {#each CATEGORIES as cat}
+      <h4 class="section-heading">{$t('explorer_filter.categories')}</h4>
+      {#each CATEGORY_IDS as catId}
         <label class="filter-checkbox">
           <input
             type="checkbox"
-            checked={activeCategories.has(cat.id)}
-            onchange={() => toggleCategory(cat.id)}
+            checked={activeCategories.has(catId)}
+            onchange={() => toggleCategory(catId)}
           />
-          {cat.label}
+          {$t(CATEGORY_KEYS[catId])}
         </label>
       {/each}
     </section>
 
     <section class="filter-section">
-      <h4 class="section-heading">Visibility</h4>
-      {#each VISIBILITIES as v}
+      <h4 class="section-heading">{$t('explorer_filter.visibility')}</h4>
+      {#each VISIBILITY_IDS as vId}
         <label class="filter-radio">
           <input
             type="radio"
             name="filter-visibility"
-            value={v.id}
+            value={vId}
             bind:group={visibility}
             onchange={emitFilter}
           />
-          {v.label}
+          {$t(VISIBILITY_KEYS[vId])}
         </label>
       {/each}
     </section>
 
     <section class="filter-section">
-      <h4 class="section-heading">Min churn (30d)</h4>
+      <h4 class="section-heading">{$t('explorer_filter.min_churn')}</h4>
       <div class="churn-wrap">
         <input
           type="range"
