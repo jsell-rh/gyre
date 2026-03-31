@@ -827,7 +827,7 @@
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
-            <span class="breadcrumb-repo" aria-current="page">Agent Rules</span>
+            <span class="breadcrumb-repo" aria-current="page">{$t('topbar.agent_rules_label')}</span>
           </nav>
         </div>
       {:else if mode === 'repo'}
@@ -975,7 +975,7 @@
               </button>
               <div class="ws-dropdown-divider" role="separator"></div>
               {#if workspaces.length === 0}
-                <div class="ws-dropdown-empty">No workspaces yet</div>
+                <div class="ws-dropdown-empty">{$t('workspace_home.select_workspace_desc')}</div>
               {:else}
                 {#each workspaces as ws}
                   <button
@@ -1176,7 +1176,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Agent Rules</a>
+            >{$t('topbar.agent_rules_label')}</a>
           </li>
         </ul>
       </nav>
@@ -1389,9 +1389,9 @@
       onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
     />
     <div class="token-actions">
-      <button class="btn-secondary" onclick={() => (createWsModalOpen = false)}>Cancel</button>
+      <button class="btn-secondary" onclick={() => (createWsModalOpen = false)}>{$t('common.cancel')}</button>
       <button class="btn-primary" onclick={handleCreateWorkspaceFromDropdown} disabled={createWsSaving || !createWsForm.name?.trim()}>
-        {createWsSaving ? 'Creating…' : 'Create Workspace'}
+        {createWsSaving ? $t('workspace_home.create_ws_creating') : $t('workspace_home.create_ws_submit')}
       </button>
     </div>
   </div>
@@ -1452,8 +1452,8 @@
       </button>
     </div>
     <div class="token-actions">
-      <button class="btn-secondary" onclick={() => (tokenModalOpen = false)}>Cancel</button>
-      <button class="btn-primary" onclick={saveToken}>Save</button>
+      <button class="btn-secondary" onclick={() => (tokenModalOpen = false)}>{$t('common.cancel')}</button>
+      <button class="btn-primary" onclick={saveToken}>{$t('common.save')}</button>
     </div>
   </div>
 </Modal>
