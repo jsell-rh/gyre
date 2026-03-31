@@ -27,6 +27,9 @@ worktrees/
 
 # Web app
 web/node_modules/
+
+# Agent runner
+docker/gyre-agent/node_modules/
 repos/
 crates/gyre-server/repos/
 
