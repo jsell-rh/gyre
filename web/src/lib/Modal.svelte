@@ -55,6 +55,7 @@
   $effect(() => {
     if (open) {
       previousFocus = document.activeElement;
+      document.body.style.overflow = 'hidden';
       // Focus the first form field if available, otherwise first focusable element
       tick().then(() => {
         const formField = modalEl?.querySelector(
