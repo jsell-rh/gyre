@@ -127,13 +127,23 @@ pub struct RigVertexAiAdapter {
 
 impl RigVertexAiAdapter {
     /// Return the generateContent endpoint URL for this adapter's model.
+    ///
+    /// Claude models (claude-*) are published by Anthropic; all others (e.g.
+    /// Gemini) are published by Google. The publisher segment in the Vertex AI
+    /// REST path must match the model's actual publisher.
     fn endpoint_url(&self) -> String {
+        let publisher = if self.model.starts_with("claude") {
+            "anthropic"
+        } else {
+            "google"
+        };
         format!(
             "https://{location}-aiplatform.googleapis.com/v1/\
              projects/{project}/locations/{location}/\
-             publishers/google/models/{model}:generateContent",
+             publishers/{publisher}/models/{model}:generateContent",
             location = self.location,
             project = self.project,
+            publisher = publisher,
             model = self.model,
         )
     }
@@ -512,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_url_format() {
+    fn endpoint_url_format_gemini() {
         let cache = Arc::new(RwLock::new(TokenCache::default()));
         let adapter = RigVertexAiAdapter {
             project: "my-project".to_string(),
@@ -525,6 +535,28 @@ mod tests {
         assert!(url.contains("my-project"));
         assert!(url.contains("us-central1"));
         assert!(url.contains("gemini-2.0-flash-001"));
+        assert!(url.contains("publishers/google/"));
+        assert!(url.contains("generateContent"));
+    }
+
+    #[test]
+    fn endpoint_url_format_claude() {
+        let cache = Arc::new(RwLock::new(TokenCache::default()));
+        let adapter = RigVertexAiAdapter {
+            project: "my-project".to_string(),
+            location: "us-central1".to_string(),
+            model: "claude-opus-4-6@default".to_string(),
+            client: reqwest::Client::new(),
+            token_cache: cache,
+        };
+        let url = adapter.endpoint_url();
+        assert!(url.contains("my-project"));
+        assert!(url.contains("us-central1"));
+        assert!(url.contains("claude-opus-4-6@default"));
+        assert!(
+            url.contains("publishers/anthropic/"),
+            "Claude must use anthropic publisher, got: {url}"
+        );
         assert!(url.contains("generateContent"));
     }
 

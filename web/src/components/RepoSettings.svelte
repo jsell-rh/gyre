@@ -615,58 +615,84 @@
 
         <!-- Delete -->
         <div class="danger-card" data-testid="delete-section">
-          <div class="danger-card-content">
-            <div class="danger-card-info">
-              <h3 class="danger-card-title">Delete Repository</h3>
-              <p class="danger-card-desc">
-                Permanently deletes this repository and all associated data including specs,
-                agents, merge requests, and history.
-                <strong>This action cannot be undone.</strong>
-              </p>
-            </div>
-            <button
-              class="btn-danger"
-              onclick={() => { deleteConfirm = true; deleteConfirmName = ''; archiveConfirm = false; deleteError = null; }}
-              data-testid="delete-btn"
-            >
-              Delete
-            </button>
-          </div>
-
-          {#if deleteConfirm && !archiveConfirm}
-            <div class="confirm-box" data-testid="delete-confirm-box">
-              <p class="confirm-msg">
-                To confirm deletion, type the repository name:
-                <strong>{deleteConfirmRequired}</strong>
-              </p>
-              <input
-                class="confirm-input"
-                type="text"
-                placeholder={deleteConfirmRequired}
-                bind:value={deleteConfirmName}
-                aria-label="Type repository name to confirm deletion"
-                data-testid="delete-confirm-input"
-              />
-              {#if deleteError}
-                <p class="error-text" role="alert">{deleteError}</p>
-              {/if}
-              <div class="confirm-actions">
-                <button
-                  class="btn-secondary"
-                  onclick={() => { deleteConfirm = false; deleteConfirmName = ''; deleteError = null; }}
-                >
-                  Cancel
-                </button>
-                <button
-                  class="btn-danger"
-                  onclick={deleteRepo}
-                  disabled={!deleteReady || deleting}
-                  data-testid="delete-confirm-btn"
-                >
-                  {deleting ? 'Deleting…' : 'Delete Repository'}
-                </button>
+          {#if repo?.status !== 'Archived'}
+            <!-- Repo must be archived before it can be deleted -->
+            <div class="danger-card-content">
+              <div class="danger-card-info">
+                <h3 class="danger-card-title">Delete Repository</h3>
+                <p class="danger-card-desc">
+                  Permanently deletes this repository and all associated data including specs,
+                  agents, merge requests, and history.
+                  <strong>This action cannot be undone.</strong>
+                </p>
+                <p class="danger-card-prereq" data-testid="delete-archive-required">
+                  Archive this repository first before deleting it.
+                </p>
               </div>
+              <button
+                class="btn-danger"
+                disabled
+                data-testid="delete-btn"
+                title="Archive this repository first"
+              >
+                Delete
+              </button>
             </div>
+          {:else}
+            <!-- Repo is archived — deletion is allowed -->
+            <div class="danger-card-content">
+              <div class="danger-card-info">
+                <h3 class="danger-card-title">Delete Repository</h3>
+                <p class="danger-card-desc">
+                  Permanently deletes this repository and all associated data including specs,
+                  agents, merge requests, and history.
+                  <strong>This action cannot be undone.</strong>
+                </p>
+              </div>
+              <button
+                class="btn-danger"
+                onclick={() => { deleteConfirmName = ''; archiveConfirm = false; deleteError = null; }}
+                data-testid="delete-btn"
+              >
+                Delete
+              </button>
+            </div>
+
+            {#if deleteConfirmName !== undefined && !archiveConfirm}
+              <div class="confirm-box" data-testid="delete-confirm-box">
+                <p class="confirm-msg">
+                  To confirm deletion, type the repository name:
+                  <strong>{deleteConfirmRequired}</strong>
+                </p>
+                <input
+                  class="confirm-input"
+                  type="text"
+                  placeholder={deleteConfirmRequired}
+                  bind:value={deleteConfirmName}
+                  aria-label="Type repository name to confirm deletion"
+                  data-testid="delete-confirm-input"
+                />
+                {#if deleteError}
+                  <p class="error-text" role="alert">{deleteError}</p>
+                {/if}
+                <div class="confirm-actions">
+                  <button
+                    class="btn-secondary"
+                    onclick={() => { deleteConfirmName = ''; deleteError = null; }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    class="btn-danger"
+                    onclick={deleteRepo}
+                    disabled={!deleteReady || deleting}
+                    data-testid="delete-confirm-btn"
+                  >
+                    {deleting ? 'Deleting…' : 'Delete Repository'}
+                  </button>
+                </div>
+              </div>
+            {/if}
           {/if}
         </div>
       </div>
@@ -1129,6 +1155,13 @@
     color: var(--color-text-secondary);
     margin: 0;
     line-height: 1.6;
+  }
+
+  .danger-card-prereq {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: var(--space-2) 0 0;
+    font-style: italic;
   }
 
   .confirm-box {
