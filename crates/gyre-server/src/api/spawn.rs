@@ -629,6 +629,29 @@ pub async fn spawn_agent(
         // Placeholder so the Anthropic SDK initialises; cred-proxy injects the real key per request.
         container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
 
+        // Vertex AI: forward non-secret Vertex config env vars to the container.
+        // Secrets (GCP SA JSON) are handled by GYRE_CRED_GCP_SA_JSON above.
+        // CLAUDE_CODE_USE_VERTEX enables Vertex mode in the Claude Agent SDK.
+        for var_name in [
+            "CLAUDE_CODE_USE_VERTEX",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "CLOUD_ML_REGION",
+        ] {
+            if let Ok(val) = std::env::var(var_name) {
+                if !val.is_empty() {
+                    container_env.insert(var_name.to_string(), val);
+                }
+            }
+        }
+        // Also check GYRE_VERTEX_LOCATION as an alias for CLOUD_ML_REGION.
+        if !container_env.contains_key("CLOUD_ML_REGION") {
+            if let Ok(val) = std::env::var("GYRE_VERTEX_LOCATION") {
+                if !val.is_empty() {
+                    container_env.insert("CLOUD_ML_REGION".to_string(), val);
+                }
+            }
+        }
+
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
             command: command.clone(),
