@@ -273,8 +273,8 @@
   <!-- Workspace scope: repo list for graph exploration — S4.4b -->
   <div class="ws-repo-list" aria-busy={wsReposLoading}>
     <div class="ws-repo-header">
-      <h1 class="page-title">Workspace Architecture</h1>
-      <p class="ws-repo-desc">Select a workspace repository to explore its knowledge graph</p>
+      <h1 class="page-title">{$t('explorer_view.workspace_title')}</h1>
+      <p class="ws-repo-desc">{$t('explorer_view.workspace_desc')}</p>
     </div>
     {#if wsReposLoading}
       <div class="ws-repo-grid">
@@ -288,7 +288,7 @@
         <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">{$t('common.retry')}</button>
       </div>
     {:else if wsRepos.length === 0}
-      <EmptyState title="No repositories" description="Create a repository in this workspace to explore its architecture." />
+      <EmptyState title={$t('explorer_view.no_repos')} description={$t('explorer_view.no_repos_desc')} />
     {:else}
       <div class="ws-repo-grid">
         {#each wsRepos as repo (repo.id)}
@@ -317,8 +317,8 @@
     <!-- Header -->
     <div class="explorer-header">
       <div class="header-left">
-        <h1 class="page-title">System Explorer</h1>
-        <p class="subtitle">Realized architecture — navigate the living knowledge graph</p>
+        <h1 class="page-title">{$t('explorer_view.system_title')}</h1>
+        <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
       </div>
       <div class="header-right">
         {#if reposLoading}
@@ -383,7 +383,7 @@
           tabindex={explorerTab === 'architecture' ? 0 : -1}
           onclick={() => { explorerTab = 'architecture'; }}
           type="button"
-        >Architecture</button>
+        >{$t('explorer_view.sub_tabs.architecture')}</button>
         <button
           class="explorer-tab-btn {explorerTab === 'briefing' ? 'active' : ''}"
           role="tab"
@@ -392,7 +392,7 @@
           tabindex={explorerTab === 'briefing' ? 0 : -1}
           onclick={() => { explorerTab = 'briefing'; }}
           type="button"
-        >Briefing</button>
+        >{$t('explorer_view.sub_tabs.briefing')}</button>
         <button
           class="explorer-tab-btn {explorerTab === 'code' ? 'active' : ''}"
           role="tab"
@@ -401,7 +401,7 @@
           tabindex={explorerTab === 'code' ? 0 : -1}
           onclick={() => { explorerTab = 'code'; }}
           type="button"
-        >Code</button>
+        >{$t('explorer_view.sub_tabs.code')}</button>
       </div>
     {/if}
 
@@ -529,7 +529,7 @@
             />
             {#if repos.length === 0 && !reposLoading}
               <p class="hint">No repositories found. Create a project and repository to get started.</p>
-              <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>Go to Settings</button>
+              <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>{$t('explorer_view.go_to_settings')}</button>
             {/if}
           </div>
 
