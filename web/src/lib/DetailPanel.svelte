@@ -832,10 +832,44 @@
                 {/if}
               </dl>
             {/if}
+          {:else if entity.type === 'task'}
+            {@const tk = entity.data ?? {}}
+            <dl class="entity-meta">
+              <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
+              <dt>Status</dt><dd><Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} /></dd>
+              <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+              {#if tk.priority}
+                <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
+              {/if}
+              {#if tk.task_type}
+                <dt>Type</dt><dd>{tk.task_type}</dd>
+              {/if}
+              {#if tk.description}
+                <dt>Description</dt><dd>{tk.description}</dd>
+              {/if}
+              {#if tk.spec_path}
+                <dt>Spec</dt><dd class="mono">{tk.spec_path}</dd>
+              {/if}
+              {#if tk.branch}
+                <dt>Branch</dt><dd class="mono">{tk.branch}</dd>
+              {/if}
+              {#if tk.assigned_to}
+                <dt>Assigned</dt><dd class="mono" title={tk.assigned_to}>{shortId(tk.assigned_to)}</dd>
+              {/if}
+              {#if tk.labels?.length > 0}
+                <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
+              {/if}
+              {#if tk.created_at}
+                <dt>Created</dt><dd>{fmtDate(tk.created_at)}</dd>
+              {/if}
+              {#if tk.updated_at}
+                <dt>Updated</dt><dd>{fmtDate(tk.updated_at)}</dd>
+              {/if}
+            </dl>
           {:else}
             <dl class="entity-meta">
               <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
-              <dt>{$t('detail_panel.id')}</dt><dd class="mono">{entity.id}</dd>
+              <dt>{$t('detail_panel.id')}</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
               {#if entity.data?.status}
                 <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
               {/if}
