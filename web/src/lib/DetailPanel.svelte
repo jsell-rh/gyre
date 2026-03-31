@@ -98,7 +98,7 @@
         id: 'ask-why',
         label: $t('detail_panel.tabs.ask_why'),
         disabled: !data.conversation_sha,
-        title: data.conversation_sha ? undefined : 'Conversation unavailable',
+        title: data.conversation_sha ? undefined : $t('detail_panel.conversation_unavailable'),
       });
       return result;
     }
@@ -114,7 +114,7 @@
           id: 'ask-why',
           label: $t('detail_panel.tabs.ask_why'),
           disabled: !data.conversation_sha,
-          title: data.conversation_sha ? undefined : 'Conversation unavailable',
+          title: data.conversation_sha ? undefined : $t('detail_panel.conversation_unavailable'),
         });
       }
       return result;
@@ -611,7 +611,7 @@
           class="panel-btn"
           onclick={popout}
           aria-label={expanded ? $t('detail_panel.collapse') : $t('detail_panel.pop_out')}
-          title={expanded ? 'Collapse' : 'Pop Out'}
+          title={expanded ? $t('detail_panel.collapse_label') : $t('detail_panel.pop_out_label')}
         >
           {#if expanded}
             <!-- Collapse icon -->
@@ -625,7 +625,7 @@
               <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
             </svg>
           {/if}
-          <span class="sr-only">{expanded ? 'Collapse' : 'Pop Out'}</span>
+          <span class="sr-only">{expanded ? $t('detail_panel.collapse_label') : $t('detail_panel.pop_out_label')}</span>
         </button>
         <button
           class="panel-btn panel-close"

@@ -791,14 +791,14 @@
   {:else if showListFallback}
     <div class="threshold-banner warning">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      Graph too large ({nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}) — showing list view. Drill into a module to view its graph.
+      {$t('explorer_canvas.graph_too_large', { values: { count: nodes.length } })}
     </div>
     <div class="list-fallback-wrap">
-      <table class="list-table" aria-label="Node list (graph too large for canvas)">
+      <table class="list-table" aria-label={$t('explorer_canvas.node_list_label')}>
         <thead><tr><th scope="col">{$t('explorer_canvas.legend_type')}</th><th scope="col">{$t('explorer_canvas.col_name')}</th><th scope="col">{$t('explorer_canvas.file')}</th><th scope="col">{$t('detail_panel.spec')}</th></tr></thead>
         <tbody>
           {#each nodes.slice(0, 1000) as node}
-            <tr class="list-row" role="button" tabindex="0" aria-label="Select node {node.name}"
+            <tr class="list-row" role="button" tabindex="0" aria-label={$t('explorer_canvas.select_node', { values: { name: node.name } })}
               onclick={() => selectNode(node)} onkeydown={(e) => e.key === 'Enter' && selectNode(node)}
               ondblclick={(e) => { e.stopPropagation(); drillInFromList(node); }}>
               <td><Badge variant="default" value={node.node_type ?? '?'} /></td>
@@ -807,7 +807,7 @@
               <td>{node.spec_path ? node.spec_path.split('/').pop() : '—'}</td>
               <td>
                 <button class="drill-in-btn" onclick={(e) => { e.stopPropagation(); drillInFromList(node); }}
-                  aria-label="Drill into {node.name}">
+                  aria-label={$t('explorer_canvas.drill_into_node', { values: { name: node.name } })}>
                   {$t('explorer_canvas.drill_in_btn')}
                 </button>
               </td>
@@ -846,7 +846,7 @@
       {/if}
 
       <!-- Layout engine switcher -->
-      <div class="layout-switcher" role="group" aria-label="Layout engine">
+      <div class="layout-switcher" role="group" aria-label={$t('explorer_canvas.layout_engine_label')}>
         {#each Object.entries(LAYOUT_LABELS) as [eng, label]}
           <button class="layout-btn" class:active={layoutEngine === eng}
             onclick={() => (layoutEngine = eng)} aria-pressed={layoutEngine === eng} title="Switch to {label} layout" aria-label="Switch to {label} layout">
@@ -896,7 +896,7 @@
       <svg bind:this={svgEl} class="graph-svg" class:panning={isPanning}
         viewBox="{viewBox.x} {viewBox.y} {viewBox.w} {viewBox.h}"
         role="application"
-        aria-label="Architecture graph canvas — pan with drag, zoom with scroll, right-click for options, double-click to drill in"
+        aria-label={$t('explorer_canvas.canvas_label')}
         onmousedown={onMouseDown} onmousemove={onMouseMove} onmouseup={onMouseUp}
         onmouseleave={onMouseUp} onwheel={onWheel} oncontextmenu={onContextMenu} ondblclick={onDblClick}
         ontouchstart={onTouchStart} ontouchmove={onTouchMove} ontouchend={onTouchEnd} ontouchcancel={onTouchEnd}>
@@ -1006,7 +1006,7 @@
       </svg>
 
       {#if specLinkageOn}
-        <div class="spec-legend" aria-label="Spec linkage legend">
+        <div class="spec-legend" aria-label={$t('explorer_canvas.spec_linkage_legend')}>
           <div class="spec-legend-title">{$t('explorer_canvas.spec_coverage')}</div>
           {#each [{ label: $t('explorer_canvas.high_confidence'), color: '#22c55e', dashed: false },{ label: $t('explorer_canvas.medium_confidence'), color: '#eab308', dashed: false },{ label: $t('explorer_canvas.low_confidence'), color: '#f97316', dashed: false },{ label: $t('explorer_canvas.unspecced_label'), color: '#ef4444', dashed: true }] as entry}
             <div class="spec-legend-item">
@@ -1024,7 +1024,7 @@
       {/if}
 
       {#if showRiskHeatmap}
-        <div class="risk-panel" role="complementary" aria-label="Risk heat-map — top 10 nodes">
+        <div class="risk-panel" role="complementary" aria-label={$t('explorer_canvas.risk_heatmap_panel')}>
           <div class="risk-panel-header">
             <span class="risk-panel-title">{$t('explorer_canvas.risk_heatmap')}</span>
             <span class="risk-panel-sub">{$t('explorer_canvas.top_risk')}</span>
@@ -1033,7 +1033,7 @@
             <div class="risk-empty">{repoId ? $t('explorer_canvas.loading_risk') : $t('explorer_canvas.no_risk_data')}</div>
           {:else}
             <div class="risk-table-wrap">
-              <table class="risk-table" aria-label="Top 10 highest-risk nodes">
+              <table class="risk-table" aria-label={$t('explorer_canvas.risk_table_label')}>
                 <thead>
                   <tr>
                     <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'name')} aria-label={$t('explorer_canvas.sort_by_name')}>{$t('explorer_canvas.col_name')} {sortIcon('name')}</button></th>
@@ -1046,7 +1046,7 @@
                   {#each topRiskNodes as entry}
                     {@const fill = riskFillColor(entry.score)}
                     <tr class="risk-row" class:highlighted={highlightedNodeId === entry.id} role="button" tabindex="0"
-                      aria-label="Highlight node {entry.name} on canvas"
+                      aria-label={$t('explorer_canvas.highlight_node', { values: { name: entry.name } })}
                       onclick={() => panToNode(entry.id)} onkeydown={(e) => e.key === 'Enter' && panToNode(entry.id)}>
                       <td class="risk-name" title={entry.name}>{entry.name.substring(0, 14)}</td>
                       <td><span class="risk-score-chip" style="--chip-color: {fill}">{entry.score.toFixed(2)}</span></td>
@@ -1121,7 +1121,7 @@
 
       <!-- ── Spec detail panel (bidirectional nav TASK-360) ─────────────── -->
       {#if specPanelNode}
-        <div class="spec-detail-panel" role="complementary" aria-label="Spec detail for {specPanelNode.name}" data-testid="spec-detail-panel">
+        <div class="spec-detail-panel" role="complementary" aria-label={$t('explorer_canvas.spec_detail_label', { values: { name: specPanelNode.name } })} data-testid="spec-detail-panel">
           <div class="spec-panel-header">
             <div class="spec-panel-title-row">
               <span class="spec-panel-label">{$t('explorer_canvas.governing_spec')}</span>
@@ -1217,7 +1217,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="ctx-menu" style="left:{contextMenu.x}px; top:{contextMenu.y}px"
-    onclick={(e) => e.stopPropagation()} role="menu" tabindex="-1" aria-label="Node context menu">
+    onclick={(e) => e.stopPropagation()} role="menu" tabindex="-1" aria-label={$t('explorer_canvas.context_menu_label')}>
     <button class="ctx-item" role="menuitem" onclick={() => ctxViewDetails(contextMenu.node)}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
       {$t('explorer_canvas.view_details')}

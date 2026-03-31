@@ -1074,7 +1074,10 @@
     "revocation_failed": "Revocation failed: {error}",
     "llm_assist_failed": "LLM assist failed: {error}",
     "spec_saved": "Spec saved — MR #{mr_id} created",
-    "save_failed": "Save failed: {error}"
+    "save_failed": "Save failed: {error}",
+    "conversation_unavailable": "Conversation unavailable",
+    "collapse_label": "Collapse",
+    "pop_out_label": "Pop Out"
   },
   "explorer_canvas": {
     "no_graph": "No graph data",
@@ -1170,7 +1173,18 @@
     "copy_name": "Copy Name",
     "switch_to_layout": "Switch to {label} layout",
     "computing_layout": "Computing layout\u2026",
-    "risk_hint": "Node size \u221D fan-in \u00B7 Color = risk score"
+    "risk_hint": "Node size \u221D fan-in \u00B7 Color = risk score",
+    "node_list_label": "Node list (graph too large for canvas)",
+    "select_node": "Select node {name}",
+    "drill_into_node": "Drill into {name}",
+    "layout_engine_label": "Layout engine",
+    "canvas_label": "Architecture graph canvas — pan with drag, zoom with scroll, right-click for options, double-click to drill in",
+    "spec_linkage_legend": "Spec linkage legend",
+    "risk_heatmap_panel": "Risk heat-map — top 10 nodes",
+    "risk_table_label": "Top 10 highest-risk nodes",
+    "highlight_node": "Highlight node {name} on canvas",
+    "spec_detail_label": "Spec detail for {name}",
+    "context_menu_label": "Node context menu"
   },
   "explorer_filter": {
     "title": "Filters",
@@ -1655,7 +1669,17 @@
     "clear": "Clear",
     "hint_agent": "Ctrl+Enter to send \u00b7 Messages are signed and persisted via message bus",
     "hint_qa": "Ctrl+Enter to send \u00b7 Read-only Q&A \u2014 cannot trigger actions",
-    "hint_edit": "Ctrl+Enter to send \u00b7 Produces draft suggestions \u2014 you accept before saving"
+    "hint_edit": "Ctrl+Enter to send \u00b7 Produces draft suggestions \u2014 you accept before saving",
+    "chat_history": "Chat history",
+    "dismiss_error": "Dismiss error",
+    "message_input": "Message input",
+    "send_message": "Send message",
+    "sending_to": "Sending to: {recipient}"
+  },
+  "flow_renderer": {
+    "controls_label": "Flow animation controls",
+    "scrubber_label": "Animation scrubber",
+    "playback_speed": "Playback speed"
   },
   "workspace_cards": {
     "title": "Workspaces",
