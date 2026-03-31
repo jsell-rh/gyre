@@ -332,14 +332,7 @@
     const path = entity.id;
     const repoId = entity.data?.repo_id ?? null;
 
-    if (activeTab === 'content' && !specDetail && !specDetailLoading) {
-      specDetailLoading = true;
-      api.specContent(path, repoId)
-        .then((d) => { specDetail = d; editContent = d?.content ?? ''; })
-        .catch(() => { specDetail = null; })
-        .finally(() => { specDetailLoading = false; });
-    }
-    if (activeTab === 'edit' && !specDetail && !specDetailLoading) {
+    if ((activeTab === 'content' || activeTab === 'edit') && !specDetail && !specDetailLoading) {
       specDetailLoading = true;
       api.specContent(path, repoId)
         .then((d) => { specDetail = d; editContent = d?.content ?? ''; })
