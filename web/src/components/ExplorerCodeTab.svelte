@@ -712,6 +712,7 @@
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>Merge Request {sortIcon('mr')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>{$t('code_tab.col_priority')} {sortIcon('priority')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
+              <th scope="col">Dependencies</th>
               <th scope="col">Speculative Merge</th>
             </tr>
           </thead>
@@ -729,6 +730,15 @@
                 </td>
                 <td><span class="priority-pill priority-{entry.priority <= 25 ? 'high' : entry.priority <= 75 ? 'normal' : 'low'}">P{entry.priority ?? '—'}</span></td>
                 <td><span class="status-badge status-{entry._mr_status ?? ''}">{entry.status ?? 'queued'}</span></td>
+                <td>
+                  {#if entry.depends_on?.length > 0}
+                    <span class="dep-indicator dep-blocked" title="Blocked by {entry.depends_on.length} MR(s)">blocked ({entry.depends_on.length})</span>
+                  {:else if entry.atomic_group}
+                    <span class="dep-indicator dep-group" title="Atomic group: {entry.atomic_group}">{entry.atomic_group}</span>
+                  {:else}
+                    <span class="secondary">—</span>
+                  {/if}
+                </td>
                 <td>
                   {#if entry._speculative}
                     {@const sm = entry._speculative}
@@ -1387,6 +1397,24 @@
   }
 
   /* Speculative merge badge */
+  .dep-indicator {
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
+  .dep-blocked {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
+    font-weight: 600;
+  }
+
+  .dep-group {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    color: var(--color-primary);
+    font-family: var(--font-mono);
+  }
+
   .spec-merge-badge {
     display: inline-block;
     padding: 1px var(--space-2);
