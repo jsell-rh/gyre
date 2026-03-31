@@ -118,17 +118,23 @@
         const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
         mrs = mrs.map(mr => ({ ...mr, _gates: gateMap[mr.id] }));
       } else if (tab === 'merge-queue') {
-        const [all, mrList] = await Promise.all([
+        const [all, mrList, specMerges] = await Promise.all([
           api.mergeQueue(),
           api.mergeRequests({ repository_id: repoId }),
+          api.repoSpeculative(repoId).catch(() => []),
         ]);
         const mrMap = Object.fromEntries((Array.isArray(mrList) ? mrList : []).map(m => [m.id, m]));
+        const specMap = new Map();
+        for (const sm of (Array.isArray(specMerges) ? specMerges : [])) {
+          if (sm.branch) specMap.set(sm.branch, sm);
+        }
         queue = (Array.isArray(all) ? all : [])
           .filter(e => e.repository_id === repoId || e.repo_id === repoId)
           .map(e => {
             const mrId = e.merge_request_id ?? e.mr_id;
             const mr = mrMap[mrId];
-            return { ...e, _mr_title: mr?.title, _mr_status: mr?.status, _mr_branch: mr?.source_branch };
+            const spec = mr?.source_branch ? specMap.get(mr.source_branch) : null;
+            return { ...e, _mr_title: mr?.title, _mr_status: mr?.status, _mr_branch: mr?.source_branch, _speculative: spec };
           });
       } else if (tab === 'tasks') {
         const all = await api.tasks({ repoId });
@@ -648,6 +654,7 @@
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>Merge Request {sortIcon('mr')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>{$t('code_tab.col_priority')} {sortIcon('priority')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
+              <th scope="col">Speculative Merge</th>
             </tr>
           </thead>
           <tbody>
@@ -664,6 +671,16 @@
                 </td>
                 <td><span class="priority-pill priority-{entry.priority <= 25 ? 'high' : entry.priority <= 75 ? 'normal' : 'low'}">P{entry.priority ?? '—'}</span></td>
                 <td><span class="status-badge status-{entry._mr_status ?? ''}">{entry.status ?? 'queued'}</span></td>
+                <td>
+                  {#if entry._speculative}
+                    {@const sm = entry._speculative}
+                    <span class="spec-merge-badge" class:spec-merge-clean={sm.mergeable || sm.status === 'clean'} class:spec-merge-conflict={sm.has_conflicts || sm.status === 'conflict'} title={sm.has_conflicts ? 'This branch has merge conflicts with main' : sm.mergeable ? 'Clean merge — no conflicts detected' : 'Speculative merge status: ' + (sm.status ?? 'unknown')}>
+                      {sm.has_conflicts ? 'Conflicts' : sm.mergeable ? 'Clean' : sm.status ?? '—'}
+                    </span>
+                  {:else}
+                    <span class="secondary">—</span>
+                  {/if}
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -1309,6 +1326,30 @@
     color: var(--color-text-muted);
     margin: 0;
     padding: 0 var(--space-4);
+  }
+
+  /* Speculative merge badge */
+  .spec-merge-badge {
+    display: inline-block;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+  }
+
+  .spec-merge-clean {
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+    color: var(--color-success);
+  }
+
+  .spec-merge-conflict {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+    color: var(--color-danger);
   }
 
   /* Files / Blame view */
