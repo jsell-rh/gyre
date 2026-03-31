@@ -511,9 +511,22 @@
         api.agentWorkload(id).catch(() => null),
         api.agentTouchedPaths(id).catch(() => null),
         api.agentCard(id).catch(() => null),
-      ]).then(async ([d, logs, container, workload, touchedPaths, card]) => {
+        api.costsByAgent(id).catch(() => []),
+      ]).then(async ([d, logs, container, workload, touchedPaths, card, costs]) => {
         const norm = normalizeAgent(d);
-        agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths, _card: card } : norm;
+        const costEntries = Array.isArray(costs) ? costs : [];
+        const totalTokens = costEntries.reduce((sum, c) => sum + (c.input_tokens ?? 0) + (c.output_tokens ?? 0), 0);
+        const totalCost = costEntries.reduce((sum, c) => sum + (c.cost_usd ?? c.amount ?? 0), 0);
+        const modelUsage = {};
+        for (const c of costEntries) {
+          const m = c.model ?? 'unknown';
+          if (!modelUsage[m]) modelUsage[m] = { input: 0, output: 0, cost: 0 };
+          modelUsage[m].input += c.input_tokens ?? 0;
+          modelUsage[m].output += c.output_tokens ?? 0;
+          modelUsage[m].cost += c.cost_usd ?? c.amount ?? 0;
+        }
+        const _costs = costEntries.length > 0 ? { totalTokens, totalCost, models: modelUsage, entries: costEntries } : null;
+        agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths, _card: card, _costs } : norm;
         // Pre-cache a few recent logs for the info view
         if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
         // Resolve spec_path via task if available
@@ -1622,6 +1635,30 @@
                     </div>
                   </div>
                 {/if}
+              {/if}
+
+              <!-- LLM Usage & Cost -->
+              {#if ag._costs}
+                <div class="agent-container-info">
+                  <span class="progress-section-label">LLM Usage</span>
+                  <dl class="entity-meta">
+                    <dt>Total Tokens</dt><dd>{ag._costs.totalTokens.toLocaleString()}</dd>
+                    {#if ag._costs.totalCost > 0}
+                      <dt>Total Cost</dt><dd>${ag._costs.totalCost.toFixed(4)}</dd>
+                    {/if}
+                  </dl>
+                  {#if Object.keys(ag._costs.models).length > 0}
+                    <div class="cost-model-breakdown">
+                      {#each Object.entries(ag._costs.models) as [model, usage]}
+                        <div class="cost-model-row">
+                          <span class="cost-model-name mono">{model}</span>
+                          <span class="cost-model-tokens">{(usage.input + usage.output).toLocaleString()} tokens</span>
+                          {#if usage.cost > 0}<span class="cost-model-cost">${usage.cost.toFixed(4)}</span>{/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
               {/if}
 
               <!-- Provenance chain for agent -->
@@ -4959,6 +4996,37 @@
     color: var(--color-text-muted);
     font-style: italic;
     padding: 2px 0;
+  }
+
+  /* ── Agent cost breakdown ───────────────────────────────────────────── */
+  .cost-model-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+  }
+
+  .cost-model-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    padding: 2px 0;
+  }
+
+  .cost-model-name {
+    color: var(--color-text-secondary);
+    min-width: 120px;
+  }
+
+  .cost-model-tokens {
+    color: var(--color-text-muted);
+  }
+
+  .cost-model-cost {
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    margin-left: auto;
   }
 
   /* ── MR deps section ───────────────────────────────────────────────────── */
