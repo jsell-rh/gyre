@@ -216,7 +216,7 @@
     {#if error}
       <div class="error-banner" role="alert">
         <span>{error}</span>
-        <button class="retry-btn" onclick={() => { error = null; loadTab(subTab); }}>Retry</button>
+        <button class="retry-btn" onclick={() => { error = null; loadTab(subTab); }}>{$t('common.retry')}</button>
       </div>
     {:else if loading}
       <Skeleton lines={6} />

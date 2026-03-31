@@ -122,7 +122,7 @@
         {#if agentsLoading}
           <span class="meta-value">{$t('repo_mode.loading_agents')}</span>
         {:else}
-          <span class="meta-value">{activeAgents.length} agent{activeAgents.length === 1 ? '' : 's'} active</span>
+          <span class="meta-value">{$t('repo_mode.agents_active', { values: { count: activeAgents.length } })}</span>
         {/if}
       </button>
 

@@ -17,6 +17,7 @@
    *   scope       — 'tenant' | 'workspace' | 'repo'
    */
   import { getContext, onDestroy } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -574,7 +575,7 @@
       <div class="split-layout"><div class="split-left"><Skeleton /></div><div class="split-right"><Skeleton /></div></div>
     {:else if wsError}
       <div role="alert"><EmptyState title="Failed to load" description={wsError} /></div>
-      <button class="retry-btn" onclick={loadWorkspaceData}>Retry</button>
+      <button class="retry-btn" onclick={loadWorkspaceData}>{$t('common.retry')}</button>
     {:else}
       <div class="split-layout" data-testid="preview-loop">
         <!-- LEFT: Meta-spec editor -->
@@ -779,7 +780,7 @@
       </div>
     {:else if error}
       <div role="alert"><EmptyState title="Failed to load meta-specs" description={error} /></div>
-      <button class="retry-btn" onclick={loadTenantSpecs}>Retry</button>
+      <button class="retry-btn" onclick={loadTenantSpecs}>{$t('common.retry')}</button>
     {:else}
       <div class="creative-surface">
         <!-- Sidebar: list of meta-specs -->
@@ -874,7 +875,7 @@
               </div>
 
               <div class="create-actions">
-                <Button variant="secondary" onclick={() => createMode = false}>Cancel</Button>
+                <Button variant="secondary" onclick={() => createMode = false}>{$t('common.cancel')}</Button>
                 <Button variant="primary" onclick={handleCreate} disabled={createSaving}>
                   {createSaving ? 'Creating…' : 'Create Meta-spec'}
                 </Button>
@@ -908,7 +909,7 @@
                 >
                   {selected.required ? 'Required' : 'Optional'}
                 </button>
-                <Button variant="danger" size="sm" onclick={() => deleteTarget = selected}>Delete</Button>
+                <Button variant="danger" size="sm" onclick={() => deleteTarget = selected}>{$t('common.delete')}</Button>
               </div>
             </div>
 
@@ -924,10 +925,10 @@
                 if (e.key === 'ArrowLeft')  { e.preventDefault(); onEditorTabChange(tabs[(idx + tabs.length - 1) % tabs.length]); }
               }}
             >
-              <button class="editor-tab" role="tab" id="etab-edit" aria-controls="epanel-edit" aria-selected={editorTab === 'edit'} class:active={editorTab === 'edit'} tabindex={editorTab === 'edit' ? 0 : -1} onclick={() => onEditorTabChange('edit')}>Edit</button>
-              <button class="editor-tab" role="tab" id="etab-impact" aria-controls="epanel-impact" aria-selected={editorTab === 'impact'} class:active={editorTab === 'impact'} tabindex={editorTab === 'impact' ? 0 : -1} onclick={() => onEditorTabChange('impact')}>Impact</button>
-              <button class="editor-tab" role="tab" id="etab-history" aria-controls="epanel-history" aria-selected={editorTab === 'history'} class:active={editorTab === 'history'} tabindex={editorTab === 'history' ? 0 : -1} onclick={() => onEditorTabChange('history')}>History</button>
-              <button class="editor-tab" role="tab" id="etab-approval" aria-controls="epanel-approval" aria-selected={editorTab === 'approval'} class:active={editorTab === 'approval'} tabindex={editorTab === 'approval' ? 0 : -1} onclick={() => onEditorTabChange('approval')}>Approval</button>
+              <button class="editor-tab" role="tab" id="etab-edit" aria-controls="epanel-edit" aria-selected={editorTab === 'edit'} class:active={editorTab === 'edit'} tabindex={editorTab === 'edit' ? 0 : -1} onclick={() => onEditorTabChange('edit')}>{$t('meta_specs.editor_tabs.edit')}</button>
+              <button class="editor-tab" role="tab" id="etab-impact" aria-controls="epanel-impact" aria-selected={editorTab === 'impact'} class:active={editorTab === 'impact'} tabindex={editorTab === 'impact' ? 0 : -1} onclick={() => onEditorTabChange('impact')}>{$t('meta_specs.editor_tabs.impact')}</button>
+              <button class="editor-tab" role="tab" id="etab-history" aria-controls="epanel-history" aria-selected={editorTab === 'history'} class:active={editorTab === 'history'} tabindex={editorTab === 'history' ? 0 : -1} onclick={() => onEditorTabChange('history')}>{$t('meta_specs.editor_tabs.history')}</button>
+              <button class="editor-tab" role="tab" id="etab-approval" aria-controls="epanel-approval" aria-selected={editorTab === 'approval'} class:active={editorTab === 'approval'} tabindex={editorTab === 'approval' ? 0 : -1} onclick={() => onEditorTabChange('approval')}>{$t('meta_specs.editor_tabs.approval')}</button>
             </div>
 
             <!-- Edit tab -->
@@ -1212,7 +1213,7 @@
         This cannot be undone. If active bindings exist, deletion will fail with 409.
       </p>
       <div class="form-actions">
-        <Button variant="secondary" onclick={() => deleteTarget = null}>Cancel</Button>
+        <Button variant="secondary" onclick={() => deleteTarget = null}>{$t('common.cancel')}</Button>
         <Button variant="danger" onclick={handleDelete} disabled={deleteSaving}>
           {deleteSaving ? 'Deleting…' : 'Delete'}
         </Button>

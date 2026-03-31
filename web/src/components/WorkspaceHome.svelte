@@ -692,16 +692,16 @@
                     <span class="repo-name">{repo.name}</span>
                     <span class="repo-meta">
                       {#if (repo.active_spec_count ?? 0) > 0}
-                        <span class="repo-stat">{repo.active_spec_count} spec{repo.active_spec_count !== 1 ? 's' : ''} active</span>
+                        <span class="repo-stat">{$t('workspace_home.repo_specs_active', { values: { count: repo.active_spec_count } })}</span>
                       {/if}
                       {#if (repo.active_agents ?? 0) > 0}
-                        <span class="repo-stat">{repo.active_agents} agent{repo.active_agents !== 1 ? 's' : ''}</span>
+                        <span class="repo-stat">{$t('workspace_home.repo_agents_count', { values: { count: repo.active_agents } })}</span>
                       {/if}
                     </span>
                     <span class="repo-health health-{health}" aria-label="Status: {health}" data-testid="repo-health">
-                      {#if health === 'healthy'}● healthy
-                      {:else if health === 'gate'}⚠ gate
-                      {:else}○ idle
+                      {#if health === 'healthy'}● {$t('workspace_home.repo_health_healthy')}
+                      {:else if health === 'gate'}⚠ {$t('workspace_home.repo_health_gate')}
+                      {:else}○ {$t('workspace_home.repo_health_idle')}
                       {/if}
                     </span>
                   </button>
@@ -842,15 +842,15 @@
             </div>
           {:else}
             <p class="rules-summary" data-testid="rules-summary">
-              {allMetaSpecs.length} meta-spec{allMetaSpecs.length !== 1 ? 's' : ''} active
+              {$t('workspace_home.rules_summary', { values: { count: allMetaSpecs.length } })}
               {#if requiredMetaSpecs.length > 0}
-                ({requiredMetaSpecs.length} required)
+                {$t('workspace_home.rules_summary_required', { values: { count: requiredMetaSpecs.length } })}
               {/if}
             </p>
 
             {#if recentlyUpdated.length > 0}
               <div class="reconcile-status" role="status" data-testid="reconcile-status">
-                Reconciling: {recentlyUpdated.length} meta-spec{recentlyUpdated.length !== 1 ? 's' : ''} recently updated
+                {$t('workspace_home.rules_reconciling', { values: { count: recentlyUpdated.length } })}
               </div>
             {/if}
 
@@ -881,32 +881,32 @@
 </div>
 
 <!-- Create Workspace modal -->
-<Modal bind:open={createWsOpen} title="New Workspace" size="sm">
+<Modal bind:open={createWsOpen} title={$t('workspace_home.create_ws_title')} size="sm">
   <div class="create-ws-form">
-    <label class="create-ws-label">Name *
+    <label class="create-ws-label">{$t('workspace_home.create_ws_name_label')}
       <input
         class="create-ws-input"
         bind:value={createWsForm.name}
-        placeholder="e.g. Backend Team"
+        placeholder={$t('workspace_home.create_ws_name_placeholder')}
         onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
       />
     </label>
-    <label class="create-ws-label">Description
+    <label class="create-ws-label">{$t('workspace_home.create_ws_desc_label')}
       <input
         class="create-ws-input"
         bind:value={createWsForm.description}
-        placeholder="What is this workspace for?"
+        placeholder={$t('workspace_home.create_ws_desc_placeholder')}
         onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
       />
     </label>
     <div class="create-ws-actions">
-      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>Cancel</button>
+      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>{$t('workspace_home.create_ws_cancel')}</button>
       <button
         class="create-ws-submit"
         onclick={handleCreateWorkspace}
         disabled={createWsSaving || !createWsForm.name?.trim()}
       >
-        {createWsSaving ? 'Creating…' : 'Create Workspace'}
+        {createWsSaving ? $t('workspace_home.create_ws_creating') : $t('workspace_home.create_ws_submit')}
       </button>
     </div>
   </div>
