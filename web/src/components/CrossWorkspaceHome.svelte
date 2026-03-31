@@ -212,6 +212,10 @@
   let briefingError = $state(null);
   let briefingSummaries = $state([]); // [{ workspaceName, summary }]
 
+  // ── Budget summary state ─────────────────────────────────────────────────
+  let budgetSummary = $state(null);
+  let budgetSummaryLoading = $state(true);
+
   // ── Agent Rules state ────────────────────────────────────────────────────
   let rulesLoading = $state(true);
   let rulesError = $state(null);
@@ -226,6 +230,7 @@
     });
     loadSpecs();
     loadAgentRules();
+    loadBudgetSummary();
   });
 
   async function loadDecisions() {
@@ -300,6 +305,17 @@
       briefingError = e?.message ?? $t('cross_workspace.error_load_briefing');
     } finally {
       briefingLoading = false;
+    }
+  }
+
+  async function loadBudgetSummary() {
+    budgetSummaryLoading = true;
+    try {
+      budgetSummary = await api.budgetSummary();
+    } catch {
+      budgetSummary = null;
+    } finally {
+      budgetSummaryLoading = false;
     }
   }
 
@@ -559,6 +575,69 @@
           </li>
         {/each}
       </ul>
+    {/if}
+  </section>
+
+  <!-- ── Budget Summary ──────────────────────────────────────────────────── -->
+  <section class="cwh-section" data-testid="section-budget" aria-labelledby="budget-heading">
+    <div class="section-header">
+      <h2 class="section-title" id="budget-heading">Budget Overview</h2>
+    </div>
+    {#if budgetSummaryLoading}
+      <div class="loading-placeholder">Loading budget...</div>
+    {:else if budgetSummary}
+      {@const bs = budgetSummary}
+      {@const wsBreakdown = Array.isArray(bs.workspaces) ? bs.workspaces : (bs.workspace_budgets ?? [])}
+      <div class="budget-summary-grid">
+        {#if bs.total_active_agents != null || bs.total_cost_today != null || bs.total_tokens_today != null}
+          <div class="budget-stat-cards">
+            {#if bs.total_active_agents != null}
+              <div class="budget-stat-card">
+                <span class="budget-stat-value">{bs.total_active_agents}</span>
+                <span class="budget-stat-label">Active Agents</span>
+              </div>
+            {/if}
+            {#if bs.total_tokens_today != null}
+              <div class="budget-stat-card">
+                <span class="budget-stat-value">{bs.total_tokens_today.toLocaleString()}</span>
+                <span class="budget-stat-label">Tokens Today</span>
+              </div>
+            {/if}
+            {#if bs.total_cost_today != null}
+              <div class="budget-stat-card">
+                <span class="budget-stat-value">${bs.total_cost_today.toFixed(2)}</span>
+                <span class="budget-stat-label">Cost Today</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
+        {#if wsBreakdown.length > 0}
+          <table class="cwh-specs-table">
+            <thead>
+              <tr>
+                <th>Workspace</th>
+                <th>Agents</th>
+                <th>Tokens</th>
+                <th>Cost</th>
+                <th>Limit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each wsBreakdown as ws}
+                <tr>
+                  <td>{workspaceNameMap[ws.workspace_id] ?? ws.workspace_name ?? ws.workspace_id?.slice(0, 8) ?? '—'}</td>
+                  <td>{ws.active_agents ?? ws.agents ?? '—'}</td>
+                  <td>{(ws.tokens_today ?? ws.tokens ?? 0).toLocaleString()}</td>
+                  <td>${(ws.cost_today ?? ws.cost ?? 0).toFixed(2)}</td>
+                  <td>{ws.max_cost_per_day != null ? `$${ws.max_cost_per_day.toFixed(2)}/day` : '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+    {:else}
+      <p class="empty-text">No budget data available. Configure workspace budgets in workspace settings.</p>
     {/if}
   </section>
 
@@ -1324,5 +1403,54 @@
 
     /* Hide workspace/repo attribution on small screens to save space */
     .spec-attribution { display: none; }
+  }
+
+  /* ── Budget Summary ────────────────────────────────────────────────── */
+  .budget-summary-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .budget-stat-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: var(--space-3);
+  }
+
+  .budget-stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated, var(--color-bg));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  .budget-stat-value {
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+  }
+
+  .budget-stat-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .loading-placeholder {
+    padding: var(--space-4);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+  }
+
+  .empty-text {
+    padding: var(--space-2);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
   }
 </style>
