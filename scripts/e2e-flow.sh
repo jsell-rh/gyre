@@ -624,6 +624,22 @@ done
 [ "$MERGED" = true ] || fail "MR did not merge within 30s (status: ${MR_CURRENT})"
 ok "MR merged!"
 
+# Push to main to trigger knowledge graph extraction.
+# The merge processor writes directly to the bare repo, so the post-receive
+# hook (which runs graph extraction) doesn't fire. We fetch the merged main,
+# add a version bump commit, and push — this triggers extraction of all code
+# including the agent's new types.
+info "Pushing to main to trigger graph extraction..."
+git_with_token "$REPO_DIR" "$TOKEN" fetch origin main 2>/dev/null
+git -C "$REPO_DIR" checkout main 2>/dev/null || git -C "$REPO_DIR" checkout -b main origin/main 2>/dev/null
+git -C "$REPO_DIR" reset --hard origin/main 2>/dev/null
+echo '0.2.0' > "$REPO_DIR/VERSION"
+git -C "$REPO_DIR" add VERSION
+git -C "$REPO_DIR" commit -m "chore: bump version to 0.2.0 after greeting service merge" --no-gpg-sign
+git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1 | tail -2
+sleep 3  # allow async graph extraction to complete
+ok "Main pushed — graph extraction triggered"
+
 # =============================================================================
 step 10 "Verify attestation"
 # =============================================================================
