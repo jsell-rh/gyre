@@ -916,6 +916,7 @@
   function specStatusColor(s) {
     if (s === 'approved')   return 'success';
     if (s === 'pending')    return 'warning';
+    if (s === 'rejected')   return 'danger';
     if (s === 'deprecated') return 'neutral';
     return 'neutral';
   }
@@ -1768,9 +1769,16 @@
                 <button class="approval-btn revoke" onclick={revokeCurrentSpec} disabled={revoking}>
                   {revoking ? $t('detail_panel.revoking') : $t('detail_panel.revoke_approval')}
                 </button>
+              {:else if sd.approval_status === 'rejected'}
+                <button class="approval-btn approve" onclick={approveCurrentSpec} disabled={approving || !sd.current_sha}>
+                  {approving ? $t('detail_panel.approving') : 'Re-approve'}
+                </button>
               {:else if sd.current_sha}
                 <button class="approval-btn approve" onclick={approveCurrentSpec} disabled={approving}>
                   {approving ? $t('detail_panel.approving') : $t('detail_panel.approve')}
+                </button>
+                <button class="approval-btn revoke" onclick={rejectCurrentSpec} disabled={rejecting}>
+                  {rejecting ? 'Rejecting...' : 'Reject'}
                 </button>
               {/if}
             </div>
