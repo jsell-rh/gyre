@@ -149,8 +149,11 @@
     "trust": "Trust: {level}",
     "budget": "Budget: {pct}%",
     "live": "Live",
+    "live_tooltip": "Live \u2014 real-time updates active",
     "offline": "Offline",
-    "connecting": "Connecting"
+    "offline_tooltip": "Offline \u2014 connection error",
+    "connecting": "Connecting",
+    "connecting_tooltip": "Connecting\u2026"
   },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
@@ -469,7 +472,13 @@
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
       "suggested_link": "Suggested Link"
-    }
+    },
+    "status_resolved": "Resolved",
+    "gate_label": "Gate: {name}",
+    "persona_label": "Persona: {name}",
+    "related_spec": "Related spec: {path}",
+    "agent_label": "Agent: {id}",
+    "mr_label": "MR: {title}"
   },
   "spec_dashboard": {
     "title": "Specs",
@@ -496,7 +505,8 @@
     "col_updated": "Updated",
     "markdown_source": "Markdown source",
     "spec_created": "Spec created — MR #{mr_id} created",
-    "create_failed": "Create failed: {error}"
+    "create_failed": "Create failed: {error}",
+    "filter_kind": "Kind:"
   },
   "code_tab": {
     "clone": "Clone",
@@ -615,6 +625,12 @@
     "new_meta_spec": "+ New Meta-spec",
     "filter_all": "All",
     "filter_by_kind": "Filter by kind",
+    "kind_labels": {
+      "meta:persona": "Persona",
+      "meta:principle": "Principle",
+      "meta:standard": "Standard",
+      "meta:process": "Process"
+    },
     "failed_to_load": "Failed to load meta-specs",
     "no_meta_specs_yet": "No meta-specs yet.",
     "create_one": "Create one",
@@ -1196,7 +1212,26 @@
       "loading": "Loading gates\u2026",
       "empty": "No gates configured for this repository.",
       "required": "Required",
-      "optional": "Optional"
+      "optional": "Optional",
+      "add_gate": "+ Add Gate",
+      "delete_gate": "Delete",
+      "delete_gate_confirm": "Remove this gate?",
+      "deleting": "Deleting\u2026",
+      "gate_name_label": "Name",
+      "gate_name_placeholder": "e.g. unit-tests",
+      "gate_type_label": "Type",
+      "gate_command_label": "Command",
+      "gate_command_placeholder": "e.g. cargo test --all",
+      "gate_required_label": "Required (blocks merge on failure)",
+      "creating": "Creating\u2026",
+      "create_gate": "Create Gate",
+      "create_failed": "Failed to create gate: {error}",
+      "delete_failed": "Failed to delete gate: {error}",
+      "type_test_command": "Test Command",
+      "type_lint_command": "Lint Command",
+      "type_required_approvals": "Required Approvals",
+      "type_agent_review": "Agent Review",
+      "type_agent_validation": "Agent Validation"
     },
     "policies": {
       "title": "Policies",
@@ -1482,6 +1517,13 @@
     "token_agent_id": "Agent ID",
     "token_expires": "Expires",
     "refresh": "Refresh",
+    "time_just_now": "just now",
+    "time_minutes_ago": "{count}m ago",
+    "time_hours_ago": "{count}h ago",
+    "time_days_ago": "{count}d ago",
+    "enter_workspace": "Enter Workspace",
+    "filter_placeholder": "Filter\u2026",
+    "resolved": "Resolved",
     "status": {
       "active": "Active",
       "idle": "Idle",
@@ -1519,7 +1561,10 @@
     "clear_filter": "Clear filter",
     "repos": "repos",
     "active_agents": "active agents",
-    "budget": "Budget"
+    "budget": "Budget",
+    "trust_default": "Standard",
+    "enter_workspace": "Enter Workspace",
+    "filter_workspaces": "Filter workspaces"
   },
   "search": {
     "placeholder": "Search tasks, agents, specs, MRs\u2026",

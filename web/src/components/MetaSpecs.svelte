@@ -34,22 +34,16 @@
 
   // ─── Constants ───────────────────────────────────────────────────────────────
 
-  const KIND_LABELS = {
-    'meta:persona':   'Persona',
-    'meta:principle': 'Principle',
-    'meta:standard':  'Standard',
-    'meta:process':   'Process',
-  };
   const KIND_COLORS = {
     'meta:persona':   'purple',
     'meta:principle': 'blue',
     'meta:standard':  'orange',
     'meta:process':   'green',
   };
-  const META_KINDS = Object.keys(KIND_LABELS);
+  const META_KINDS = ['meta:persona', 'meta:principle', 'meta:standard', 'meta:process'];
 
   function kindBadgeVariant(kind) { return KIND_COLORS[kind] || 'gray'; }
-  function kindLabel(kind) { return KIND_LABELS[kind] || kind; }
+  function kindLabel(kind) { return $t(`meta_specs.kind_labels.${kind}`) || kind; }
 
   function approvalVariant(status) {
     if (status === 'Approved') return 'green';
@@ -769,7 +763,7 @@
     <div class="filter-pills" role="group" aria-label={$t('meta_specs.filter_by_kind')}>
       <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} aria-pressed={kindFilter === 'all'}>{$t('meta_specs.filter_all')}</button>
       {#each META_KINDS as k}
-        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} aria-pressed={kindFilter === k}>{KIND_LABELS[k]}</button>
+        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} aria-pressed={kindFilter === k}>{kindLabel(k)}</button>
       {/each}
     </div>
 
@@ -832,7 +826,7 @@
                     onclick={() => createForm.kind = k}
                     aria-pressed={createForm.kind === k}
                   >
-                    <span class="kind-card-label">{KIND_LABELS[k]}</span>
+                    <span class="kind-card-label">{kindLabel(k)}</span>
                     <span class="kind-card-desc">{
                       k === 'meta:persona' ? $t('meta_specs.create.kind_persona_desc') :
                       k === 'meta:principle' ? $t('meta_specs.create.kind_principle_desc') :

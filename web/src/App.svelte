@@ -907,10 +907,10 @@
                 onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
                 aria-haspopup="menu"
                 aria-expanded={wsDropdownOpen}
-                aria-label="All Workspaces — switch workspace"
+                aria-label="{$t('topbar.all_workspaces')} — {$t('topbar.switch_workspace')}"
                 data-testid="ws-all-workspaces-btn"
               >
-                All Workspaces
+                {$t('topbar.all_workspaces')}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
                   <path d="M6 9l6 6 6-6"/>
                 </svg>
@@ -936,10 +936,10 @@
               onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
               aria-haspopup="menu"
               aria-expanded={wsDropdownOpen}
-              aria-label="Select workspace"
+              aria-label="{$t('topbar.select_workspace')}"
               data-testid="ws-select-prompt"
             >
-              Select workspace
+              {$t('topbar.select_workspace')}
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
                 <path d="M6 9l6 6 6-6"/>
               </svg>
@@ -1295,8 +1295,8 @@
         class:connected={wsStatus === 'connected'}
         class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
         role="status"
-        aria-label={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
-        title={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
+        aria-label={wsStatus === 'connected' ? $t('status_bar.live_tooltip') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline_tooltip') : $t('status_bar.connecting_tooltip')}
+        title={wsStatus === 'connected' ? $t('status_bar.live_tooltip') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline_tooltip') : $t('status_bar.connecting_tooltip')}
       >
         <span class="ws-dot" aria-hidden="true"></span>
         {wsStatus === 'connected' ? $t('status_bar.live') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline') : $t('status_bar.connecting')}

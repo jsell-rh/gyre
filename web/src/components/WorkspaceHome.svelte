@@ -412,11 +412,11 @@
     if (!ts) return '';
     const diff = Date.now() - new Date(ts).getTime();
     const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m ago`;
+    if (m < 1) return $t('common.time_just_now');
+    if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
     const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+    if (h < 24) return $t('common.time_hours_ago', { values: { count: h } });
+    return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
   }
 
   // ── Load all data when workspace changes ───────────────────────────────
