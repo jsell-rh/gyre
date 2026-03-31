@@ -745,6 +745,7 @@
       entityNameCache = { ...entityNameCache, [key]: null };
       const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
                       type === 'task' ? api.task(id).then(t => t?.title) :
+                      type === 'repo' ? api.repo(id).then(r => r?.name) :
                       Promise.resolve(null);
       fetcher.then(name => {
         if (name) entityNameCache = { ...entityNameCache, [key]: name };
@@ -923,6 +924,9 @@
                 {:else if mr.agent_id}
                   <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{entityName('agent', mr.agent_id)}</button></dd>
                 {/if}
+                {#if mr.repository_id ?? mr.repo_id}
+                  <dt>Repo</dt><dd class="mono" title={mr.repository_id ?? mr.repo_id}>{entityName('repo', mr.repository_id ?? mr.repo_id)}</dd>
+                {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
                   <dt>Author</dt><dd class="mono" title={mr.author_id}>{shortId(mr.author_id)}</dd>
                 {/if}
@@ -967,7 +971,7 @@
                   <dt>Task</dt><dd><button class="entity-link" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{entityName('task', ag.task_id)}</button></dd>
                 {/if}
                 {#if ag.repo_id}
-                  <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{shortId(ag.repo_id)}</dd>
+                  <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{entityName('repo', ag.repo_id)}</dd>
                 {/if}
                 {#if ag.mr_id}
                   <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{shortId(ag.mr_id)}</button></dd>
@@ -1005,10 +1009,10 @@
                 <dt>Branch</dt><dd class="mono">{tk.branch}</dd>
               {/if}
               {#if tk.assigned_to}
-                <dt>Assigned</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{shortId(tk.assigned_to)}</button></dd>
+                <dt>Assigned</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{entityName('agent', tk.assigned_to)}</button></dd>
               {/if}
               {#if tk.repo_id}
-                <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{shortId(tk.repo_id)}</dd>
+                <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{entityName('repo', tk.repo_id)}</dd>
               {/if}
               {#if tk.labels?.length > 0}
                 <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
@@ -1543,7 +1547,7 @@
                   <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
                 {/if}
                 {#if att.repo_id}
-                  <dt>Repo</dt><dd class="mono" title={att.repo_id}>{shortId(att.repo_id)}</dd>
+                  <dt>Repo</dt><dd class="mono" title={att.repo_id}>{entityName('repo', att.repo_id)}</dd>
                 {/if}
                 {#if att.gate_results?.length > 0}
                   {@const passed = att.gate_results.filter(g => g.status === 'Passed' || g.status === 'passed').length}
