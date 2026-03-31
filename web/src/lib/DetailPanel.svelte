@@ -284,6 +284,8 @@
   let newReviewDecision = $state('approved');
   let newReviewBody = $state('');
   let submittingReview = $state(false);
+  let newMessageText = $state('');
+  let sendingMessage = $state(false);
 
   // Agent/task name cache for cross-references
   let entityNameCache = $state({});
@@ -497,8 +499,8 @@
     }
     if (activeTab === 'chat' && !agentMessages && !agentMessagesLoading) {
       agentMessagesLoading = true;
-      api.agentLogs(id, 200, 0)
-        .then((d) => { agentMessages = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []); })
+      api.agentMessages(id)
+        .then((d) => { agentMessages = Array.isArray(d) ? d : (d?.messages ?? []); })
         .catch(() => { agentMessages = []; })
         .finally(() => { agentMessagesLoading = false; });
     }
@@ -986,6 +988,23 @@
       toastError('Failed to submit review: ' + (e.message ?? e));
     } finally {
       submittingReview = false;
+    }
+  }
+
+  async function sendMessage() {
+    if (!newMessageText?.trim() || !entity || sendingMessage) return;
+    sendingMessage = true;
+    try {
+      await api.sendAgentMessage(entity.id, { content: newMessageText.trim(), kind: 'FreeText' });
+      toastSuccess('Message sent');
+      newMessageText = '';
+      // Reload messages
+      const msgs = await api.agentMessages(entity.id).catch(() => []);
+      agentMessages = Array.isArray(msgs) ? msgs : (msgs?.messages ?? []);
+    } catch (e) {
+      toastError('Failed to send message: ' + (e.message ?? e));
+    } finally {
+      sendingMessage = false;
     }
   }
 
@@ -1884,19 +1903,50 @@
                 {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
               </div>
             {:else if Array.isArray(agentMessages) && agentMessages.length > 0}
-              <div class="trace-list">
-                {#each agentMessages as entry}
-                  <div class="trace-entry">
-                    {#if entry.timestamp || entry.created_at}
-                      <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
-                    {/if}
-                    <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+              <div class="messages-list">
+                {#each agentMessages as msg}
+                  <div class="message-item">
+                    <div class="message-header">
+                      {#if msg.kind ?? msg.message_type}
+                        <Badge value={msg.kind ?? msg.message_type} variant={
+                          (msg.kind === 'TaskAssignment' || msg.message_type === 'TaskAssignment') ? 'info' :
+                          (msg.kind === 'Escalation' || msg.message_type === 'Escalation') ? 'danger' :
+                          (msg.kind === 'StatusUpdate' || msg.message_type === 'StatusUpdate') ? 'warning' :
+                          (msg.kind === 'ReviewRequest' || msg.message_type === 'ReviewRequest') ? 'info' :
+                          'muted'
+                        } />
+                      {/if}
+                      {#if msg.sender_id ?? msg.from}
+                        <span class="message-sender mono">{msg.sender_id ?? msg.from}</span>
+                      {/if}
+                      {#if msg.timestamp ?? msg.created_at}
+                        <span class="message-time">{fmtDate(msg.timestamp ?? msg.created_at)}</span>
+                      {/if}
+                    </div>
+                    <p class="message-body">{msg.content ?? msg.message ?? msg.body ?? JSON.stringify(msg)}</p>
                   </div>
                 {/each}
               </div>
             {:else}
-              <p class="no-data">No messages or logs from this agent</p>
+              <p class="no-data">No messages for this agent</p>
             {/if}
+
+            <!-- Send message form -->
+            <div class="message-form">
+              <span class="progress-section-label">Send Message</span>
+              <textarea
+                class="comment-textarea"
+                bind:value={newMessageText}
+                placeholder="Send a message to this agent..."
+                rows="2"
+                disabled={sendingMessage}
+              ></textarea>
+              <div class="comment-form-actions">
+                <Button variant="primary" size="sm" onclick={sendMessage} disabled={!newMessageText?.trim() || sendingMessage}>
+                  {sendingMessage ? 'Sending...' : 'Send'}
+                </Button>
+              </div>
+            </div>
           {:else}
             <EmptyState title={$t('detail_panel.no_conversation')} description={$t('detail_panel.start_conversation')} />
           {/if}
