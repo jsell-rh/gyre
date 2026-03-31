@@ -132,6 +132,11 @@
       return result;
     }
 
+    if (type === 'task') {
+      result.push({ id: 'activity', label: 'Activity' });
+      return result;
+    }
+
     // Generic: info + optional extras
     if (data.spec_path) result.push({ id: 'spec', label: $t('detail_panel.tabs.spec') });
     if (data.author_agent_id) result.push({ id: 'chat', label: $t('detail_panel.tabs.chat') });
@@ -274,13 +279,25 @@
   // Agent/task name cache for cross-references
   let entityNameCache = $state({});
 
+  // ── Task entity tab state ─────────────────────────────────────────────────
+  let taskDetail = $state(null);
+  let taskDetailLoading = $state(false);
+  let taskAgents = $state(null);
+  let taskAgentsLoading = $state(false);
+  let taskMrs = $state(null);
+  let taskMrsLoading = $state(false);
+
   // ── Agent entity tab state ─────────────────────────────────────────────────
   let agentDetail = $state(null);
   let agentDetailLoading = $state(false);
   let agentLogs = $state(null);
   let agentLogsLoading = $state(false);
+  let agentMessages = $state(null);
+  let agentMessagesLoading = $state(false);
+  let agentWorkload = $state(null);
+  let agentWorkloadLoading = $state(false);
 
-  // Reset MR/agent data when entity changes
+  // Reset MR/agent/task data when entity changes
   $effect(() => {
     if (entity?.type === 'mr') {
       mrDetail = null;
@@ -294,6 +311,13 @@
     if (entity?.type === 'agent') {
       agentDetail = null;
       agentLogs = null;
+      agentMessages = null;
+      agentWorkload = null;
+    }
+    if (entity?.type === 'task') {
+      taskDetail = null;
+      taskAgents = null;
+      taskMrs = null;
     }
   });
 
@@ -378,9 +402,14 @@
 
     if (activeTab === 'info' && !agentDetail && !agentDetailLoading) {
       agentDetailLoading = true;
-      api.agent(id)
-        .then((d) => { agentDetail = d; })
-        .catch(() => { agentDetail = null; })
+      Promise.all([
+        api.agent(id),
+        api.agentLogs(id, 5, 0).catch(() => []),
+      ]).then(([d, logs]) => {
+        agentDetail = d;
+        // Pre-cache a few recent logs for the info view
+        if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
+      }).catch(() => { agentDetail = null; })
         .finally(() => { agentDetailLoading = false; });
     }
     if (activeTab === 'trace' && !agentLogs && !agentLogsLoading) {
@@ -389,6 +418,54 @@
         .then((d) => { agentLogs = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []); })
         .catch(() => { agentLogs = []; })
         .finally(() => { agentLogsLoading = false; });
+    }
+    if (activeTab === 'chat' && !agentMessages && !agentMessagesLoading) {
+      agentMessagesLoading = true;
+      api.agentLogs(id, 200, 0)
+        .then((d) => { agentMessages = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []); })
+        .catch(() => { agentMessages = []; })
+        .finally(() => { agentMessagesLoading = false; });
+    }
+    if (activeTab === 'history' && !agentWorkload && !agentWorkloadLoading) {
+      agentWorkloadLoading = true;
+      Promise.all([
+        api.agent(id).catch(() => null),
+        api.agentContainer(id).catch(() => null),
+      ]).then(([ag, container]) => {
+        agentWorkload = { agent: ag, container };
+      }).catch(() => { agentWorkload = null; })
+        .finally(() => { agentWorkloadLoading = false; });
+    }
+  });
+
+  // Load task data per tab
+  $effect(() => {
+    if (entity?.type !== 'task') return;
+    const id = entity.id;
+
+    if (activeTab === 'info' && !taskDetail && !taskDetailLoading) {
+      taskDetailLoading = true;
+      api.task(id)
+        .then((d) => { taskDetail = d; })
+        .catch(() => { taskDetail = null; })
+        .finally(() => { taskDetailLoading = false; });
+    }
+    if (activeTab === 'activity' && !taskAgents && !taskAgentsLoading) {
+      taskAgentsLoading = true;
+      taskMrsLoading = true;
+      Promise.all([
+        api.agents({ status: undefined }).then(list => {
+          const all = Array.isArray(list) ? list : [];
+          return all.filter(a => a.task_id === id);
+        }).catch(() => []),
+        api.mergeRequests({}).then(list => {
+          const all = Array.isArray(list) ? list : [];
+          return all.filter(m => m.task_id === id);
+        }).catch(() => []),
+      ]).then(([agents, mrs]) => {
+        taskAgents = agents;
+        taskMrs = mrs;
+      }).finally(() => { taskAgentsLoading = false; taskMrsLoading = false; });
     }
   });
 
@@ -1121,42 +1198,78 @@
               </dl>
             {/if}
           {:else if entity.type === 'task'}
-            {@const tk = entity.data ?? {}}
-            <dl class="entity-meta">
-              <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
-              <dt>Status</dt><dd><Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} /></dd>
-              <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
-              {#if tk.priority}
-                <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
+            {#if taskDetailLoading && !entity.data}
+              <div class="spec-skeleton">
+                {#each Array(5) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+              </div>
+            {:else}
+              {@const tk = taskDetail ?? entity.data ?? {}}
+              <dl class="entity-meta">
+                <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
+                <dt>Status</dt><dd><Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} /></dd>
+                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                {#if tk.priority}
+                  <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
+                {/if}
+                {#if tk.task_type}
+                  <dt>Type</dt><dd>{tk.task_type}</dd>
+                {/if}
+                {#if tk.description}
+                  <dt>Description</dt><dd class="task-description">{tk.description}</dd>
+                {/if}
+                {#if tk.spec_path}
+                  <dt>Spec</dt><dd><button class="entity-link mono" title={tk.spec_path} onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })}>{tk.spec_path.split('/').pop()}</button></dd>
+                {/if}
+                {#if tk.branch}
+                  <dt>Branch</dt><dd class="mono">{tk.branch}</dd>
+                {/if}
+                {#if tk.assigned_to}
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{entityName('agent', tk.assigned_to)}</button></dd>
+                {/if}
+                {#if tk.repo_id}
+                  <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{entityName('repo', tk.repo_id)}</dd>
+                {/if}
+                {#if tk.labels?.length > 0}
+                  <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
+                {/if}
+                {#if tk.created_at}
+                  <dt>Created</dt><dd>{fmtDate(tk.created_at)}</dd>
+                {/if}
+                {#if tk.updated_at}
+                  <dt>Updated</dt><dd>{fmtDate(tk.updated_at)}</dd>
+                {/if}
+              </dl>
+
+              <!-- Provenance chain for task -->
+              {#if tk.spec_path || tk.assigned_to}
+                <div class="provenance-chain">
+                  <span class="provenance-label">Provenance</span>
+                  <div class="provenance-flow">
+                    {#if tk.spec_path}
+                      <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })} title={tk.spec_path}>
+                        <span class="provenance-icon prov-icon-spec"></span>
+                        <span class="provenance-type">Spec</span>
+                        <span class="provenance-name">{tk.spec_path.split('/').pop()}</span>
+                      </button>
+                      <span class="provenance-arrow">&#x2192;</span>
+                    {/if}
+                    <span class="provenance-node provenance-task provenance-current">
+                      <span class="provenance-icon prov-icon-task"></span>
+                      <span class="provenance-type">Task</span>
+                      <span class="provenance-name">{tk.status ?? 'backlog'}</span>
+                    </span>
+                    {#if tk.assigned_to}
+                      <span class="provenance-arrow">&#x2192;</span>
+                      <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', tk.assigned_to)} title={tk.assigned_to}>
+                        <span class="provenance-icon prov-icon-agent"></span>
+                        <span class="provenance-type">Agent</span>
+                        <span class="provenance-name">{entityName('agent', tk.assigned_to)}</span>
+                      </button>
+                    {/if}
+                  </div>
+                </div>
               {/if}
-              {#if tk.task_type}
-                <dt>Type</dt><dd>{tk.task_type}</dd>
-              {/if}
-              {#if tk.description}
-                <dt>Description</dt><dd>{tk.description}</dd>
-              {/if}
-              {#if tk.spec_path}
-                <dt>Spec</dt><dd><button class="entity-link mono" title={tk.spec_path} onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })}>{tk.spec_path.split('/').pop()}</button></dd>
-              {/if}
-              {#if tk.branch}
-                <dt>Branch</dt><dd class="mono">{tk.branch}</dd>
-              {/if}
-              {#if tk.assigned_to}
-                <dt>Assigned</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{entityName('agent', tk.assigned_to)}</button></dd>
-              {/if}
-              {#if tk.repo_id}
-                <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{entityName('repo', tk.repo_id)}</dd>
-              {/if}
-              {#if tk.labels?.length > 0}
-                <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
-              {/if}
-              {#if tk.created_at}
-                <dt>Created</dt><dd>{fmtDate(tk.created_at)}</dd>
-              {/if}
-              {#if tk.updated_at}
-                <dt>Updated</dt><dd>{fmtDate(tk.updated_at)}</dd>
-              {/if}
-            </dl>
+            {/if}
           {:else}
             <dl class="entity-meta">
               <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
@@ -1490,7 +1603,28 @@
 
       {:else if activeTab === 'chat'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_conversation')} description={$t('detail_panel.start_conversation')} />
+          {#if entity.type === 'agent'}
+            {#if agentMessagesLoading}
+              <div class="spec-skeleton">
+                {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+              </div>
+            {:else if Array.isArray(agentMessages) && agentMessages.length > 0}
+              <div class="trace-list">
+                {#each agentMessages as entry}
+                  <div class="trace-entry">
+                    {#if entry.timestamp || entry.created_at}
+                      <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                    {/if}
+                    <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data">No messages or logs from this agent</p>
+            {/if}
+          {:else}
+            <EmptyState title={$t('detail_panel.no_conversation')} description={$t('detail_panel.start_conversation')} />
+          {/if}
         </div>
 
       {:else if activeTab === 'history'}
@@ -1523,6 +1657,55 @@
               </div>
             {:else}
               <p class="no-data">{$t('detail_panel.no_approvals')}</p>
+            {/if}
+          {:else if entity.type === 'agent'}
+            {#if agentWorkloadLoading}
+              <div class="spec-skeleton">
+                {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+              </div>
+            {:else if agentWorkload}
+              {@const ag = agentWorkload.agent ?? agentDetail ?? entity.data ?? {}}
+              {@const container = agentWorkload.container}
+              <span class="progress-section-label">Lifecycle</span>
+              <dl class="entity-meta">
+                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
+                {#if ag.created_at}
+                  <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
+                {/if}
+                {#if ag.completed_at}
+                  <dt>Completed</dt><dd>{fmtDate(ag.completed_at)}</dd>
+                  {@const dur = ag.completed_at - ag.created_at}
+                  <dt>Duration</dt><dd>{dur < 60 ? `${Math.round(dur)}s` : dur < 3600 ? `${Math.round(dur / 60)}m` : `${Math.round(dur / 3600)}h ${Math.round((dur % 3600) / 60)}m`}</dd>
+                {/if}
+                {#if ag.mr_id}
+                  <dt>Result MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
+                {/if}
+              </dl>
+              {#if container}
+                <span class="progress-section-label">Container</span>
+                <dl class="entity-meta">
+                  {#if container.container_id}
+                    <dt>Container</dt><dd class="mono">{shortId(container.container_id)}</dd>
+                  {/if}
+                  {#if container.image}
+                    <dt>Image</dt><dd class="mono">{container.image}</dd>
+                  {/if}
+                  {#if container.runtime}
+                    <dt>Runtime</dt><dd>{container.runtime}</dd>
+                  {/if}
+                  {#if container.exit_code !== undefined && container.exit_code !== null}
+                    <dt>Exit code</dt><dd><Badge value={String(container.exit_code)} variant={container.exit_code === 0 ? 'success' : 'danger'} /></dd>
+                  {/if}
+                  {#if container.started_at}
+                    <dt>Started</dt><dd>{fmtDate(container.started_at)}</dd>
+                  {/if}
+                  {#if container.stopped_at}
+                    <dt>Stopped</dt><dd>{fmtDate(container.stopped_at)}</dd>
+                  {/if}
+                </dl>
+              {/if}
+            {:else}
+              <p class="no-data">No lifecycle details available</p>
             {/if}
           {:else}
             <EmptyState title={$t('detail_panel.no_history')} description={$t('detail_panel.no_history_desc')} />
@@ -1900,6 +2083,49 @@
             </div>
           {:else}
             <p class="no-data">No trace logs available for this agent</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'activity'}
+        <div class="tab-pane">
+          {#if taskAgentsLoading || taskMrsLoading}
+            <div class="spec-skeleton">
+              {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else}
+            {#if Array.isArray(taskAgents) && taskAgents.length > 0}
+              <span class="progress-section-label">Agents</span>
+              <ul class="task-list">
+                {#each taskAgents as agent}
+                  <li class="task-item clickable-row" onclick={() => navigateTo('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('agent', agent.id, agent); }}>
+                    <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : agent.status === 'completed' ? 'info' : agent.status === 'failed' ? 'danger' : 'muted'} />
+                    <span class="task-title">{agent.name ?? shortId(agent.id)}</span>
+                    {#if agent.branch}
+                      <span class="task-agent mono">{agent.branch}</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="no-data no-data-sm">No agents assigned to this task</p>
+            {/if}
+
+            {#if Array.isArray(taskMrs) && taskMrs.length > 0}
+              <span class="progress-section-label">Merge Requests</span>
+              <ul class="task-list">
+                {#each taskMrs as mr}
+                  <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id, mr); }}>
+                    <Badge value={mr.status ?? 'open'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
+                    <span class="task-title">{mr.title ?? shortId(mr.id)}</span>
+                    {#if mr.source_branch}
+                      <span class="task-agent mono">{mr.source_branch}</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="no-data no-data-sm">No merge requests linked to this task</p>
+            {/if}
           {/if}
         </div>
 
@@ -3245,6 +3471,12 @@
   .no-data-sm {
     padding: var(--space-2) 0;
     font-size: var(--text-xs);
+  }
+
+  .task-description {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
   }
 
   /* ── Comment/Review form ─────────────────────────────────────────────────── */
