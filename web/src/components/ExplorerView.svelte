@@ -262,6 +262,35 @@
   let conceptFilterIds = $derived.by(() =>
     conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
   );
+
+  // ── Repo dependencies & risk metrics ────────────────────────────────
+  let repoDeps = $state(null);
+  let repoDepsLoading = $state(false);
+  let repoRisks = $state(null);
+  let repoRisksLoading = $state(false);
+
+  $effect(() => {
+    if (!selectedRepoId || explorerTab !== 'architecture') return;
+    if (repoDeps !== null) return; // already loaded
+    repoDepsLoading = true;
+    repoRisksLoading = true;
+    Promise.all([
+      api.repoDependencies(selectedRepoId).catch(() => []),
+      api.repoDependents(selectedRepoId).catch(() => []),
+      api.repoGraphRisks(selectedRepoId).catch(() => []),
+    ]).then(([deps, depts, risks]) => {
+      repoDeps = { dependencies: Array.isArray(deps) ? deps : [], dependents: Array.isArray(depts) ? depts : [] };
+      repoRisks = Array.isArray(risks) ? risks : [];
+    }).finally(() => { repoDepsLoading = false; repoRisksLoading = false; });
+  });
+
+  // Reset when repo changes
+  $effect(() => {
+    if (selectedRepoId) {
+      repoDeps = null;
+      repoRisks = null;
+    }
+  });
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -564,6 +593,54 @@
             conceptQuery={conceptQuery.trim()}
             categoryFilters={activeFilters}
           />
+        {/if}
+
+        <!-- Repo dependencies & risks (below graph, architecture tab only) -->
+        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length)}
+          <div class="arch-insights">
+            {#if repoDeps && (repoDeps.dependencies.length > 0 || repoDeps.dependents.length > 0)}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Cross-Repo Dependencies</h3>
+                {#if repoDeps.dependencies.length > 0}
+                  <div class="arch-dep-group">
+                    <span class="arch-dep-label">Depends on ({repoDeps.dependencies.length})</span>
+                    <ul class="arch-dep-list">
+                      {#each repoDeps.dependencies as dep}
+                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? dep.repo_id ?? dep}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+                {#if repoDeps.dependents.length > 0}
+                  <div class="arch-dep-group">
+                    <span class="arch-dep-label">Depended on by ({repoDeps.dependents.length})</span>
+                    <ul class="arch-dep-list">
+                      {#each repoDeps.dependents as dep}
+                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? dep.repo_id ?? dep}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+            {#if repoRisks?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Risk Hotspots ({repoRisks.length})</h3>
+                <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
+                <ul class="arch-risk-list">
+                  {#each repoRisks.slice(0, 10) as node}
+                    <li class="arch-risk-item">
+                      <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
+                      <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '—'}</span>
+                      {#if node.risk_reason ?? node.reason}
+                        <span class="arch-risk-reason">{node.risk_reason ?? node.reason}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
@@ -1164,6 +1241,109 @@
 
   .ask-explanation { color: var(--color-text-secondary); }
   .ask-error { color: var(--color-danger); }
+
+  /* ── Architecture insights (deps + risks) ────────────────────────── */
+  .arch-insights {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-6);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .arch-insight-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .arch-insight-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .arch-insight-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .arch-dep-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .arch-dep-label {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .arch-dep-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .arch-dep-item {
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+  }
+
+  .arch-risk-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .arch-risk-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    font-size: var(--text-xs);
+  }
+
+  .arch-risk-name {
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    font-weight: 500;
+  }
+
+  .arch-risk-score {
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
+    font-weight: 600;
+    font-size: var(--text-xs);
+  }
+
+  .arch-risk-reason {
+    color: var(--color-text-muted);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
