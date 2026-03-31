@@ -325,10 +325,61 @@
       const gateResults = await Promise.all(gatePromises);
       const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
       wsMrs = mrList.map(mr => gateMap[mr.id] ? { ...mr, _gates: gateMap[mr.id] } : mr);
+      // Enrich diff_stats for MRs that lack them (best-effort, parallel)
+      const needDiff = wsMrs.filter(mr => !mr.diff_stats).slice(0, 10);
+      if (needDiff.length > 0) {
+        Promise.all(needDiff.map(mr =>
+          api.mrDiff(mr.id).then(d => ({ id: mr.id, diff_stats: { files_changed: d?.files_changed ?? 0, insertions: d?.insertions ?? 0, deletions: d?.deletions ?? 0 } })).catch(() => null)
+        )).then(results => {
+          const diffMap = Object.fromEntries(results.filter(Boolean).map(r => [r.id, r.diff_stats]));
+          if (Object.keys(diffMap).length > 0) {
+            wsMrs = wsMrs.map(mr => diffMap[mr.id] ? { ...mr, diff_stats: diffMap[mr.id] } : mr);
+          }
+        });
+      }
     } catch {
       wsMrs = [];
     } finally {
       mrsLoading = false;
+    }
+  }
+
+  // ── MR actions ────────────────────────────────────────────────────────
+  let enqueuingMrId = $state(null);
+  async function quickEnqueueMr(mr, e) {
+    e?.stopPropagation();
+    if (enqueuingMrId) return;
+    enqueuingMrId = mr.id;
+    try {
+      await api.enqueue(mr.id);
+      toastSuccess(`MR "${mr.title ?? 'Untitled'}" enqueued for merge`);
+      wsMrs = wsMrs.map(m => m.id === mr.id ? { ...m, queue_position: 0 } : m);
+    } catch (err) {
+      toastError('Enqueue failed: ' + (err.message ?? err));
+    } finally {
+      enqueuingMrId = null;
+    }
+  }
+
+  // ── Task status transitions ──────────────────────────────────────────
+  const WS_TASK_TRANSITIONS = {
+    backlog: ['in_progress'],
+    in_progress: ['done', 'blocked'],
+    blocked: ['in_progress'],
+    review: ['done'],
+  };
+  let changingWsTaskId = $state(null);
+  async function quickChangeWsTaskStatus(task, newStatus, e) {
+    e?.stopPropagation();
+    if (changingWsTaskId) return;
+    changingWsTaskId = task.id;
+    try {
+      await api.updateTaskStatus(task.id, newStatus);
+      wsTasks = wsTasks.map(t => t.id === task.id ? { ...t, status: newStatus } : t);
+    } catch (err) {
+      toastError('Status change failed: ' + (err.message ?? err));
+    } finally {
+      changingWsTaskId = null;
     }
   }
 
@@ -1219,6 +1270,7 @@
                   <th>Spec</th>
                   <th>Agent</th>
                   <th>Repo</th>
+                  <th class="ws-th-action"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1231,6 +1283,13 @@
                     <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                     <td class="ws-cell-mono">{repoMap[task.repo_id]?.name ?? ''}</td>
+                    <td class="ws-cell-action">
+                      {#if WS_TASK_TRANSITIONS[task.status]?.length}
+                        {#each WS_TASK_TRANSITIONS[task.status] as nextStatus}
+                          <button class="ws-quick-action-btn ws-quick-action-{nextStatus}" onclick={(e) => quickChangeWsTaskStatus(task, nextStatus, e)} disabled={changingWsTaskId === task.id} title="Move to {nextStatus.replace(/_/g, ' ')}">{changingWsTaskId === task.id ? '...' : nextStatus === 'in_progress' ? 'Start' : nextStatus === 'done' ? 'Done' : nextStatus === 'blocked' ? 'Block' : nextStatus.replace(/_/g, ' ')}</button>
+                        {/each}
+                      {/if}
+                    </td>
                   </tr>
                 {/each}
               </tbody>
@@ -1268,6 +1327,7 @@
                   <th>Changes</th>
                   <th>Spec</th>
                   <th>Repo</th>
+                  <th class="ws-th-action"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1279,7 +1339,7 @@
                     <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
                     <td>
                       {#if mr._gates?.total > 0}
-                        <div class="gate-cell-ws" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''}>
+                        <button class="gate-cell-ws gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
                           <span class="gate-summary-inline">
                             {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
                             {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
@@ -1292,7 +1352,7 @@
                               {/each}
                             </span>
                           {/if}
-                        </div>
+                        </button>
                       {/if}
                     </td>
                     <td class="ws-cell-diff">
@@ -1308,6 +1368,11 @@
                       {/if}
                     </td>
                     <td class="ws-cell-mono">{repoMap[mr.repository_id]?.name ?? ''}</td>
+                    <td class="ws-cell-action">
+                      {#if mr.status === 'open' && mr.queue_position == null}
+                        <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id} title="Enqueue for merge">{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
+                      {/if}
+                    </td>
                   </tr>
                 {/each}
               </tbody>
@@ -2655,7 +2720,25 @@
   .gate-fail-inline { color: var(--color-danger); font-weight: 600; }
   .gate-pending-inline { color: var(--color-text-muted); }
 
-  .gate-cell-ws { display: flex; flex-direction: column; gap: 2px; }
+  .gate-cell-ws { display: flex; flex-direction: column; gap: 2px; background: none; border: none; padding: 0; text-align: left; }
+  .gate-cell-clickable { cursor: pointer; border-radius: var(--radius); }
+  .gate-cell-clickable:hover { background: var(--color-surface-elevated); }
+
+  .ws-th-action { width: 70px; }
+  .ws-cell-action { white-space: nowrap; }
+  .ws-quick-action-btn {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text);
+    cursor: pointer;
+    margin-right: 2px;
+  }
+  .ws-quick-action-btn:hover:not(:disabled) { background: var(--color-surface-elevated); border-color: var(--color-primary); color: var(--color-primary); }
+  .ws-quick-action-btn:disabled { opacity: 0.5; cursor: default; }
+  .ws-quick-action-done:hover:not(:disabled) { border-color: var(--color-success); color: var(--color-success); }
   .gate-names-ws { display: flex; flex-wrap: wrap; gap: 2px; }
   .gate-name-tag-ws {
     font-size: 10px;
