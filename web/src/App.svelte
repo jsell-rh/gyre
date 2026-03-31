@@ -1246,6 +1246,7 @@
             <CrossWorkspaceHome
               onSelectWorkspace={(ws) => goToWorkspaceHome(ws)}
               onSettings={userIsAdmin ? () => goToTenantSettings() : undefined}
+              onManageAgentRules={userIsAdmin ? () => goToTenantAgentRules() : undefined}
             />
           {/if}
         {:else if mode === 'profile'}
