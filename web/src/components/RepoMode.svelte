@@ -212,7 +212,7 @@
       class="agent-panel"
       role="dialog"
       aria-modal="true"
-      aria-label="Active agents in {repo?.name ?? 'this repo'}"
+      aria-label={$t('repo_mode.active_agents')}
       tabindex="-1"
       bind:this={agentPanelEl}
       onclick={(e) => e.stopPropagation()}
@@ -224,7 +224,7 @@
         <button
           class="panel-close-btn"
           onclick={() => { agentPanelOpen = false; }}
-          aria-label="Close agent panel"
+          aria-label={$t('common.close')}
           data-testid="agent-panel-close"
         >✕</button>
       </div>
