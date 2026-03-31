@@ -63,6 +63,23 @@
   let auditLoading = $state(false);
   let auditError = $state(null);
   let auditFilterType = $state('');
+  let auditSortCol = $state('timestamp');
+  let auditSortDir = $state(-1);
+
+  function toggleAuditSort(col) {
+    if (col === auditSortCol) { auditSortDir *= -1; }
+    else { auditSortCol = col; auditSortDir = 1; }
+  }
+
+  const sortedAuditEvents = $derived(
+    [...auditEvents].sort((a, b) => {
+      const av = a[auditSortCol] ?? '';
+      const bv = b[auditSortCol] ?? '';
+      if (av < bv) return -1 * auditSortDir;
+      if (av > bv) return 1 * auditSortDir;
+      return 0;
+    })
+  );
 
   const AUDIT_EVENT_TYPES = [
     'spec_approved', 'spec_revoked', 'gate_override', 'agent_spawned',
@@ -549,7 +566,13 @@
           <p class="empty-text">No audit events found for this repository.</p>
         {:else}
           <div class="audit-list" data-testid="repo-audit-list">
-            {#each auditEvents as evt}
+            <div class="audit-row audit-header">
+              <button class="audit-sort-btn" aria-sort={auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('event_type')}>Type{auditSortCol === 'event_type' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-sort={auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('actor')}>Actor{auditSortCol === 'actor' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-sort={auditSortCol === 'details' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('details')}>Detail{auditSortCol === 'details' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+              <button class="audit-sort-btn" aria-sort={auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'} onclick={() => toggleAuditSort('timestamp')}>Time{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
+            </div>
+            {#each sortedAuditEvents as evt}
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
@@ -1076,6 +1099,33 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     font-size: var(--text-sm);
+  }
+
+  .audit-header {
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .audit-sort-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    padding: 0;
+    transition: color var(--transition-fast);
+  }
+
+  .audit-sort-btn:hover { color: var(--color-text); }
+
+  .audit-sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .audit-type {
