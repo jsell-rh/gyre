@@ -19,6 +19,7 @@
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   const goToAgentRules = getContext('goToAgentRules');
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
 
   let {
     workspace = null,
@@ -132,6 +133,18 @@
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
 
+  // ── Tasks state ────────────────────────────────────────────────────────
+  let tasksLoading = $state(true);
+  let wsTasks = $state([]);
+
+  // ── MRs state ──────────────────────────────────────────────────────────
+  let mrsLoading = $state(true);
+  let wsMrs = $state([]);
+
+  // ── Agents state ───────────────────────────────────────────────────────
+  let agentsLoading = $state(true);
+  let wsAgents = $state([]);
+
   // ── Trust-level filtering ──────────────────────────────────────────────
   // At Guided/Autonomous trust, exclude priority-10 items (suggested links)
   function shouldExcludeByTrust(n) {
@@ -219,6 +232,48 @@
       specs = [];
     } finally {
       specsLoading = false;
+    }
+  }
+
+  // ── Tasks: load ────────────────────────────────────────────────────────
+  async function loadTasks() {
+    if (!workspace?.id) return;
+    tasksLoading = true;
+    try {
+      const data = await api.tasks({ workspaceId: workspace.id });
+      wsTasks = Array.isArray(data) ? data : [];
+    } catch {
+      wsTasks = [];
+    } finally {
+      tasksLoading = false;
+    }
+  }
+
+  // ── MRs: load ─────────────────────────────────────────────────────────
+  async function loadMrs() {
+    if (!workspace?.id) return;
+    mrsLoading = true;
+    try {
+      const data = await api.mergeRequests({ workspace_id: workspace.id });
+      wsMrs = Array.isArray(data) ? data : [];
+    } catch {
+      wsMrs = [];
+    } finally {
+      mrsLoading = false;
+    }
+  }
+
+  // ── Agents: load ──────────────────────────────────────────────────────
+  async function loadAgents() {
+    if (!workspace?.id) return;
+    agentsLoading = true;
+    try {
+      const data = await api.agents({ workspaceId: workspace.id });
+      wsAgents = Array.isArray(data) ? data : [];
+    } catch {
+      wsAgents = [];
+    } finally {
+      agentsLoading = false;
     }
   }
 
@@ -438,6 +493,9 @@
     loadRepos();
     loadSpecs();
     loadRules();
+    loadTasks();
+    loadMrs();
+    loadAgents();
   });
 </script>
 
@@ -831,6 +889,138 @@
             {/if}
           </div>
         {/if}
+      </section>
+
+      <!-- ── Tasks ──────────────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-tasks" data-testid="section-tasks">
+        <div class="section-header">
+          <h2 class="section-title" id="section-tasks">Tasks
+            {#if !tasksLoading && wsTasks.length > 0}
+              <span class="section-badge">{wsTasks.length}</span>
+            {/if}
+          </h2>
+        </div>
+        <div class="section-body">
+          {#if tasksLoading}
+            <div class="skeleton-row"></div>
+          {:else if wsTasks.length === 0}
+            <p class="empty-text">No tasks in this workspace yet.</p>
+          {:else}
+            <table class="ws-entity-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Title</th>
+                  <th>Priority</th>
+                  <th>Type</th>
+                  <th>Repo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each wsTasks.slice(0, 10) as task}
+                  <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'task', id: task.id, data: task }); }}>
+                    <td><span class="status-badge status-{task.status ?? 'backlog'}">{task.status ?? 'backlog'}</span></td>
+                    <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
+                    <td>{#if task.priority}<span class="priority-badge priority-{task.priority}">{task.priority}</span>{/if}</td>
+                    <td class="ws-cell-type">{task.task_type ?? ''}</td>
+                    <td class="ws-cell-mono">{repoMap[task.repo_id]?.name ?? ''}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            {#if wsTasks.length > 10}
+              <p class="show-more-hint">{wsTasks.length - 10} more tasks not shown</p>
+            {/if}
+          {/if}
+        </div>
+      </section>
+
+      <!-- ── Merge Requests ──────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-mrs" data-testid="section-mrs">
+        <div class="section-header">
+          <h2 class="section-title" id="section-mrs">Merge Requests
+            {#if !mrsLoading && wsMrs.length > 0}
+              <span class="section-badge">{wsMrs.length}</span>
+            {/if}
+          </h2>
+        </div>
+        <div class="section-body">
+          {#if mrsLoading}
+            <div class="skeleton-row"></div>
+          {:else if wsMrs.length === 0}
+            <p class="empty-text">No merge requests in this workspace yet.</p>
+          {:else}
+            <table class="ws-entity-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Title</th>
+                  <th>Branch</th>
+                  <th>Agent</th>
+                  <th>Repo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each wsMrs.slice(0, 10) as mr}
+                  <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
+                    <td><span class="status-badge status-{mr.status ?? 'open'}">{mr.status ?? 'open'}</span></td>
+                    <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
+                    <td class="ws-cell-mono">{mr.source_branch ?? ''}</td>
+                    <td class="ws-cell-mono">{mr.author_agent_id ? (mr.author_agent_id.length > 12 ? mr.author_agent_id.slice(0, 8) : mr.author_agent_id) : ''}</td>
+                    <td class="ws-cell-mono">{repoMap[mr.repository_id]?.name ?? ''}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            {#if wsMrs.length > 10}
+              <p class="show-more-hint">{wsMrs.length - 10} more MRs not shown</p>
+            {/if}
+          {/if}
+        </div>
+      </section>
+
+      <!-- ── Agents ──────────────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-agents" data-testid="section-agents">
+        <div class="section-header">
+          <h2 class="section-title" id="section-agents">Agents
+            {#if !agentsLoading && wsAgents.length > 0}
+              <span class="section-badge">{wsAgents.length}</span>
+            {/if}
+          </h2>
+        </div>
+        <div class="section-body">
+          {#if agentsLoading}
+            <div class="skeleton-row"></div>
+          {:else if wsAgents.length === 0}
+            <p class="empty-text">No agents in this workspace.</p>
+          {:else}
+            <table class="ws-entity-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Name</th>
+                  <th>Task</th>
+                  <th>Branch</th>
+                  <th>Repo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each wsAgents.slice(0, 10) as agent}
+                  <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>
+                    <td><span class="status-badge status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span></td>
+                    <td class="ws-cell-title">{agent.name ?? agent.id.slice(0, 8)}</td>
+                    <td class="ws-cell-mono">{agent.task_id ? (agent.task_id.length > 12 ? agent.task_id.slice(0, 8) : agent.task_id) : ''}</td>
+                    <td class="ws-cell-mono">{agent.branch ?? ''}</td>
+                    <td class="ws-cell-mono">{repoMap[agent.repo_id]?.name ?? ''}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            {#if wsAgents.length > 10}
+              <p class="show-more-hint">{wsAgents.length - 10} more agents not shown</p>
+            {/if}
+          {/if}
+        </div>
       </section>
 
       <!-- ── Agent Rules ───────────────────────────────────────────────── -->
@@ -1807,6 +1997,123 @@
     display: flex;
     gap: var(--space-2);
     padding-top: var(--space-1);
+  }
+
+  /* ── Entity tables (Tasks, MRs, Agents) ──────────────────────────────── */
+  .ws-entity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  .ws-entity-table thead th {
+    text-align: left;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  .ws-entity-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .ws-entity-row:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .ws-entity-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  .ws-entity-table td {
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: middle;
+  }
+
+  .ws-cell-title {
+    font-weight: 500;
+    color: var(--color-text);
+    max-width: 250px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ws-cell-mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .ws-cell-type {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .status-badge {
+    display: inline-block;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .status-done, .status-merged, .status-completed, .status-active {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    color: var(--color-success);
+  }
+
+  .status-in_progress, .status-open, .status-running {
+    background: color-mix(in srgb, var(--color-info) 15%, transparent);
+    color: var(--color-info);
+  }
+
+  .status-blocked, .status-failed, .status-closed {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    color: var(--color-danger);
+  }
+
+  .status-backlog, .status-review, .status-pending {
+    background: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
+    color: var(--color-text-muted);
+  }
+
+  .priority-badge {
+    display: inline-block;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .priority-high, .priority-critical {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    color: var(--color-danger);
+  }
+
+  .priority-low {
+    background: color-mix(in srgb, var(--color-text-muted) 10%, transparent);
+    color: var(--color-text-muted);
+  }
+
+  .show-more-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-align: center;
+    margin: var(--space-2) 0 0;
+    font-style: italic;
   }
 
   @media (max-width: 768px) {
