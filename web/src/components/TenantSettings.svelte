@@ -445,17 +445,17 @@
             onchange={refreshAudit}
           >
             <option value="">{$t('tenant_settings.audit.all_events')}</option>
-            <option value="tenant_created">Tenant created</option>
-            <option value="tenant_updated">Tenant updated</option>
-            <option value="user_role_changed">User role changed</option>
-            <option value="compute_target_added">Compute target added</option>
-            <option value="budget_updated">Budget updated</option>
-            <option value="agent_killed">Agent killed</option>
-            <option value="snapshot_created">Snapshot created</option>
-            <option value="job_run">Job run</option>
+            <option value="tenant_created">{$t('tenant_settings.audit_event_types.tenant_created')}</option>
+            <option value="tenant_updated">{$t('tenant_settings.audit_event_types.tenant_updated')}</option>
+            <option value="user_role_changed">{$t('tenant_settings.audit_event_types.user_role_changed')}</option>
+            <option value="compute_target_added">{$t('tenant_settings.audit_event_types.compute_target_added')}</option>
+            <option value="budget_updated">{$t('tenant_settings.audit_event_types.budget_updated')}</option>
+            <option value="agent_killed">{$t('tenant_settings.audit_event_types.agent_killed')}</option>
+            <option value="snapshot_created">{$t('tenant_settings.audit_event_types.snapshot_created')}</option>
+            <option value="job_run">{$t('tenant_settings.audit_event_types.job_run')}</option>
           </select>
-          <button class="refresh-btn" onclick={refreshAudit} aria-label="Refresh audit log" data-testid="audit-refresh">
-            Refresh
+          <button class="refresh-btn" onclick={refreshAudit} aria-label={$t('tenant_settings.refresh')} data-testid="audit-refresh">
+            {$t('tenant_settings.refresh')}
           </button>
         </div>
 
@@ -464,15 +464,15 @@
         {:else if auditError}
           <div class="panel-error" role="alert">{auditError}</div>
         {:else if auditEvents.length === 0}
-          <div class="panel-empty">No audit events found.</div>
+          <div class="panel-empty">{$t('tenant_settings.audit_empty')}</div>
         {:else}
           <table class="data-table" data-testid="audit-events-table">
             <thead>
               <tr>
-                <th scope="col" aria-sort={auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('timestamp', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Time{sortArrow('timestamp', auditSortCol, auditSortDir)}</button></th>
-                <th scope="col" aria-sort={auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('event_type', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Event{sortArrow('event_type', auditSortCol, auditSortDir)}</button></th>
-                <th scope="col" aria-sort={auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('actor', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Actor{sortArrow('actor', auditSortCol, auditSortDir)}</button></th>
-                <th scope="col" aria-sort={auditSortCol === 'detail' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('detail', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>Details{sortArrow('detail', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'timestamp' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('timestamp', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>{$t('tenant_settings.audit_col_time')}{sortArrow('timestamp', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'event_type' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('event_type', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>{$t('tenant_settings.audit_col_event')}{sortArrow('event_type', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'actor' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('actor', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>{$t('tenant_settings.audit_col_actor')}{sortArrow('actor', auditSortCol, auditSortDir)}</button></th>
+                <th scope="col" aria-sort={auditSortCol === 'detail' ? (auditSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('detail', auditSortCol, auditSortDir, v => auditSortCol = v, v => auditSortDir = v)}>{$t('tenant_settings.audit_col_details')}{sortArrow('detail', auditSortCol, auditSortDir)}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -493,8 +493,8 @@
     {:else if activeTab === 'health'}
       <div id="tab-panel-health" role="tabpanel" aria-label="Health" class="tab-panel" data-testid="tenant-tab-health">
         <div class="panel-header">
-          <h2 class="panel-title">System Health</h2>
-          <p class="panel-desc">Current status of all system components.</p>
+          <h2 class="panel-title">{$t('tenant_settings.health.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.health.subtitle')}</p>
         </div>
 
         {#if healthLoading}
@@ -502,7 +502,7 @@
         {:else if healthError}
           <div class="panel-error" role="alert">{healthError}</div>
         {:else if !health}
-          <div class="panel-empty">No health data available.</div>
+          <div class="panel-empty">{$t('tenant_settings.health.empty')}</div>
         {:else}
           <div class="health-grid" data-testid="health-grid">
             {#each Object.entries(health) as [component, status] (component)}
@@ -522,8 +522,8 @@
     {:else if activeTab === 'jobs'}
       <div id="tab-panel-jobs" role="tabpanel" aria-label="Jobs" class="tab-panel" data-testid="tenant-tab-jobs">
         <div class="panel-header">
-          <h2 class="panel-title">Background Jobs</h2>
-          <p class="panel-desc">Scheduled and on-demand background job status. Admins can manually trigger jobs.</p>
+          <h2 class="panel-title">{$t('tenant_settings.jobs.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.jobs.subtitle')}</p>
         </div>
 
         {#if jobsLoading}
@@ -531,15 +531,15 @@
         {:else if jobsError}
           <div class="panel-error" role="alert">{jobsError}</div>
         {:else if jobs.length === 0}
-          <div class="panel-empty">No jobs registered.</div>
+          <div class="panel-empty">{$t('tenant_settings.jobs.empty')}</div>
         {:else}
           <table class="data-table" data-testid="jobs-table">
             <thead>
               <tr>
-                <th scope="col" aria-sort={jobsSortCol === 'name' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Job{sortArrow('name', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col" aria-sort={jobsSortCol === 'schedule' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('schedule', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Schedule{sortArrow('schedule', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col" aria-sort={jobsSortCol === 'last_run' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('last_run', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Last Run{sortArrow('last_run', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col" aria-sort={jobsSortCol === 'status' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>Status{sortArrow('status', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'name' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_job')}{sortArrow('name', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'schedule' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('schedule', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_schedule')}{sortArrow('schedule', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'last_run' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('last_run', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_last_run')}{sortArrow('last_run', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'status' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_status')}{sortArrow('status', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col">{$t('tenant_settings.audit.col_action')}</th>
               </tr>
             </thead>
@@ -562,7 +562,7 @@
                       aria-label="Run job {job.name ?? job.id}"
                       data-testid="run-job-{job.name ?? job.id}"
                     >
-                      {runningJob === (job.name ?? job.id) ? 'Running…' : 'Run now'}
+                      {runningJob === (job.name ?? job.id) ? $t('tenant_settings.jobs.running') : $t('tenant_settings.jobs.run_now')}
                     </button>
                   </td>
                 </tr>

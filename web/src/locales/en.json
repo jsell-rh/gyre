@@ -1364,12 +1364,38 @@
     },
     "health": {
       "title": "Health",
-      "loading": "Loading health status\u2026"
+      "subtitle": "Current status of all system components.",
+      "loading": "Loading health status\u2026",
+      "empty": "No health data available."
     },
     "jobs": {
       "title": "Jobs",
-      "loading": "Loading jobs\u2026"
-    }
+      "subtitle": "Scheduled and on-demand background job status. Admins can manually trigger jobs.",
+      "loading": "Loading jobs\u2026",
+      "empty": "No jobs registered.",
+      "col_job": "Job",
+      "col_schedule": "Schedule",
+      "col_last_run": "Last Run",
+      "col_status": "Status",
+      "running": "Running\u2026",
+      "run_now": "Run now"
+    },
+    "audit_event_types": {
+      "tenant_created": "Tenant created",
+      "tenant_updated": "Tenant updated",
+      "user_role_changed": "User role changed",
+      "compute_target_added": "Compute target added",
+      "budget_updated": "Budget updated",
+      "agent_killed": "Agent killed",
+      "snapshot_created": "Snapshot created",
+      "job_run": "Job run"
+    },
+    "audit_empty": "No audit events found.",
+    "audit_col_time": "Time",
+    "audit_col_event": "Event",
+    "audit_col_actor": "Actor",
+    "audit_col_details": "Details",
+    "refresh": "Refresh"
   },
   "common": {
     "cancel": "Cancel",
@@ -1402,6 +1428,18 @@
       "merged": "Merged",
       "closed": "Closed"
     }
+  },
+  "inline_chat": {
+    "ask_about": "Ask about {recipient} \u25b8",
+    "edit_spec": "Edit spec: \"{recipient}\" \u25b8",
+    "message_to": "Message to {recipient} \u25b8",
+    "placeholder_qa": "Ask a question\u2026",
+    "placeholder_edit": "Describe a change\u2026",
+    "placeholder_message": "Type a message\u2026",
+    "clear": "Clear",
+    "hint_agent": "Ctrl+Enter to send \u00b7 Messages are signed and persisted via message bus",
+    "hint_qa": "Ctrl+Enter to send \u00b7 Read-only Q&A \u2014 cannot trigger actions",
+    "hint_edit": "Ctrl+Enter to send \u00b7 Produces draft suggestions \u2014 you accept before saving"
   },
   "search": {
     "placeholder": "Search tasks, agents, specs, MRs\u2026",
