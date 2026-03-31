@@ -567,13 +567,14 @@ pub async fn spawn_agent(
             "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
-        // Use compute target's configured command, or fall back to /gyre/entrypoint.sh
+        // Use compute target's configured command, GYRE_AGENT_COMMAND env var, or /gyre/entrypoint.sh.
         let command = resolved_target_config
             .as_ref()
             .and_then(|cfg| cfg.config.get("command"))
             .and_then(|v| v.as_str())
-            .unwrap_or("/gyre/entrypoint.sh")
-            .to_string();
+            .map(String::from)
+            .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+            .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
         let args: Vec<String> = resolved_target_config
             .as_ref()
             .and_then(|cfg| cfg.config.get("args"))
