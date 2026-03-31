@@ -617,7 +617,7 @@
         <button
           class="panel-btn"
           onclick={popout}
-          aria-label={expanded ? 'Collapse panel' : 'Pop out to full width'}
+          aria-label={expanded ? $t('detail_panel.collapse') : $t('detail_panel.pop_out')}
           title={expanded ? 'Collapse' : 'Pop Out'}
         >
           {#if expanded}
@@ -637,7 +637,7 @@
         <button
           class="panel-btn panel-close"
           onclick={close}
-          aria-label="Close detail panel"
+          aria-label={$t('detail_panel.close')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <path d="M18 6L6 18M6 6l12 12"/>
@@ -652,16 +652,16 @@
       {#if activeTab === 'info'}
         <div class="tab-pane">
           <dl class="entity-meta">
-            <dt>Type</dt><dd>{entity.type}</dd>
-            <dt>ID</dt><dd class="mono">{entity.id}</dd>
+            <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
+            <dt>{$t('detail_panel.id')}</dt><dd class="mono">{entity.id}</dd>
             {#if entity.data?.status}
-              <dt>Status</dt><dd>{entity.data.status}</dd>
+              <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
             {/if}
             {#if entity.data?.created_at}
-              <dt>Created</dt><dd>{fmtDate(entity.data.created_at)}</dd>
+              <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
             {/if}
             {#if entity.data?.spec_path}
-              <dt>Spec</dt><dd class="mono">{entity.data.spec_path}</dd>
+              <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
             {/if}
           </dl>
         </div>
@@ -675,16 +675,16 @@
           {:else if specDetail?.content}
             <dl class="spec-meta-list">
               {#if entity.data?.approval_status}
-                <dt>Status</dt>
+                <dt>{$t('detail_panel.status')}</dt>
                 <dd>
                   <Badge value={entity.data.approval_status} color={specStatusColor(entity.data.approval_status)} />
                 </dd>
               {/if}
               {#if entity.data?.owner}
-                <dt>Owner</dt><dd class="mono">{entity.data.owner}</dd>
+                <dt>{$t('detail_panel.owner')}</dt><dd class="mono">{entity.data.owner}</dd>
               {/if}
               {#if entity.data?.updated_at}
-                <dt>Updated</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
+                <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
               {/if}
             </dl>
             <div class="spec-approval-actions" data-testid="spec-approval-actions">
@@ -695,7 +695,7 @@
                   disabled={revoking}
                   data-testid="spec-revoke-btn"
                 >
-                  {revoking ? 'Revoking…' : 'Revoke Approval'}
+                  {revoking ? $t('detail_panel.revoking') : $t('detail_panel.revoke_approval')}
                 </button>
               {:else}
                 <button
@@ -704,7 +704,7 @@
                   disabled={approving || !entity.data?.current_sha}
                   data-testid="spec-approve-btn"
                 >
-                  {approving ? 'Approving…' : 'Approve'}
+                  {approving ? $t('detail_panel.approving') : $t('detail_panel.approve')}
                 </button>
               {/if}
             </div>
@@ -714,29 +714,29 @@
           {:else}
             <!-- Metadata fallback (no content field from server yet) -->
             <dl class="spec-meta-list">
-              <dt>Path</dt><dd class="mono">{entity.id}</dd>
+              <dt>{$t('detail_panel.path')}</dt><dd class="mono">{entity.id}</dd>
               {#if entity.data?.title}
-                <dt>Title</dt><dd>{entity.data.title}</dd>
+                <dt>{$t('detail_panel.title')}</dt><dd>{entity.data.title}</dd>
               {/if}
               {#if entity.data?.owner}
-                <dt>Owner</dt><dd class="mono">{entity.data.owner}</dd>
+                <dt>{$t('detail_panel.owner')}</dt><dd class="mono">{entity.data.owner}</dd>
               {/if}
               {#if entity.data?.kind}
-                <dt>Kind</dt><dd>{entity.data.kind}</dd>
+                <dt>{$t('detail_panel.kind')}</dt><dd>{entity.data.kind}</dd>
               {/if}
               {#if entity.data?.approval_status}
-                <dt>Status</dt>
+                <dt>{$t('detail_panel.status')}</dt>
                 <dd><Badge value={entity.data.approval_status} color={specStatusColor(entity.data.approval_status)} /></dd>
               {/if}
               {#if entity.data?.current_sha}
-                <dt>SHA</dt><dd class="mono">{entity.data.current_sha.slice(0, 7)}</dd>
+                <dt>{$t('detail_panel.sha')}</dt><dd class="mono">{entity.data.current_sha.slice(0, 7)}</dd>
               {/if}
               {#if entity.data?.updated_at}
-                <dt>Updated</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
+                <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
               {/if}
             </dl>
             {#if !entity.data?.repo_id}
-              <p class="spec-hint">Full content requires repo context.</p>
+              <p class="spec-hint">{$t('detail_panel.full_content_requires_repo')}</p>
             {/if}
           {/if}
         </div>
@@ -749,15 +749,15 @@
             <textarea
               class="spec-editor-textarea"
               bind:value={editContent}
-              placeholder="Spec content…"
-              aria-label="Spec editor"
+              placeholder={$t('detail_panel.spec_placeholder')}
+              aria-label={$t('detail_panel.spec_editor')}
               spellcheck="false"
             ></textarea>
 
             {#if llmSuggestion}
               <div class="suggestion-block" role="region" aria-label="LLM suggestion">
                 <div class="suggestion-hdr">
-                  <span class="suggestion-lbl">Suggested Change</span>
+                  <span class="suggestion-lbl">{$t('detail_panel.suggested_change')}</span>
                 </div>
                 {#if llmSuggestion.explanation}
                   <p class="suggestion-expl">{llmSuggestion.explanation}</p>
@@ -776,16 +776,16 @@
                   </div>
                 {/if}
                 <div class="suggestion-btns">
-                  <Button variant="primary" onclick={acceptSuggestion}>Accept</Button>
-                  <Button variant="secondary" onclick={editSuggestion}>Edit</Button>
-                  <Button variant="secondary" onclick={dismissSuggestion}>Dismiss</Button>
+                  <Button variant="primary" onclick={acceptSuggestion}>{$t('detail_panel.accept')}</Button>
+                  <Button variant="secondary" onclick={editSuggestion}>{$t('detail_panel.edit_btn')}</Button>
+                  <Button variant="secondary" onclick={dismissSuggestion}>{$t('detail_panel.dismiss')}</Button>
                 </div>
               </div>
             {/if}
 
             {#if llmStreaming && llmExplanation}
               <div class="llm-streaming" aria-live="polite">
-                <span class="streaming-lbl">Thinking…</span>
+                <span class="streaming-lbl">{$t('detail_panel.thinking')}</span>
                 <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
               </div>
             {/if}
@@ -796,17 +796,17 @@
                 <textarea
                   class="llm-textarea"
                   bind:value={llmInstruction}
-                  placeholder="Describe a change… e.g. 'Add error handling section'"
+                  placeholder={$t('detail_panel.llm_placeholder')}
                   rows="2"
                   disabled={llmStreaming}
                   onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
-                  aria-label="LLM instruction"
+                  aria-label={$t('detail_panel.llm_instruction')}
                 ></textarea>
                 <button
                   class="llm-send"
                   onclick={sendLlmInstruction}
                   disabled={!llmInstruction.trim() || llmStreaming || !entity.data?.repo_id}
-                  aria-label="Send to LLM"
+                  aria-label={$t('detail_panel.send_to_llm')}
                   aria-busy={llmStreaming}
                 >
                   {#if llmStreaming}
@@ -818,23 +818,23 @@
                       <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
                     </svg>
                   {/if}
-                  <span class="sr-only">Send</span>
+                  <span class="sr-only">{$t('detail_panel.send')}</span>
                 </button>
               </div>
               {#if !entity.data?.repo_id}
-                <p class="llm-hint warn">LLM editing requires repo context.</p>
+                <p class="llm-hint warn">{$t('detail_panel.llm_requires_repo')}</p>
               {:else}
-                <p class="llm-hint">Ctrl+Enter · Produces draft suggestions — accept to apply</p>
+                <p class="llm-hint">{$t('detail_panel.llm_hint')}</p>
               {/if}
             </div>
 
             {#if entity.data?.repo_id}
               <div class="save-bar">
-                <Button variant="secondary" onclick={openEditorSplit} aria-label="Open editor split view with architecture preview">
-                  Preview
+                <Button variant="secondary" onclick={openEditorSplit} aria-label={$t('detail_panel.preview_aria')}>
+                  {$t('detail_panel.preview')}
                 </Button>
                 <Button variant="primary" onclick={saveSpec} disabled={saving || !editContent.trim()}>
-                  {saving ? 'Saving…' : 'Save & Create MR'}
+                  {saving ? $t('detail_panel.saving') : $t('detail_panel.save_create_mr')}
                 </Button>
               </div>
             {/if}
@@ -853,7 +853,7 @@
             {@const pct = total > 0 ? Math.round((done / total) * 100) : 0}
             <div class="progress-summary">
               <span class="progress-big">{done}/{total}</span>
-              <span class="progress-lbl">tasks complete</span>
+              <span class="progress-lbl">{$t('detail_panel.tasks_complete')}</span>
             </div>
             <div
               class="progress-bar-track"
@@ -877,10 +877,10 @@
                 {/each}
               </ul>
             {:else}
-              <p class="no-data">No tasks linked to this spec.</p>
+              <p class="no-data">{$t('detail_panel.no_tasks')}</p>
             {/if}
           {:else}
-            <p class="no-data">Progress data requires repo context.</p>
+            <p class="no-data">{$t('detail_panel.progress_requires_repo')}</p>
           {/if}
         </div>
 
@@ -911,18 +911,18 @@
               {/each}
             </ul>
           {:else}
-            <p class="no-data">No spec links found.</p>
+            <p class="no-data">{$t('detail_panel.no_links')}</p>
           {/if}
         </div>
 
       {:else if activeTab === 'spec'}
         <div class="tab-pane">
-          <EmptyState title="Spec not loaded" description="Spec content for {entity.data?.spec_path ?? 'this entity'} is not available in this context." />
+          <EmptyState title={$t('detail_panel.spec_not_loaded')} description="Spec content for {entity.data?.spec_path ?? 'this entity'} is not available in this context." />
         </div>
 
       {:else if activeTab === 'chat'}
         <div class="tab-pane">
-          <EmptyState title="No conversation yet" description="Start a conversation by typing below." />
+          <EmptyState title={$t('detail_panel.no_conversation')} description={$t('detail_panel.start_conversation')} />
         </div>
 
       {:else if activeTab === 'history'}
@@ -951,10 +951,10 @@
                 {/each}
               </div>
             {:else}
-              <p class="no-data">No approval events recorded.</p>
+              <p class="no-data">{$t('detail_panel.no_approvals')}</p>
             {/if}
           {:else}
-            <EmptyState title="No history available" description="Modification history will appear when changes are recorded." />
+            <EmptyState title={$t('detail_panel.no_history')} description={$t('detail_panel.no_history_desc')} />
           {/if}
         </div>
 
@@ -963,7 +963,7 @@
           {#if archLoading}
             <div class="arch-loading-wrap">
               <Skeleton width="100%" height="220px" />
-              <p class="arch-loading-label">Loading architecture graph…</p>
+              <p class="arch-loading-label">{$t('detail_panel.loading_arch')}</p>
             </div>
           {:else if archError}
             <div class="arch-error" role="alert">
@@ -976,7 +976,7 @@
           {:else}
             <div class="arch-mini-header">
               <span class="arch-mini-label">
-                {archNodes.length} {archNodes.length === 1 ? 'node' : 'nodes'} governed by this spec
+                {archNodes.length} {archNodes.length === 1 ? 'node' : 'nodes'} {$t('detail_panel.governed_by_spec')}
               </span>
               {#if archGhostOverlays.length}
                 <span class="arch-predict-badge">
@@ -999,7 +999,7 @@
                   onclick={expandToCanvas}
                   disabled={!archNodes.length}
                 >
-                  Expand to canvas →
+                  {$t('detail_panel.expand_to_canvas')}
                 </Button>
               </div>
             {/if}
@@ -1008,22 +1008,22 @@
 
       {:else if activeTab === 'diff'}
         <div class="tab-pane">
-          <EmptyState title="Code diff not available" description="Diff view requires a merge request context." />
+          <EmptyState title={$t('detail_panel.diff_not_available')} description={$t('detail_panel.diff_not_available_desc')} />
         </div>
 
       {:else if activeTab === 'gates'}
         <div class="tab-pane">
-          <EmptyState title="No gate results" description="Gate checks will appear here when a merge request is active." />
+          <EmptyState title={$t('detail_panel.no_gates')} description={$t('detail_panel.no_gates_desc')} />
         </div>
 
       {:else if activeTab === 'attestation'}
         <div class="tab-pane">
-          <EmptyState title="No attestation data" description="Merge attestation and conversation provenance will appear after the MR is merged." />
+          <EmptyState title={$t('detail_panel.no_attestation')} description={$t('detail_panel.no_attestation_desc')} />
         </div>
 
       {:else if activeTab === 'trace'}
         <div class="tab-pane">
-          <EmptyState title="No trace data" description="System trace timeline will appear when agent activity is recorded." />
+          <EmptyState title={$t('detail_panel.no_trace')} description={$t('detail_panel.no_trace_desc')} />
         </div>
 
       {:else if activeTab === 'ask-why'}
@@ -1035,14 +1035,14 @@
               disabled={interrogationLoading}
               aria-describedby="ask-why-hint"
             >
-              {interrogationLoading ? 'Starting…' : 'Ask Why — Spawn Review Agent'}
+              {interrogationLoading ? $t('detail_panel.ask_why_starting') : $t('detail_panel.ask_why_spawn')}
             </button>
-            <p class="ask-why-hint" id="ask-why-hint">Spawns an interrogation agent to answer questions about this entity's decision history.</p>
+            <p class="ask-why-hint" id="ask-why-hint">{$t('detail_panel.ask_why_hint')}</p>
             {#if interrogationAgentId}
-              <a class="view-spawned-link" href="/explorer?detail=agent:{interrogationAgentId}">View spawned agent &rarr;</a>
+              <a class="view-spawned-link" href="/explorer?detail=agent:{interrogationAgentId}">{$t('detail_panel.ask_why_view_agent')}</a>
             {/if}
           {:else}
-            <p class="ask-why-unavailable">Conversation unavailable — no conversation SHA recorded for this entity.</p>
+            <p class="ask-why-unavailable">{$t('detail_panel.ask_why_unavailable')}</p>
           {/if}
         </div>
       {/if}

@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from './api.js';
   import Badge from './Badge.svelte';
   import EmptyState from './EmptyState.svelte';
@@ -781,7 +782,7 @@
 
 <div class="canvas-wrap">
   {#if !nodes.length}
-    <EmptyState title="No graph data" description="Select a repository to view its knowledge graph. Graph nodes are extracted on push." />
+    <EmptyState title={$t('explorer_canvas.no_graph')} description={$t('explorer_canvas.no_graph_desc')} />
   {:else if showListFallback}
     <div class="threshold-banner warning">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -789,7 +790,7 @@
     </div>
     <div class="list-fallback-wrap">
       <table class="list-table" aria-label="Node list (graph too large for canvas)">
-        <thead><tr><th scope="col">Type</th><th scope="col">Name</th><th scope="col">File</th><th scope="col">Spec</th></tr></thead>
+        <thead><tr><th scope="col">{$t('explorer_canvas.legend_type')}</th><th scope="col">{$t('explorer_canvas.col_name')}</th><th scope="col">{$t('explorer_canvas.file')}</th><th scope="col">{$t('detail_panel.spec')}</th></tr></thead>
         <tbody>
           {#each nodes.slice(0, 1000) as node}
             <tr class="list-row" role="button" tabindex="0" aria-label="Select node {node.name}"
@@ -802,7 +803,7 @@
               <td>
                 <button class="drill-in-btn" onclick={(e) => { e.stopPropagation(); drillInFromList(node); }}
                   aria-label="Drill into {node.name}">
-                  Drill In &rarr;
+                  {$t('explorer_canvas.drill_in_btn')}
                 </button>
               </td>
             </tr>
@@ -815,7 +816,7 @@
       <div class="threshold-banner info">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         Showing public API only — {privateNodeCount} private nodes hidden.
-        <button class="banner-action" onclick={() => (showAllPrivate = true)}>Show All</button>
+        <button class="banner-action" onclick={() => (showAllPrivate = true)}>{$t('explorer_canvas.show_all')}</button>
       </div>
     {/if}
 
@@ -827,16 +828,16 @@
     {/if}
 
     <div class="canvas-toolbar">
-      <button class="tool-btn" onclick={resetView} title="Reset view" aria-label="Reset view">
+      <button class="tool-btn" onclick={resetView} title={$t('explorer_canvas.reset_view')} aria-label={$t('explorer_canvas.reset_view')}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/></svg>
-        Reset
+        {$t('explorer_canvas.reset')}
       </button>
       {#if drillNode}
         <button class="tool-btn drill-back" onclick={exitDrillIn}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
-          Full Graph
+          {$t('explorer_canvas.full_graph')}
         </button>
-        <span class="drill-label">Drill-in: <strong>{drillNode.name}</strong></span>
+        <span class="drill-label">{$t('explorer_canvas.drill_in')} <strong>{drillNode.name}</strong></span>
       {/if}
 
       <!-- Layout engine switcher -->
@@ -847,30 +848,30 @@
             {label}
           </button>
         {/each}
-        {#if layoutPending}<span class="layout-spinner" aria-label="Computing layout…"></span>{/if}
+        {#if layoutPending}<span class="layout-spinner" aria-label={$t('explorer_canvas.computing_layout')}></span>{/if}
       </div>
 
       <button class="tool-btn" class:active={specLinkageOn} onclick={() => (specLinkageOn = !specLinkageOn)}
-        title="Toggle spec linkage overlay" aria-label="Toggle spec linkage overlay" aria-pressed={specLinkageOn}>Spec Linkage</button>
+        title={$t('explorer_canvas.toggle_spec_linkage')} aria-label={$t('explorer_canvas.toggle_spec_linkage')} aria-pressed={specLinkageOn}>{$t('explorer_canvas.spec_linkage')}</button>
       {#if specLinkageOn}
         <button class="tool-btn" class:active={showUnspeccedOnly} onclick={() => (showUnspeccedOnly = !showUnspeccedOnly)}
-          title="Show only unspecced nodes" aria-label="Show only unspecced nodes" aria-pressed={showUnspeccedOnly}>
-          Unspecced only ({specCounts.unspecced})
+          title={$t('explorer_canvas.show_unspecced')} aria-label={$t('explorer_canvas.show_unspecced')} aria-pressed={showUnspeccedOnly}>
+          {$t('explorer_canvas.unspecced_only')} ({specCounts.unspecced})
         </button>
       {/if}
 
       <button class="tool-btn risk-toggle" class:active={showRiskHeatmap} onclick={() => (showRiskHeatmap = !showRiskHeatmap)}
-        title={showRiskHeatmap ? 'Disable risk heat-map' : 'Enable risk heat-map'} aria-label={showRiskHeatmap ? 'Disable risk heat-map' : 'Enable risk heat-map'} aria-pressed={showRiskHeatmap}>
+        title={showRiskHeatmap ? $t('explorer_canvas.disable_risk') : $t('explorer_canvas.enable_risk')} aria-label={showRiskHeatmap ? $t('explorer_canvas.disable_risk') : $t('explorer_canvas.enable_risk')} aria-pressed={showRiskHeatmap}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
           <circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/><path d="M8 12h1M15 12h1M12 8v1M12 15v1"/>
         </svg>
-        Risk Heat-map
+        {$t('explorer_canvas.risk_heatmap')}
       </button>
       {#if showRiskHeatmap}
         <span class="heatmap-legend">
-          <span class="hm-dot" style="background:var(--color-success)"></span>low
-          <span class="hm-dot" style="background:var(--color-warning)"></span>medium
-          <span class="hm-dot" style="background:var(--color-danger)"></span>high
+          <span class="hm-dot" style="background:var(--color-success)"></span>{$t('explorer_canvas.risk_low')}
+          <span class="hm-dot" style="background:var(--color-warning)"></span>{$t('explorer_canvas.risk_medium')}
+          <span class="hm-dot" style="background:var(--color-danger)"></span>{$t('explorer_canvas.risk_high')}
         </span>
       {/if}
 
@@ -878,8 +879,8 @@
 
       {#if !showRiskHeatmap}
         <div class="legend">
-          {#each [['Package','#7c5ff5'],['Module','#4a9eff'],['Type','#22c55e'],['Interface','#f59e0b'],['Function','#14b8a6'],['Endpoint','#ef4444'],['Component','#a78bfa'],['Table','#9ca3af'],['Constant','#fbbf24']] as [lbl, color]}
-            <span class="legend-item"><span class="legend-dot" style="background:{color}"></span>{lbl}</span>
+          {#each [['legend_package','#7c5ff5'],['legend_module','#4a9eff'],['legend_type','#22c55e'],['legend_interface','#f59e0b'],['legend_function','#14b8a6'],['legend_endpoint','#ef4444'],['legend_component','#a78bfa'],['legend_table','#9ca3af'],['legend_constant','#fbbf24']] as [key, color]}
+            <span class="legend-item"><span class="legend-dot" style="background:{color}"></span>{$t(`explorer_canvas.${key}`)}</span>
           {/each}
         </div>
       {/if}
@@ -1001,8 +1002,8 @@
 
       {#if specLinkageOn}
         <div class="spec-legend" aria-label="Spec linkage legend">
-          <div class="spec-legend-title">Spec Coverage</div>
-          {#each [{ label: 'High confidence', color: '#22c55e', dashed: false },{ label: 'Medium confidence', color: '#eab308', dashed: false },{ label: 'Low confidence', color: '#f97316', dashed: false },{ label: 'Unspecced', color: '#ef4444', dashed: true }] as entry}
+          <div class="spec-legend-title">{$t('explorer_canvas.spec_coverage')}</div>
+          {#each [{ label: $t('explorer_canvas.high_confidence'), color: '#22c55e', dashed: false },{ label: $t('explorer_canvas.medium_confidence'), color: '#eab308', dashed: false },{ label: $t('explorer_canvas.low_confidence'), color: '#f97316', dashed: false },{ label: $t('explorer_canvas.unspecced_label'), color: '#ef4444', dashed: true }] as entry}
             <div class="spec-legend-item">
               <svg width="20" height="12" aria-hidden="true">
                 <circle cx="6" cy="6" r="5" fill="none" stroke={entry.color} stroke-width="2" stroke-dasharray={entry.dashed ? '3 2' : 'none'} />
@@ -1011,8 +1012,8 @@
             </div>
           {/each}
           <div class="spec-legend-counts">
-            <span class="spec-count specced">{specCounts.specced} specced</span>
-            <span class="spec-count unspecced">{specCounts.unspecced} unspecced</span>
+            <span class="spec-count specced">{specCounts.specced} {$t('explorer_canvas.specced')}</span>
+            <span class="spec-count unspecced">{specCounts.unspecced} {$t('explorer_canvas.unspecced')}</span>
           </div>
         </div>
       {/if}
@@ -1020,20 +1021,20 @@
       {#if showRiskHeatmap}
         <div class="risk-panel" role="complementary" aria-label="Risk heat-map — top 10 nodes">
           <div class="risk-panel-header">
-            <span class="risk-panel-title">Risk Heat-map</span>
+            <span class="risk-panel-title">{$t('explorer_canvas.risk_heatmap')}</span>
             <span class="risk-panel-sub">Top 10 · click to highlight</span>
           </div>
           {#if riskData.length === 0}
-            <div class="risk-empty">{repoId ? 'Loading risk data…' : 'No risk data available'}</div>
+            <div class="risk-empty">{repoId ? $t('explorer_canvas.loading_risk') : $t('explorer_canvas.no_risk_data')}</div>
           {:else}
             <div class="risk-table-wrap">
               <table class="risk-table" aria-label="Top 10 highest-risk nodes">
                 <thead>
                   <tr>
-                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'name')} aria-label="Sort by name">Name {sortIcon('name')}</button></th>
-                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'score')} aria-label="Sort by risk score">Score {sortIcon('score')}</button></th>
-                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'churn_rate')} aria-label="Sort by churn">Churn {sortIcon('churn_rate')}</button></th>
-                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'fan_out')} aria-label="Sort by fan-out">Fan-out {sortIcon('fan_out')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'name')} aria-label={$t('explorer_canvas.sort_by_name')}>{$t('explorer_canvas.col_name')} {sortIcon('name')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'score')} aria-label={$t('explorer_canvas.sort_by_score')}>{$t('explorer_canvas.col_score')} {sortIcon('score')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'churn_rate')} aria-label={$t('explorer_canvas.sort_by_churn')}>{$t('explorer_canvas.col_churn')} {sortIcon('churn_rate')}</button></th>
+                    <th scope="col"><button class="sort-col" onclick={() => (riskSortBy = 'fan_out')} aria-label={$t('explorer_canvas.sort_by_fan_out')}>{$t('explorer_canvas.col_fan_out')} {sortIcon('fan_out')}</button></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1058,11 +1059,11 @@
 
       {#if selectedNode}
         {@const colors = nodeTypeColor(selectedNode.node_type)}
-        <div class="detail-panel" role="complementary" aria-label="Node details">
+        <div class="detail-panel" role="complementary" aria-label={$t('explorer_canvas.node_details')}>
           <div class="panel-header" style="border-left: 3px solid {colors.stroke}">
             <div class="panel-title-row">
               <span class="panel-type">{selectedNode.node_type}</span>
-              <button class="close-btn" onclick={closeDetail} aria-label="Close detail panel">×</button>
+              <button class="close-btn" onclick={closeDetail} aria-label={$t('explorer_canvas.close_detail')}>×</button>
             </div>
             <span class="panel-name">{selectedNode.name}</span>
             {#if selectedNode.qualified_name && selectedNode.qualified_name !== selectedNode.name}
@@ -1071,18 +1072,18 @@
           </div>
           <div class="panel-body">
             {#if selectedNode.file_path}
-              <div class="panel-row"><span class="panel-label">File</span><span class="panel-val mono">{selectedNode.file_path}:{selectedNode.line_start ?? ''}</span></div>
+              <div class="panel-row"><span class="panel-label">{$t('explorer_canvas.file')}</span><span class="panel-val mono">{selectedNode.file_path}:{selectedNode.line_start ?? ''}</span></div>
             {/if}
             {#if selectedNode.visibility}
-              <div class="panel-row"><span class="panel-label">Visibility</span><Badge variant="default" value={selectedNode.visibility} /></div>
+              <div class="panel-row"><span class="panel-label">{$t('explorer_canvas.visibility')}</span><Badge variant="default" value={selectedNode.visibility} /></div>
             {/if}
             {#if selectedNode.spec_path}
-              <div class="panel-row"><span class="panel-label">Spec</span>
-                <button class="spec-link-btn" onclick={() => openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path })} title="Navigate to spec">{selectedNode.spec_path}</button>
+              <div class="panel-row"><span class="panel-label">{$t('detail_panel.spec')}</span>
+                <button class="spec-link-btn" onclick={() => openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path })} title={$t('explorer_canvas.navigate_to_spec')}>{selectedNode.spec_path}</button>
               </div>
             {/if}
             {#if selectedNode.spec_confidence}
-              <div class="panel-row"><span class="panel-label">Confidence</span>
+              <div class="panel-row"><span class="panel-label">{$t('explorer_canvas.confidence')}</span>
                 <Badge variant={selectedNode.spec_confidence === 'High' ? 'success' : selectedNode.spec_confidence === 'Medium' ? 'warning' : 'default'} value={selectedNode.spec_confidence} />
               </div>
             {/if}
@@ -1090,25 +1091,25 @@
               {@const risk  = riskByNodeId.get(selectedNode.id)}
               {@const score = riskScores.get(selectedNode.id)}
               <div class="panel-section risk-detail-section">
-                <div class="panel-label">Risk</div>
+                <div class="panel-label">{$t('explorer_canvas.risk')}</div>
                 <div class="risk-detail-grid">
-                  <div class="risk-detail-item"><span class="risk-detail-val" style="color:{riskFillColor(score ?? 0)}">{score?.toFixed(2) ?? '?'}</span><span class="risk-detail-label">score</span></div>
-                  <div class="risk-detail-item"><span class="risk-detail-val">{typeof risk.churn_rate === 'number' ? risk.churn_rate.toFixed(2) : risk.churn_rate ?? 0}</span><span class="risk-detail-label">churn</span></div>
-                  <div class="risk-detail-item"><span class="risk-detail-val">{risk.fan_out ?? 0}</span><span class="risk-detail-label">fan-out</span></div>
-                  <div class="risk-detail-item"><span class="risk-detail-val">{risk.fan_in ?? 0}</span><span class="risk-detail-label">fan-in</span></div>
+                  <div class="risk-detail-item"><span class="risk-detail-val" style="color:{riskFillColor(score ?? 0)}">{score?.toFixed(2) ?? '?'}</span><span class="risk-detail-label">{$t('explorer_canvas.score')}</span></div>
+                  <div class="risk-detail-item"><span class="risk-detail-val">{typeof risk.churn_rate === 'number' ? risk.churn_rate.toFixed(2) : risk.churn_rate ?? 0}</span><span class="risk-detail-label">{$t('explorer_canvas.churn')}</span></div>
+                  <div class="risk-detail-item"><span class="risk-detail-val">{risk.fan_out ?? 0}</span><span class="risk-detail-label">{$t('explorer_canvas.fan_out')}</span></div>
+                  <div class="risk-detail-item"><span class="risk-detail-val">{risk.fan_in ?? 0}</span><span class="risk-detail-label">{$t('explorer_canvas.fan_in')}</span></div>
                 </div>
-                <div class="panel-row" style="margin-top:4px"><span class="panel-label">Spec</span><Badge variant={risk.spec_covered ? 'success' : 'warning'} value={risk.spec_covered ? 'covered' : 'missing'} /></div>
+                <div class="panel-row" style="margin-top:4px"><span class="panel-label">{$t('detail_panel.spec')}</span><Badge variant={risk.spec_covered ? 'success' : 'warning'} value={risk.spec_covered ? $t('explorer_canvas.covered') : $t('explorer_canvas.missing')} /></div>
               </div>
             {/if}
             {#if selectedNode.doc_comment}
-              <div class="panel-section"><div class="panel-label">Doc</div><p class="panel-doc">{selectedNode.doc_comment}</p></div>
+              <div class="panel-section"><div class="panel-label">{$t('explorer_canvas.doc')}</div><p class="panel-doc">{selectedNode.doc_comment}</p></div>
             {/if}
             <div class="panel-metrics">
               {#if selectedNode.complexity != null}<div class="metric"><span class="metric-val">{selectedNode.complexity}</span><span class="metric-label">complexity</span></div>{/if}
               {#if selectedNode.churn_count_30d != null}<div class="metric"><span class="metric-val">{selectedNode.churn_count_30d}</span><span class="metric-label">churn/30d</span></div>{/if}
             </div>
-            {#if selectedNode.last_modified_at}<div class="panel-row"><span class="panel-label">Modified</span><span class="panel-val">{relativeTime(selectedNode.last_modified_at)}</span></div>{/if}
-            {#if selectedNode.last_modified_by}<div class="panel-row"><span class="panel-label">By agent</span><span class="panel-val mono">{selectedNode.last_modified_by}</span></div>{/if}
+            {#if selectedNode.last_modified_at}<div class="panel-row"><span class="panel-label">{$t('explorer_canvas.modified')}</span><span class="panel-val">{relativeTime(selectedNode.last_modified_at)}</span></div>{/if}
+            {#if selectedNode.last_modified_by}<div class="panel-row"><span class="panel-label">{$t('explorer_canvas.by_agent')}</span><span class="panel-val mono">{selectedNode.last_modified_by}</span></div>{/if}
           </div>
         </div>
       {/if}
@@ -1118,43 +1119,43 @@
         <div class="spec-detail-panel" role="complementary" aria-label="Spec detail for {specPanelNode.name}" data-testid="spec-detail-panel">
           <div class="spec-panel-header">
             <div class="spec-panel-title-row">
-              <span class="spec-panel-label">Governing Spec</span>
-              <button class="close-btn" onclick={closeSpecPanel} aria-label="Close spec panel">×</button>
+              <span class="spec-panel-label">{$t('explorer_canvas.governing_spec')}</span>
+              <button class="close-btn" onclick={closeSpecPanel} aria-label={$t('explorer_canvas.close_spec_panel')}>×</button>
             </div>
             <span class="spec-panel-node-name">{specPanelNode.name}</span>
           </div>
           <div class="spec-panel-body">
             {#if !specPanelNode.spec_path}
               <div class="no-spec-state" data-testid="no-governing-spec">
-                <p class="no-spec-text">No governing spec</p>
-                <p class="no-spec-hint">This node has no spec_path set. Create a spec to document and govern its behavior.</p>
+                <p class="no-spec-text">{$t('explorer_canvas.no_governing_spec')}</p>
+                <p class="no-spec-hint">{$t('explorer_canvas.no_spec_hint')}</p>
                 <button class="create-spec-btn" onclick={() => { if (goToRepoTab) { goToRepoTab('specs', { create: 'true' }); } else { navigate?.('specs'); } }} data-testid="create-spec-btn">
-                  Create spec
+                  {$t('explorer_canvas.create_spec')}
                 </button>
               </div>
             {:else}
               <div class="spec-path-row">
-                <span class="spec-path-label">Path</span>
+                <span class="spec-path-label">{$t('detail_panel.path')}</span>
                 <span class="spec-path-val mono">{specPanelNode.spec_path}</span>
               </div>
 
               {#if specLoading}
-                <div class="spec-loading">Loading spec content…</div>
+                <div class="spec-loading">{$t('explorer_canvas.loading_spec')}</div>
               {:else if specContent}
                 <textarea
                   class="spec-editor-textarea"
                   bind:value={specEditDraft}
-                  aria-label="Spec content editor"
+                  aria-label={$t('explorer_canvas.spec_editor')}
                   spellcheck="false"
                   data-testid="spec-editor"
                 ></textarea>
 
                 {#if ghostOverlays.length > 0}
                   <div class="ghost-legend" data-testid="ghost-legend">
-                    <span class="ghost-chip new">+ new</span>
-                    <span class="ghost-chip modified">~ modified</span>
-                    <span class="ghost-chip removed">− removed</span>
-                    <span class="ghost-label">Predicted impact on canvas</span>
+                    <span class="ghost-chip new">{$t('explorer_canvas.ghost_new')}</span>
+                    <span class="ghost-chip modified">{$t('explorer_canvas.ghost_modified')}</span>
+                    <span class="ghost-chip removed">{$t('explorer_canvas.ghost_removed')}</span>
+                    <span class="ghost-label">{$t('explorer_canvas.predicted_impact')}</span>
                   </div>
                 {/if}
 
@@ -1164,15 +1165,15 @@
                       <p class="suggestion-expl">{specLlmSuggestion.explanation}</p>
                     {/if}
                     <div class="suggestion-btns">
-                      <button class="suggestion-accept-btn" onclick={acceptSpecSuggestion}>Accept</button>
-                      <button class="suggestion-dismiss-btn" onclick={() => { specLlmSuggestion = null; }}>Dismiss</button>
+                      <button class="suggestion-accept-btn" onclick={acceptSpecSuggestion}>{$t('explorer_canvas.accept')}</button>
+                      <button class="suggestion-dismiss-btn" onclick={() => { specLlmSuggestion = null; }}>{$t('explorer_canvas.dismiss')}</button>
                     </div>
                   </div>
                 {/if}
 
                 {#if specLlmStreaming && specLlmExplanation}
                   <div class="llm-streaming" aria-live="polite">
-                    <span class="streaming-lbl">Thinking…</span>
+                    <span class="streaming-lbl">{$t('explorer_canvas.thinking')}</span>
                     <p class="streaming-txt">{specLlmExplanation}</p>
                   </div>
                 {/if}
@@ -1181,23 +1182,23 @@
                   <textarea
                     class="llm-textarea"
                     bind:value={specLlmInstruction}
-                    placeholder="Describe a spec change…"
+                    placeholder={$t('explorer_canvas.spec_change_placeholder')}
                     rows="2"
                     disabled={specLlmStreaming}
-                    aria-label="LLM instruction for spec editing"
+                    aria-label={$t('explorer_canvas.llm_instruction')}
                     onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendSpecLlmInstruction(); } }}
                   ></textarea>
                   <button
                     class="llm-send-btn"
                     onclick={sendSpecLlmInstruction}
                     disabled={!specLlmInstruction.trim() || specLlmStreaming}
-                    aria-label="Send LLM instruction"
+                    aria-label={$t('explorer_canvas.send_llm')}
                   >
                     {specLlmStreaming ? '…' : '↑'}
                   </button>
                 </div>
               {:else}
-                <p class="spec-no-content">Spec content unavailable. Ensure the server has repo context.</p>
+                <p class="spec-no-content">{$t('explorer_canvas.spec_unavailable')}</p>
               {/if}
             {/if}
           </div>
@@ -1214,21 +1215,21 @@
     onclick={(e) => e.stopPropagation()} role="menu" tabindex="-1" aria-label="Node context menu">
     <button class="ctx-item" role="menuitem" onclick={() => ctxViewDetails(contextMenu.node)}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-      View Details
+      {$t('explorer_canvas.view_details')}
     </button>
     <button class="ctx-item" role="menuitem" onclick={() => ctxFindUsages(contextMenu.node)}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
-      Find Usages
+      {$t('explorer_canvas.find_usages')}
     </button>
     <button class="ctx-item" class:disabled={!contextMenu.node.spec_path} role="menuitem"
       onclick={() => ctxGoToSpec(contextMenu.node)} disabled={!contextMenu.node.spec_path}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-      Go to Spec
+      {$t('explorer_canvas.go_to_spec')}
     </button>
     <div class="ctx-separator"></div>
     <button class="ctx-item" role="menuitem" onclick={() => ctxCopyName(contextMenu.node)}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-      Copy Name
+      {$t('explorer_canvas.copy_name')}
     </button>
   </div>
 {/if}
