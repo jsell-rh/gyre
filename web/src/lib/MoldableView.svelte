@@ -5,6 +5,7 @@
   import EmptyState from './EmptyState.svelte';
   import { api } from './api.js';
   import { toast as showToast } from './toast.svelte.js';
+  import { t } from 'svelte-i18n';
 
   let {
     nodes = [],
@@ -113,7 +114,7 @@
       // No traces found for any MR
       flowSpans = [];
     } catch (_e) {
-      flowError = _e.message ?? 'Failed to load traces';
+      flowError = _e.message ?? $t('moldable_view.flow_load_failed');
       flowSpans = [];
     } finally {
       flowLoading = false;
@@ -172,7 +173,7 @@
       timelineDeltas = Array.isArray(data) ? data : [];
     } catch (_e) {
       timelineDeltas = [];
-      showToast('Failed to load timeline: ' + _e.message, { type: 'error' });
+      showToast($t('moldable_view.timeline_load_failed') + ': ' + _e.message, { type: 'error' });
     } finally {
       timelineLoading = false;
       // Default scrubber to "Now"
@@ -198,10 +199,10 @@
 
   function relativeTime(epochSeconds) {
     const diff = Math.floor(Date.now() / 1000) - epochSeconds;
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
+    if (diff < 60) return $t('moldable_view.time_just_now');
+    if (diff < 3600) return $t('moldable_view.time_minutes_ago', { values: { count: Math.floor(diff / 60) } });
+    if (diff < 86400) return $t('moldable_view.time_hours_ago', { values: { count: Math.floor(diff / 3600) } });
+    return $t('moldable_view.time_days_ago', { values: { count: Math.floor(diff / 86400) } });
   }
 
   function deltaJsonSummary(delta_json) {
@@ -223,7 +224,7 @@
 <div class="moldable-view">
   <!-- View switcher tabs -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="view-tabs" role="tablist" aria-label="View mode"
+  <div class="view-tabs" role="tablist" aria-label={$t('moldable_view.view_mode')}
     onkeydown={(e) => {
       const views = ['graph', 'list', 'timeline', 'flow'];
       const idx = views.indexOf(activeView);
@@ -247,7 +248,7 @@
         <circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/>
         <path d="M7 12h10M17 7l-10 4M17 17L7 13"/>
       </svg>
-      Graph
+      {$t('moldable_view.tab_graph')}
     </button>
     <button
       class="view-tab"
@@ -263,7 +264,7 @@
         <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
         <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
       </svg>
-      List
+      {$t('moldable_view.tab_list')}
     </button>
     <button
       class="view-tab"
@@ -278,7 +279,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
       </svg>
-      Timeline
+      {$t('moldable_view.tab_timeline')}
     </button>
     <button
       class="view-tab"
@@ -294,7 +295,7 @@
         <circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/>
         <path d="M7 11.5l9-5M7 12.5l9 5"/>
       </svg>
-      Flow
+      {$t('moldable_view.tab_flow')}
     </button>
   </div>
 
@@ -310,15 +311,15 @@
             class="filter-select"
             value={filterType}
             onchange={(e) => (filterType = e.target.value)}
-            aria-label="Filter by node type"
+            aria-label={$t('moldable_view.filter_by_type')}
           >
-            {#each nodeTypes as t}
-              <option value={t}>{t || 'All types'}</option>
+            {#each nodeTypes as nt}
+              <option value={nt}>{nt || $t('moldable_view.all_types')}</option>
             {/each}
           </select>
-          <div class="sort-group" role="group" aria-label="Sort by">
-            <span class="sort-label">Sort:</span>
-            {#each [['type', 'Type'], ['name', 'Name'], ['file', 'File']] as [val, label]}
+          <div class="sort-group" role="group" aria-label={$t('moldable_view.sort_by')}>
+            <span class="sort-label">{$t('moldable_view.sort_label')}:</span>
+            {#each [['type', $t('moldable_view.col_type')], ['name', $t('moldable_view.col_name')], ['file', $t('moldable_view.col_file')]] as [val, label]}
               <button
                 class="sort-btn"
                 class:active={sortBy === val}
@@ -327,33 +328,33 @@
               >{label}{sortBy === val ? (sortDir === 'asc' ? ' \u2191' : ' \u2193') : ''}</button>
             {/each}
           </div>
-          <span class="list-count">{filteredNodes.length} {filteredNodes.length === 1 ? 'node' : 'nodes'}</span>
+          <span class="list-count">{filteredNodes.length} {filteredNodes.length === 1 ? $t('moldable_view.node') : $t('moldable_view.nodes')}</span>
         </div>
 
         <div class="list-table-wrap">
           {#if filteredNodes.length === 0 && conceptFilterIds}
             <div class="list-empty-concept">
               <EmptyState
-                title="No nodes matching '{conceptQuery}'"
-                description="Try a shorter term or check spelling."
+                title={$t('moldable_view.no_nodes_matching', { values: { query: conceptQuery } })}
+                description={$t('moldable_view.no_nodes_matching_desc')}
               />
             </div>
           {:else if filteredNodes.length === 0 && !conceptFilterIds}
             <div class="list-empty-concept">
               <EmptyState
-                title="No graph data yet"
-                description="Push code to trigger graph extraction."
+                title={$t('moldable_view.no_graph_data')}
+                description={$t('moldable_view.no_graph_data_desc')}
               />
             </div>
           {:else}
             <table class="list-table">
               <thead>
                 <tr>
-                  <th scope="col">Type</th>
-                  <th scope="col">Name</th>
-                  <th scope="col">File</th>
-                  <th scope="col">Spec</th>
-                  <th scope="col">Churn</th>
+                  <th scope="col">{$t('moldable_view.col_type')}</th>
+                  <th scope="col">{$t('moldable_view.col_name')}</th>
+                  <th scope="col">{$t('moldable_view.col_file')}</th>
+                  <th scope="col">{$t('moldable_view.col_spec')}</th>
+                  <th scope="col">{$t('moldable_view.col_churn')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -361,7 +362,7 @@
                   <tr
                     class="list-row"
                     tabindex="0"
-                    aria-label="Select node {node.name}"
+                    aria-label={$t('moldable_view.select_node', { values: { name: node.name } })}
                     onclick={() => onSelectNode?.(node)}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
                   >
@@ -387,17 +388,17 @@
     {:else if activeView === 'flow'}
       <div class="flow-container">
         {#if flowLoading}
-          <div class="flow-status-bar" role="status" aria-label="Loading traces">
+          <div class="flow-status-bar" role="status" aria-label={$t('moldable_view.loading_traces')}>
             <div class="flow-spinner-inline" aria-hidden="true"></div>
-            <span>Loading traces…</span>
+            <span>{$t('moldable_view.loading_traces')}</span>
           </div>
         {:else if flowError}
           <div class="flow-status-bar flow-status-error" role="alert">
-            <span>Failed to load traces: {flowError}</span>
+            <span>{$t('moldable_view.flow_error', { values: { error: flowError } })}</span>
           </div>
         {:else if repoId && flowSpans.length === 0}
           <div class="flow-status-bar">
-            <span>No traces recorded — run integration gate tests to capture data.</span>
+            <span>{$t('moldable_view.no_traces')}</span>
           </div>
         {/if}
         <FlowRenderer
@@ -410,41 +411,41 @@
 
     {:else if activeView === 'timeline'}
       <div class="timeline-view" aria-busy={timelineLoading}>
-        <span class="sr-only" aria-live="polite">{timelineLoading ? "" : "timeline loaded"}</span>
+        <span class="sr-only" aria-live="polite">{timelineLoading ? "" : $t('moldable_view.timeline_loaded')}</span>
         <div class="timeline-header">
-          <h3 class="timeline-title">Architectural Timeline</h3>
+          <h3 class="timeline-title">{$t('moldable_view.architectural_timeline')}</h3>
           {#if !repoId}
-            <p class="timeline-hint">Select a repository to view architectural history.</p>
+            <p class="timeline-hint">{$t('moldable_view.select_repo_hint')}</p>
           {:else if timelineLoading}
-            <p class="timeline-hint">Loading timeline…</p>
+            <p class="timeline-hint">{$t('moldable_view.loading_timeline')}</p>
           {:else if timelineDeltas.length > 0}
             <span class="timeline-meta">
-              {timelineDeltas.length} delta{timelineDeltas.length !== 1 ? 's' : ''}
-              · {timelineNodes.length} / {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'} visible
+              {timelineDeltas.length} {timelineDeltas.length !== 1 ? $t('moldable_view.deltas') : $t('moldable_view.delta')}
+              · {timelineNodes.length} / {nodes.length} {nodes.length === 1 ? $t('moldable_view.node') : $t('moldable_view.nodes')} {$t('moldable_view.visible')}
             </span>
           {/if}
           {#if repoId && !timelineLoading && timelineDeltas.length > 0}
-            <button class="now-btn" onclick={resetToNow} title="Jump to now">Now</button>
+            <button class="now-btn" onclick={resetToNow} title={$t('moldable_view.jump_to_now')}>{$t('moldable_view.now')}</button>
           {/if}
         </div>
 
         {#if !repoId || (!timelineLoading && timelineDeltas.length === 0)}
           <div class="timeline-empty">
             <EmptyState
-              title="No architectural changes recorded yet."
-              description={repoId ? "Push code to trigger graph extraction and populate the timeline." : "Select a repository above to view its architectural timeline."}
+              title={$t('moldable_view.no_changes_title')}
+              description={repoId ? $t('moldable_view.no_changes_desc_repo') : $t('moldable_view.no_changes_desc_no_repo')}
             />
           </div>
         {:else if timelineLoading}
           <div class="timeline-empty">
-            <div class="timeline-spinner" role="status" aria-label="Loading timeline"></div>
+            <div class="timeline-spinner" role="status" aria-label={$t('moldable_view.loading_timeline')}></div>
           </div>
         {:else}
           <!-- Node list filtered by scrubber position -->
           <div class="timeline-nodes-area">
             {#if timelineNodes.length === 0}
               <div class="timeline-empty-inner">
-                <p class="no-nodes-msg">No nodes modified up to this point in history.</p>
+                <p class="no-nodes-msg">{$t('moldable_view.no_nodes_at_point')}</p>
               </div>
             {:else}
               <div class="timeline-node-list">
@@ -471,27 +472,27 @@
 
           <!-- Selected delta card -->
           {#if selectedDelta}
-            <div class="delta-card" role="complementary" aria-label="Delta details">
+            <div class="delta-card" role="complementary" aria-label={$t('moldable_view.delta_details')}>
               <div class="delta-card-header">
                 <code class="delta-sha">{selectedDelta.commit_sha?.slice(0, 7) ?? '???????'}</code>
                 <span class="delta-time">{relativeTime(selectedDelta.timestamp)}</span>
-                <button class="delta-close" onclick={() => (selectedDelta = null)} aria-label="Close delta card" title="Close">✕</button>
+                <button class="delta-close" onclick={() => (selectedDelta = null)} aria-label={$t('moldable_view.close_delta_card')} title={$t('common.close')}>✕</button>
               </div>
               {#if selectedDelta.spec_ref}
                 <div class="delta-row">
-                  <span class="delta-label">Spec</span>
+                  <span class="delta-label">{$t('moldable_view.delta_spec')}</span>
                   <span class="delta-value mono">{selectedDelta.spec_ref}</span>
                 </div>
               {/if}
               {#if selectedDelta.agent_id}
                 <div class="delta-row">
-                  <span class="delta-label">Agent</span>
+                  <span class="delta-label">{$t('moldable_view.delta_agent')}</span>
                   <span class="delta-value mono">{selectedDelta.agent_id}</span>
                 </div>
               {/if}
               {#if selectedDelta.delta_json}
                 <div class="delta-row">
-                  <span class="delta-label">Changes</span>
+                  <span class="delta-label">{$t('moldable_view.delta_changes')}</span>
                   <span class="delta-value">{deltaJsonSummary(selectedDelta.delta_json).join(', ') || '—'}</span>
                 </div>
               {/if}
@@ -499,7 +500,7 @@
           {/if}
 
           <!-- Scrubber -->
-          <div class="scrubber-area" aria-label="Timeline scrubber">
+          <div class="scrubber-area" aria-label={$t('moldable_view.timeline_scrubber')}>
             <!-- Delta markers -->
             <div class="marker-track">
               {#each sortedDeltas as delta}
@@ -509,7 +510,7 @@
                   style="left: {markerLeft(delta.timestamp)}"
                   title="{delta.commit_sha?.slice(0, 7)} · {relativeTime(delta.timestamp)}"
                   onclick={() => selectDelta(delta)}
-                  aria-label="Delta at {relativeTime(delta.timestamp)}"
+                  aria-label={$t('moldable_view.delta_at', { values: { time: relativeTime(delta.timestamp) } })}
                 >
                   <span class="marker-pip"></span>
                 </button>
@@ -524,12 +525,12 @@
               step={1000}
               value={scrubberValue}
               oninput={onScrubberChange}
-              aria-label="Scrub architectural timeline"
+              aria-label={$t('moldable_view.scrub_timeline')}
             />
 
             <div class="scrubber-labels">
               <span class="scrubber-label-left">{relativeTime(minTs)}</span>
-              <span class="scrubber-label-right">Now</span>
+              <span class="scrubber-label-right">{$t('moldable_view.now')}</span>
             </div>
           </div>
         {/if}

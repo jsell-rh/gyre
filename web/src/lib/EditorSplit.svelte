@@ -2,6 +2,7 @@
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import { api } from './api.js';
   import { toastError, toastSuccess } from './toast.svelte.js';
+  import { t } from 'svelte-i18n';
 
   /**
    * EditorSplit — full-width editor + architecture preview split layout.
@@ -126,7 +127,7 @@
         }
       }
     } catch (e) {
-      toastError(`LLM assist failed: ${e.message}`);
+      toastError($t('editor_split.llm_assist_failed', { values: { error: e.message } }));
     } finally {
       llmStreaming = false;
     }
@@ -182,9 +183,9 @@
         content,
         message: `Update ${specPath} via editor split`,
       });
-      toastSuccess(`Spec saved — MR #${result.mr_id} created`);
+      toastSuccess($t('editor_split.spec_saved', { values: { mr_id: result.mr_id } }));
     } catch (e) {
-      toastError(`Save failed: ${e.message}`);
+      toastError($t('editor_split.save_failed', { values: { error: e.message } }));
     } finally {
       saving = false;
     }
@@ -206,16 +207,16 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="editor-split" role="region" aria-label="Editor split view">
+<div class="editor-split" role="region" aria-label={$t('editor_split.editor_split_view')}>
   <!-- Back button -->
   <div class="split-header">
-    <button class="back-btn" onclick={() => onClose?.()} aria-label="Close editor split">
+    <button class="back-btn" onclick={() => onClose?.()} aria-label={$t('editor_split.close_editor')}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
         <path d="M19 12H5M12 19l-7-7 7-7"/>
       </svg>
-      Back
+      {$t('editor_split.back')}
     </button>
-    <span class="split-label">{context === 'meta-spec' ? 'Meta-spec editor' : 'Spec editor'}{specPath ? ` — ${specPath}` : ''}</span>
+    <span class="split-label">{context === 'meta-spec' ? $t('editor_split.meta_spec_editor') : $t('editor_split.spec_editor')}{specPath ? ` — ${specPath}` : ''}</span>
     {#if repoId && specPath}
       <button
         class="save-btn"
@@ -223,7 +224,7 @@
         disabled={saving || !content.trim()}
         aria-busy={saving}
       >
-        {saving ? 'Saving…' : 'Save & Create MR'}
+        {saving ? $t('editor_split.saving') : $t('editor_split.save_create_mr')}
       </button>
     {/if}
   </div>
@@ -236,55 +237,55 @@
         class="split-textarea"
         value={content}
         oninput={handleContentInput}
-        placeholder="Spec content…"
-        aria-label="Spec editor"
+        placeholder={$t('editor_split.spec_placeholder')}
+        aria-label={$t('editor_split.spec_editor')}
         spellcheck="false"
         data-testid="editor-split-textarea"
       ></textarea>
 
       {#if llmSuggestion}
-        <div class="suggestion-block" role="region" aria-label="LLM suggestion" data-testid="llm-suggestion">
+        <div class="suggestion-block" role="region" aria-label={$t('editor_split.llm_suggestion')} data-testid="llm-suggestion">
           <div class="suggestion-hdr">
-            <span class="suggestion-lbl">Suggested Change</span>
-            <button class="dismiss-btn" onclick={dismissSuggestion} aria-label="Dismiss suggestion">✕</button>
+            <span class="suggestion-lbl">{$t('editor_split.suggested_change')}</span>
+            <button class="dismiss-btn" onclick={dismissSuggestion} aria-label={$t('editor_split.dismiss_suggestion')}>✕</button>
           </div>
           {#if llmSuggestion.explanation}
             <p class="suggestion-expl">{llmSuggestion.explanation}</p>
           {/if}
           <div class="suggestion-btns">
-            <button class="accept-btn" onclick={acceptSuggestion}>Accept</button>
-            <button class="dismiss-btn-sm" onclick={dismissSuggestion}>Dismiss</button>
+            <button class="accept-btn" onclick={acceptSuggestion}>{$t('editor_split.accept')}</button>
+            <button class="dismiss-btn-sm" onclick={dismissSuggestion}>{$t('common.dismiss')}</button>
           </div>
         </div>
       {/if}
 
       {#if llmStreaming && llmExplanation}
         <div class="llm-streaming" aria-live="polite">
-          <span class="streaming-lbl">Thinking…</span>
+          <span class="streaming-lbl">{$t('editor_split.thinking')}</span>
           <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
         </div>
       {/if}
 
       <div class="llm-input-area">
         <div class="recipient-line">
-          Edit {context === 'meta-spec' ? 'meta-spec' : 'spec'}{specPath ? `: "${specPath}" ▸` : ' ▸'}
+          {$t('editor_split.edit_label')} {context === 'meta-spec' ? $t('editor_split.meta_spec') : $t('editor_split.spec')}{specPath ? `: "${specPath}" ▸` : ' ▸'}
         </div>
         <div class="llm-row">
           <textarea
             class="llm-textarea"
             bind:value={llmInstruction}
-            placeholder="Describe a change… e.g. 'Add error handling section'"
+            placeholder={$t('editor_split.llm_placeholder')}
             rows="2"
             disabled={llmStreaming || !repoId}
             onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
-            aria-label="LLM instruction"
+            aria-label={$t('editor_split.llm_instruction')}
             data-testid="llm-input"
           ></textarea>
           <button
             class="llm-send"
             onclick={sendLlmInstruction}
             disabled={!llmInstruction.trim() || llmStreaming || !repoId}
-            aria-label="Send to LLM"
+            aria-label={$t('editor_split.send_to_llm')}
             aria-busy={llmStreaming}
             data-testid="llm-send-btn"
           >
@@ -297,13 +298,13 @@
                 <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
               </svg>
             {/if}
-            <span class="sr-only">Send</span>
+            <span class="sr-only">{$t('editor_split.send')}</span>
           </button>
         </div>
         {#if !repoId}
-          <p class="llm-hint warn">LLM editing requires repo context.</p>
+          <p class="llm-hint warn">{$t('editor_split.llm_requires_repo')}</p>
         {:else}
-          <p class="llm-hint">Ctrl+Enter · Produces draft suggestions — accept to apply</p>
+          <p class="llm-hint">{$t('editor_split.llm_hint')}</p>
         {/if}
       </div>
     </div>
@@ -314,11 +315,11 @@
     <!-- Right: Architecture preview -->
     <div class="pane pane-right" data-testid="arch-preview-pane">
       <div class="pane-header">
-        <span class="pane-title">Architecture Preview</span>
+        <span class="pane-title">{$t('editor_split.architecture_preview')}</span>
         {#if graphLoading}
-          <span class="loading-chip" aria-live="polite">Loading graph…</span>
+          <span class="loading-chip" aria-live="polite">{$t('editor_split.loading_graph')}</span>
         {:else if ghostOverlays.length}
-          <span class="overlay-chip">{ghostOverlays.length} predicted changes</span>
+          <span class="overlay-chip">{$t('editor_split.predicted_changes', { values: { count: ghostOverlays.length } })}</span>
         {/if}
       </div>
       <div class="canvas-wrap">
