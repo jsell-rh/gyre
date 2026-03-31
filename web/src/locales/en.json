@@ -126,7 +126,9 @@
       "spec_assertion_failure": "Assertion Fail",
       "suggested_link": "Suggested Link"
     },
-    "go_to_repo_decisions": "Go to {name} decisions"
+    "go_to_repo_decisions": "Go to {name} decisions",
+    "scope_tenant": "Tenant",
+    "scope_workspace": "Workspace"
   },
   "repo_mode": {
     "tabs": {
