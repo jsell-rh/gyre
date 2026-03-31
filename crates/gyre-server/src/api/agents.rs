@@ -383,8 +383,24 @@ mod tests {
         let app = app();
         let (app, id) = create_test_agent(app, "worker2").await;
 
-        // Idle -> Blocked is invalid
-        let body = serde_json::json!({ "status": "blocked" });
+        // First move to Dead (terminal state).
+        let body = serde_json::json!({ "status": "dead" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Dead -> Active is invalid (Dead is terminal).
+        let body = serde_json::json!({ "status": "active" });
         let resp = app
             .oneshot(
                 Request::builder()
