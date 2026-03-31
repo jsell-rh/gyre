@@ -535,12 +535,15 @@
     if (activeTab === 'activity' && !taskAgents && !taskAgentsLoading) {
       taskAgentsLoading = true;
       taskMrsLoading = true;
+      const tk = taskDetail ?? entity.data ?? {};
+      const wsId = tk.workspace_id;
+      const repoId = tk.repo_id ?? tk.repository_id;
       Promise.all([
-        api.agents({ status: undefined }).then(list => {
+        api.agents({ workspaceId: wsId, repoId }).then(list => {
           const all = Array.isArray(list) ? list : [];
-          return all.filter(a => a.task_id === id);
+          return all.filter(a => (a.task_id ?? a.current_task_id) === id);
         }).catch(() => []),
-        api.mergeRequests({}).then(list => {
+        api.mergeRequests(repoId ? { repository_id: repoId } : {}).then(list => {
           const all = Array.isArray(list) ? list : [];
           return all.filter(m => m.task_id === id);
         }).catch(() => []),
@@ -2448,15 +2451,55 @@
               {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
           {:else}
+            <!-- Provenance summary -->
+            {@const tk = taskDetail ?? entity.data ?? {}}
+            {#if tk.spec_path || (taskAgents?.length > 0) || (taskMrs?.length > 0)}
+              <div class="task-activity-summary">
+                <span class="progress-section-label">Progress</span>
+                <div class="provenance-flow">
+                  {#if tk.spec_path}
+                    <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })} title={tk.spec_path}>
+                      <span class="provenance-type">Spec</span>
+                      <span class="provenance-name">{tk.spec_path.split('/').pop()}</span>
+                    </button>
+                    <span class="provenance-arrow">→</span>
+                  {/if}
+                  <span class="provenance-node provenance-task provenance-current">
+                    <span class="provenance-type">Task</span>
+                    <span class="provenance-name">{tk.status ?? 'backlog'}</span>
+                  </span>
+                  {#if taskAgents?.length > 0}
+                    <span class="provenance-arrow">→</span>
+                    <span class="provenance-node provenance-agent">
+                      <span class="provenance-type">Agents</span>
+                      <span class="provenance-name">{taskAgents.length}</span>
+                    </span>
+                  {/if}
+                  {#if taskMrs?.length > 0}
+                    <span class="provenance-arrow">→</span>
+                    <span class="provenance-node provenance-mr">
+                      <span class="provenance-type">MRs</span>
+                      <span class="provenance-name">{taskMrs.filter(m => m.status === 'merged').length}/{taskMrs.length} merged</span>
+                    </span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
             {#if Array.isArray(taskAgents) && taskAgents.length > 0}
-              <span class="progress-section-label">Agents</span>
+              <span class="progress-section-label">Agents ({taskAgents.length})</span>
               <ul class="task-list">
                 {#each taskAgents as agent}
+                  {@const agNorm = normalizeAgent(agent)}
+                  {@const dur = agNorm.completed_at && agNorm.created_at ? Math.round(agNorm.completed_at - agNorm.created_at) : null}
                   <li class="task-item clickable-row" onclick={() => navigateTo('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('agent', agent.id, agent); }}>
-                    <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : agent.status === 'completed' ? 'info' : agent.status === 'failed' ? 'danger' : 'muted'} />
+                    <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : agent.status === 'failed' ? 'danger' : 'muted'} />
                     <span class="task-title">{agent.name ?? shortId(agent.id)}</span>
                     {#if agent.branch}
                       <span class="task-agent mono">{agent.branch}</span>
+                    {/if}
+                    {#if dur}
+                      <span class="task-duration">{dur < 60 ? dur + 's' : dur < 3600 ? Math.round(dur / 60) + 'm' : Math.round(dur / 3600) + 'h'}</span>
                     {/if}
                   </li>
                 {/each}
@@ -2466,7 +2509,7 @@
             {/if}
 
             {#if Array.isArray(taskMrs) && taskMrs.length > 0}
-              <span class="progress-section-label">Merge Requests</span>
+              <span class="progress-section-label">Merge Requests ({taskMrs.length})</span>
               <ul class="task-list">
                 {#each taskMrs as mr}
                   <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id, mr); }}>
@@ -2474,6 +2517,12 @@
                     <span class="task-title">{mr.title ?? shortId(mr.id)}</span>
                     {#if mr.source_branch}
                       <span class="task-agent mono">{mr.source_branch}</span>
+                    {/if}
+                    {#if mr.diff_stats}
+                      <span class="diff-stat-compact">
+                        <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                        <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                      </span>
                     {/if}
                   </li>
                 {/each}
@@ -3217,6 +3266,17 @@
     padding: 1px var(--space-1);
     border-radius: var(--radius-sm);
     flex-shrink: 0;
+  }
+
+  .task-duration {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+
+  .task-activity-summary {
+    margin-bottom: var(--space-3);
   }
 
   .task-priority.priority-high,
