@@ -414,7 +414,9 @@
     "metric_mrs": "MRs",
     "metric_runs": "runs",
     "metric_cost": "cost",
-    "metric_budget": "budget"
+    "metric_budget": "budget",
+    "uncertain": "uncertain: \"{text}\"",
+    "not_yet_available": "Briefing data not yet available"
   },
   "diff_suggestion": {
     "suggested_change": "Suggested Change",
