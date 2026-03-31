@@ -543,6 +543,62 @@
     return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
   }
 
+  // ── Activity feed state ─────────────────────────────────────────────────
+  let activityLoading = $state(true);
+  let activityEvents = $state([]);
+
+  async function loadActivity() {
+    activityLoading = true;
+    try {
+      const data = await api.activity(30);
+      activityEvents = Array.isArray(data) ? data : [];
+    } catch {
+      activityEvents = [];
+    } finally {
+      activityLoading = false;
+    }
+  }
+
+  function activityIcon(event) {
+    const t = event.event_type ?? event.event ?? event.type ?? '';
+    if (t.includes('spec') && t.includes('approv')) return '✓';
+    if (t.includes('spec') && t.includes('reject')) return '✗';
+    if (t.includes('spec')) return '📋';
+    if (t.includes('task')) return '☑';
+    if (t.includes('agent') && t.includes('spawn')) return '▶';
+    if (t.includes('agent') && t.includes('complet')) return '⬛';
+    if (t.includes('mr') && t.includes('merg')) return '🔀';
+    if (t.includes('mr') && t.includes('creat')) return '📝';
+    if (t.includes('gate')) return '🚦';
+    if (t.includes('push')) return '⬆';
+    if (t.includes('graph')) return '🔗';
+    return '•';
+  }
+
+  function activityLabel(event) {
+    const t = event.event_type ?? event.event ?? event.type ?? '';
+    return t.replace(/_/g, ' ').replace(/\./g, ' ');
+  }
+
+  function activityVariant(event) {
+    const t = event.event_type ?? event.event ?? event.type ?? '';
+    if (t.includes('fail') || t.includes('reject')) return 'danger';
+    if (t.includes('merg') || t.includes('approv') || t.includes('complet') || t.includes('pass')) return 'success';
+    if (t.includes('spawn') || t.includes('enqueue') || t.includes('running')) return 'warning';
+    return 'info';
+  }
+
+  // ── Derived: provenance summary counts ──────────────────────────────
+  let provenanceSummary = $derived.by(() => {
+    const approved = specs.filter(s => s.approval_status === 'approved' || s.status === 'approved').length;
+    const pending = specs.filter(s => s.approval_status === 'pending' || s.status === 'pending').length;
+    const activeAgentCount = wsAgents.filter(a => a.status === 'active').length;
+    const mergedMrs = wsMrs.filter(m => m.status === 'merged').length;
+    const openMrs = wsMrs.filter(m => m.status === 'open').length;
+    const inProgressTasks = wsTasks.filter(t => t.status === 'in_progress').length;
+    return { approved, pending, activeAgentCount, mergedMrs, openMrs, inProgressTasks, totalTasks: wsTasks.length };
+  });
+
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
@@ -553,6 +609,7 @@
     loadTasks();
     loadMrs();
     loadAgents();
+    loadActivity();
   });
 </script>
 
@@ -659,6 +716,94 @@
                 </li>
               {/each}
             </ul>
+          {/if}
+        </div>
+      </section>
+
+      <!-- ── Provenance Overview ───────────────────────────────────────── -->
+      {#if !specsLoading && !tasksLoading && !agentsLoading && !mrsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
+        <section class="home-section provenance-overview-section" aria-labelledby="section-overview" data-testid="section-overview">
+          <div class="section-header">
+            <h2 class="section-title" id="section-overview">Development Flow</h2>
+          </div>
+          <div class="section-body">
+            <div class="prov-flow-bar">
+              <div class="prov-flow-node">
+                <span class="prov-flow-count">{provenanceSummary.approved + provenanceSummary.pending}</span>
+                <span class="prov-flow-label">Specs</span>
+                {#if provenanceSummary.pending > 0}
+                  <span class="prov-flow-sub prov-sub-pending">{provenanceSummary.pending} pending</span>
+                {/if}
+              </div>
+              <span class="prov-flow-arrow">→</span>
+              <div class="prov-flow-node">
+                <span class="prov-flow-count">{provenanceSummary.totalTasks}</span>
+                <span class="prov-flow-label">Tasks</span>
+                {#if provenanceSummary.inProgressTasks > 0}
+                  <span class="prov-flow-sub prov-sub-active">{provenanceSummary.inProgressTasks} in progress</span>
+                {/if}
+              </div>
+              <span class="prov-flow-arrow">→</span>
+              <div class="prov-flow-node">
+                <span class="prov-flow-count">{wsAgents.length}</span>
+                <span class="prov-flow-label">Agents</span>
+                {#if provenanceSummary.activeAgentCount > 0}
+                  <span class="prov-flow-sub prov-sub-active">{provenanceSummary.activeAgentCount} active</span>
+                {/if}
+              </div>
+              <span class="prov-flow-arrow">→</span>
+              <div class="prov-flow-node">
+                <span class="prov-flow-count">{wsMrs.length}</span>
+                <span class="prov-flow-label">MRs</span>
+                {#if provenanceSummary.openMrs > 0}
+                  <span class="prov-flow-sub prov-sub-pending">{provenanceSummary.openMrs} open</span>
+                {/if}
+                {#if provenanceSummary.mergedMrs > 0}
+                  <span class="prov-flow-sub prov-sub-merged">{provenanceSummary.mergedMrs} merged</span>
+                {/if}
+              </div>
+            </div>
+          </div>
+        </section>
+      {/if}
+
+      <!-- ── Recent Activity ─────────────────────────────────────────────── -->
+      <section class="home-section" aria-labelledby="section-activity" data-testid="section-activity">
+        <div class="section-header">
+          <h2 class="section-title" id="section-activity">Recent Activity
+            {#if !activityLoading && activityEvents.length > 0}
+              <span class="section-badge">{activityEvents.length}</span>
+            {/if}
+          </h2>
+        </div>
+        <div class="section-body">
+          {#if activityLoading}
+            <div class="skeleton-row"></div>
+          {:else if activityEvents.length === 0}
+            <p class="empty-text">No recent activity.</p>
+          {:else}
+            <div class="activity-timeline">
+              {#each activityEvents.slice(0, 15) as event, i}
+                {@const variant = activityVariant(event)}
+                <div class="activity-item">
+                  <div class="activity-dot activity-dot-{variant}"></div>
+                  {#if i < Math.min(activityEvents.length, 15) - 1}<div class="activity-line"></div>{/if}
+                  <div class="activity-content">
+                    <span class="activity-icon">{activityIcon(event)}</span>
+                    <span class="activity-label">{activityLabel(event)}</span>
+                    {#if event.entity_name ?? event.title ?? event.description}
+                      <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
+                    {/if}
+                    {#if event.entity_id && event.entity_type}
+                      <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: event.entity_type, id: event.entity_id, data: event })} title="View {event.entity_type}">{entityName(event.entity_type, event.entity_id)}</button>
+                    {/if}
+                    {#if event.timestamp ?? event.created_at}
+                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
           {/if}
         </div>
       </section>
@@ -2315,6 +2460,143 @@
     .spec-activity {
       display: none;
     }
+  }
+
+  /* ── Provenance Flow Bar ───────────────────────────────────────────── */
+  .prov-flow-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .prov-flow-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 70px;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .prov-flow-count {
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text);
+    font-family: var(--font-display);
+  }
+
+  .prov-flow-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+
+  .prov-flow-sub {
+    font-size: 10px;
+    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .prov-sub-pending { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
+  .prov-sub-active { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
+  .prov-sub-merged { color: var(--color-info); background: color-mix(in srgb, var(--color-info) 12%, transparent); }
+
+  .prov-flow-arrow {
+    font-size: var(--text-lg);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  /* ── Activity Timeline ───────────────────────────────────────────── */
+  .activity-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: var(--space-2) 0;
+  }
+
+  .activity-item {
+    display: flex;
+    position: relative;
+    padding-left: 24px;
+    min-height: 32px;
+  }
+
+  .activity-dot {
+    position: absolute;
+    left: 6px;
+    top: 6px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    z-index: 1;
+    border: 2px solid var(--color-surface);
+    background: var(--color-text-muted);
+  }
+
+  .activity-dot-success { background: var(--color-success); }
+  .activity-dot-danger { background: var(--color-danger); }
+  .activity-dot-warning { background: var(--color-warning); }
+  .activity-dot-info { background: var(--color-info); }
+
+  .activity-line {
+    position: absolute;
+    left: 10px;
+    top: 18px;
+    bottom: -4px;
+    width: 2px;
+    background: var(--color-border);
+  }
+
+  .activity-content {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: 2px 0 var(--space-2) var(--space-2);
+    font-size: var(--text-xs);
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .activity-icon {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+  }
+
+  .activity-label {
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-transform: capitalize;
+  }
+
+  .activity-detail {
+    color: var(--color-text);
+    font-weight: 500;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .activity-entity-link {
+    font-size: var(--text-xs);
+  }
+
+  .activity-time {
+    color: var(--color-text-muted);
+    font-size: 10px;
+    white-space: nowrap;
+    margin-left: auto;
   }
 
   @media (prefers-reduced-motion: reduce) {
