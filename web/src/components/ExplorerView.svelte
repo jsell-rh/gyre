@@ -111,6 +111,7 @@
       if (!controller.signal.aborted) {
         askLoading = false;
         askAbortController = null;
+        if (!askError) askQuery = '';
       }
     }
   }
