@@ -2230,4 +2230,178 @@ mod tests {
             "spawn should fall back to tenant-default compute target: {json}"
         );
     }
+
+    // ── Signal chain: task_type filtering tests (agent-runtime §1 Phase 4) ───
+
+    /// Helper: create a task with a specific task_type via the API.
+    async fn create_task_with_type(
+        app: Router,
+        title: &str,
+        task_type: Option<&str>,
+    ) -> (Router, String) {
+        let mut body = serde_json::json!({"title": title});
+        if let Some(tt) = task_type {
+            body["task_type"] = serde_json::Value::String(tt.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: attempt spawn and return the response (without asserting status).
+    async fn try_spawn(
+        app: Router,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> (Router, axum::response::Response) {
+        let body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (app, resp)
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_delegation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task_with_type(app, "Delegation task", Some("delegation")).await;
+        let (_, resp) = try_spawn(app, "worker-deleg", &repo_id, &task_id, "feat/deleg").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "delegation tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("delegation"),
+            "error should mention delegation: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_coordination_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Coordination task", Some("coordination")).await;
+        let (_, resp) = try_spawn(app, "worker-coord", &repo_id, &task_id, "feat/coord").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "coordination tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("coordination"),
+            "error should mention coordination: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_tasks_without_task_type() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        // Create task without task_type (simulates push-hook pre-approval task).
+        let (app, task_id) =
+            create_task_with_type(app, "Pre-approval push-hook task", None).await;
+        let (_, resp) =
+            try_spawn(app, "worker-none", &repo_id, &task_id, "feat/no-type").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tasks without task_type must not trigger agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("task_type"),
+            "error should mention task_type: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_allows_implementation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Implementation task", Some("implementation")).await;
+        let (_, resp) =
+            try_spawn(app, "worker-impl", &repo_id, &task_id, "feat/impl").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "implementation tasks should spawn agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrogation_agents_bypass_task_type_check() {
+        // Interrogation agents are system-initiated and should work with any task_type,
+        // including delegation tasks that would normally be rejected.
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation for interrogation", Some("delegation")).await;
+
+        let body = serde_json::json!({
+            "name": "interrogation-bypass",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/bypass",
+            "agent_type": "interrogation",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation agents should bypass task_type filtering"
+        );
+    }
 }

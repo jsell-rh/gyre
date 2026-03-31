@@ -1724,6 +1724,138 @@ specs:
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Spec rejection mid-flight (agent-runtime §1)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_cancels_in_flight_tasks() {
+        let state = test_state();
+        // Seed a spec entry.
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/target.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // Create an in-flight task linked to the spec.
+        let task_id = gyre_common::Id::new("reject-task-1");
+        let mut task = gyre_domain::Task::new(task_id.clone(), "Implement target", 1700000000);
+        task.spec_path = Some("system/target.md".to_string());
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        let _ = task.transition_status(gyre_domain::TaskStatus::InProgress);
+        state.tasks.create(&task).await.unwrap();
+
+        // Create an active agent working on this task.
+        let agent_id = gyre_common::Id::new("reject-agent-1");
+        let mut agent = gyre_domain::Agent::new(agent_id.clone(), "reject-worker", 1700000000);
+        agent.assign_task(task_id.clone());
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "spec is invalid" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Ftarget.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Task should be cancelled.
+        let updated_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated_task.status, gyre_domain::TaskStatus::Cancelled);
+        assert!(updated_task
+            .cancelled_reason
+            .unwrap()
+            .contains("spec rejected"));
+
+        // Agent should be stopped.
+        let updated_agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(updated_agent.status, gyre_domain::AgentStatus::Stopped);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_skips_already_done_tasks() {
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/done-spec.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // Create a completed task linked to the spec.
+        let task_id = gyre_common::Id::new("done-task-1");
+        let mut task = gyre_domain::Task::new(task_id.clone(), "Already done", 1700000000);
+        task.spec_path = Some("system/done-spec.md".to_string());
+        let _ = task.transition_status(gyre_domain::TaskStatus::InProgress);
+        let _ = task.transition_status(gyre_domain::TaskStatus::Review);
+        let _ = task.transition_status(gyre_domain::TaskStatus::Done);
+        state.tasks.create(&task).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "not needed" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdone-spec.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Done task should remain done (not cancelled).
+        let updated_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated_task.status, gyre_domain::TaskStatus::Done);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_sets_status_to_rejected() {
+        let (app, state) = app_with_spec();
+        let body = serde_json::json!({ "reason": "outdated design" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let entry = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.approval_status, ApprovalStatus::Rejected);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn spec_index_returns_markdown() {
         let (app, _) = app_with_spec();
