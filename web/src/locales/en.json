@@ -947,6 +947,7 @@
     "clear_search": "Clear search"
   },
   "detail_panel": {
+    "title": "Detail panel",
     "tabs": {
       "info": "Info",
       "content": "Content",
@@ -1632,6 +1633,13 @@
     "no_results": "No results for \"{query}\"",
     "hint_navigate": "navigate",
     "hint_select": "select",
-    "hint_close": "close"
+    "hint_close": "close",
+    "dialog_label": "Quick navigation",
+    "input_label": "Search or navigate",
+    "searching": "Searching\u2026",
+    "results_label": "Search results"
+  },
+  "presence": {
+    "active_users": "Active users in this workspace"
   }
 }
