@@ -339,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn create_agent_and_get() {
         let app = app();
-        let (app, id) = create_test_agent(app, "ceo").await;
+        let (app, id) = create_test_agent(app, "workspace-orchestrator").await;
 
         let resp = app
             .oneshot(
@@ -352,7 +352,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["name"], "ceo");
+        assert_eq!(json["name"], "workspace-orchestrator");
         assert_eq!(json["status"], "idle");
     }
 
