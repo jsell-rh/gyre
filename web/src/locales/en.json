@@ -578,6 +578,8 @@
     "commits": "Commits",
     "merge_requests": "Merge Requests",
     "merge_queue": "Merge Queue",
+    "tasks": "Tasks",
+    "agents": "Agents",
     "no_branches": "No branches",
     "no_commits": "No commits",
     "no_mrs": "No merge requests",

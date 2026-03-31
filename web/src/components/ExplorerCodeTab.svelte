@@ -16,6 +16,8 @@
     { id: 'commits', labelKey: 'code_tab.commits' },
     { id: 'merge-requests', labelKey: 'code_tab.merge_requests' },
     { id: 'merge-queue', labelKey: 'code_tab.merge_queue' },
+    { id: 'tasks', labelKey: 'code_tab.tasks' },
+    { id: 'agents', labelKey: 'code_tab.agents' },
   ];
 
   // Clone URL copy state
@@ -44,6 +46,9 @@
   let commits = $state([]);
   let mrs = $state([]);
   let queue = $state([]);
+  let tasks = $state([]);
+  let agents = $state([]);
+  let agentCommits = $state({});
   let loading = $state(true);
   let error = $state(null);
   let filterQuery = $state('');
@@ -66,7 +71,17 @@
         branches = await api.repoBranches(repoId);
       } else if (tab === 'commits') {
         const branch = repo?.default_branch ?? 'main';
-        commits = await api.repoCommits(repoId, branch, 50);
+        const [commitList, agentCommitList] = await Promise.all([
+          api.repoCommits(repoId, branch, 50),
+          api.repoAgentCommits(repoId).catch(() => []),
+        ]);
+        commits = commitList;
+        const acMap = {};
+        for (const ac of (Array.isArray(agentCommitList) ? agentCommitList : [])) {
+          if (ac.sha) acMap[ac.sha] = ac.agent_id;
+          if (ac.commit_sha) acMap[ac.commit_sha] = ac.agent_id;
+        }
+        agentCommits = acMap;
       } else if (tab === 'merge-requests') {
         mrs = await api.mergeRequests({ repository_id: repoId });
       } else if (tab === 'merge-queue') {
@@ -82,6 +97,13 @@
             const mr = mrMap[mrId];
             return { ...e, _mr_title: mr?.title, _mr_status: mr?.status, _mr_branch: mr?.source_branch };
           });
+      } else if (tab === 'tasks') {
+        const all = await api.tasks({ repoId });
+        // Client-side filter in case server doesn't support repo_id filter
+        tasks = (Array.isArray(all) ? all : []).filter(t => !repoId || t.repo_id === repoId || !t.repo_id);
+      } else if (tab === 'agents') {
+        agents = await api.agents({ repoId });
+        if (!Array.isArray(agents)) agents = [];
       }
     } catch (e) {
       error = $t('code_tab.load_failed', { values: { tab, error: e.message } });
@@ -149,6 +171,32 @@
       else if (sortField === 'author') { av = a.author ?? a.author_name ?? ''; bv = b.author ?? b.author_name ?? ''; }
       else if (sortField === 'date') { av = a.timestamp ?? a.authored_at ?? a.date ?? ''; bv = b.timestamp ?? b.authored_at ?? b.date ?? ''; }
       else { av = a[sortField] ?? ''; bv = b[sortField] ?? ''; }
+      return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    });
+    return rows;
+  });
+
+  let filteredTasks = $derived.by(() => {
+    let rows = tasks.filter(matchesFilter);
+    rows.sort((a, b) => {
+      let av, bv;
+      if (sortField === 'status') { av = a.status ?? ''; bv = b.status ?? ''; }
+      else if (sortField === 'priority') {
+        const pOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+        av = pOrder[a.priority] ?? 2; bv = pOrder[b.priority] ?? 2;
+        return sortDir === 'asc' ? av - bv : bv - av;
+      }
+      else { av = a[sortField] ?? ''; bv = b[sortField] ?? ''; }
+      return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    });
+    return rows;
+  });
+
+  let filteredAgents = $derived.by(() => {
+    let rows = agents.filter(matchesFilter);
+    rows.sort((a, b) => {
+      const av = a[sortField] ?? '';
+      const bv = b[sortField] ?? '';
       return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
     });
     return rows;
@@ -271,10 +319,21 @@
           </thead>
           <tbody>
             {#each filteredCommits as commit}
-              <tr class="table-row" onclick={() => onRowClick(commit, 'commit')} tabindex="0" role="button" aria-label="Commit {commit.sha ?? commit.id ?? ''}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(commit, 'commit'); } }}>
-                <td class="mono">{(commit.sha ?? commit.id ?? '').slice(0, 7)}</td>
+              {@const commitSha = commit.sha ?? commit.id ?? ''}
+              {@const commitAgent = agentCommits[commitSha]}
+              <tr class="table-row" onclick={() => onRowClick(commit, 'commit')} tabindex="0" role="button" aria-label="Commit {commitSha}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(commit, 'commit'); } }}>
+                <td class="mono">{commitSha.slice(0, 7)}</td>
                 <td class="commit-msg" title={commit.message ?? commit.summary ?? ''}>{commit.message ?? commit.summary ?? '—'}</td>
-                <td class="secondary">{commit.author ?? commit.author_name ?? '—'}</td>
+                <td class="secondary">
+                  {#if commitAgent}
+                    <button class="agent-link" title="View agent {commitAgent}" onclick={(e) => { e.stopPropagation(); onRowClick({ id: commitAgent }, 'agent'); }}>
+                      <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                      {commit.author ?? commit.author_name ?? commitAgent.slice(0, 8)}
+                    </button>
+                  {:else}
+                    {commit.author ?? commit.author_name ?? '—'}
+                  {/if}
+                </td>
                 <td class="secondary">{relativeTime(commit.timestamp ?? commit.authored_at ?? commit.date)}</td>
               </tr>
             {/each}
@@ -351,6 +410,78 @@
                 </td>
                 <td><span class="priority-pill priority-{entry.priority <= 25 ? 'high' : entry.priority <= 75 ? 'normal' : 'low'}">P{entry.priority ?? '—'}</span></td>
                 <td><span class="status-badge status-{entry._mr_status ?? ''}">{entry.status ?? 'queued'}</span></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    {:else if subTab === 'tasks'}
+      {#if filteredTasks.length === 0}
+        <EmptyState title="No tasks" message={filterQuery ? 'No tasks match your filter' : 'No tasks for this repository yet'} />
+      {:else}
+        <table class="code-table">
+          <thead>
+            <tr>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>Title {sortIcon('title')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>Priority {sortIcon('priority')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('task_type')}>Type {sortIcon('task_type')}</button></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each filteredTasks as task}
+              <tr class="table-row" onclick={() => onRowClick(task, 'task')} tabindex="0" role="button" aria-label="View task: {task.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(task, 'task'); } }}>
+                <td>
+                  <div class="task-title-cell">
+                    <span title={task.title}>{task.title}</span>
+                    {#if task.spec_path}
+                      <span class="mr-spec-ref" title={task.spec_path}>{task.spec_path.split('/').pop()}</span>
+                    {/if}
+                  </div>
+                </td>
+                <td><span class="status-badge status-{task.status}">{task.status ?? 'backlog'}</span></td>
+                <td>
+                  {#if task.priority}
+                    <span class="priority-pill priority-{task.priority === 'critical' || task.priority === 'high' ? 'high' : task.priority === 'low' ? 'low' : 'normal'}">{task.priority}</span>
+                  {:else}
+                    <span class="secondary">—</span>
+                  {/if}
+                </td>
+                <td class="secondary">{task.task_type ?? '—'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+    {:else if subTab === 'agents'}
+      {#if filteredAgents.length === 0}
+        <EmptyState title="No agents" message={filterQuery ? 'No agents match your filter' : 'No agents have been spawned for this repository yet'} />
+      {:else}
+        <table class="code-table">
+          <thead>
+            <tr>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('name')}>Name {sortIcon('name')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('branch')}>Branch {sortIcon('branch')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('created_at')}>Created {sortIcon('created_at')}</button></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each filteredAgents as agent}
+              <tr class="table-row" onclick={() => onRowClick(agent, 'agent')} tabindex="0" role="button" aria-label="View agent: {agent.name}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(agent, 'agent'); } }}>
+                <td>
+                  <div class="agent-name-cell">
+                    <span>{agent.name ?? agent.id?.slice(0, 8) ?? '—'}</span>
+                    {#if agent.agent_type}
+                      <span class="agent-type-tag">{agent.agent_type}</span>
+                    {/if}
+                  </div>
+                </td>
+                <td><span class="status-badge status-{agent.status}">{agent.status ?? 'unknown'}</span></td>
+                <td class="mono secondary">{agent.branch ?? '—'}</td>
+                <td class="secondary">{relativeTime(agent.created_at)}</td>
               </tr>
             {/each}
           </tbody>
@@ -673,6 +804,56 @@
 
   .mr-diff-ins { color: var(--color-success); }
   .mr-diff-del { color: var(--color-danger); }
+
+  /* Task title cell with spec ref */
+  .task-title-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  /* Agent name cell */
+  .agent-name-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .agent-type-tag {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: color-mix(in srgb, var(--color-info) 8%, transparent);
+    border-radius: var(--radius-sm);
+    width: fit-content;
+  }
+
+  /* Agent status colors */
+  .status-badge.status-active { background: color-mix(in srgb, var(--color-success) 10%, transparent); border-color: color-mix(in srgb, var(--color-success) 40%, transparent); color: var(--color-success); }
+  .status-badge.status-completed, .status-badge.status-idle { background: color-mix(in srgb, var(--color-info) 10%, transparent); border-color: color-mix(in srgb, var(--color-info) 40%, transparent); color: var(--color-info); }
+  .status-badge.status-failed, .status-badge.status-dead { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); color: var(--color-danger); }
+
+  /* Task status colors */
+  .status-badge.status-done { background: color-mix(in srgb, var(--color-success) 10%, transparent); border-color: color-mix(in srgb, var(--color-success) 40%, transparent); color: var(--color-success); }
+  .status-badge.status-in_progress { background: color-mix(in srgb, var(--color-warning) 10%, transparent); border-color: color-mix(in srgb, var(--color-warning) 40%, transparent); color: var(--color-warning); }
+  .status-badge.status-blocked { background: color-mix(in srgb, var(--color-danger) 10%, transparent); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); color: var(--color-danger); }
+  .status-badge.status-backlog { background: var(--color-surface-elevated); border-color: var(--color-border); color: var(--color-text-muted); }
+
+  /* Agent link in commit table */
+  .agent-link {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in srgb, var(--color-primary) 40%, transparent);
+  }
+  .agent-link:hover { text-decoration-color: var(--color-primary); }
+  .agent-icon { margin-right: 2px; font-size: var(--text-xs); }
 
   @media (prefers-reduced-motion: reduce) {
     .subtab-btn, .sort-btn, .table-row { transition: none; }

@@ -73,12 +73,13 @@ export const api = {
   repo: (id) => request(`/repos/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
-  tasks: ({ workspaceId, status, assigned_to, parent_task_id } = {}) => {
+  tasks: ({ workspaceId, repoId, status, assigned_to, parent_task_id } = {}) => {
     const p = new URLSearchParams();
     if (status) p.set('status', status);
     if (assigned_to) p.set('assigned_to', assigned_to);
     if (parent_task_id) p.set('parent_task_id', parent_task_id);
     if (workspaceId) p.set('workspace_id', workspaceId);
+    if (repoId) p.set('repo_id', repoId);
     const qs = p.toString();
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
