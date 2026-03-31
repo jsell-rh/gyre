@@ -1346,6 +1346,7 @@
       "abac_title": "ABAC Policies",
       "abac_loading": "Loading policies\u2026",
       "abac_empty": "No ABAC policies configured for this workspace.",
+      "abac_delete_failed": "Failed to delete policy: {error}",
       "drift_title": "Meta-Spec Drift Policy",
       "drift_desc": "Controls how the workspace responds when agents produce code under outdated meta-spec versions.",
       "warn_on_drift": "Warn on drift",
