@@ -1354,11 +1354,11 @@
       "policy_save_failed": "Policy save failed: {error}"
     },
     "budget": {
-      "title": "Budget",
-      "description": "Credit allocation for agents in this repository. Cannot exceed the workspace budget.",
+      "title": "Workspace Budget",
+      "description": "Budget is managed at the workspace level. This view shows the workspace budget that governs all repos within it.",
       "loading": "Loading budget\u2026",
       "unavailable": "Budget data unavailable \u2014 this feature may not be configured.",
-      "empty": "No budget allocation configured for this repository.",
+      "empty": "No budget data available. Budget is managed at the workspace level.",
       "allocated": "Allocated",
       "used": "Used",
       "remaining": "Remaining",
