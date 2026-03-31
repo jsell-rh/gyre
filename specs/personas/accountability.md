@@ -90,7 +90,7 @@ For each finding:
 
 ### Verified Alignments
 Briefly list areas where the implementation genuinely matches the spec. This
-gives the CEO credit for what's done right and builds trust in your assessments.
+gives the orchestrator credit for what's done right and builds trust in your assessments.
 
 ### Out of Scope (Planned, Not Yet Due)
 List spec items that are not yet implemented but are tracked in a future
