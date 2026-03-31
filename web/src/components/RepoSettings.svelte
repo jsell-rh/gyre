@@ -58,6 +58,12 @@
   let gateCreateError = $state(null);
   let deletingGateId = $state(null);
 
+  // ── Push Gates ────────────────────────────────────────────────────────
+  let pushGates = $state([]);
+  let pushGatesLoading = $state(false);
+  let newPushGate = $state('');
+  let pushGatesSaving = $state(false);
+
   // ── Policies ──────────────────────────────────────────────────────────
   let specPolicy = $state(null);
   let specPolicyLoading = $state(false);
@@ -120,6 +126,7 @@
 
     if (activeTab === 'gates') {
       if (untrack(() => gates.length === 0 && !gatesLoading)) loadGates(repoId);
+      if (untrack(() => pushGates.length === 0 && !pushGatesLoading)) loadPushGates(repoId);
     }
     if (activeTab === 'policies') {
       if (untrack(() => !specPolicy && !specPolicyLoading)) loadSpecPolicy(repoId);
@@ -177,6 +184,41 @@
     } catch (e) {
       toastError($t('repo_settings.gates.delete_failed', { values: { error: e.message } }));
     } finally { deletingGateId = null; }
+  }
+
+  async function loadPushGates(repoId) {
+    pushGatesLoading = true;
+    try {
+      const resp = await api.repoPushGates(repoId);
+      pushGates = Array.isArray(resp?.gates ?? resp) ? (resp?.gates ?? resp) : [];
+    } catch {
+      pushGates = [];
+    } finally { pushGatesLoading = false; }
+  }
+
+  async function addPushGate() {
+    if (!repo?.id || !newPushGate.trim()) return;
+    pushGatesSaving = true;
+    try {
+      const updated = [...pushGates, newPushGate.trim()];
+      await api.setRepoPushGates(repo.id, { gates: updated });
+      pushGates = updated;
+      newPushGate = '';
+    } catch (e) {
+      toastError('Failed to add push gate: ' + (e.message ?? e));
+    } finally { pushGatesSaving = false; }
+  }
+
+  async function removePushGate(gate) {
+    if (!repo?.id) return;
+    pushGatesSaving = true;
+    try {
+      const updated = pushGates.filter(g => g !== gate);
+      await api.setRepoPushGates(repo.id, { gates: updated });
+      pushGates = updated;
+    } catch (e) {
+      toastError('Failed to remove push gate: ' + (e.message ?? e));
+    } finally { pushGatesSaving = false; }
   }
 
   async function loadSpecPolicy(repoId) {
@@ -507,6 +549,50 @@
               </div>
             </div>
           {/if}
+        {/if}
+
+        <!-- Push Gates Section -->
+        <h3 class="section-title">Push Gates</h3>
+        <p class="tab-desc">Push gates validate commits before they are accepted. Rejected pushes show the gate name to the user.</p>
+
+        {#if pushGatesLoading}
+          <p class="loading-text">Loading push gates...</p>
+        {:else}
+          {#if pushGates.length === 0}
+            <p class="empty-text">No push gates configured. Commits are accepted without pre-receive checks.</p>
+          {:else}
+            <div class="gates-list" data-testid="push-gates-list">
+              {#each pushGates as gate}
+                <div class="gate-card">
+                  <div class="gate-header">
+                    <span class="gate-name">{gate}</span>
+                    <span class="gate-kind">push gate</span>
+                    <button
+                      class="btn-gate-delete"
+                      onclick={() => removePushGate(gate)}
+                      disabled={pushGatesSaving}
+                      aria-label="Remove push gate {gate}"
+                    >
+                      {pushGatesSaving ? 'Removing...' : 'Remove'}
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+          <div class="action-row action-row-left" style="display: flex; gap: var(--space-2); align-items: center;">
+            <input
+              class="field-input field-input-sm"
+              type="text"
+              placeholder="e.g., conventional-commit"
+              bind:value={newPushGate}
+              onkeydown={(e) => e.key === 'Enter' && addPushGate()}
+              style="max-width: 240px;"
+            />
+            <button class="btn-secondary" onclick={addPushGate} disabled={pushGatesSaving || !newPushGate.trim()}>
+              Add Push Gate
+            </button>
+          </div>
         {/if}
       </div>
 
@@ -913,6 +999,16 @@
     color: var(--color-text-secondary);
     margin: 0;
     margin-top: calc(-1 * var(--space-3));
+  }
+
+  .section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--color-border);
   }
 
   /* ── Fields ───────────────────────────────────────────────────────── */
