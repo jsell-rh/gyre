@@ -1347,9 +1347,23 @@
               <!-- MR Actions -->
               {#if mr.status === 'open'}
                 <div class="mr-actions">
-                  <Button variant="primary" onclick={enqueueMr} disabled={enqueueing}>
-                    {enqueueing ? 'Enqueueing...' : 'Enqueue for Merge'}
-                  </Button>
+                  {#if mr.queue_position != null}
+                    <span class="queue-position">
+                      <Badge value="queued" variant="warning" />
+                      <span class="queue-pos-text">Position {mr.queue_position + 1} in merge queue</span>
+                    </span>
+                  {:else}
+                    <Button variant="primary" onclick={enqueueMr} disabled={enqueueing}>
+                      {enqueueing ? 'Enqueueing...' : 'Enqueue for Merge'}
+                    </Button>
+                  {/if}
+                </div>
+              {:else if mr.status === 'merged'}
+                <div class="mr-merged-info">
+                  <Badge value="merged" variant="success" />
+                  {#if mr.merge_commit_sha}
+                    <span class="mono copyable" title="Click to copy merge SHA: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</span>
+                  {/if}
                 </div>
               {/if}
             {/if}
@@ -4298,6 +4312,26 @@
     margin-top: var(--space-3);
     padding-top: var(--space-3);
     border-top: 1px solid var(--color-border);
+    align-items: center;
+  }
+
+  .queue-position {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .queue-pos-text {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .mr-merged-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    font-size: var(--text-sm);
   }
 
   /* ── Gate summary bar ──────────────────────────────────────────────────── */
