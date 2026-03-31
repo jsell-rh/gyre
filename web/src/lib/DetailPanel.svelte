@@ -336,9 +336,12 @@
         api.mergeRequest(id),
         api.mrDependencies(id).catch(() => null),
         api.mrGates(id).catch(() => []),
-      ]).then(([d, deps, gates]) => {
+        api.mrTimeline(id).catch(() => []),
+      ]).then(([d, deps, gates, timeline]) => {
         mrDetail = d;
         mrDeps = deps;
+        // Pre-cache timeline for the timeline tab
+        if (!mrTimeline) mrTimeline = Array.isArray(timeline) ? timeline : [];
         // Pre-compute gate summary for info tab
         const gateList = Array.isArray(gates) ? gates : (gates?.gates ?? []);
         if (gateList.length > 0) {
@@ -346,6 +349,14 @@
           const failed = gateList.filter(g => g.status === 'Failed' || g.status === 'failed').length;
           const total = gateList.length;
           mrDetail = { ...mrDetail, _gateSummary: { passed, failed, total } };
+        }
+        // Build mini status story from timeline
+        if (mrTimeline.length > 0) {
+          const events = mrTimeline.slice(-4).map(evt => {
+            const evtType = evt.event_type ?? evt.type ?? evt.event;
+            return { label: timelineEventLabel(evtType), variant: timelineEventVariant(evtType), time: evt.timestamp ?? evt.created_at };
+          });
+          mrDetail = { ...mrDetail, _statusStory: events };
         }
       }).catch(() => { mrDetail = null; })
         .finally(() => { mrDetailLoading = false; mrDepsLoading = false; });
@@ -1073,7 +1084,17 @@
               {@const mr = mrDetail ?? entity.data ?? {}}
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
-                <dt>Status</dt><dd><Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} /></dd>
+                <dt>Status</dt>
+                <dd>
+                  <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
+                  {#if mr._statusStory?.length > 0}
+                    <span class="status-story">
+                      {#each mr._statusStory as step, i}
+                        <span class="status-step status-step-{step.variant}">{step.label}</span>{#if i < mr._statusStory.length - 1}<span class="status-step-arrow">→</span>{/if}
+                      {/each}
+                    </span>
+                  {/if}
+                </dd>
                 <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
                 {#if mr.source_branch}
                   <dt>Branch</dt><dd class="mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</dd>
@@ -3614,6 +3635,33 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.5;
+  }
+
+  /* ── Status story (how did it get here) ──────────────────────────────── */
+  .status-story {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-top: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .status-step {
+    font-size: 10px;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .status-step-success { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
+  .status-step-danger { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
+  .status-step-warning { background: color-mix(in srgb, var(--color-warning) 12%, transparent); color: var(--color-warning); }
+  .status-step-info { background: color-mix(in srgb, var(--color-info) 12%, transparent); color: var(--color-info); }
+
+  .status-step-arrow {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    margin: 0 1px;
   }
 
   /* ── Agent container info ──────────────────────────────────────────────── */
