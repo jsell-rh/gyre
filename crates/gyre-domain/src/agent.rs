@@ -23,32 +23,29 @@ pub enum DisconnectedBehavior {
     Abort,
 }
 
+/// Agent status enum per agent-runtime.md §1 Phase 4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
-    Idle,
+    /// Agent is executing work.
     Active,
-    Blocked,
-    Error,
-    Dead,
-    /// Agent is alive but paused due to server disconnection.
-    Paused,
-    /// Agent terminated with a failure (non-recoverable error).
+    /// Agent completed successfully.
+    Idle,
+    /// Max iterations reached, spawn failure, or non-recoverable error.
     Failed,
-    /// Agent was explicitly stopped by an operator or orchestrator.
+    /// Manually stopped, cascaded shutdown, or paused due to disconnection.
     Stopped,
+    /// Detected by stale agent detector (heartbeat expired).
+    Dead,
 }
 
 impl fmt::Display for AgentStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            AgentStatus::Idle => "Idle",
             AgentStatus::Active => "Active",
-            AgentStatus::Blocked => "Blocked",
-            AgentStatus::Error => "Error",
-            AgentStatus::Dead => "Dead",
-            AgentStatus::Paused => "Paused",
+            AgentStatus::Idle => "Idle",
             AgentStatus::Failed => "Failed",
             AgentStatus::Stopped => "Stopped",
+            AgentStatus::Dead => "Dead",
         };
         write!(f, "{s}")
     }
@@ -136,21 +133,15 @@ impl Agent {
         self.current_task_id = Some(task_id);
     }
 
-    /// Enforce valid status transitions.
+    /// Enforce valid status transitions per agent-runtime.md §1.
     pub fn transition_status(&mut self, new_status: AgentStatus) -> Result<(), AgentError> {
         let valid = matches!(
             (&self.status, &new_status),
             (AgentStatus::Idle, AgentStatus::Active)
                 | (AgentStatus::Active, AgentStatus::Idle)
-                | (AgentStatus::Active, AgentStatus::Blocked)
-                | (AgentStatus::Active, AgentStatus::Error)
-                | (AgentStatus::Active, AgentStatus::Paused)
                 | (AgentStatus::Active, AgentStatus::Failed)
                 | (AgentStatus::Active, AgentStatus::Stopped)
-                | (AgentStatus::Blocked, AgentStatus::Active)
-                | (AgentStatus::Error, AgentStatus::Idle)
-                | (AgentStatus::Paused, AgentStatus::Active)
-                | (AgentStatus::Paused, AgentStatus::Dead)
+                // Terminal transitions: any state can reach Dead, Failed, Stopped.
                 | (_, AgentStatus::Dead)
                 | (_, AgentStatus::Failed)
                 | (_, AgentStatus::Stopped)
@@ -218,31 +209,23 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_transition_idle_to_blocked() {
-        let mut agent = make_agent();
-        assert!(agent.transition_status(AgentStatus::Blocked).is_err());
-        assert_eq!(agent.status, AgentStatus::Idle);
-    }
-
-    #[test]
     fn test_any_to_dead() {
         let mut agent = make_agent();
         assert!(agent.transition_status(AgentStatus::Dead).is_ok());
     }
 
     #[test]
-    fn test_active_to_blocked() {
+    fn test_active_to_failed() {
         let mut agent = make_agent();
         agent.transition_status(AgentStatus::Active).unwrap();
-        assert!(agent.transition_status(AgentStatus::Blocked).is_ok());
+        assert!(agent.transition_status(AgentStatus::Failed).is_ok());
     }
 
     #[test]
-    fn test_blocked_back_to_active() {
+    fn test_active_to_stopped() {
         let mut agent = make_agent();
         agent.transition_status(AgentStatus::Active).unwrap();
-        agent.transition_status(AgentStatus::Blocked).unwrap();
-        assert!(agent.transition_status(AgentStatus::Active).is_ok());
+        assert!(agent.transition_status(AgentStatus::Stopped).is_ok());
     }
 
     #[test]
