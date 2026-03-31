@@ -874,6 +874,20 @@
                     {/if}
                     {#if event.entity_id && event.entity_type}
                       <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: event.entity_type, id: event.entity_id, data: event })} title="View {event.entity_type}">{entityName(event.entity_type, event.entity_id)}</button>
+                    {:else}
+                      {@const evtStr = (event.event_type ?? event.type ?? '').toLowerCase()}
+                      {#if event.agent_id}
+                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'agent', id: event.agent_id, data: {} })} title="View agent">{entityName('agent', event.agent_id)}</button>
+                      {/if}
+                      {#if event.mr_id}
+                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'mr', id: event.mr_id, data: {} })} title="View MR">{entityName('mr', event.mr_id)}</button>
+                      {/if}
+                      {#if event.task_id && !event.agent_id}
+                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'task', id: event.task_id, data: {} })} title="View task">{entityName('task', event.task_id)}</button>
+                      {/if}
+                      {#if event.spec_path && !event.agent_id && !event.mr_id}
+                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'spec', id: event.spec_path, data: { path: event.spec_path, repo_id: event.repo_id } })} title="View spec">{event.spec_path.split('/').pop()}</button>
+                      {/if}
                     {/if}
                     {#if event.timestamp ?? event.created_at}
                       <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
