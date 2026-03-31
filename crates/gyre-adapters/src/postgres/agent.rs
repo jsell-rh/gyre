@@ -11,27 +11,24 @@ use crate::schema::agents;
 
 fn status_to_str(s: &AgentStatus) -> &'static str {
     match s {
-        AgentStatus::Idle => "Idle",
         AgentStatus::Active => "Active",
-        AgentStatus::Blocked => "Blocked",
-        AgentStatus::Error => "Error",
-        AgentStatus::Dead => "Dead",
-        AgentStatus::Paused => "Paused",
+        AgentStatus::Idle => "Idle",
         AgentStatus::Failed => "Failed",
         AgentStatus::Stopped => "Stopped",
+        AgentStatus::Dead => "Dead",
     }
 }
 
 fn str_to_status(s: &str) -> Result<AgentStatus> {
     match s {
-        "Idle" => Ok(AgentStatus::Idle),
         "Active" => Ok(AgentStatus::Active),
-        "Blocked" => Ok(AgentStatus::Blocked),
-        "Error" => Ok(AgentStatus::Error),
-        "Dead" => Ok(AgentStatus::Dead),
-        "Paused" => Ok(AgentStatus::Paused),
+        "Idle" => Ok(AgentStatus::Idle),
         "Failed" => Ok(AgentStatus::Failed),
         "Stopped" => Ok(AgentStatus::Stopped),
+        "Dead" => Ok(AgentStatus::Dead),
+        // Map legacy statuses to spec-compliant equivalents.
+        "Blocked" | "Error" => Ok(AgentStatus::Failed),
+        "Paused" => Ok(AgentStatus::Stopped),
         other => Err(anyhow!("unknown agent status: {}", other)),
     }
 }

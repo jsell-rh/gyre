@@ -631,7 +631,7 @@ pub async fn reject_spec(
                 if agent.current_task_id.as_ref() == Some(&task.id)
                     && matches!(
                         agent.status,
-                        gyre_domain::AgentStatus::Active | gyre_domain::AgentStatus::Blocked
+                        gyre_domain::AgentStatus::Active
                     )
                 {
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);

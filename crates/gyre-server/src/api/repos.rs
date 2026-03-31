@@ -293,7 +293,7 @@ pub async fn archive_repo(
             .unwrap_or(false);
         let stoppable = matches!(
             agent.status,
-            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Paused
+            AgentStatus::Active | AgentStatus::Idle
         );
         if is_repo_task && stoppable {
             agent.status = AgentStatus::Dead;
