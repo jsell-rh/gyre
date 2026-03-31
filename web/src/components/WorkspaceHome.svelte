@@ -258,9 +258,9 @@
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Approved' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_approved') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
     }
   }
 
@@ -273,9 +273,9 @@
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Rejected' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_rejected') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
     }
   }
 
@@ -285,9 +285,9 @@
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
       await api.enqueue(body.mr_id);
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: 'Re-queued' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('workspace_home.action_re_queued') } };
     } catch (e) {
-      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || 'Failed' } };
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('workspace_home.action_failed') } };
     }
   }
 
@@ -297,7 +297,7 @@
       await api.markNotificationRead(n.id);
       notifications = notifications.filter(item => item.id !== n.id);
     } catch {
-      toastError('Dismiss failed — please try again.');
+      toastError($t('decisions.dismiss_failed'));
     }
     actionStates = { ...actionStates, [n.id]: { loading: false } };
   }
@@ -552,10 +552,10 @@
               data-testid="specs-status-filter"
             >
               <option value="">{$t('workspace_home.all_statuses')}</option>
-              <option value="draft">Draft</option>
-              <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
-              <option value="implemented">Implemented</option>
+              <option value="draft">{$t('workspace_home.status_draft')}</option>
+              <option value="pending">{$t('workspace_home.status_pending')}</option>
+              <option value="approved">{$t('workspace_home.status_approved')}</option>
+              <option value="implemented">{$t('workspace_home.status_implemented')}</option>
             </select>
           </div>
         </div>
@@ -580,14 +580,14 @@
                     <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>{$t('workspace_home.sections.repos')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
                   </th>
                   <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Path <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>{$t('workspace_home.col_path')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
                   </th>
                   <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('workspace_home.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
                   </th>
-                  <th scope="col">Progress</th>
+                  <th scope="col">{$t('workspace_home.col_progress')}</th>
                   <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Last activity <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
+                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
                   </th>
                 </tr>
               </thead>

@@ -74,7 +74,7 @@
         queue = Array.isArray(all) ? all.filter(e => e.repository_id === repoId || e.repo_id === repoId) : [];
       }
     } catch (e) {
-      error = 'Failed to load ' + tab + ': ' + e.message;
+      error = $t('code_tab.load_failed', { values: { tab, error: e.message } });
     } finally {
       loading = false;
     }
@@ -160,10 +160,10 @@
     if (!ts) return '';
     const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
     const diff = (Date.now() - d.getTime()) / 1000;
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
+    if (diff < 60) return $t('code_tab.time_just_now');
+    if (diff < 3600) return $t('code_tab.time_minutes_ago', { values: { count: Math.floor(diff / 60) } });
+    if (diff < 86400) return $t('code_tab.time_hours_ago', { values: { count: Math.floor(diff / 3600) } });
+    return $t('code_tab.time_days_ago', { values: { count: Math.floor(diff / 86400) } });
   }
 </script>
 
@@ -175,7 +175,7 @@
     <div class="clone-url-bar">
       <span class="clone-label">{$t('code_tab.clone')}</span>
       <code class="clone-url-text" title={cloneUrl}>{cloneUrl}</code>
-      <button class="clone-copy-btn" onclick={copyCloneUrl} aria-label="Copy clone URL" title="Copy clone URL">
+      <button class="clone-copy-btn" onclick={copyCloneUrl} aria-label={$t('code_tab.copy_clone_url')} title={$t('code_tab.copy_clone_url')}>
         {#if cloneCopied}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
           {$t('code_tab.copied')}
@@ -207,7 +207,7 @@
       class="filter-input"
       placeholder="Filter {$t(SUB_TABS.find(st => st.id === subTab)?.labelKey ?? '')}…"
       bind:value={filterQuery}
-      aria-label="Filter list"
+      aria-label={$t('code_tab.filter_list')}
     />
   </div>
 
@@ -222,15 +222,15 @@
       <Skeleton lines={6} />
     {:else if subTab === 'branches'}
       {#if filteredBranches.length === 0}
-        <EmptyState title={$t('code_tab.no_branches')} message={filterQuery ? 'No branches match your filter.' : 'No branches found for this repository.'} />
+        <EmptyState title={$t('code_tab.no_branches')} message={filterQuery ? $t('code_tab.no_branches_filter') : $t('code_tab.no_branches_empty')} />
       {:else}
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('name')}>Name {sortIcon('name')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('last_commit')}>Last Commit {sortIcon('last_commit')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>Author {sortIcon('author')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('name')}>{$t('code_tab.col_name')} {sortIcon('name')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('last_commit')}>{$t('code_tab.col_last_commit')} {sortIcon('last_commit')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>{$t('code_tab.col_author')} {sortIcon('author')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
             </tr>
           </thead>
           <tbody>
@@ -248,15 +248,15 @@
 
     {:else if subTab === 'commits'}
       {#if filteredCommits.length === 0}
-        <EmptyState title={$t('code_tab.no_commits')} message={filterQuery ? 'No commits match your filter.' : 'No commits found for this branch.'} />
+        <EmptyState title={$t('code_tab.no_commits')} message={filterQuery ? $t('code_tab.no_commits_filter') : $t('code_tab.no_commits_empty')} />
       {:else}
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('sha')}>SHA {sortIcon('sha')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('message')}>Message {sortIcon('message')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>Author {sortIcon('author')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('date')}>Date {sortIcon('date')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('sha')}>{$t('code_tab.col_sha')} {sortIcon('sha')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('message')}>{$t('code_tab.col_message')} {sortIcon('message')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author')}>{$t('code_tab.col_author')} {sortIcon('author')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('date')}>{$t('code_tab.col_date')} {sortIcon('date')}</button></th>
             </tr>
           </thead>
           <tbody>
@@ -274,15 +274,15 @@
 
     {:else if subTab === 'merge-requests'}
       {#if filteredMrs.length === 0}
-        <EmptyState title={$t('code_tab.no_mrs')} message={filterQuery ? 'No MRs match your filter.' : 'No open merge requests for this repository.'} />
+        <EmptyState title={$t('code_tab.no_mrs')} message={filterQuery ? $t('code_tab.no_mrs_filter') : $t('code_tab.no_mrs_empty')} />
       {:else}
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>Title {sortIcon('title')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author_id')}>Author {sortIcon('author_id')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('updated_at')}>Updated {sortIcon('updated_at')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>{$t('code_tab.col_title')} {sortIcon('title')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author_id')}>{$t('code_tab.col_author')} {sortIcon('author_id')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('updated_at')}>{$t('code_tab.col_updated')} {sortIcon('updated_at')}</button></th>
             </tr>
           </thead>
           <tbody>
@@ -300,14 +300,14 @@
 
     {:else if subTab === 'merge-queue'}
       {#if filteredQueue.length === 0}
-        <EmptyState title={$t('code_tab.queue_empty')} message={filterQuery ? 'No entries match your filter.' : 'No entries in the merge queue for this repository.'} />
+        <EmptyState title={$t('code_tab.queue_empty')} message={filterQuery ? $t('code_tab.no_queue_filter') : $t('code_tab.no_queue_empty')} />
       {:else}
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>MR {sortIcon('mr')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>Priority {sortIcon('priority')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>{$t('code_tab.col_mr')} {sortIcon('mr')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>{$t('code_tab.col_priority')} {sortIcon('priority')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
             </tr>
           </thead>
           <tbody>
