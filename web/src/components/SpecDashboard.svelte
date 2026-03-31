@@ -208,8 +208,8 @@
     if (s === 'approved')   return 'success';
     if (s === 'pending')    return 'warning';
     if (s === 'draft')      return 'info';
-    if (s === 'deprecated') return 'neutral';
-    return 'neutral';
+    if (s === 'deprecated') return 'muted';
+    return 'muted';
   }
 
   function statusIcon(s) {
