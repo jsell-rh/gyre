@@ -275,7 +275,35 @@ SPEC_AFTER=$(api_get "${API}/specs/${SPEC_PATH_ENCODED}")
 ok "Spec status: approved"
 
 # =============================================================================
-step 5 "Create implementation task"
+step 5 "Configure quality gates"
+# =============================================================================
+# Create a test gate (required — must pass to merge)
+GATE1_RESPONSE=$(api_post "${API}/repos/${REPO_ID}/gates" "{
+  \"name\": \"unit-tests\",
+  \"gate_type\": \"test_command\",
+  \"command\": \"echo all-tests-passed\",
+  \"required\": true
+}")
+GATE1_ID=$(echo "$GATE1_RESPONSE" | jq -r '.id')
+ok "Gate 'unit-tests': ${GATE1_ID} (test_command, required)"
+
+# Create an advisory lint gate (non-blocking)
+GATE2_RESPONSE=$(api_post "${API}/repos/${REPO_ID}/gates" "{
+  \"name\": \"lint-check\",
+  \"gate_type\": \"lint_command\",
+  \"command\": \"echo lint-clean\",
+  \"required\": false
+}")
+GATE2_ID=$(echo "$GATE2_RESPONSE" | jq -r '.id')
+ok "Gate 'lint-check': ${GATE2_ID} (lint_command, advisory)"
+
+# Verify gates are listed
+GATES_LIST=$(api_get "${API}/repos/${REPO_ID}/gates")
+GATE_COUNT=$(echo "$GATES_LIST" | jq 'length')
+ok "${GATE_COUNT} gates configured for repo"
+
+# =============================================================================
+step 6 "Create implementation task"
 # =============================================================================
 TASK_RESPONSE=$(api_post "${API}/tasks" "{
   \"title\": \"Implement greeting service\",
@@ -292,7 +320,7 @@ ok "Task: ${TASK_ID}"
 [ "$TASK_SPEC_PATH" != "null" ] && ok "Task → spec: ${TASK_SPEC_PATH}" || warn "Task spec_path not set"
 
 # =============================================================================
-step 6 "Spawn agent"
+step 7 "Spawn agent"
 # =============================================================================
 SPAWN_RESPONSE=$(api_post "${API}/agents/spawn" "{
   \"name\": \"e2e-worker-${RUN_ID}\",
@@ -307,7 +335,7 @@ ok "Agent: ${AGENT_ID} (active)"
 info "JWT issued — script will simulate agent work"
 
 # =============================================================================
-step 7 "Agent implements the spec (real Rust code)"
+step 8 "Agent implements the spec (real Rust code)"
 # =============================================================================
 AGENT_DIR="${WORK_DIR}/agent-work"
 git_with_token "$WORK_DIR" "$AGENT_TOKEN" clone "${AGENT_CLONE_URL}.git" agent-work 2>/dev/null || true
@@ -574,7 +602,7 @@ git_with_token "$AGENT_DIR" "$AGENT_TOKEN" push origin feat/greeting-service 2>&
 ok "Agent pushed 2 files (+160 lines of Rust)"
 
 # =============================================================================
-step 8 "Agent completes → MR with diff"
+step 9 "Agent completes → MR with diff"
 # =============================================================================
 sleep 2  # let post-receive hooks finish
 
@@ -608,7 +636,7 @@ ok "Agent → $(api_get "${API}/agents/${AGENT_ID}" | jq -r '.status')"
 ok "Task → $(api_get "${API}/tasks/${TASK_ID}" | jq -r '.status')"
 
 # =============================================================================
-step 9 "Merge queue"
+step 10 "Merge queue + gates"
 # =============================================================================
 api_post "${API}/merge-queue/enqueue" "{\"merge_request_id\": \"${MR_ID}\"}" >/dev/null
 ok "MR enqueued"
@@ -623,6 +651,27 @@ for i in $(seq 1 30); do
 done
 [ "$MERGED" = true ] || fail "MR did not merge within 30s (status: ${MR_CURRENT})"
 ok "MR merged!"
+
+# Verify gate results
+GATE_RESULTS=$(api_get "${API}/merge-requests/${MR_ID}/gates")
+GATE_RESULT_COUNT=$(echo "$GATE_RESULTS" | jq 'length')
+if [ "$GATE_RESULT_COUNT" -gt 0 ]; then
+  ok "Gate results: ${GATE_RESULT_COUNT} gates executed"
+  echo "$GATE_RESULTS" | jq -r '.[] | "\(.gate_id[:8])... → \(.status)\(if .output then " (\(.output | gsub("\n";"") | .[:40]))" else "" end)"' 2>/dev/null | while read -r line; do
+    echo -e "  ${DIM}  ${line}${NC}"
+  done
+  # Check no required gates failed (merge wouldn't succeed if they did, but verify)
+  GATE_PASSED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Passed")] | length')
+  GATE_FAILED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Failed")] | length')
+  GATE_PENDING=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Pending" or .status == "Running")] | length')
+  if [ "$GATE_FAILED" = "0" ]; then
+    ok "${GATE_PASSED} passed, ${GATE_PENDING} pending/advisory"
+  else
+    warn "${GATE_FAILED} gate(s) failed"
+  fi
+else
+  warn "No gate results found — gates may not have triggered"
+fi
 
 # Push to main to trigger knowledge graph extraction.
 # The merge processor writes directly to the bare repo, so the post-receive
@@ -641,7 +690,7 @@ sleep 3  # allow async graph extraction to complete
 ok "Main pushed — graph extraction triggered"
 
 # =============================================================================
-step 10 "Verify attestation"
+step 11 "Verify attestation"
 # =============================================================================
 ATTESTATION=$(curl -sf -H "$AUTH" "${API}/merge-requests/${MR_ID}/attestation" 2>/dev/null) || true
 if [ -n "$ATTESTATION" ] && [ "$ATTESTATION" != "null" ]; then
@@ -661,7 +710,7 @@ else
 fi
 
 # =============================================================================
-step 11 "Verify knowledge graph"
+step 12 "Verify knowledge graph"
 # =============================================================================
 sleep 2  # graph extraction runs async after merge push
 
@@ -704,7 +753,7 @@ if [ -n "$GRAPH_MODULES" ] && [ "$GRAPH_MODULES" != "null" ]; then
 fi
 
 # =============================================================================
-step 12 "Verify full provenance chain"
+step 13 "Verify full provenance chain"
 # =============================================================================
 
 # Spec
