@@ -7,49 +7,103 @@
 Agents are work executors. Humans never spawn agents directly — the system spawns them in response to approved specs. Every agent runs with a frozen set of meta-spec prompts, operates on a single task, and iterates through the Ralph loop until gates pass or max iterations are reached.
 
 ```
-Human writes spec (LLM assistant available)
-  → Human approves spec (always required, per vision.md §3)
-    → Approved spec SHA triggers inbox message to orchestrator agent
-      → Orchestrator decomposes spec into tasks
-        → For each task: worker agent spawned
-          → Agent implements, commits, pushes, signals "done"
-            → "Done" signal triggers MR creation
-              → Gates run automatically (including spec-vs-code agent review)
-                → Pass: MR merges, task marked completed
-                → Fail: agent re-spawned (clean context + failure messages), loops
+Human writes/modifies spec
+  → Human approves spec (always required — new, modified, or agent-authored)
+    → SpecApproved event on message bus
+      → Workspace orchestrator: cross-repo impact analysis + delegation task
+        → Delegation task triggers repo orchestrator
+          → Repo orchestrator decomposes into sub-tasks (ordered)
+            → System mechanically spawns agent per task
+              → Agent implements, commits, pushes, signals "done"
+                → "Done" signal triggers MR creation
+                  → Gates run automatically (including spec-vs-code review)
+                    → Pass: MR merges, task completed
+                    → Fail: agent re-spawned (clean context + failure), loops
 ```
 
 ---
 
 ## 1. Agent Lifecycle
 
-### Phase 1: Spec Triggers Orchestration
+### The Signal Chain
 
-When a spec is approved (new SHA recorded in the spec approval ledger), the server creates a `SpecChanged` message on the message bus. The **workspace orchestrator** receives this message in its inbox.
+Spec approval is the **single trigger** for all agent work. Every path to implementation goes through human approval:
+- New spec pushed → needs approval before implementation
+- Modified spec pushed → old approval invalidated, needs re-approval
+- Agent-authored spec (via `spec-edit/*` branch) → needs human approval
 
-Gyre uses a **two-level orchestration model** (per `platform-model.md` §3):
+There is no other trigger. The `SpecApproved` event is the universal starting signal.
 
-- **Workspace orchestrator:** Coordinates across repos. Receives `SpecChanged` messages. Decides which repo a spec belongs to. Spawns or messages the repo orchestrator. Handles cross-repo spec escalation.
-- **Repo orchestrator:** Decomposes specs into tasks within a single repo. Spawns worker agents. Manages the Ralph loop lifecycle for its repo's tasks. Escalates cross-repo needs to the workspace orchestrator.
+### Phase 1: Spec Approval Triggers Orchestration
 
-Both are agents with built-in personas (`workspace-orchestrator`, `repo-orchestrator`). Neither implements code — they decompose and delegate.
+When a human approves a spec (`POST /api/v1/specs/:path/approve`), the approval handler:
 
-**Orchestrator spawn:** If no workspace orchestrator is active, the server spawns one automatically when a `SpecChanged` message has no active consumer. The workspace orchestrator is spawned on demand (not long-lived) — it receives messages, processes them, and completes. If new messages arrive after completion, a new session is spawned. Repo orchestrators are spawned by the workspace orchestrator when a repo needs task decomposition. Both use the workspace's configured compute target.
+1. Records the approval in the spec approval ledger (SHA + approver + timestamp)
+2. Creates a `SpecApproved` message on the message bus (**new message kind** — amends `message-bus.md`). Payload: `{repo_id, spec_path, spec_sha, approved_by, approval_id}`. This is distinct from `SpecChanged` (which fires on push, before approval).
+3. The **workspace orchestrator** receives the `SpecApproved` message in its inbox.
 
-### Phase 2: Agent Spawn
+### Phase 2: Workspace Orchestrator — Cross-Repo Coordination
 
-For each task, the repo orchestrator spawns a worker agent via the `agent.spawn` MCP tool (per `platform-model.md` §4's rule that all agent-to-server interaction is via MCP). This tool wraps `POST /api/v1/agents/spawn` internally. **Amendment to `platform-model.md` §4 MCP tools:** add `agent.spawn` (scope: repo) — spawns a new agent for a task within the caller's repo scope. The repo orchestrator's repo-scoped JWT is sufficient since worker agents are spawned within the same repo. The workspace orchestrator (workspace-scoped JWT) can also call `agent.spawn` for cross-repo operations. The server:
+The workspace orchestrator is an **LLM agent** with the `workspace-orchestrator` persona. It is spawned on demand — not long-lived. If no workspace orchestrator is active when a `SpecApproved` message arrives, the server spawns one automatically.
 
-1. **Preconditions:** Checks repo status (rejects spawn if `Archived` per `repo-lifecycle.md` §4), checks `max_agents` limit (returns 429 if at capacity), checks workspace budget (rejects if exhausted). Creates the agent record (`Active` status). **Agent status enum:** `Active` (executing), `Idle` (completed successfully), `Failed` (max iterations or spawn failure), `Stopped` (manually stopped or cascaded shutdown), `Dead` (detected by stale agent detector — heartbeat expired, per HSI §4). Amendment to `platform-model.md` §6: define `AgentStatus` enum alongside existing `TaskStatus`.
-2. Mints an OIDC JWT (EdDSA-signed, per `platform-model.md` §1 Token Scoping) scoped to the agent's repo
-3. Assembles the prompt set (§2)
-4. Creates a git worktree on the task's branch
-5. Provisions the agent on the workspace's compute target (§3)
-6. Injects environment variables (server URL, token, branch, task ID, repo ID)
+The workspace orchestrator's job is **cross-repo impact analysis and delegation**, not decomposition:
+
+1. Reads the approved spec content
+2. Queries `spec_links` for cross-repo and cross-workspace dependencies: does any spec in another repo reference or depend on this spec?
+3. For the spec's own repo: creates a **delegation task** — a task with `task_type: "delegation"` that signals the repo orchestrator to begin decomposition. The delegation task references the approved spec (`spec_ref: spec_path@spec_sha`).
+4. For dependent repos: creates **coordination tasks** — tasks in each affected repo notifying their orchestrators that a dependency changed. These may result in documentation updates, spec amendments, or re-implementation depending on the repo orchestrator's judgment.
+5. For cross-workspace dependencies: creates priority-4 notifications for dependent workspace admins (per HSI §8).
+
+**Coordination task processing:** Coordination tasks (`task_type: Coordination`) are handled by the same repo orchestrator mechanism as delegation tasks — the task scheduler detects `Coordination` tasks and spawns the repo orchestrator, which reads the coordination task, assesses the impact of the dependency change, and may create sub-tasks (documentation updates, spec amendments, re-implementation) or mark the coordination task as `Completed` if no action is needed.
+
+The workspace orchestrator **only creates tasks** (via `task.create` MCP tool). It never spawns agents, never touches code, never interacts with compute targets. It thinks in tasks.
+
+**Orchestrator spawn and message routing:** Both orchestrators use the workspace's configured compute target (§3). The workspace orchestrator has a workspace-scoped JWT. It completes after processing its inbox. The `SpecApproved` message uses `Destination::Workspace(workspace_id)` routing (amends `message-bus.md` scoping rules). The server maintains an **orchestrator registry** per workspace: if an active workspace orchestrator exists, the message is delivered to its inbox. If none exists, the server spawns one and delivers the message to the new agent's inbox before it starts processing. This is an internal server mechanism, not a message bus feature — the server intercepts workspace-destined `SpecApproved` messages and ensures exactly-one-active-orchestrator semantics via a per-workspace mutex. Concurrent `SpecApproved` events are serialized: the second message waits in the inbox until the first is processed (or until a new session is spawned if the orchestrator completed between messages).
+
+### Phase 3: Repo Orchestrator — Task Decomposition
+
+When a delegation task is created in a repo, the **task scheduler** detects it by `task_type: Delegation` (same scheduler that handles `Implementation` tasks, but with different behavior). For delegation tasks, the scheduler spawns the **repo orchestrator** — an LLM agent with the `repo-orchestrator` persona and a repo-scoped JWT. The same exactly-one-active semantics apply: a per-repo mutex ensures only one repo orchestrator is active at a time. If a repo orchestrator is already active, the delegation task waits in the queue.
+
+The repo orchestrator:
+
+1. Reads the delegation task and the approved spec it references
+2. Reads the repo's current codebase state (via MCP tools)
+3. **Decomposes** the spec into ordered sub-tasks via `task.create` MCP tool. Each sub-task includes:
+   - Description and acceptance criteria
+   - `spec_ref` pointing to the approved spec SHA
+   - `parent_task_id` linking to the delegation task
+   - `order: u32` — execution priority (lower = first). Tasks with the same order can run in parallel.
+   - `depends_on: Vec<Id>` — task IDs that must complete before this task starts (optional, for explicit dependencies). `depends_on` takes precedence over `order` — if a task has `order: 1` but `depends_on: [task_with_order_3]`, it waits for the dependency regardless of order. Tasks at the same `order` with no `depends_on` conflicts run in parallel.
+4. Marks the delegation task as `Completed`
+5. Completes
+
+The repo orchestrator **only creates tasks**. It never spawns agents. The system handles the task→agent mapping mechanically.
+
+**Decomposition strategy:** The orchestrator is an LLM — it reads the spec and uses judgment to determine the right decomposition. A small spec might produce one task. A large spec might produce ten. The orchestrator considers: what can be parallelized, what has dependencies, what's the right granularity for an agent to handle in a single session.
+
+### Phase 4: System Spawns Agents (Mechanical)
+
+When a sub-task is created (status: `Backlog`), the **system** (not an orchestrator) handles agent spawning mechanically:
+
+1. **Task scheduler** detects new `Backlog` tasks with `task_type: Implementation` (NOT `Delegation` or `Coordination` — those trigger orchestrator spawning, not worker agent spawning). The `task_type` field is the discriminator that prevents pre-approval tasks (created by `spec-lifecycle.md` push hook, which do NOT have `task_type: Implementation`) from triggering agent spawning.
+2. Checks ordering: are all `depends_on` tasks completed? Is this task's `order` value the next to run?
+3. **Preconditions:** Checks repo status (rejects if `Archived` per `repo-lifecycle.md` §4), checks `max_agents` limit (queues task — the scheduler re-checks periodically as agents complete, does not reject or return 429), checks workspace budget (rejects if exhausted — task stays `Backlog` with a `BudgetExhausted` flag)
+4. Sets task status to `InProgress`
+5. Creates the agent record (`Active` status)
+
+**Agent status enum:** `Active` (executing), `Idle` (completed successfully), `Failed` (max iterations or spawn failure), `Stopped` (manually stopped or cascaded shutdown), `Dead` (detected by stale agent detector — heartbeat expired, per HSI §4). Amendment to `platform-model.md`: define `AgentStatus` enum alongside existing `TaskStatus`.
+
+6. Mints an OIDC JWT (EdDSA-signed, per `platform-model.md` §1 Token Scoping) scoped to the agent's repo
+7. Assembles the prompt set (§2)
+8. Creates a git worktree on the task's branch
+9. Provisions the agent on the workspace's compute target (§3)
+10. Injects environment variables (server URL, token, branch, task ID, repo ID)
 
 The agent process starts, clones the repo, reads its task via MCP, and begins implementation.
 
-### Phase 3: Implementation
+**Resource management is system-level.** The task scheduler respects `max_agents` per repo (with fallback to `Workspace.max_agents_per_repo`), workspace budget, and task ordering — all without orchestrator involvement. If a repo has 5 pending tasks but `max_agents: 2`, the scheduler runs 2 at a time and queues the rest. Orchestrators never need to know about compute targets, JWT minting, or process lifecycle.
+
+### Phase 5: Implementation
 
 The agent works autonomously:
 - Reads task details and spec refs via MCP
@@ -59,7 +113,7 @@ The agent works autonomously:
 
 The agent has no knowledge of other agents, the merge queue, or the broader system state. It sees its task, its spec, and its repo.
 
-### Phase 4: MR and Gates
+### Phase 6: MR and Gates
 
 When the agent signals completion:
 1. Server creates a MR from the agent's branch to the default branch
@@ -70,7 +124,7 @@ When the agent signals completion:
    - **TraceCapture gate:** captures OTel spans during test execution (observational, always passes)
 3. All gate results are recorded on the MR
 
-### Phase 5: Ralph Loop
+### Phase 7: Ralph Loop
 
 **If all gates pass:** MR merges. Task marked `Completed`. Agent marked `Idle`. JWT revoked.
 
@@ -83,9 +137,9 @@ When the agent signals completion:
    - **Gate failure messages in inbox** — the agent reads these on startup and addresses them
 4. The agent re-implements, commits, pushes, signals done
 5. Gates run again
-6. Loop continues until convergence or `max_iterations` reached
+6. Loop continues until convergence or `max_iterations` reached (default: 10, configurable per repo via `repo_lifecycle.md` §3 repo settings. Stored on the Repository entity as `max_agent_iterations: Option<u32>`, falls back to workspace default, then server default of 10.)
 
-**Max iterations reached:** Task marked `Blocked`. Agent marked `Failed`. JWT revoked. Orchestrator notified via inbox message. Orchestrator may re-decompose the task, adjust the spec, or escalate to a human via a priority-1 notification ("Agent needs clarification").
+**Max iterations reached:** Task marked `Blocked`. Agent marked `Failed`. JWT revoked. The system creates a `TaskBlocked` message destined to the repo's orchestrator inbox (same routing mechanism as `SpecApproved` — if no orchestrator is active, the server spawns one to process the failure). The repo orchestrator may re-decompose the task, adjust the approach, or escalate to a human via a priority-1 notification ("Agent needs clarification").
 
 **Spawn failure:** If `ComputeTarget::spawn_process()` fails (Docker not running, SSH unreachable, K8s API down), the server:
 1. Marks the agent `Failed` with error details
@@ -93,9 +147,16 @@ When the agent signals completion:
 3. If all retries fail: task marked `Blocked`, orchestrator notified, priority-1 notification created for workspace admins ("Compute target unavailable: {target_name}")
 4. No fallback to a different compute target — the workspace's selected target is authoritative
 
+**Spec rejection mid-flight:** If a spec is rejected (`POST /specs/:path/reject` per HSI §8) while agents are implementing it, the approval handler:
+1. Sets all in-flight tasks referencing that `spec_ref` to `Cancelled` status
+2. Sends a shutdown message to all active agents working on those tasks
+3. Agents have 60 seconds to commit current work (same grace period as budget exhaustion), then are killed and marked `Stopped`
+4. The delegation task (if any) is also `Cancelled`
+5. A priority-2 "Spec rejected" notification is created for workspace Admin/Developer members
+
 **Key property:** Each iteration is a fresh session. The agent has no memory of previous attempts — only the gate failure messages and the current state of the code on its branch. This is deliberate: fresh context prevents the agent from repeating the same mistakes and forces it to reason from first principles each time.
 
-### Phase 6: System-Initiated Agents
+### Phase 8: System-Initiated Agents
 
 Some agents are spawned by the system, not by an orchestrator:
 
@@ -210,7 +271,7 @@ A background job (or check on spec access) detects when a spec pins an old meta-
 - System creates a soft notification (Inbox priority 6, "Meta-spec drift alert"):
   - "Spec X uses persona v3, but v5 is available. Review and update pin."
 - Human updates the pin → spec metadata changes → spec SHA changes → spec needs re-approval
-- Approved → orchestrator receives `SpecChanged` → re-decomposes → agents re-implement with new prompts
+- Approved → `SpecApproved` event → orchestrator creates delegation task → agents re-implement with new prompts
 
 The invalidation cascades through the existing spec lifecycle. No new mechanism needed.
 
@@ -347,7 +408,7 @@ Tenant budget (absolute ceiling)
               └── Per-agent enforcement (charged to repo, rolled up to workspace)
 ```
 
-Budget is tracked per repo and aggregated to workspace. The repo-level budget (defined in `repo-lifecycle.md` §3) provides fine-grained control — a workspace admin can give a critical repo a larger share of the workspace budget. When no repo-level budget is set, the repo inherits the workspace limit. Agent usage charges against the repo's budget, which rolls up to the workspace total. The `max_agents` field on `Repository` (per `repo-lifecycle.md` §3) is enforced at agent spawn time: the server checks the count of `Active` agents scoped to the repo before provisioning a new one. If at the limit, spawn returns `429 Too Many Requests` with a message indicating the repo's concurrent agent limit. **Fallback:** When `Repository.max_agents` is `None`, the server falls back to `Workspace.max_agents_per_repo` (per `platform-model.md` §1). When both are `None`, no limit is enforced. A repo's `max_agents` cannot exceed the workspace's `max_agents_per_repo` — the server validates this on `PUT /api/v1/repos/:id` and rejects values that exceed the workspace limit (400 error).
+Budget is tracked per repo and aggregated to workspace. The repo-level budget (defined in `repo-lifecycle.md` §3) provides fine-grained control — a workspace admin can give a critical repo a larger share of the workspace budget. When no repo-level budget is set, the repo inherits the workspace limit. Agent usage charges against the repo's budget, which rolls up to the workspace total. The `max_agents` field on `Repository` (per `repo-lifecycle.md` §3) is enforced at agent spawn time: the server checks the count of `Active` agents scoped to the repo before provisioning a new one. If at the limit, the task scheduler queues the task and re-checks periodically as agents complete (no 429 — the scheduler handles queuing internally). **Fallback:** When `Repository.max_agents` is `None`, the server falls back to `Workspace.max_agents_per_repo` (per `platform-model.md` §1). When both are `None`, no limit is enforced. A repo's `max_agents` cannot exceed the workspace's `max_agents_per_repo` — the server validates this on `PUT /api/v1/repos/:id` and rejects values that exceed the workspace limit (400 error).
 
 ### Enforcement Levels
 
@@ -429,11 +490,15 @@ The **task context** is assembled at spawn time from the task, spec, and any gat
 
 | Spec | Amendment |
 |---|---|
-| `platform-model.md` §4 | Agent spawn semantics move to this spec. `platform-model.md` retains domain types (Agent, Task, MR structs) but defers lifecycle to `agent-runtime.md`. Add `agent.spawn` MCP tool (scope: repo — repo orchestrator can spawn agents in its own repo; workspace orchestrator's broader JWT also covers this). |
+| `platform-model.md` §4 | Agent spawn semantics move to this spec. `platform-model.md` retains domain types (Agent, Task, MR structs) but defers lifecycle to `agent-runtime.md`. Remove `agent.spawn` MCP tool — orchestrators do not spawn agents. They create tasks via `task.create`. The system spawns agents mechanically in response to new implementation tasks. |
+| `platform-model.md` §3 Task | Add `task_type: TaskType` field (enum: `Implementation`, `Delegation`, `Coordination`). `Delegation` tasks trigger repo orchestrator decomposition. `Coordination` tasks notify repos of cross-repo dependency changes. `Implementation` tasks trigger mechanical agent spawning. Add `order: Option<u32>` and `depends_on: Vec<Id>` fields for task sequencing. Add `parent_task_id: Option<Id>` for delegation→sub-task linkage. |
+| `message-bus.md` MessageKind | Add `SpecApproved` (Event tier, server-only). Payload: `{repo_id, spec_path, spec_sha, approved_by, approval_id}`. Fired by the spec approval handler. Distinct from `SpecChanged` (which fires on push, before approval). The workspace orchestrator subscribes to `SpecApproved`, not `SpecChanged`, as the trigger for implementation work. |
+| `spec-lifecycle.md` | The push hook continues to fire `SpecChanged` and create initial tasks, but these are informational (the spec needs approval). Implementation work begins only when `SpecApproved` fires. Stale terminology: replace "CEO agent" with "workspace orchestrator" and "repo orchestrator" throughout. |
 | `platform-model.md` §1 Workspace | Add `compute_target_id: Option<Id>` field to Workspace struct. References a `ComputeTargetConfig` entity defined in this spec §3. |
 | `meta-spec-reconciliation.md` | Meta-spec registry model (tenant/workspace levels, `required` flag, DB-backed versioning) defined here. Reconciliation spec defers to this for registry semantics. The `PUT /api/v1/workspaces/{id}/meta-spec-set` endpoint is replaced by updating `required` flags and spec-level bindings via the meta-spec API. Reconciliation is triggered when a required meta-spec's approved version changes — the meta-spec approval handler (on `PUT /api/v1/meta-specs/:id` with `approval_status: Approved`) checks if the meta-spec is `required` and if so, enqueues a reconciliation sweep for affected workspaces. The `MetaSpecSnapshot` from reconciliation spec uses `content_hash` (from this spec) instead of git SHA — struct fields become `{meta_spec_id: Id, kind: String, content_hash: String, version: u32}` tuples instead of `path@sha` strings. The `MetaSpecPolicy` (§9 of reconciliation spec) is retained — it controls merge-time drift enforcement and is stored as a workspace-level setting. Drift detection compares the `meta_specs_used` array in merge attestations against current required meta-spec versions. |
 | `platform-model.md` §2 Persona | The `Persona` struct gains `required: bool` field from this spec. Existing fields (`id`, `name`, `scope`, `scope_id`, `prompt`, `version`, `content_hash`, `owner`, `approval_status`, `approved_by`, `approved_at`, `created_at`, `updated_at`) are preserved — `prompt` holds the prompt text, `content_hash` holds the SHA-256, `version` is already incremented on changes. The bootstrap persona list in `platform-model.md` §2 is superseded by the bootstrap table in this spec §2 (which also covers bootstrap step 5 in `platform-model.md` §8). Bootstrap meta-specs are seeded with `approval_status: Approved` (pre-approved, same as platform-model.md §2's built-in personas). The `/api/v1/personas` endpoints from `platform-model.md` §2 are **removed** — replaced entirely by `/api/v1/meta-specs?kind=meta:persona`. No migration path needed (greenfield). |
-| `platform-model.md` §1 or §3 Agent entity | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`, `Dead`. Add `status: AgentStatus` field to the Agent entity (not currently defined as a struct in platform-model — define it alongside Task/MR/Repository). |
+| `platform-model.md` §1 or §3 Agent entity | Add `AgentStatus` enum: `Active`, `Idle`, `Failed`, `Stopped`, `Dead`. Add `status: AgentStatus` field to the Agent entity (not currently defined as a struct in platform-model — define it alongside Task/MR/Repository). Add `task_id: Id` field — every agent is bound to exactly one task (the system creates the binding mechanically). |
+| `agent-gates.md` spec approval | The `POST /api/v1/specs/:path/approve` endpoint handler must emit `SpecApproved` on the message bus after recording the approval in the ledger. This is the trigger for the entire agent lifecycle chain. The endpoint is defined in `agent-gates.md` (spec approval ledger) — this spec adds the message bus emission as a side effect. |
 | `agent-gates.md` | Gate failure → Ralph loop re-spawn defined here. `agent-gates.md` retains gate type definitions and execution mechanics. `MergeAttestation` amended to include `meta_specs_used` array. |
 | `abac-policy-engine.md` §Resource attributes | Add `meta_spec` (attributes: `scope`, `scope_id`, `kind`) and `compute_target` (attributes: `tenant_id`) to the resource type list. Add `archive` to the action attribute table (used by repo archive/unarchive endpoints). |
 | `hierarchy-enforcement.md` §4 | Add compute target CRUD endpoints and meta-spec CRUD endpoints to route table. Compute target routes use tenant context from auth (no path param). Meta-spec routes use `scope_id` from query param/body. Add `meta_spec_versions`, `meta_spec_bindings`, `compute_targets` tables to tenant-filter configuration. |

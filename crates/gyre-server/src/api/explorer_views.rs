@@ -449,7 +449,10 @@ pub async fn generate_explorer_view(
         .for_model(&model)
         .predict_json(&system_prompt, &user_prompt)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(|e| {
+            tracing::error!(model = %model, workspace_id = %workspace_id, error = ?e, "LLM predict_json failed in generate_explorer_view");
+            ApiError::Internal(e)
+        })?;
 
     // Charge budget: record as llm_query cost entry.
     let cost_entry = CostEntry::new(
