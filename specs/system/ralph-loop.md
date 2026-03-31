@@ -1,6 +1,6 @@
 # The Ralph Loop
 
-> **Status: Draft.** This spec defines the Ralph loop as Gyre's core implementation primitive.
+> **Status: Superseded.** This spec is superseded by [`agent-runtime.md`](agent-runtime.md) §1 (Agent Lifecycle) and §5 (Agent Prompt Structure). All cross-references should point to `agent-runtime.md`.
 
 ## Origin
 
