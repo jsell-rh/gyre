@@ -42,6 +42,7 @@
     "tenant_settings": "Tenant settings",
     "all_workspaces": "All Workspaces",
     "back_to_workspace": "Back to workspace home",
+    "back_to_all_workspaces": "Back to All Workspaces",
     "agent_rules_label": "Agent Rules"
   },
   "workspace_home": {
@@ -1474,7 +1475,9 @@
       "col_last_run": "Last Run",
       "col_status": "Status",
       "running": "Running\u2026",
-      "run_now": "Run now"
+      "run_now": "Run now",
+      "job_triggered": "Job \"{name}\" triggered",
+      "job_failed": "Failed to run job: {error}"
     },
     "audit_event_types": {
       "tenant_created": "Tenant created",

@@ -200,11 +200,11 @@
     runningJob = jobName;
     try {
       await api.adminRunJob(jobName);
-      showToast(`Job "${jobName}" triggered`, { type: 'success' });
+      showToast($t('tenant_settings.jobs.job_triggered', { values: { name: jobName } }), { type: 'success' });
       jobs = [];
       await loadJobs();
     } catch (e) {
-      showToast(`Failed to run job: ${e?.message ?? 'Unknown error'}`, { type: 'error' });
+      showToast($t('tenant_settings.jobs.job_failed', { values: { error: e?.message ?? 'Unknown error' } }), { type: 'error' });
     } finally {
       runningJob = null;
     }
@@ -231,7 +231,7 @@
     <button
       class="back-btn"
       onclick={() => onBack?.()}
-      aria-label="Back to All Workspaces"
+      aria-label={$t('topbar.back_to_all_workspaces')}
       data-testid="tenant-settings-back"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
