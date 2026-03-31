@@ -824,18 +824,18 @@
           <button
             class="back-btn"
             onclick={() => goToWorkspaceHome(currentWorkspace)}
-            aria-label="Back to workspace home"
+            aria-label={$t('topbar.back_to_workspace')}
             data-testid="back-btn"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
               <path d="M19 12H5M12 5l-7 7 7 7"/>
             </svg>
           </button>
-          <nav class="breadcrumb" aria-label="Location">
+          <nav class="breadcrumb" aria-label={$t('topbar.location')}>
             <button
               class="breadcrumb-ws"
               onclick={() => goToWorkspaceHome(currentWorkspace)}
-              aria-label="Go to {currentWorkspace?.name ?? 'workspace'} home"
+              aria-label={$t('topbar.go_to_workspace_home', { values: { name: currentWorkspace?.name ?? 'workspace' } })}
             >
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
@@ -849,18 +849,18 @@
           <button
             class="back-btn"
             onclick={() => goToWorkspaceHome(currentWorkspace)}
-            aria-label="Back to workspace home"
+            aria-label={$t('topbar.back_to_workspace')}
             data-testid="back-btn"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
               <path d="M19 12H5M12 5l-7 7 7 7"/>
             </svg>
           </button>
-          <nav class="breadcrumb" aria-label="Location" data-testid="repo-breadcrumb">
+          <nav class="breadcrumb" aria-label={$t('topbar.location')} data-testid="repo-breadcrumb">
             <button
               class="breadcrumb-ws"
               onclick={() => goToWorkspaceHome(currentWorkspace)}
-              aria-label="Go to {currentWorkspace?.name ?? 'workspace'} home"
+              aria-label={$t('topbar.go_to_workspace_home', { values: { name: currentWorkspace?.name ?? 'workspace' } })}
             >
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
@@ -893,7 +893,7 @@
                 onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
                 aria-haspopup="menu"
                 aria-expanded={wsDropdownOpen}
-                aria-label="Switch workspace"
+                aria-label={$t('topbar.switch_workspace')}
                 data-testid="ws-dropdown-toggle"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
@@ -903,8 +903,8 @@
               <button
                 class="ws-gear-btn"
                 onclick={() => goToWorkspaceSettings()}
-                aria-label="Workspace settings"
-                title="Workspace settings (g s)"
+                aria-label={$t('topbar.workspace_settings')}
+                title={$t('topbar.workspace_settings') + ' (g s)'}
                 data-testid="ws-gear-btn"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
@@ -932,8 +932,8 @@
                 <button
                   class="ws-gear-btn"
                   onclick={() => goToTenantSettings()}
-                  aria-label="Tenant settings"
-                  title="Tenant settings"
+                  aria-label={$t('topbar.tenant_settings')}
+                  title={$t('topbar.tenant_settings')}
                   data-testid="all-settings-gear-btn"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
@@ -965,7 +965,7 @@
               class="ws-dropdown"
               role="menu"
               tabindex="-1"
-              aria-label="Workspaces"
+              aria-label={$t('topbar.all_workspaces')}
               bind:this={wsDropdownEl}
               onkeydown={onWsDropdownKeydown}
               onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) wsDropdownOpen = false; }}
@@ -1025,7 +1025,7 @@
         <button
           class="search-trigger"
           onclick={() => (searchOpen = true)}
-          aria-label="Open search (Ctrl+K)"
+          aria-label={$t('topbar.open_search')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
@@ -1052,8 +1052,8 @@
               document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
           }}
-          aria-label={decisionsCount > 0 ? `${decisionsCount} decisions pending` : 'No decisions pending'}
-          title="Decisions"
+          aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
+          title={$t('workspace_home.sections.decisions')}
           data-testid="decisions-badge"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -1065,7 +1065,7 @@
           {/if}
         </button>
         <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {decisionsCount > 0 ? `${decisionsCount} decisions pending` : ''}
+          {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
         </span>
 
         <!-- User avatar dropdown -->
@@ -1076,7 +1076,7 @@
             onclick={() => (userMenuOpen = !userMenuOpen)}
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            aria-label="User menu ({hasToken ? 'authenticated' : 'not authenticated'})"
+            aria-label={$t('topbar.user_menu')}
           >
             <div class="user-avatar" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -1092,7 +1092,7 @@
               class="user-dropdown"
               role="menu"
               tabindex="-1"
-              aria-label="User menu"
+              aria-label={$t('topbar.user_menu')}
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}
               onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) userMenuOpen = false; }}
@@ -1124,7 +1124,7 @@
       <nav
         id="mobile-drawer"
         class="mobile-drawer"
-        aria-label="Navigation drawer"
+        aria-label={$t('topbar.navigation_drawer')}
         data-testid="mobile-drawer"
       >
         <div class="drawer-header">
@@ -1132,7 +1132,7 @@
           <button
             class="drawer-close"
             onclick={() => (mobileDrawerOpen = false)}
-            aria-label="Close navigation drawer"
+            aria-label={$t('topbar.close_drawer')}
           >✕</button>
         </div>
         <ul class="drawer-links" role="list">
@@ -1263,29 +1263,29 @@
     </div>
 
     <!-- ── Status bar (24px) ─────────────────────────────────────────── -->
-    <footer class="status-bar" aria-label="Status bar">
+    <footer class="status-bar" aria-label={$t('status_bar.label')}>
       {#if trustLevel}
-        <span class="status-item status-trust" title="Workspace trust level">
+        <span class="status-item status-trust" title={$t('status_bar.trust')}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
-          Trust: {trustLevel}
+          {$t('status_bar.trust')}: {trustLevel}
         </span>
       {/if}
 
       {#if budgetPct !== null}
-        <span class="status-item status-budget" title="Budget usage">
+        <span class="status-item status-budget" title={$t('status_bar.budget')}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
             <rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
           </svg>
-          Budget: {budgetPct}%
+          {$t('status_bar.budget')}: {budgetPct}%
           <span
             class="budget-bar-track"
             role="progressbar"
             aria-valuenow={budgetPct}
             aria-valuemin="0"
             aria-valuemax="100"
-            aria-label="Budget {budgetPct}%"
+            aria-label="{$t('status_bar.budget')} {budgetPct}%"
           >
             <span
               class="budget-bar-fill"
@@ -1358,7 +1358,7 @@
     }
   }}>
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1">
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={$t('shortcuts.title')} tabindex="-1">
       <div class="shortcuts-header">
         <h2>{$t('shortcuts.title')}</h2>
         <button onclick={() => (shortcutsOpen = false)} aria-label={$t('common.close')}>✕</button>
@@ -1452,7 +1452,7 @@
         class="token-toggle"
         type="button"
         onclick={() => tokenVisible = !tokenVisible}
-        aria-label={tokenVisible ? 'Hide token' : 'Show token'}
+        aria-label={tokenVisible ? $t('settings.token.hide') : $t('settings.token.show')}
       >
         {#if tokenVisible}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
