@@ -486,6 +486,50 @@
     return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
   }
 
+  // ── Human-friendly entity name cache ──────────────────────────────────
+  let entityNameCache = $state({});
+
+  function queueNameResolution(type, id) {
+    if (!id) return;
+    const key = `${type}:${id}`;
+    if (entityNameCache[key] !== undefined) return;
+    queueMicrotask(() => {
+      if (entityNameCache[key] !== undefined) return;
+      entityNameCache = { ...entityNameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'task' ? api.task(id).then(t => t?.title) :
+                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) entityNameCache = { ...entityNameCache, [key]: name };
+      }).catch(() => {});
+    });
+  }
+
+  function entityName(type, id) {
+    if (!id) return '';
+    // Check repo map first
+    if (type === 'repo') return repoMap[id]?.name ?? shortId(id);
+    const cached = entityNameCache[`${type}:${id}`];
+    if (cached) return cached;
+    queueNameResolution(type, id);
+    return shortId(id);
+  }
+
+  function shortId(id) {
+    if (!id) return '';
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
+
+  function fmtDuration(startTs, endTs) {
+    if (!startTs) return '';
+    const end = endTs ?? Date.now() / 1000;
+    const secs = Math.round(end - startTs);
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+    return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+  }
+
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
@@ -913,6 +957,8 @@
                   <th>Title</th>
                   <th>Priority</th>
                   <th>Type</th>
+                  <th>Spec</th>
+                  <th>Agent</th>
                   <th>Repo</th>
                 </tr>
               </thead>
@@ -923,6 +969,8 @@
                     <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
                     <td>{#if task.priority}<span class="priority-badge priority-{task.priority}">{task.priority}</span>{/if}</td>
                     <td class="ws-cell-type">{task.task_type ?? ''}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                     <td class="ws-cell-mono">{repoMap[task.repo_id]?.name ?? ''}</td>
                   </tr>
                 {/each}
@@ -957,6 +1005,8 @@
                   <th>Title</th>
                   <th>Branch</th>
                   <th>Agent</th>
+                  <th>Changes</th>
+                  <th>Spec</th>
                   <th>Repo</th>
                 </tr>
               </thead>
@@ -965,8 +1015,20 @@
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
                     <td><span class="status-badge status-{mr.status ?? 'open'}">{mr.status ?? 'open'}</span></td>
                     <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
-                    <td class="ws-cell-mono">{mr.source_branch ?? ''}</td>
-                    <td class="ws-cell-mono">{mr.author_agent_id ? (mr.author_agent_id.length > 12 ? mr.author_agent_id.slice(0, 8) : mr.author_agent_id) : ''}</td>
+                    <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
+                    <td class="ws-cell-diff">
+                      {#if mr.diff_stats}
+                        <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                        <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                      {/if}
+                    </td>
+                    <td class="ws-cell-mono ws-cell-link">
+                      {#if mr.spec_ref}
+                        {@const specPath = mr.spec_ref.split('@')[0]}
+                        <button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? mr.repo_id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>
+                      {/if}
+                    </td>
                     <td class="ws-cell-mono">{repoMap[mr.repository_id]?.name ?? ''}</td>
                   </tr>
                 {/each}
@@ -1001,6 +1063,8 @@
                   <th>Name</th>
                   <th>Task</th>
                   <th>Branch</th>
+                  <th>Duration</th>
+                  <th>MR</th>
                   <th>Repo</th>
                 </tr>
               </thead>
@@ -1008,9 +1072,11 @@
                 {#each wsAgents.slice(0, 10) as agent}
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>
                     <td><span class="status-badge status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span></td>
-                    <td class="ws-cell-title">{agent.name ?? agent.id.slice(0, 8)}</td>
-                    <td class="ws-cell-mono">{agent.task_id ? (agent.task_id.length > 12 ? agent.task_id.slice(0, 8) : agent.task_id) : ''}</td>
-                    <td class="ws-cell-mono">{agent.branch ?? ''}</td>
+                    <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.task_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: agent.task_id, data: {} }); }} title={agent.task_id}>{entityName('task', agent.task_id)}</button>{/if}</td>
+                    <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
+                    <td class="ws-cell-time">{fmtDuration(agent.created_at, agent.completed_at)}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: agent.mr_id, data: {} }); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
                     <td class="ws-cell-mono">{repoMap[agent.repo_id]?.name ?? ''}</td>
                   </tr>
                 {/each}
@@ -2106,6 +2172,78 @@
   .priority-low {
     background: color-mix(in srgb, var(--color-text-muted) 10%, transparent);
     color: var(--color-text-muted);
+  }
+
+  /* ── Entity link buttons in tables ──────────────────────────────────── */
+  .ws-entity-link {
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-link, var(--color-primary));
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+    display: inline-block;
+    vertical-align: middle;
+    text-align: left;
+  }
+
+  .ws-entity-link:hover {
+    text-decoration: underline;
+    color: var(--color-primary);
+  }
+
+  .ws-entity-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+    border-radius: var(--radius-sm);
+  }
+
+  .ws-cell-link {
+    max-width: 130px;
+  }
+
+  .ws-cell-diff {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+
+  .ws-cell-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .diff-ins {
+    color: var(--color-success);
+    font-weight: 600;
+  }
+
+  .diff-del {
+    color: var(--color-danger);
+    font-weight: 600;
+    margin-left: var(--space-1);
+  }
+
+  .branch-ref {
+    max-width: 100px;
+    display: inline-block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+
+  .branch-arrow {
+    color: var(--color-text-muted);
+    margin: 0 2px;
+    font-size: var(--text-xs);
   }
 
   .show-more-hint {
