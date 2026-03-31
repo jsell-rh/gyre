@@ -1654,6 +1654,51 @@
                 </div>
               {/if}
             {/if}
+          {:else if entity.type === 'commit'}
+            {@const c = entity.data ?? {}}
+            {@const sha = c.sha ?? c.id ?? entity.id}
+            <dl class="entity-meta">
+              <dt>SHA</dt><dd class="mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 12)}...</dd>
+              {#if c.message ?? c.summary}
+                <dt>Message</dt><dd class="task-description">{c.message ?? c.summary}</dd>
+              {/if}
+              {#if c.author ?? c.author_name}
+                <dt>Author</dt><dd>{c.author ?? c.author_name}</dd>
+              {/if}
+              {#if c.author_email}
+                <dt>Email</dt><dd class="mono">{c.author_email}</dd>
+              {/if}
+              {#if c.timestamp ?? c.authored_at ?? c.date}
+                <dt>Date</dt><dd>{fmtDate(c.timestamp ?? c.authored_at ?? c.date)}</dd>
+              {/if}
+              {#if c.agent_id}
+                <dt>Agent</dt><dd><button class="entity-link mono" title={c.agent_id} onclick={() => navigateTo('agent', c.agent_id)}>{entityName('agent', c.agent_id)}</button></dd>
+              {/if}
+              {#if c.branch}
+                <dt>Branch</dt><dd class="mono">{c.branch}</dd>
+              {/if}
+              {#if c.parents?.length > 0}
+                <dt>Parents</dt><dd class="mono">{c.parents.map(p => p.slice(0, 7)).join(', ')}</dd>
+              {/if}
+            </dl>
+            {#if c.agent_id}
+              <div class="provenance-chain">
+                <span class="provenance-label">Provenance</span>
+                <div class="provenance-flow">
+                  <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', c.agent_id)} title={c.agent_id}>
+                    <span class="provenance-icon prov-icon-agent"></span>
+                    <span class="provenance-type">Agent</span>
+                    <span class="provenance-name">{entityName('agent', c.agent_id)}</span>
+                  </button>
+                  <span class="provenance-arrow">&#x2192;</span>
+                  <span class="provenance-node provenance-code provenance-current">
+                    <span class="provenance-icon prov-icon-code"></span>
+                    <span class="provenance-type">Commit</span>
+                    <span class="provenance-name">{sha.slice(0, 7)}</span>
+                  </span>
+                </div>
+              </div>
+            {/if}
           {:else}
             <dl class="entity-meta">
               <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
