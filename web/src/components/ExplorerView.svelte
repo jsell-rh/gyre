@@ -68,7 +68,7 @@
         ...(selectedRepoId ? { repo_id: selectedRepoId } : {}),
       });
       if (!res.ok) {
-        askError = `Request failed: ${res.status}`;
+        askError = $t('explorer_view.ask_request_failed', { values: { status: res.status } });
         askLoading = false;
         return;
       }
@@ -91,7 +91,7 @@
             else if (line.startsWith('data: ')) dataPayload += (dataPayload ? '\n' : '') + line.slice(6);
           }
           if (eventType === 'error') {
-            askError = dataPayload || 'LLM connection failed';
+            askError = dataPayload || $t('explorer_view.ask_llm_failed');
           } else if (eventType === 'partial') {
             askExplanation += dataPayload;
           } else if (eventType === 'complete' || eventType === 'message') {
@@ -106,7 +106,7 @@
       }
     } catch (e) {
       if (e.name === 'AbortError') return;
-      askError = 'LLM connection failed';
+      askError = $t('explorer_view.ask_llm_failed');
     } finally {
       if (!controller.signal.aborted) {
         askLoading = false;
@@ -150,7 +150,7 @@
         ? await api.repos({ workspaceId: scope.workspaceId })
         : await api.allRepos();
     } catch (e) {
-      wsReposError = e.message ?? 'Failed to load repositories';
+      wsReposError = e.message ?? $t('explorer_view.repos_load_failed', { values: { error: '' } });
       wsRepos = [];
     } finally {
       wsReposLoading = false;
@@ -169,7 +169,7 @@
     try {
       repos = await api.allRepos();
     } catch (e) {
-      showToast('Failed to load repositories: ' + e.message, { type: 'error' });
+      showToast($t('explorer_view.repos_load_failed', { values: { error: e.message } }), { type: 'error' });
     } finally {
       reposLoading = false;
     }
@@ -184,7 +184,7 @@
     try {
       graph = await api.repoGraph(repoId);
     } catch (e) {
-      showToast('Failed to load graph: ' + e.message, { type: 'error' });
+      showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
       graph = { nodes: [], edges: [] };
     } finally {
@@ -229,7 +229,7 @@
       conceptNodes = result.nodes ?? [];
       conceptEdges = result.edges ?? [];
     } catch (e) {
-      showToast('Concept search failed: ' + e.message, { type: 'error' });
+      showToast($t('explorer_view.concept_search_failed', { values: { error: e.message } }), { type: 'error' });
       conceptNodes = [];
       conceptEdges = [];
     } finally {

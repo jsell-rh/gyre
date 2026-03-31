@@ -178,7 +178,7 @@
   function progressLabel(path) {
     const p = progressMap[path];
     if (!p) return null;
-    return `${p.completed_tasks}/${p.total_tasks} tasks`;
+    return $t('spec_dashboard.progress_tasks', { values: { done: p.completed_tasks, total: p.total_tasks } });
   }
 
   // ── New spec ────────────────────────────────────────────────────────────────
@@ -234,7 +234,7 @@
 </script>
 
 <div class="spec-view">
-  <span class="sr-only" aria-live="polite">{loading ? "" : "specs loaded"}</span>
+  <span class="sr-only" aria-live="polite">{loading ? "" : $t('spec_dashboard.loaded')}</span>
   <!-- ── Header ─────────────────────────────────────────────────────────────── -->
   <div class="view-header">
     <div>
@@ -263,7 +263,7 @@
           onclick={() => (filterStatus = f)}
           aria-pressed={filterStatus === f}
         >
-          {f.charAt(0).toUpperCase() + f.slice(1)}
+          {$t(`spec_dashboard.filter_${f}`)}
         </button>
       {/each}
     </div>
@@ -278,7 +278,7 @@
             onclick={() => (filterKind = k)}
             aria-pressed={filterKind === k}
           >
-            {k.charAt(0).toUpperCase() + k.slice(1)}
+            {k === 'all' ? $t('spec_dashboard.filter_all') : k.charAt(0).toUpperCase() + k.slice(1)}
           </button>
         {/each}
       </div>

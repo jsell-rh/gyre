@@ -267,7 +267,7 @@
 
 <div class="inbox" aria-busy={loading}>
   <span class="sr-only" role="status">
-    {#if !loading}{visibleNotifications.length} notification{visibleNotifications.length === 1 ? '' : 's'}{/if}
+    {#if !loading}{$t('decisions.notification_count', { values: { count: visibleNotifications.length } })}{/if}
   </span>
   <div class="inbox-header">
       <div class="inbox-title-row">
