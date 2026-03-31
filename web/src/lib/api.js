@@ -518,6 +518,12 @@ export const api = {
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Tenant-level ABAC policies
+  policies: () => request('/policies'),
+  policyDecisions: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies/decisions${qs ? '?' + qs : ''}`);
+  },
   workspaceAbacPolicies: (id) => request(`/policies?scope=Workspace&scope_id=${id}`),
   createWorkspaceAbacPolicy: (id, data) =>
     request('/policies', { method: 'POST', body: JSON.stringify({ ...data, scope: 'Workspace', scope_id: id }) }),
