@@ -95,7 +95,7 @@ The Accountability agent's patrol checks for:
 - `spec-implementation` tasks that have been in Backlog for more than N days
 - Specs that were modified but have no corresponding task (should never happen if the hook works, but defense in depth)
 
-If any of these are found, the Accountability agent escalates to the CEO.
+If any of these are found, the Accountability agent escalates to the workspace orchestrator.
 
 ## Spec Approval Interaction
 
