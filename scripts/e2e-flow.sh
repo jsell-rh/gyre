@@ -1511,9 +1511,10 @@ else
   # implements code, commits, pushes, and calls gyre_agent_complete — all
   # autonomously via the Claude Agent SDK.
 
-  # Create a compute target that runs claude --print as the agent command.
-  # The server injects GYRE_* env vars; we configure the command and args.
-  AGENT_SCRIPT="$(cd /home/jsell/code/gyre/worktrees/ralph-ui-fix && pwd)/scripts/e2e-agent-claude.sh"
+  # The server spawns the agent command from GYRE_AGENT_COMMAND env var
+  # (falls back to /gyre/entrypoint.sh which only exists in Docker).
+  # We write the wrapper script and check if the server has GYRE_AGENT_COMMAND set.
+  AGENT_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/scripts/e2e-agent-claude.sh"
 
   # Write the agent wrapper script that sets up MCP config and runs Claude
   cat > "$AGENT_SCRIPT" << 'AGENT_WRAPPER'
@@ -1605,28 +1606,23 @@ Important: You MUST call gyre_agent_complete as your final action." 2>&1 || true
 echo "[agent] Claude Code finished"
 AGENT_WRAPPER
   chmod +x "$AGENT_SCRIPT"
-  ok "Agent wrapper script created"
+  ok "Agent wrapper script: ${AGENT_SCRIPT}"
 
-  # Create a compute target that uses our wrapper
-  AGENT_CT=$(api_post "${API}/admin/compute-targets" "{
-    \"name\": \"e2e-claude-agent-${RUN_ID}\",
-    \"target_type\": \"local\",
-    \"config\": {
-      \"command\": \"${AGENT_SCRIPT}\",
-      \"args\": []
-    }
-  }" 2>/dev/null) || AGENT_CT=""
-
-  if [ -n "$AGENT_CT" ]; then
-    AGENT_CT_ID=$(echo "$AGENT_CT" | jq -r '.id // "none"')
-    ok "Compute target: ${AGENT_CT_ID} (local, claude wrapper)"
-  else
-    warn "Compute target creation failed — skipping real agent test"
-    AGENT_CT_ID=""
+  # Check if the server was started with GYRE_AGENT_COMMAND pointing to our script.
+  # The spawn handler uses: compute_target command → GYRE_AGENT_COMMAND → /gyre/entrypoint.sh
+  SERVER_PID=$(lsof -ti :${BASE_URL##*:} 2>/dev/null | head -1)
+  if [ -n "$SERVER_PID" ]; then
+    AGENT_CMD=$(tr '\0' '\n' < /proc/$SERVER_PID/environ 2>/dev/null | grep "^GYRE_AGENT_COMMAND=" | cut -d= -f2-)
+    if [ -n "$AGENT_CMD" ]; then
+      ok "Server has GYRE_AGENT_COMMAND=${AGENT_CMD}"
+    else
+      warn "Server missing GYRE_AGENT_COMMAND — agent spawn will use /gyre/entrypoint.sh (Docker only)"
+      info "Restart server with: GYRE_AGENT_COMMAND=${AGENT_SCRIPT}"
+    fi
   fi
 
-  if [ -n "$AGENT_CT_ID" ] && [ "$AGENT_CT_ID" != "none" ]; then
-    # Create a task for the real agent
+  # Create a task for the real agent
+  {
     REAL_TASK=$(api_post "${API}/tasks" "{
       \"title\": \"Add a version module with build info\",
       \"description\": \"Create src/version.rs that exports a Version struct with name, version, and build_timestamp fields. Add a pub fn current() -> Version that returns the current build info. Re-export from lib.rs.\",
@@ -1639,14 +1635,13 @@ AGENT_WRAPPER
     REAL_TASK_ID=$(echo "$REAL_TASK" | jq -r '.id')
     ok "Task for real agent: ${REAL_TASK_ID}"
 
-    # Spawn the agent — the server will exec our wrapper script
+    # Spawn the agent — the server will exec GYRE_AGENT_COMMAND
     info "Spawning real Claude agent..."
     REAL_SPAWN=$(api_post "${API}/agents/spawn" "{
       \"name\": \"claude-agent-${RUN_ID}\",
       \"repo_id\": \"${REPO_ID}\",
       \"task_id\": \"${REAL_TASK_ID}\",
-      \"branch\": \"feat/version-module\",
-      \"compute_target_id\": \"${AGENT_CT_ID}\"
+      \"branch\": \"feat/version-module\"
     }")
     REAL_AGENT_ID=$(echo "$REAL_SPAWN" | jq -r '.agent.id')
     ok "Agent spawned: ${REAL_AGENT_ID}"
@@ -1691,9 +1686,7 @@ AGENT_WRAPPER
       warn "Agent did not complete within 240s (status: ${REAL_AGENT_STATUS})"
     fi
 
-    # Clean up compute target
-    curl -s -X DELETE -H "$AUTH" "${API}/admin/compute-targets/${AGENT_CT_ID}" >/dev/null 2>&1
-  fi
+  }
 
   # =========================================================================
   step $((STEP++)) "LLM moldable development"
