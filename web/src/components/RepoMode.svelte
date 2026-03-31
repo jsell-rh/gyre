@@ -340,7 +340,7 @@
             <tbody>
               {#each repoTasks as task}
                 <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'task', id: task.id, data: task }); }}>
-                  <td><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
+                  <td title={task.status === 'blocked' ? `Blocked${task.depends_on?.length ? ` by ${task.depends_on.length} task(s)` : ''}` : task.status === 'in_progress' && task.assigned_to ? `In progress — assigned to agent` : task.status === 'done' ? 'Completed' : task.status === 'backlog' ? 'Awaiting assignment' : ''}><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
@@ -379,14 +379,14 @@
             <tbody>
               {#each repoMrs as mr}
                 <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
-                  <td><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} /></td>
+                  <td title={mr.queue_position != null ? `Position ${mr.queue_position + 1} in merge queue — gates will run before merge` : mr.status === 'merged' ? `Merged${mr.merge_commit_sha ? ' at ' + mr.merge_commit_sha.slice(0, 7) : ''}` : mr.status === 'open' ? 'Open — ready to enqueue for merge' : mr.status === 'closed' ? 'Closed without merging' : ''}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} /></td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
                   <td class="cell-mono">{#if mr.author_agent_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{:else}{''}{/if}</td>
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
-                      <div class="gate-cell-repo" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''}>
+                      <button class="gate-cell-repo gate-cell-clickable" title="View gate details: {mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join(', ') ?? ''}" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
                         <span class="gate-summary-compact">
                           {#if mr._gates.failed > 0}
                             <span class="gate-fail-compact">✗{mr._gates.failed}</span>
@@ -401,11 +401,11 @@
                         {#if mr._gates.details?.length > 0}
                           <span class="gate-names-repo">
                             {#each mr._gates.details as g}
-                              <span class="gate-tag gate-tag-{g.status}">{g.name}</span>
+                              <span class="gate-tag gate-tag-{g.status}">{g.name}{#if g.gate_type} · {g.gate_type.replace(/_/g, ' ')}{/if}</span>
                             {/each}
                           </span>
                         {/if}
-                      </div>
+                      </button>
                     {/if}
                   </td>
                   <td>
@@ -974,6 +974,9 @@
   .gate-pending-compact { color: var(--color-text-muted); }
 
   .gate-cell-repo { display: flex; flex-direction: column; gap: 2px; }
+  .gate-cell-clickable { background: none; border: 1px solid transparent; padding: var(--space-1); border-radius: var(--radius-sm); cursor: pointer; text-align: left; font: inherit; color: inherit; transition: border-color var(--transition-fast), background var(--transition-fast); }
+  .gate-cell-clickable:hover { border-color: var(--color-border); background: var(--color-surface-hover, rgba(0,0,0,0.03)); }
+  .gate-cell-clickable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
   .gate-names-repo { display: flex; flex-wrap: wrap; gap: 2px; }
   .gate-tag {
     font-size: 10px;
