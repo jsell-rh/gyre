@@ -263,8 +263,14 @@
           const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
           const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-          return { id: mr.id, passed, failed, total: arr.length };
-        }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0 }))
+          const details = arr.map(g => ({
+            name: g.name ?? g.gate_name ?? 'Gate',
+            status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
+            gate_type: g.gate_type,
+            required: g.required,
+          }));
+          return { id: mr.id, passed, failed, total: arr.length, details };
+        }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0, details: [] }))
       );
       const gateResults = await Promise.all(gatePromises);
       const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
@@ -1180,11 +1186,20 @@
                     <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
                     <td>
                       {#if mr._gates?.total > 0}
-                        <span class="gate-summary-inline">
-                          {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
-                          {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
-                          {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}<span class="gate-pending-inline">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>{/if}
-                        </span>
+                        <div class="gate-cell-ws" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''}>
+                          <span class="gate-summary-inline">
+                            {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
+                            {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
+                            {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}<span class="gate-pending-inline">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>{/if}
+                          </span>
+                          {#if mr._gates.details?.length > 0}
+                            <span class="gate-names-ws">
+                              {#each mr._gates.details as g}
+                                <span class="gate-name-tag-ws gate-tag-{g.status}">{g.name}</span>
+                              {/each}
+                            </span>
+                          {/if}
+                        </div>
                       {/if}
                     </td>
                     <td class="ws-cell-diff">
@@ -2429,6 +2444,19 @@
   .gate-pass-inline { color: var(--color-success); font-weight: 600; }
   .gate-fail-inline { color: var(--color-danger); font-weight: 600; }
   .gate-pending-inline { color: var(--color-text-muted); }
+
+  .gate-cell-ws { display: flex; flex-direction: column; gap: 2px; }
+  .gate-names-ws { display: flex; flex-wrap: wrap; gap: 2px; }
+  .gate-name-tag-ws {
+    font-size: 10px;
+    padding: 0 3px;
+    border-radius: var(--radius);
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+  .gate-tag-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-tag-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-tag-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
 
   .branch-ref {
     max-width: 100px;
