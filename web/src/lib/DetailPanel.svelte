@@ -270,6 +270,8 @@
   let mrReviewsLoading = $state(false);
   let mrComments = $state(null);
   let mrCommentsLoading = $state(false);
+  let mrDeps = $state(null);
+  let mrDepsLoading = $state(false);
   let newCommentText = $state('');
   let submittingComment = $state(false);
   let newReviewDecision = $state('approved');
@@ -307,6 +309,7 @@
       mrTimeline = null;
       mrReviews = null;
       mrComments = null;
+      mrDeps = null;
     }
     if (entity?.type === 'agent') {
       agentDetail = null;
@@ -328,10 +331,24 @@
 
     if (activeTab === 'info' && !mrDetail && !mrDetailLoading) {
       mrDetailLoading = true;
-      api.mergeRequest(id)
-        .then((d) => { mrDetail = d; })
-        .catch(() => { mrDetail = null; })
-        .finally(() => { mrDetailLoading = false; });
+      mrDepsLoading = true;
+      Promise.all([
+        api.mergeRequest(id),
+        api.mrDependencies(id).catch(() => null),
+        api.mrGates(id).catch(() => []),
+      ]).then(([d, deps, gates]) => {
+        mrDetail = d;
+        mrDeps = deps;
+        // Pre-compute gate summary for info tab
+        const gateList = Array.isArray(gates) ? gates : (gates?.gates ?? []);
+        if (gateList.length > 0) {
+          const passed = gateList.filter(g => g.status === 'Passed' || g.status === 'passed').length;
+          const failed = gateList.filter(g => g.status === 'Failed' || g.status === 'failed').length;
+          const total = gateList.length;
+          mrDetail = { ...mrDetail, _gateSummary: { passed, failed, total } };
+        }
+      }).catch(() => { mrDetail = null; })
+        .finally(() => { mrDetailLoading = false; mrDepsLoading = false; });
     }
     if (activeTab === 'diff' && !mrDiff && !mrDiffLoading) {
       mrDiffLoading = true;
@@ -405,8 +422,9 @@
       Promise.all([
         api.agent(id),
         api.agentLogs(id, 5, 0).catch(() => []),
-      ]).then(([d, logs]) => {
-        agentDetail = d;
+        api.agentContainer(id).catch(() => null),
+      ]).then(([d, logs, container]) => {
+        agentDetail = d ? { ...d, _container: container } : d;
         // Pre-cache a few recent logs for the info view
         if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
       }).catch(() => { agentDetail = null; })
@@ -1156,6 +1174,50 @@
                 </div>
               {/if}
 
+              <!-- Gate Summary -->
+              {#if mr._gateSummary}
+                <div class="gate-summary-bar">
+                  <span class="gate-summary-label">Gates</span>
+                  <div class="gate-summary-pills">
+                    {#if mr._gateSummary.passed > 0}
+                      <span class="gate-pill gate-pill-pass">{mr._gateSummary.passed} passed</span>
+                    {/if}
+                    {#if mr._gateSummary.failed > 0}
+                      <span class="gate-pill gate-pill-fail">{mr._gateSummary.failed} failed</span>
+                    {/if}
+                    {#if mr._gateSummary.total - mr._gateSummary.passed - mr._gateSummary.failed > 0}
+                      <span class="gate-pill gate-pill-pending">{mr._gateSummary.total - mr._gateSummary.passed - mr._gateSummary.failed} pending</span>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+
+              <!-- Dependencies -->
+              {#if mrDeps && ((mrDeps.depends_on?.length ?? 0) > 0 || (mrDeps.dependents?.length ?? 0) > 0)}
+                <div class="mr-deps-section">
+                  {#if mrDeps.depends_on?.length > 0}
+                    <span class="progress-section-label">Blocked by</span>
+                    <ul class="task-list">
+                      {#each mrDeps.depends_on as depId}
+                        <li class="task-item clickable-row" onclick={() => navigateTo('mr', depId)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', depId); }}>
+                          <span class="task-title">{entityName('mr', depId)}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                  {#if mrDeps.dependents?.length > 0}
+                    <span class="progress-section-label">Blocks</span>
+                    <ul class="task-list">
+                      {#each mrDeps.dependents as depId}
+                        <li class="task-item clickable-row" onclick={() => navigateTo('mr', depId)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', depId); }}>
+                          <span class="task-title">{entityName('mr', depId)}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              {/if}
+
               <!-- MR Actions -->
               {#if mr.status === 'open'}
                 <div class="mr-actions">
@@ -1191,6 +1253,9 @@
                 {#if ag.mr_id}
                   <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
+                {#if ag.workspace_id}
+                  <dt>Workspace</dt><dd class="mono" title={ag.workspace_id}>{shortId(ag.workspace_id)}</dd>
+                {/if}
                 {#if ag.created_at}
                   <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
                 {/if}
@@ -1203,6 +1268,71 @@
                   <dt>Running</dt><dd>{elapsed < 60 ? `${elapsed}m` : `${Math.round(elapsed / 60)}h ${elapsed % 60}m`}</dd>
                 {/if}
               </dl>
+
+              <!-- Container info if available -->
+              {#if ag._container}
+                <div class="agent-container-info">
+                  <span class="progress-section-label">Container</span>
+                  <dl class="entity-meta">
+                    {#if ag._container.image}
+                      <dt>Image</dt><dd class="mono">{ag._container.image}</dd>
+                    {/if}
+                    {#if ag._container.runtime}
+                      <dt>Runtime</dt><dd>{ag._container.runtime}</dd>
+                    {/if}
+                    {#if ag._container.exit_code !== undefined && ag._container.exit_code !== null}
+                      <dt>Exit</dt><dd><Badge value={String(ag._container.exit_code)} variant={ag._container.exit_code === 0 ? 'success' : 'danger'} /></dd>
+                    {/if}
+                  </dl>
+                </div>
+              {/if}
+
+              <!-- Provenance chain for agent -->
+              {#if ag.task_id || ag.mr_id}
+                <div class="provenance-chain">
+                  <span class="provenance-label">Provenance</span>
+                  <div class="provenance-flow">
+                    {#if ag.task_id}
+                      <button class="provenance-node provenance-task" onclick={() => navigateTo('task', ag.task_id)} title={ag.task_id}>
+                        <span class="provenance-icon prov-icon-task"></span>
+                        <span class="provenance-type">Task</span>
+                        <span class="provenance-name">{entityName('task', ag.task_id)}</span>
+                      </button>
+                      <span class="provenance-arrow">&#x2192;</span>
+                    {/if}
+                    <span class="provenance-node provenance-agent provenance-current">
+                      <span class="provenance-icon prov-icon-agent"></span>
+                      <span class="provenance-type">Agent</span>
+                      <span class="provenance-name">{ag.status ?? 'active'}</span>
+                    </span>
+                    {#if ag.mr_id}
+                      <span class="provenance-arrow">&#x2192;</span>
+                      <button class="provenance-node provenance-mr" onclick={() => navigateTo('mr', ag.mr_id)} title={ag.mr_id}>
+                        <span class="provenance-icon prov-icon-mr"></span>
+                        <span class="provenance-type">MR</span>
+                        <span class="provenance-name">{entityName('mr', ag.mr_id)}</span>
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+
+              <!-- Recent logs preview -->
+              {#if Array.isArray(agentLogs) && agentLogs.length > 0}
+                <div class="agent-recent-logs">
+                  <span class="progress-section-label">Recent Activity</span>
+                  <div class="trace-list trace-list-compact">
+                    {#each agentLogs.slice(0, 3) as entry}
+                      <div class="trace-entry">
+                        {#if entry.timestamp || entry.created_at}
+                          <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                        {/if}
+                        <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
             {/if}
           {:else if entity.type === 'task'}
             {#if taskDetailLoading && !entity.data}
@@ -3486,6 +3616,20 @@
     line-height: 1.5;
   }
 
+  /* ── Agent container info ──────────────────────────────────────────────── */
+  .agent-container-info,
+  .agent-recent-logs {
+    margin-top: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .trace-list-compact {
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
   /* ── Comment/Review form ─────────────────────────────────────────────────── */
   .comment-form {
     display: flex;
@@ -3557,6 +3701,61 @@
     margin-top: var(--space-3);
     padding-top: var(--space-3);
     border-top: 1px solid var(--color-border);
+  }
+
+  /* ── Gate summary bar ──────────────────────────────────────────────────── */
+  .gate-summary-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-top: var(--space-2);
+  }
+
+  .gate-summary-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .gate-summary-pills {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .gate-pill {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+  }
+
+  .gate-pill-pass {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    color: var(--color-success);
+  }
+
+  .gate-pill-fail {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    color: var(--color-danger);
+  }
+
+  .gate-pill-pending {
+    background: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
+    color: var(--color-text-muted);
+  }
+
+  /* ── MR deps section ───────────────────────────────────────────────────── */
+  .mr-deps-section {
+    margin-top: var(--space-2);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
   /* ── Provenance chain ─────────────────────────────────────────────────── */
