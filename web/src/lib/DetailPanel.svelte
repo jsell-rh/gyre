@@ -762,6 +762,7 @@
       const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
                       type === 'task' ? api.task(id).then(t => t?.title) :
                       type === 'repo' ? api.repo(id).then(r => r?.name) :
+                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
                       Promise.resolve(null);
       fetcher.then(name => {
         if (name) entityNameCache = { ...entityNameCache, [key]: name };
@@ -1219,31 +1220,66 @@
               <pre class="spec-content-pre">{specDetail.content}</pre>
             </div>
           {:else}
-            <!-- Metadata fallback (no content field from server yet) -->
+            {@const sd = specDetail ?? entity.data ?? {}}
             <dl class="spec-meta-list">
               <dt>{$t('detail_panel.path')}</dt><dd class="mono">{entity.id}</dd>
-              {#if entity.data?.title}
-                <dt>{$t('detail_panel.title')}</dt><dd>{entity.data.title}</dd>
+              {#if sd.title}
+                <dt>{$t('detail_panel.title')}</dt><dd>{sd.title}</dd>
               {/if}
-              {#if entity.data?.owner}
-                <dt>{$t('detail_panel.owner')}</dt><dd class="mono">{entity.data.owner}</dd>
-              {/if}
-              {#if entity.data?.kind}
-                <dt>{$t('detail_panel.kind')}</dt><dd>{entity.data.kind}</dd>
-              {/if}
-              {#if entity.data?.approval_status}
+              {#if sd.approval_status}
                 <dt>{$t('detail_panel.status')}</dt>
-                <dd><Badge value={entity.data.approval_status} variant={specStatusColor(entity.data.approval_status)} /></dd>
+                <dd><Badge value={sd.approval_status} variant={specStatusColor(sd.approval_status)} /></dd>
               {/if}
-              {#if entity.data?.current_sha}
-                <dt>{$t('detail_panel.sha')}</dt><dd class="mono">{entity.data.current_sha.slice(0, 7)}</dd>
+              {#if sd.owner}
+                <dt>{$t('detail_panel.owner')}</dt><dd class="mono">{sd.owner}</dd>
               {/if}
-              {#if entity.data?.updated_at}
-                <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
+              {#if sd.kind}
+                <dt>{$t('detail_panel.kind')}</dt><dd>{sd.kind}</dd>
+              {/if}
+              {#if sd.current_sha}
+                <dt>{$t('detail_panel.sha')}</dt><dd class="mono">{sd.current_sha.slice(0, 7)}</dd>
+              {/if}
+              {#if sd.drift_status && sd.drift_status !== 'none'}
+                <dt>Drift</dt><dd><Badge value={sd.drift_status} variant={sd.drift_status === 'drifted' ? 'warning' : 'muted'} /></dd>
+              {/if}
+              {#if sd.repo_id}
+                <dt>Repo</dt><dd class="mono">{entityName('repo', sd.repo_id)}</dd>
+              {/if}
+              {#if sd.updated_at}
+                <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(sd.updated_at)}</dd>
               {/if}
             </dl>
-            {#if !entity.data?.repo_id && !specDetail?.repo_id}
-              <p class="spec-hint">{$t('detail_panel.full_content_requires_repo')}</p>
+            <!-- Approval actions even when content is not available -->
+            <div class="spec-approval-actions" data-testid="spec-approval-actions">
+              {#if sd.approval_status === 'approved'}
+                <button class="approval-btn revoke" onclick={revokeCurrentSpec} disabled={revoking}>
+                  {revoking ? $t('detail_panel.revoking') : $t('detail_panel.revoke_approval')}
+                </button>
+              {:else if sd.current_sha}
+                <button class="approval-btn approve" onclick={approveCurrentSpec} disabled={approving}>
+                  {approving ? $t('detail_panel.approving') : $t('detail_panel.approve')}
+                </button>
+              {/if}
+            </div>
+            {#if sd.linked_tasks?.length > 0}
+              <span class="progress-section-label">Linked Tasks</span>
+              <ul class="task-list">
+                {#each sd.linked_tasks as taskId}
+                  <li class="task-item clickable-row" onclick={() => navigateTo('task', taskId)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('task', taskId); }}>
+                    <span class="task-title">{entityName('task', taskId)}</span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if sd.linked_mrs?.length > 0}
+              <span class="progress-section-label">Linked MRs</span>
+              <ul class="task-list">
+                {#each sd.linked_mrs as mrId}
+                  <li class="task-item clickable-row" onclick={() => navigateTo('mr', mrId)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mrId); }}>
+                    <span class="task-title">{entityName('mr', mrId)}</span>
+                  </li>
+                {/each}
+              </ul>
             {/if}
           {/if}
         </div>
