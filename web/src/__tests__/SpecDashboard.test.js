@@ -13,6 +13,7 @@ vi.mock('../lib/api.js', () => ({
         kind: 'system',
         approval_status: 'approved',
         updated_at: 1700000000,
+        repo_id: 'repo-1',
       },
       {
         path: 'system/payment-retry.md',
@@ -21,6 +22,7 @@ vi.mock('../lib/api.js', () => ({
         kind: 'feature',
         approval_status: 'pending',
         updated_at: 1700003600,
+        repo_id: 'repo-1',
       },
       {
         path: 'system/identity.md',
@@ -29,6 +31,7 @@ vi.mock('../lib/api.js', () => ({
         kind: 'security',
         approval_status: 'deprecated',
         updated_at: 1699999000,
+        repo_id: 'repo-1',
       },
     ]),
     specProgress: vi.fn().mockResolvedValue({

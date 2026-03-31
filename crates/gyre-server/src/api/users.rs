@@ -35,7 +35,7 @@ use axum::{
 };
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{
-    JudgmentType, Team, User, UserNotificationPreference, UserToken, WorkspaceMembership,
+    JudgmentType, Team, User, UserNotificationPreference, UserRole, UserToken, WorkspaceMembership,
     WorkspaceRole,
 };
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,11 @@ pub async fn get_me(
         }
     }
     // Return a minimal profile derived from auth when no stored user exists.
+    let global_role = if auth.roles.contains(&UserRole::Admin) {
+        "Admin".to_string()
+    } else {
+        "Member".to_string()
+    };
     let profile = UserProfileResponse {
         id: auth.agent_id.clone(),
         username: auth.agent_id.clone(),
@@ -101,7 +106,7 @@ pub async fn get_me(
         avatar_url: None,
         timezone: "UTC".to_string(),
         locale: "en".to_string(),
-        global_role: "Member".to_string(),
+        global_role,
         preferences: serde_json::json!({}),
         created_at: 0,
         updated_at: 0,

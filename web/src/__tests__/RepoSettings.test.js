@@ -41,7 +41,9 @@ const mockRepo = {
   description: 'Handles payments',
   default_branch: 'main',
   max_concurrent_agents: 3,
+  status: 'Active',
 };
+const archivedMockRepo = { ...mockRepo, status: 'Archived' };
 
 describe('RepoSettings', () => {
   beforeEach(() => {
@@ -376,25 +378,35 @@ describe('RepoSettings', () => {
       expect(container.querySelector('[data-testid="delete-btn"]')).toBeTruthy();
     });
 
-    it('delete confirm input renders after clicking delete', async () => {
+    it('delete button is disabled for non-archived repo (archive required first)', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openDangerTab(container);
-      // Confirm box hidden until Delete button clicked
-      expect(container.querySelector('[data-testid="delete-confirm-input"]')).toBeFalsy();
-      await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
+      const deleteBtn = container.querySelector('[data-testid="delete-btn"]');
+      expect(deleteBtn.disabled).toBe(true);
+    });
+
+    it('shows archive-required message for non-archived repo', async () => {
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openDangerTab(container);
+      expect(container.querySelector('[data-testid="delete-archive-required"]')).toBeTruthy();
+    });
+
+    it('delete confirm input renders for archived repo', async () => {
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: archivedMockRepo } });
+      await openDangerTab(container);
       expect(container.querySelector('[data-testid="delete-confirm-input"]')).toBeTruthy();
     });
 
-    it('delete confirm button is disabled until correct name is typed', async () => {
-      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+    it('delete confirm button is disabled until correct name is typed (archived repo)', async () => {
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: archivedMockRepo } });
       await openDangerTab(container);
       await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       const confirmBtn = container.querySelector('[data-testid="delete-confirm-btn"]');
       expect(confirmBtn.disabled).toBe(true);
     });
 
-    it('delete confirm button enabled when correct name is typed', async () => {
-      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+    it('delete confirm button enabled when correct name is typed (archived repo)', async () => {
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: archivedMockRepo } });
       await openDangerTab(container);
       await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       const input = container.querySelector('[data-testid="delete-confirm-input"]');
