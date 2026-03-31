@@ -843,22 +843,50 @@
       'gate_started': 'Gate started',
       'gate_passed': 'Gate passed',
       'gate_failed': 'Gate failed',
+      'GateResult': 'Gate completed',
       'enqueued': 'Enqueued for merge',
       'merged': 'Merged',
+      'Merged': 'Merged to main',
       'closed': 'Closed',
       'review_submitted': 'Review submitted',
       'comment_added': 'Comment added',
       'graph_extracted': 'Graph extracted',
+      'GraphDelta': 'Architecture updated',
+      'GitPush': 'Code pushed',
       'attestation_created': 'Attestation signed',
     };
     return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
   }
 
   function timelineEventVariant(evt) {
-    if (evt === 'merged' || evt === 'gate_passed') return 'success';
+    if (evt === 'merged' || evt === 'Merged' || evt === 'gate_passed') return 'success';
     if (evt === 'gate_failed' || evt === 'closed') return 'danger';
-    if (evt?.startsWith('gate_')) return 'warning';
+    if (evt?.startsWith('gate_') || evt === 'GateResult') return 'warning';
+    if (evt === 'GraphDelta' || evt === 'graph_extracted') return 'info';
     return 'info';
+  }
+
+  /** Extract human-readable detail from a timeline event's detail field */
+  function timelineDetailText(evt) {
+    const detail = evt.detail ?? evt.details;
+    if (!detail) return evt.message ?? null;
+    if (typeof detail === 'string') return detail;
+    // GateResult events have {gate, status}
+    if (detail.gate) {
+      const status = detail.status === 'pass' || detail.status === 'passed' ? 'passed' : detail.status === 'fail' || detail.status === 'failed' ? 'failed' : detail.status;
+      return `${detail.gate}: ${status}`;
+    }
+    // GitPush events have {branch, sha, ...}
+    if (detail.branch) return `Branch: ${detail.branch}${detail.sha ? ' @ ' + detail.sha.slice(0, 7) : ''}`;
+    // GraphDelta events have {added, removed, changed}
+    if (detail.added !== undefined || detail.removed !== undefined) {
+      const parts = [];
+      if (detail.added) parts.push(`+${detail.added} nodes`);
+      if (detail.removed) parts.push(`-${detail.removed} nodes`);
+      if (detail.changed) parts.push(`~${detail.changed} changed`);
+      return parts.join(', ') || null;
+    }
+    return JSON.stringify(detail);
   }
 </script>
 
@@ -1683,24 +1711,31 @@
           {:else if Array.isArray(mrTimeline) && mrTimeline.length > 0}
             <div class="timeline-list">
               {#each mrTimeline as evt, i}
+                {@const evtType = evt.event_type ?? evt.type ?? evt.event}
+                {@const detailText = timelineDetailText(evt)}
                 <div class="timeline-item">
                   <div class="timeline-connector">
-                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evt.event_type ?? evt.event)}"></div>
+                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType)}"></div>
                     {#if i < mrTimeline.length - 1}<div class="timeline-line"></div>{/if}
                   </div>
                   <div class="timeline-content">
                     <div class="timeline-header">
-                      <Badge value={timelineEventLabel(evt.event_type ?? evt.event)} variant={timelineEventVariant(evt.event_type ?? evt.event)} />
+                      <Badge value={timelineEventLabel(evtType)} variant={timelineEventVariant(evtType)} />
                       <span class="timeline-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
                     </div>
                     {#if evt.actor || evt.actor_id || evt.agent_id}
-                      <span class="timeline-actor mono">{evt.actor ?? shortId(evt.actor_id ?? evt.agent_id)}</span>
+                      <button class="entity-link timeline-actor mono" onclick={() => navigateTo('agent', evt.actor_id ?? evt.agent_id)} title={evt.actor_id ?? evt.agent_id}>
+                        {evt.actor ?? entityName('agent', evt.actor_id ?? evt.agent_id)}
+                      </button>
                     {/if}
-                    {#if evt.detail || evt.message || evt.details}
-                      <p class="timeline-detail">{evt.detail ?? evt.message ?? (typeof evt.details === 'string' ? evt.details : JSON.stringify(evt.details))}</p>
+                    {#if detailText}
+                      <p class="timeline-detail">{detailText}</p>
                     {/if}
                     {#if evt.gate_name}
                       <span class="timeline-gate-ref mono">{evt.gate_name}</span>
+                    {/if}
+                    {#if evt.sha || evt.commit_sha}
+                      <span class="timeline-sha mono">{(evt.sha ?? evt.commit_sha).slice(0, 7)}</span>
                     {/if}
                   </div>
                 </div>
@@ -3111,6 +3146,15 @@
     color: var(--color-text-muted);
     padding: 1px var(--space-1);
     background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+    width: fit-content;
+  }
+
+  .timeline-sha {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: color-mix(in srgb, var(--color-info) 8%, transparent);
     border-radius: var(--radius-sm);
     width: fit-content;
   }
