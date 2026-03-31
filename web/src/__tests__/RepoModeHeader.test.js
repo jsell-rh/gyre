@@ -50,6 +50,7 @@ vi.mock('../lib/api.js', () => ({
     agent: vi.fn().mockResolvedValue({ name: 'mock agent' }),
     mergeRequest: vi.fn().mockResolvedValue({ title: 'mock MR' }),
     mergeRequests: vi.fn().mockResolvedValue([]),
+    notificationCount: vi.fn().mockResolvedValue(0),
   },
   setAuthToken: vi.fn(),
 }));
