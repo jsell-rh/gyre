@@ -12,6 +12,7 @@
   import { toastSuccess, toastError } from './toast.svelte.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
 
   /**
    * DetailPanel — slide-in panel from the right.
@@ -89,7 +90,9 @@
     if (type === 'mr') {
       result.push(
         { id: 'diff',        label: $t('detail_panel.tabs.diff') },
+        { id: 'timeline',    label: 'Timeline' },
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
+        { id: 'reviews',     label: 'Reviews' },
       );
       if (data.status === 'merged') {
         result.push({ id: 'attestation', label: $t('detail_panel.tabs.attestation') });
@@ -252,6 +255,12 @@
   let mrGatesLoading = $state(false);
   let mrAttestation = $state(null);
   let mrAttestationLoading = $state(false);
+  let mrTimeline = $state(null);
+  let mrTimelineLoading = $state(false);
+  let mrReviews = $state(null);
+  let mrReviewsLoading = $state(false);
+  let mrComments = $state(null);
+  let mrCommentsLoading = $state(false);
 
   // ── Agent entity tab state ─────────────────────────────────────────────────
   let agentDetail = $state(null);
@@ -266,6 +275,9 @@
       mrDiff = null;
       mrGates = null;
       mrAttestation = null;
+      mrTimeline = null;
+      mrReviews = null;
+      mrComments = null;
     }
     if (entity?.type === 'agent') {
       agentDetail = null;
@@ -314,6 +326,24 @@
         .then((d) => { mrAttestation = d; })
         .catch(() => { mrAttestation = null; })
         .finally(() => { mrAttestationLoading = false; });
+    }
+    if (activeTab === 'timeline' && !mrTimeline && !mrTimelineLoading) {
+      mrTimelineLoading = true;
+      api.mrTimeline(id)
+        .then((d) => { mrTimeline = Array.isArray(d) ? d : []; })
+        .catch(() => { mrTimeline = []; })
+        .finally(() => { mrTimelineLoading = false; });
+    }
+    if (activeTab === 'reviews' && !mrReviews && !mrReviewsLoading) {
+      mrReviewsLoading = true;
+      mrCommentsLoading = true;
+      Promise.all([
+        api.mrReviews(id).catch(() => []),
+        api.mrComments(id).catch(() => []),
+      ]).then(([revs, cmts]) => {
+        mrReviews = Array.isArray(revs) ? revs : [];
+        mrComments = Array.isArray(cmts) ? cmts : [];
+      }).finally(() => { mrReviewsLoading = false; mrCommentsLoading = false; });
     }
   });
 
@@ -677,6 +707,38 @@
     if (!id) return '—';
     return id.length > 12 ? id.slice(0, 8) + '...' : id;
   }
+
+  /** Navigate to an entity in the detail panel. */
+  function navigateTo(type, id, data) {
+    openDetailPanel?.({ type, id, data: data ?? {} });
+  }
+
+  /** Map timeline event types to human-readable labels and icons */
+  function timelineEventLabel(evt) {
+    const map = {
+      'created': 'MR created',
+      'mr_created': 'MR created',
+      'commit_pushed': 'Commits pushed',
+      'gate_started': 'Gate started',
+      'gate_passed': 'Gate passed',
+      'gate_failed': 'Gate failed',
+      'enqueued': 'Enqueued for merge',
+      'merged': 'Merged',
+      'closed': 'Closed',
+      'review_submitted': 'Review submitted',
+      'comment_added': 'Comment added',
+      'graph_extracted': 'Graph extracted',
+      'attestation_created': 'Attestation signed',
+    };
+    return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
+  }
+
+  function timelineEventVariant(evt) {
+    if (evt === 'merged' || evt === 'gate_passed') return 'success';
+    if (evt === 'gate_failed' || evt === 'closed') return 'danger';
+    if (evt?.startsWith('gate_')) return 'warning';
+    return 'info';
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -768,15 +830,19 @@
                   </dd>
                 {/if}
                 {#if mr.spec_ref}
-                  <dt>Spec</dt><dd class="mono" title={mr.spec_ref}>{mr.spec_ref}</dd>
+                  {@const specPath = mr.spec_ref.split('@')[0]}
+                  <dt>Spec</dt><dd><button class="entity-link mono" title={mr.spec_ref} onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })}>{specPath.split('/').pop()}</button></dd>
                 {/if}
                 {#if mr.author_agent_id}
-                  <dt>Agent</dt><dd class="mono" title={mr.author_agent_id}>{shortId(mr.author_agent_id)}</dd>
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.author_agent_id} onclick={() => navigateTo('agent', mr.author_agent_id)}>{shortId(mr.author_agent_id)}</button></dd>
                 {:else if mr.agent_id}
-                  <dt>Agent</dt><dd class="mono" title={mr.agent_id}>{shortId(mr.agent_id)}</dd>
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{shortId(mr.agent_id)}</button></dd>
                 {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
                   <dt>Author</dt><dd class="mono" title={mr.author_id}>{shortId(mr.author_id)}</dd>
+                {/if}
+                {#if mr.task_id}
+                  <dt>Task</dt><dd><button class="entity-link mono" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{shortId(mr.task_id)}</button></dd>
                 {/if}
                 {#if mr.has_conflicts}
                   <dt>Conflicts</dt><dd><Badge value="conflicts" variant="danger" /></dd>
@@ -813,13 +879,13 @@
                   <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
                 {/if}
                 {#if ag.task_id}
-                  <dt>Task</dt><dd class="mono" title={ag.task_id}>{shortId(ag.task_id)}</dd>
+                  <dt>Task</dt><dd><button class="entity-link mono" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{shortId(ag.task_id)}</button></dd>
                 {/if}
                 {#if ag.repo_id}
                   <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{shortId(ag.repo_id)}</dd>
                 {/if}
                 {#if ag.mr_id}
-                  <dt>MR</dt><dd class="mono" title={ag.mr_id}>{shortId(ag.mr_id)}</dd>
+                  <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{shortId(ag.mr_id)}</button></dd>
                 {/if}
                 {#if ag.created_at}
                   <dt>Created</dt><dd>{fmtDate(ag.created_at)}</dd>
@@ -848,13 +914,16 @@
                 <dt>Description</dt><dd>{tk.description}</dd>
               {/if}
               {#if tk.spec_path}
-                <dt>Spec</dt><dd class="mono">{tk.spec_path}</dd>
+                <dt>Spec</dt><dd><button class="entity-link mono" title={tk.spec_path} onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })}>{tk.spec_path.split('/').pop()}</button></dd>
               {/if}
               {#if tk.branch}
                 <dt>Branch</dt><dd class="mono">{tk.branch}</dd>
               {/if}
               {#if tk.assigned_to}
-                <dt>Assigned</dt><dd class="mono" title={tk.assigned_to}>{shortId(tk.assigned_to)}</dd>
+                <dt>Assigned</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{shortId(tk.assigned_to)}</button></dd>
+              {/if}
+              {#if tk.repo_id}
+                <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{shortId(tk.repo_id)}</dd>
               {/if}
               {#if tk.labels?.length > 0}
                 <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
@@ -1088,7 +1157,7 @@
               <span class="progress-section-label">Tasks</span>
               <ul class="task-list">
                 {#each specProgress.tasks as task}
-                  <li class="task-item">
+                  <li class="task-item clickable-row" onclick={() => navigateTo('task', task.id ?? task.task_id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('task', task.id ?? task.task_id, task); }}>
                     <Badge value={task.status} variant={taskStatusColor(task.status)} />
                     <span class="task-title">{task.title}</span>
                     {#if task.priority && task.priority !== 'medium'}
@@ -1107,11 +1176,11 @@
               <span class="progress-section-label">Merge Requests</span>
               <ul class="task-list">
                 {#each specProgress.mrs as mr}
-                  <li class="task-item">
+                  <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id ?? mr.mr_id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id ?? mr.mr_id, mr); }}>
                     <Badge value={mr.status} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
                     <span class="task-title">{mr.title}</span>
-                    {#if mr.spec_ref}
-                      <span class="task-agent mono" title={mr.spec_ref}>{mr.spec_ref.split('@')[0]?.split('/').pop()}</span>
+                    {#if mr.source_branch}
+                      <span class="task-agent mono">{mr.source_branch}</span>
                     {/if}
                   </li>
                 {/each}
@@ -1177,13 +1246,16 @@
                     <div class="history-row">
                       <Badge
                         value={ev.event}
-                        variant={ev.event === 'approved' ? 'success' : ev.event === 'invalidated' ? 'danger' : 'muted'}
+                        variant={ev.event === 'approved' ? 'success' : ev.event === 'rejected' || ev.event === 'invalidated' || ev.event === 'revoked' ? 'danger' : 'muted'}
                       />
                       <span class="history-user mono">{ev.user_id || ev.approver_id || '—'}</span>
                       <span class="history-time">{fmtDate(ev.timestamp || ev.approved_at)}</span>
                     </div>
                     {#if ev.sha || ev.spec_sha}
                       <span class="history-sha mono">{(ev.sha || ev.spec_sha).slice(0, 7)}</span>
+                    {/if}
+                    {#if ev.reason}
+                      <p class="history-reason">{ev.reason}</p>
                     {/if}
                   </div>
                 {/each}
@@ -1361,20 +1433,35 @@
                 {#if att.merge_commit_sha}
                   <dt>Merge commit</dt><dd class="mono" title={att.merge_commit_sha}>{att.merge_commit_sha.slice(0, 12)}...</dd>
                 {/if}
+                {#if att.merged_at}
+                  <dt>Merged at</dt><dd>{fmtDate(att.merged_at)}</dd>
+                {/if}
                 {#if att.spec_ref}
-                  <dt>Spec</dt><dd class="mono" title={att.spec_ref}>{att.spec_ref}</dd>
+                  {@const attSpecPath = att.spec_ref.split('@')[0]}
+                  <dt>Spec</dt><dd><button class="entity-link mono" title={att.spec_ref} onclick={() => navigateTo('spec', attSpecPath, { path: attSpecPath })}>{attSpecPath.split('/').pop()}</button></dd>
+                {/if}
+                {#if att.spec_fully_approved !== undefined}
+                  <dt>Spec approved</dt><dd><Badge value={att.spec_fully_approved ? 'yes' : 'no'} variant={att.spec_fully_approved ? 'success' : 'warning'} /></dd>
                 {/if}
                 {#if att.author_agent_id}
-                  <dt>Agent</dt><dd class="mono" title={att.author_agent_id}>{shortId(att.author_agent_id)}</dd>
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{shortId(att.author_agent_id)}</button></dd>
                 {/if}
                 {#if att.mr_id}
                   <dt>MR</dt><dd class="mono" title={att.mr_id}>{shortId(att.mr_id)}</dd>
                 {/if}
                 {#if att.task_id}
-                  <dt>Task</dt><dd class="mono" title={att.task_id}>{shortId(att.task_id)}</dd>
+                  <dt>Task</dt><dd><button class="entity-link mono" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{shortId(att.task_id)}</button></dd>
                 {/if}
                 {#if att.repo_id}
                   <dt>Repo</dt><dd class="mono" title={att.repo_id}>{shortId(att.repo_id)}</dd>
+                {/if}
+                {#if att.gate_results?.length > 0}
+                  {@const passed = att.gate_results.filter(g => g.status === 'Passed' || g.status === 'passed').length}
+                  {@const total = att.gate_results.length}
+                  <dt>Gates</dt>
+                  <dd>
+                    <Badge value="{passed}/{total} passed" variant={passed === total ? 'success' : 'warning'} />
+                  </dd>
                 {/if}
               </dl>
               {#if mrAttestation.signature}
@@ -1386,6 +1473,97 @@
             </div>
           {:else}
             <p class="no-data">No attestation bundle available for this merge request</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'timeline'}
+        <div class="tab-pane">
+          {#if mrTimelineLoading}
+            <div class="spec-skeleton">
+              {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else if Array.isArray(mrTimeline) && mrTimeline.length > 0}
+            <div class="timeline-list">
+              {#each mrTimeline as evt, i}
+                <div class="timeline-item">
+                  <div class="timeline-connector">
+                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evt.event_type ?? evt.event)}"></div>
+                    {#if i < mrTimeline.length - 1}<div class="timeline-line"></div>{/if}
+                  </div>
+                  <div class="timeline-content">
+                    <div class="timeline-header">
+                      <Badge value={timelineEventLabel(evt.event_type ?? evt.event)} variant={timelineEventVariant(evt.event_type ?? evt.event)} />
+                      <span class="timeline-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
+                    </div>
+                    {#if evt.actor || evt.actor_id || evt.agent_id}
+                      <span class="timeline-actor mono">{evt.actor ?? shortId(evt.actor_id ?? evt.agent_id)}</span>
+                    {/if}
+                    {#if evt.detail || evt.message || evt.details}
+                      <p class="timeline-detail">{evt.detail ?? evt.message ?? (typeof evt.details === 'string' ? evt.details : JSON.stringify(evt.details))}</p>
+                    {/if}
+                    {#if evt.gate_name}
+                      <span class="timeline-gate-ref mono">{evt.gate_name}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="no-data">No timeline events for this merge request</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'reviews'}
+        <div class="tab-pane">
+          {#if mrReviewsLoading}
+            <div class="spec-skeleton">
+              {#each Array(3) as _}<Skeleton width="100%" height="2rem" />{/each}
+            </div>
+          {:else}
+            {#if Array.isArray(mrReviews) && mrReviews.length > 0}
+              <span class="progress-section-label">Reviews</span>
+              <div class="reviews-list">
+                {#each mrReviews as review}
+                  <div class="review-item">
+                    <div class="review-header">
+                      <Badge
+                        value={review.decision ?? review.status ?? 'review'}
+                        variant={
+                          (review.decision === 'approved' || review.status === 'approved') ? 'success' :
+                          (review.decision === 'changes_requested' || review.status === 'changes_requested') ? 'danger' : 'info'
+                        }
+                      />
+                      <span class="review-author mono">{review.reviewer ?? review.user_id ?? shortId(review.reviewer_id)}</span>
+                      <span class="review-time">{fmtDate(review.created_at ?? review.timestamp)}</span>
+                    </div>
+                    {#if review.body}
+                      <p class="review-body">{review.body}</p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data no-data-sm">No reviews yet</p>
+            {/if}
+
+            {#if Array.isArray(mrComments) && mrComments.length > 0}
+              <span class="progress-section-label">Comments</span>
+              <div class="reviews-list">
+                {#each mrComments as comment}
+                  <div class="review-item comment-item">
+                    <div class="review-header">
+                      <span class="review-author mono">{comment.author ?? comment.user_id ?? shortId(comment.author_id)}</span>
+                      <span class="review-time">{fmtDate(comment.created_at ?? comment.timestamp)}</span>
+                    </div>
+                    {#if comment.body}
+                      <p class="review-body">{comment.body}</p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data no-data-sm">No comments yet</p>
+            {/if}
           {/if}
         </div>
 
@@ -2548,5 +2726,197 @@
   .trace-msg {
     color: var(--color-text);
     word-break: break-word;
+  }
+
+  /* ── Clickable entity links ─────────────────────────────────────────────── */
+  .entity-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--color-primary);
+    cursor: pointer;
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in srgb, var(--color-primary) 40%, transparent);
+    transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+  }
+
+  .entity-link:hover {
+    color: var(--color-primary-hover, var(--color-primary));
+    text-decoration-color: var(--color-primary);
+  }
+
+  .entity-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .entity-link.mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .clickable-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .clickable-row:hover {
+    background: var(--color-surface-hover, color-mix(in srgb, var(--color-primary) 5%, transparent));
+    border-color: color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
+
+  .clickable-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* ── Timeline tab ───────────────────────────────────────────────────────── */
+  .timeline-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .timeline-item {
+    display: flex;
+    gap: var(--space-3);
+    min-height: 48px;
+  }
+
+  .timeline-connector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 16px;
+    flex-shrink: 0;
+    padding-top: var(--space-2);
+  }
+
+  .timeline-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--color-border-strong);
+    background: var(--color-surface);
+    flex-shrink: 0;
+    z-index: 1;
+  }
+
+  .timeline-dot-success { border-color: var(--color-success); background: color-mix(in srgb, var(--color-success) 20%, transparent); }
+  .timeline-dot-danger { border-color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
+  .timeline-dot-warning { border-color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 20%, transparent); }
+  .timeline-dot-info { border-color: var(--color-info); background: color-mix(in srgb, var(--color-info) 20%, transparent); }
+
+  .timeline-line {
+    width: 2px;
+    flex: 1;
+    background: var(--color-border);
+    margin-top: var(--space-1);
+  }
+
+  .timeline-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-1) 0 var(--space-3) 0;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .timeline-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .timeline-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .timeline-actor {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .timeline-detail {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .timeline-gate-ref {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+    width: fit-content;
+  }
+
+  /* ── Reviews tab ────────────────────────────────────────────────────────── */
+  .reviews-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .review-item {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .review-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .review-author {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .review-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .review-body {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    margin: 0;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+
+  .comment-item {
+    border-left: 3px solid var(--color-border-strong);
+  }
+
+  .no-data-sm {
+    padding: var(--space-2) 0;
+    font-size: var(--text-xs);
+  }
+
+  /* ── Spec history reason ────────────────────────────────────────────────── */
+  .history-reason {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    margin: 0;
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border-radius: var(--radius-sm);
+    line-height: 1.4;
   }
 </style>
