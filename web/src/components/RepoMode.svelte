@@ -190,6 +190,29 @@
     return 'muted';
   }
 
+  // ── MR quick actions ──────────────────────────────────────────────────
+  let enqueueingMr = $state(null);
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+
+  async function quickEnqueue(mr, e) {
+    e?.stopPropagation();
+    if (enqueueingMr) return;
+    enqueueingMr = mr.id;
+    try {
+      await api.enqueue(mr.id);
+      toastSuccess(`MR "${mr.title ?? 'Untitled'}" enqueued for merge`);
+      // Refresh MR list
+      const updated = await api.mergeRequest(mr.id).catch(() => null);
+      if (updated) {
+        repoMrs = repoMrs.map(m => m.id === mr.id ? { ...m, ...updated } : m);
+      }
+    } catch (err) {
+      toastError('Failed to enqueue: ' + (err.message ?? err));
+    } finally {
+      enqueueingMr = null;
+    }
+  }
+
   // Move focus to panel when it opens
   $effect(() => {
     if (agentPanelOpen && agentPanelEl) {
@@ -374,6 +397,7 @@
                 <th>Gates</th>
                 <th>Changes</th>
                 <th>Updated</th>
+                <th class="th-action"></th>
               </tr>
             </thead>
             <tbody>
@@ -417,6 +441,15 @@
                     {/if}
                   </td>
                   <td class="cell-time">{fmtRelTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
+                  <td class="cell-action">
+                    {#if mr.status === 'open' && mr.queue_position == null}
+                      <button class="quick-action-btn" onclick={(e) => quickEnqueue(mr, e)} disabled={enqueueingMr === mr.id} title="Add to merge queue">
+                        {enqueueingMr === mr.id ? '...' : 'Enqueue'}
+                      </button>
+                    {:else if mr.status === 'open' && mr.queue_position != null}
+                      <span class="queue-badge" title="In merge queue at position {mr.queue_position + 1}">#{mr.queue_position + 1}</span>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -977,6 +1010,33 @@
   .gate-cell-clickable { background: none; border: 1px solid transparent; padding: var(--space-1); border-radius: var(--radius-sm); cursor: pointer; text-align: left; font: inherit; color: inherit; transition: border-color var(--transition-fast), background var(--transition-fast); }
   .gate-cell-clickable:hover { border-color: var(--color-border); background: var(--color-surface-hover, rgba(0,0,0,0.03)); }
   .gate-cell-clickable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+
+  .th-action { width: 80px; }
+  .cell-action { text-align: right; }
+  .quick-action-btn {
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
+    white-space: nowrap;
+  }
+  .quick-action-btn:hover { opacity: 0.85; }
+  .quick-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .queue-badge {
+    display: inline-block;
+    background: var(--color-warning);
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
   .gate-names-repo { display: flex; flex-wrap: wrap; gap: 2px; }
   .gate-tag {
     font-size: 10px;
