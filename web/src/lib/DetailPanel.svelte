@@ -365,6 +365,16 @@
         // Pre-cache timeline for the timeline tab
         const rawTimeline = Array.isArray(timeline) ? timeline : (timeline?.events ?? []);
         if (!mrTimeline) mrTimeline = rawTimeline;
+        // Extract merged_at from timeline if MR response doesn't include it
+        if (d?.status === 'merged' && !d?.merged_at) {
+          const mergedEvt = rawTimeline.find(evt => {
+            const t = evt.event_type ?? evt.type ?? evt.event;
+            return t === 'Merged' || t === 'merged';
+          });
+          if (mergedEvt?.timestamp) {
+            mrDetail = { ...mrDetail, merged_at: mergedEvt.timestamp };
+          }
+        }
         // Resolve task_id via agent's current_task_id if MR lacks it
         const agentId = d?.author_agent_id ?? d?.agent_id;
         if (!d?.task_id && agentId) {
