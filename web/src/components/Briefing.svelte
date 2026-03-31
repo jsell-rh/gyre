@@ -341,10 +341,10 @@
               </div>
               <div class="item-detail">
                 {#if item.sub_specs_total}
-                  <span>{item.sub_specs_done ?? 0}/{item.sub_specs_total} sub-specs complete.</span>
+                  <span>{$t('briefing.sub_specs_progress', { values: { done: item.sub_specs_done ?? 0, total: item.sub_specs_total } })}</span>
                 {/if}
                 {#if item.active_agents}
-                  <span>{item.active_agents} agent{item.active_agents !== 1 ? 's' : ''} active.</span>
+                  <span>{$t('briefing.agents_active', { values: { count: item.active_agents } })}</span>
                 {/if}
               </div>
               {#if item.uncertainties?.length}

@@ -416,7 +416,9 @@
     "metric_cost": "cost",
     "metric_budget": "budget",
     "uncertain": "uncertain: \"{text}\"",
-    "not_yet_available": "Briefing data not yet available"
+    "not_yet_available": "Briefing data not yet available",
+    "sub_specs_progress": "{done}/{total} sub-specs complete.",
+    "agents_active": "{count} {count, plural, one {agent} other {agents}} active."
   },
   "diff_suggestion": {
     "suggested_change": "Suggested Change",
@@ -485,7 +487,9 @@
     "persona_label": "Persona: {name}",
     "related_spec": "Related spec: {path}",
     "agent_label": "Agent: {id}",
-    "mr_label": "MR: {title}"
+    "mr_label": "MR: {title}",
+    "on_mr": "on {title}",
+    "spec_label_short": "spec: {name}"
   },
   "spec_dashboard": {
     "title": "Specs",
@@ -1418,7 +1422,11 @@
       "loading_btn": "Loading\u2026",
       "refresh": "Refresh",
       "loading": "Loading audit events\u2026",
-      "empty": "No audit events found for this workspace."
+      "empty": "No audit events found for this workspace.",
+      "col_type": "Type",
+      "col_actor": "Actor",
+      "col_detail": "Detail",
+      "col_time": "Time"
     },
     "save_failed_settings": "Failed to save settings",
     "save_failed_trust": "Failed to save trust level",

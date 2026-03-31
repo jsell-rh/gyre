@@ -354,9 +354,9 @@
                   {#if body.agent_id || body.mr_title}
                     <span class="card-subtitle">
                       {#if body.agent_id}{body.agent_id}{/if}
-                      {#if body.mr_title} on {body.mr_title}{/if}
+                      {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
                       {#if body.spec_path}
-                        (spec: {body.spec_path.split('/').pop()?.replace('.md', '')})
+                        ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})
                       {/if}
                     </span>
                   {:else if body.spec_path}
