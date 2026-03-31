@@ -744,6 +744,29 @@
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
+      // Close detail panel on back navigation so back button always takes user
+      // one step back in their journey
+      if (detailPanel.open) {
+        if (detailHistory.length > 0) {
+          goBackDetailPanel();
+        } else {
+          closeDetailPanel();
+        }
+        // Don't process the popstate further — the panel close IS the back step.
+        // Re-push the current state so the next back button press navigates pages.
+        const canon = urlFor({
+          mode,
+          slug: wsSlug(currentWorkspace),
+          repoName: currentRepo?.name ?? null,
+          tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
+        });
+        window.history.pushState(
+          { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab },
+          '',
+          canon
+        );
+        return;
+      }
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt } = e.state;
         mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
