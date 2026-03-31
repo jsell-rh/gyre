@@ -532,10 +532,18 @@
                 <span>{SPEC_STATUS_ICONS[spec.status] ?? ''} {spec.status ?? '—'}</span>
               </td>
               <td class="spec-progress">
-                {#if spec.tasks_total != null}
-                  {spec.tasks_done ?? 0}/{spec.tasks_total}
+                {#if spec.tasks_total != null && spec.tasks_total > 0}
+                  {@const pct = Math.round(((spec.tasks_done ?? 0) / spec.tasks_total) * 100)}
+                  <div class="progress-cell" title="{spec.tasks_done ?? 0} of {spec.tasks_total} tasks complete ({pct}%)">
+                    <div class="progress-mini-bar">
+                      <div class="progress-mini-fill" style="width: {pct}%" class:progress-complete={pct === 100}></div>
+                    </div>
+                    <span class="progress-fraction">{spec.tasks_done ?? 0}/{spec.tasks_total}</span>
+                  </div>
+                {:else if spec.tasks_total != null}
+                  <span class="progress-fraction" title="No tasks created yet">0/0</span>
                 {:else}
-                  —
+                  <span class="secondary">—</span>
                 {/if}
               </td>
               <td class="spec-activity">{relTime(spec.updated_at)}</td>
@@ -664,18 +672,19 @@
     {:else}
       {#each Object.entries(specsByKind) as [kind, items] (kind)}
         <div class="rules-group">
-          <h3 class="rules-group-title">{kindLabel(kind)}</h3>
+          <h3 class="rules-group-title">{kindLabel(kind)} <span class="rules-count">({items.length})</span></h3>
           <ul class="rules-list" role="list">
             {#each items as ms (ms.id)}
-              <li class="rule-row">
+              <li class="rule-row rule-row-clickable" onclick={() => onManageAgentRules?.()} tabindex="0" role="button" title="Click to view and edit this rule" onkeydown={(e) => { if (e.key === 'Enter') onManageAgentRules?.(); }}>
                 <span class="rule-name">{ms.name ?? ms.path ?? '—'}</span>
                 {#if ms.required}
-                  <span class="rule-required" aria-label={$t('cross_workspace.rule_required')}>🔒</span>
+                  <span class="rule-required" aria-label={$t('cross_workspace.rule_required')} title="Required — agents must follow this rule">🔒</span>
                 {/if}
-                <span class="rule-version">v{ms.version ?? 1}</span>
-                <span class="rule-status" class:status-approved={ms.status === 'Approved'}>
+                <span class="rule-version" title="Version {ms.version ?? 1}">v{ms.version ?? 1}</span>
+                <span class="rule-status" class:status-approved={ms.status === 'Approved'} title={ms.status === 'Approved' ? 'This rule is approved and active' : ms.status === 'Pending' ? 'Awaiting approval' : ms.status ?? ''}>
                   {ms.status ?? '—'}
                 </span>
+                <span class="rule-arrow" aria-hidden="true">→</span>
               </li>
             {/each}
           </ul>
@@ -1189,6 +1198,18 @@
     color: var(--color-text-muted);
     white-space: nowrap;
   }
+
+  .progress-cell { display: flex; align-items: center; gap: var(--space-2); }
+  .progress-mini-bar { width: 48px; height: 6px; background: var(--color-border); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+  .progress-mini-fill { height: 100%; background: var(--color-warning); border-radius: 3px; transition: width 0.3s ease; }
+  .progress-mini-fill.progress-complete { background: var(--color-success); }
+  .progress-fraction { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+  .rule-row-clickable { cursor: pointer; transition: background var(--transition-fast); }
+  .rule-row-clickable:hover { background: var(--color-surface-hover, rgba(0,0,0,0.03)); }
+  .rule-row-clickable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -1px; }
+  .rule-arrow { color: var(--color-text-muted); font-size: var(--text-xs); margin-left: auto; }
+  .rules-count { font-weight: 400; color: var(--color-text-muted); font-size: var(--text-xs); }
 
   .spec-activity {
     font-size: var(--text-xs);
