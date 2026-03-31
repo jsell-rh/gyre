@@ -100,6 +100,7 @@ export const api = {
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
   mrDiff: (id) => request(`/merge-requests/${id}/diff`),
   mrGates: (id) => request(`/merge-requests/${id}/gates`),
+  mrAttestation: (id) => request(`/merge-requests/${id}/attestation`),
   submitReview: (mrId, data) =>
     request(`/merge-requests/${mrId}/reviews`, {
       method: 'POST',
