@@ -37,6 +37,8 @@
   // Filters
   let filterStatus = $state('all');
   let filterKind = $state('all');
+  let searchQuery = $state('');
+  let ownerMe = $state(false);
 
   // Sort (workspace/tenant scope)
   let sortCol = $state('path');
@@ -139,6 +141,17 @@
     }
     if (filterKind !== 'all') {
       result = result.filter((s) => (s.kind || 'feature') === filterKind);
+    }
+    if (ownerMe) {
+      result = result.filter((s) => s.owner === 'me' || s.is_mine);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      result = result.filter((s) =>
+        (s.path ?? '').toLowerCase().includes(q) ||
+        (s.kind ?? '').toLowerCase().includes(q) ||
+        (s.owner ?? '').toLowerCase().includes(q)
+      );
     }
     result = sortList(result, sortCol, sortDir);
     return result;
@@ -302,6 +315,23 @@
         {/each}
       </div>
     {/if}
+
+    <label class="owner-toggle">
+      <input
+        type="checkbox"
+        bind:checked={ownerMe}
+        aria-label={$t('spec_dashboard.filter_owner_me')}
+      />
+      <span class="owner-toggle-label">{$t('spec_dashboard.filter_owner_me')}</span>
+    </label>
+
+    <input
+      class="search-input"
+      type="search"
+      placeholder={$t('spec_dashboard.search_placeholder')}
+      bind:value={searchQuery}
+      aria-label={$t('spec_dashboard.search_placeholder')}
+    />
   </div>
 
   <!-- ── Content area ───────────────────────────────────────────────────────── -->
@@ -326,9 +356,9 @@
           ? $t('spec_dashboard.no_specs_registered')
           : $t('spec_dashboard.no_specs_filter')}
       />
-      {#if filterStatus !== 'all' || filterKind !== 'all'}
+      {#if filterStatus !== 'all' || filterKind !== 'all' || ownerMe || searchQuery.trim()}
         <div class="clear-filters-wrap">
-          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; }}>{$t('spec_dashboard.clear_filters')}</button>
+          <button class="clear-filters-btn" onclick={() => { filterStatus = 'all'; filterKind = 'all'; ownerMe = false; searchQuery = ''; }}>{$t('spec_dashboard.clear_filters')}</button>
         </div>
       {/if}
 
@@ -609,6 +639,51 @@
     border-color: var(--color-link);
     color: var(--color-link);
     font-weight: 500;
+  }
+
+  .owner-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .owner-toggle input[type="checkbox"] {
+    accent-color: var(--color-link);
+    cursor: pointer;
+  }
+
+  .owner-toggle-label {
+    user-select: none;
+  }
+
+  .search-input {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    min-width: 160px;
+    transition: border-color var(--transition-fast);
+  }
+
+  .search-input:focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  .search-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-color: var(--color-focus);
+  }
+
+  .search-input::placeholder {
+    color: var(--color-text-muted);
   }
 
   /* ── Content area ────────────────────────────────────────────────────────── */
