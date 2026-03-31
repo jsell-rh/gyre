@@ -369,22 +369,37 @@
             if (taskId) mrDetail = { ...mrDetail, task_id: taskId };
           } catch { /* best effort */ }
         }
+        // Fetch repo gate definitions to enrich gate results with names/types
+        const repoId = d?.repository_id ?? d?.repo_id;
+        let gateDefs = [];
+        if (repoId) {
+          try { gateDefs = await api.repoGates(repoId); } catch { /* best effort */ }
+        }
+        const gateDefMap = Object.fromEntries((Array.isArray(gateDefs) ? gateDefs : []).map(g => [g.id, g]));
         // Pre-compute gate summary for info tab
         const gateList = Array.isArray(gates) ? gates : (gates?.gates ?? []);
-        if (gateList.length > 0) {
-          const passed = gateList.filter(g => g.status === 'Passed' || g.status === 'passed').length;
-          const failed = gateList.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-          const total = gateList.length;
-          // Also store gate names for display
-          const gateNames = gateList.map(g => ({ name: g.gate_name ?? g.name ?? 'Gate', status: g.status, required: g.required }));
+        // Enrich gate results with definition data
+        const enrichedGates = gateList.map(r => {
+          const def = gateDefMap[r.gate_id] ?? {};
+          return {
+            ...r,
+            name: r.gate_name ?? def.name ?? r.name,
+            gate_type: r.gate_type ?? def.gate_type,
+            required: r.required ?? def.required,
+            command: r.command ?? def.command,
+            _result_id: r.id,
+          };
+        });
+        if (enrichedGates.length > 0) {
+          const passed = enrichedGates.filter(g => g.status === 'Passed' || g.status === 'passed').length;
+          const failed = enrichedGates.filter(g => g.status === 'Failed' || g.status === 'failed').length;
+          const total = enrichedGates.length;
+          const gateNames = enrichedGates.map(g => ({ name: g.name ?? 'Gate', status: g.status, required: g.required, gate_type: g.gate_type }));
           mrDetail = { ...mrDetail, _gateSummary: { passed, failed, total, gates: gateNames } };
         }
-        // Pre-cache gates for the gates tab
+        // Pre-cache enriched gates for the gates tab
         if (!mrGates) {
-          mrGates = gateList.map(r => ({
-            ...r,
-            name: r.gate_name ?? r.name,
-          }));
+          mrGates = enrichedGates;
         }
         // Fetch commit signature for merged MRs
         const repoId = d?.repository_id ?? d?.repo_id;
@@ -1363,11 +1378,12 @@
                       {#each mr._gateSummary.gates as gate}
                         {@const passed = gate.status === 'Passed' || gate.status === 'passed'}
                         {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
-                        <span class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed}>
+                        <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
                           <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
                           <span class="gate-detail-name">{gate.name}</span>
+                          {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
-                        </span>
+                        </button>
                       {/each}
                     </div>
                   {/if}
@@ -4603,12 +4619,31 @@
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     padding: 2px 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+
+  .gate-detail-item:hover {
+    color: var(--color-text);
+    text-decoration: underline;
   }
 
   .gate-detail-item.gate-pass .gate-check { color: var(--color-success); }
   .gate-detail-item.gate-fail .gate-check { color: var(--color-danger); }
   .gate-check { font-weight: 600; width: 14px; text-align: center; }
   .gate-detail-name { font-weight: 500; }
+
+  .gate-type-tag {
+    font-size: 9px;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-info) 12%, transparent);
+    color: var(--color-info);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
 
   .gate-advisory-tag {
     font-size: 9px;
