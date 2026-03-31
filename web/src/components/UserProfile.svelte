@@ -1,4 +1,5 @@
 <script>
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Tabs from '../lib/Tabs.svelte';
@@ -25,18 +26,13 @@
   // Notification preferences — per-type toggles.
   // Per HSI §12, stored in user_notification_preferences table (backend).
   // Using localStorage as fallback until backend endpoint is wired.
-  const NOTIF_TYPES = [
-    { id: 'SpecApproval',      label: 'Spec Approvals' },
-    { id: 'GateOverride',      label: 'Gate Overrides' },
-    { id: 'TrustChange',       label: 'Trust Level Changes' },
-    { id: 'MetaSpecEdit',      label: 'Meta-Spec Edits' },
-    { id: 'MergeRequestReview',label: 'Merge Request Reviews' },
-    { id: 'MergeRequestMerged',label: 'Merge Request Merged' },
-    { id: 'AgentFailure',      label: 'Agent Failures' },
-    { id: 'TrustSuggestion',   label: 'Trust Suggestions' },
-    { id: 'SpecDrift',         label: 'Spec Drift Alerts' },
-    { id: 'AgentNeedsClarification', label: 'Agent Clarification Requests' },
+  const NOTIF_TYPE_IDS = [
+    'SpecApproval', 'GateOverride', 'TrustChange', 'MetaSpecEdit',
+    'MergeRequestReview', 'MergeRequestMerged', 'AgentFailure',
+    'TrustSuggestion', 'SpecDrift', 'AgentNeedsClarification',
   ];
+  // Build NOTIF_TYPES array with localized labels for compatibility with defaultPrefs()
+  const NOTIF_TYPES = NOTIF_TYPE_IDS.map(id => ({ id, labelKey: `user_profile.notif_types.${id}` }));
 
   function defaultPrefs() {
     return Object.fromEntries(NOTIF_TYPES.map(t => [t.id, true]));
@@ -66,20 +62,20 @@
     prefsSaving = true;
     try {
       await api.updateNotificationPreferences(notifPrefs);
-      showToast('Notification preferences saved', { type: 'success' });
+      showToast($t('user_profile.prefs_saved'), { type: 'success' });
     } catch {
-      showToast('Failed to save preferences', { type: 'error' });
+      showToast($t('user_profile.prefs_failed'), { type: 'error' });
     }
     prefsSaving = false;
   }
 
-  const tabs = [
-    { id: 'info',        label: 'Profile' },
-    { id: 'memberships', label: 'Workspaces' },
-    { id: 'ledger',      label: 'Judgment Ledger' },
-    { id: 'notif-prefs', label: 'Notification Preferences' },
-    { id: 'notifications', label: 'Notifications' },
-  ];
+  const tabs = $derived([
+    { id: 'info',        label: $t('user_profile.tabs.info') },
+    { id: 'memberships', label: $t('user_profile.tabs.memberships') },
+    { id: 'ledger',      label: $t('user_profile.tabs.ledger') },
+    { id: 'notif-prefs', label: $t('user_profile.tabs.notif_prefs') },
+    { id: 'notifications', label: $t('user_profile.tabs.notifications') },
+  ]);
 
   $effect(() => { loadAll(); });
 
@@ -126,7 +122,7 @@
     try {
       me = await api.updateMe(editForm);
       editing = false;
-      showToast('Profile updated', { type: 'success' });
+      showToast($t('user_profile.profile_updated'), { type: 'success' });
     } catch (e) {
       showToast('Failed to update profile: ' + e.message, { type: 'error' });
     } finally {
@@ -200,7 +196,7 @@
       {me?.display_name?.[0]?.toUpperCase() ?? me?.username?.[0]?.toUpperCase() ?? '?'}
     </div>
     <div class="profile-meta">
-      <h1 class="page-title">{me?.display_name ?? me?.username ?? 'My Profile'}</h1>
+      <h1 class="page-title">{me?.display_name ?? me?.username ?? $t('user_profile.title')}</h1>
       {#if me?.username}
         <p class="username">@{me.username}</p>
       {/if}
@@ -209,7 +205,7 @@
       {/if}
     </div>
     {#if !editing}
-      <button class="btn-edit" onclick={() => (editing = true)}>Edit</button>
+      <button class="btn-edit" onclick={() => (editing = true)}>{$t('user_profile.edit')}</button>
     {/if}
     {#if unread > 0}
       <div class="notif-bell" role="status" aria-live="polite" aria-label="{unread} unread notifications">
@@ -224,19 +220,19 @@
 
   {#if editing}
     <form class="edit-form" onsubmit={(e) => { e.preventDefault(); saveEdit(); }}>
-      <label class="field-label">Display Name
-        <input class="field-input" bind:value={editForm.display_name} placeholder="Your display name" autocomplete="name" />
+      <label class="field-label">{$t('user_profile.fields.display_name')}
+        <input class="field-input" bind:value={editForm.display_name} placeholder={$t('user_profile.placeholders.display_name')} autocomplete="name" />
       </label>
-      <label class="field-label">Timezone
-        <input class="field-input" bind:value={editForm.timezone} placeholder="e.g. America/New_York" autocomplete="off" />
+      <label class="field-label">{$t('user_profile.fields.timezone')}
+        <input class="field-input" bind:value={editForm.timezone} placeholder={$t('user_profile.placeholders.timezone')} autocomplete="off" />
       </label>
-      <label class="field-label">Locale
-        <input class="field-input" bind:value={editForm.locale} placeholder="e.g. en-US" autocomplete="off" />
+      <label class="field-label">{$t('user_profile.fields.locale')}
+        <input class="field-input" bind:value={editForm.locale} placeholder={$t('user_profile.placeholders.locale')} autocomplete="off" />
       </label>
       <div class="edit-actions">
-        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>Cancel</button>
+        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>{$t('common.cancel')}</button>
         <button class="btn-primary" onclick={saveEdit} disabled={saving || !editForm.display_name.trim()} aria-busy={saving}>
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? $t('agent_card.saving') : $t('common.save')}
         </button>
       </div>
     </form>
@@ -250,7 +246,7 @@
     {:else if activeTab === 'info'}
       {#if me}
         <div class="info-grid">
-          {#each [['Username', me.username],['Email', me.email],['Display Name', me.display_name],['Timezone', me.timezone],['Locale', me.locale],['Role', me.global_role],['Auth Provider', me.oidc_issuer]] as [label, val]}
+          {#each [[$t('user_profile.fields.username'), me.username],[$t('user_profile.fields.email'), me.email],[$t('user_profile.fields.display_name'), me.display_name],[$t('user_profile.fields.timezone'), me.timezone],[$t('user_profile.fields.locale'), me.locale],[$t('user_profile.fields.role'), me.global_role],[$t('user_profile.fields.auth_provider'), me.oidc_issuer]] as [label, val]}
             {#if val}
               <div class="info-row">
                 <span class="info-label">{label}</span>
@@ -260,13 +256,13 @@
           {/each}
         </div>
       {:else}
-        <EmptyState title="No profile data" description="Profile data unavailable." />
+        <EmptyState title={$t('user_profile.no_profile')} description={$t('user_profile.no_profile_desc')} />
       {/if}
 
     {:else if activeTab === 'memberships'}
       <!-- Workspace memberships with quick-switch -->
       {#if workspaces.length === 0}
-        <EmptyState title="No workspaces" description="No workspace memberships." />
+        <EmptyState title={$t('user_profile.no_workspaces')} description={$t('user_profile.no_workspaces_desc')} />
       {:else}
         <div class="memberships-list">
           {#each workspaces as ws}
@@ -278,14 +274,14 @@
                 {/if}
               </div>
               {#if ws.trust_level}
-                <span class="membership-trust muted">Trust: {ws.trust_level}</span>
+                <span class="membership-trust muted">{$t('user_profile.trust_label', { values: { level: ws.trust_level } })}</span>
               {/if}
               <button
                 class="btn-switch"
                 onclick={() => switchWorkspace(ws)}
                 aria-label="Switch to {ws.name ?? ws.id} workspace"
               >
-                Switch
+                {$t('user_profile.switch')}
               </button>
             </div>
           {/each}
@@ -296,7 +292,7 @@
       <!-- Judgment Ledger: chronological log of human judgment decisions -->
       <!-- Sourced from GET /api/v1/users/me/judgments -->
       {#if judgments.length === 0}
-        <EmptyState title="No activity recorded" description="No judgment events recorded. Spec approvals, gate overrides, trust changes, and meta-spec edits will appear here." />
+        <EmptyState title={$t('user_profile.no_activity')} description={$t('user_profile.no_activity_desc')} />
       {:else}
         <div class="ledger-list">
           {#each judgments as j}
@@ -322,7 +318,7 @@
     {:else if activeTab === 'notif-prefs'}
       <!-- Notification Preferences: per-type toggles (HSI §12) -->
       <div class="prefs-section">
-        <p class="prefs-desc">Choose which notification types you receive in your Inbox.</p>
+        <p class="prefs-desc">{$t('user_profile.prefs_desc')}</p>
         <div class="prefs-list">
           {#each NOTIF_TYPES as nt}
             <label class="pref-row">
@@ -332,20 +328,20 @@
                 bind:checked={notifPrefs[nt.id]}
                 aria-label="Enable {nt.label} notifications"
               />
-              <span class="pref-label">{nt.label}</span>
+              <span class="pref-label">{$t(nt.labelKey)}</span>
             </label>
           {/each}
         </div>
         <div class="prefs-actions">
           <button class="btn-primary" onclick={savePrefs} disabled={prefsSaving} aria-busy={prefsSaving}>
-            {prefsSaving ? 'Saving…' : 'Save Preferences'}
+            {prefsSaving ? $t('agent_card.saving') : $t('user_profile.save_prefs')}
           </button>
         </div>
       </div>
 
     {:else if activeTab === 'notifications'}
       {#if notifications.length === 0}
-        <EmptyState title="No notifications" description="No notifications." />
+        <EmptyState title={$t('user_profile.no_notifications')} description={$t('user_profile.no_notifications_desc')} />
       {:else}
         <div class="notif-list">
           {#each notifications as notif}
@@ -361,7 +357,7 @@
               </div>
               <p class="notif-msg">{notif.message ?? notif.title ?? ''}</p>
               <button class="notif-view-btn" onclick={() => { goToWorkspaceHome?.(); }} aria-label="View in Inbox">
-                View in Inbox
+                {$t('user_profile.view_in_inbox')}
               </button>
             </div>
           {/each}
