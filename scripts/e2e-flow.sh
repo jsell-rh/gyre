@@ -1563,7 +1563,7 @@ cat > "$MCP_CFG" << MCPEOF
 {
   "mcpServers": {
     "gyre": {
-      "type": "url",
+      "type": "http",
       "url": "${GYRE_SERVER_URL}/mcp",
       "headers": {"Authorization": "Bearer ${GYRE_AUTH_TOKEN}"}
     }
