@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -276,7 +277,7 @@
   </span>
   <div class="inbox-header">
       <div class="inbox-title-row">
-        <h1 class="inbox-title">Decisions</h1>
+        <h1 class="inbox-title">{$t('decisions.title')}</h1>
         {#if unresolvedCount > 0}
           <span class="inbox-badge" aria-label="{unresolvedCount} unresolved items"
             >{unresolvedCount}</span
@@ -292,14 +293,14 @@
             aria-label="Filter by notification type"
             data-testid="inbox-type-filter"
           >
-            {#each availableTypes as t}
-              <option value={t}>{t === 'all' ? 'All types' : (TYPE_LABELS[t] ?? t)}</option>
+            {#each availableTypes as typ}
+              <option value={typ}>{typ === 'all' ? $t('decisions.all_types') : (TYPE_LABELS[typ] ?? typ)}</option>
             {/each}
           </select>
         {/if}
         <label class="dismissed-toggle">
           <input type="checkbox" bind:checked={showDismissed} />
-          Show Dismissed
+          {$t('decisions.show_dismissed')}
         </label>
         <Button variant="ghost" size="sm" onclick={loadNotifications}>Refresh</Button>
       </div>
@@ -319,7 +320,7 @@
         {/each}
       </div>
     {:else if visibleNotifications.length === 0}
-      <EmptyState title="All caught up!" description="No pending notifications." />
+      <EmptyState title={$t('decisions.all_caught_up')} description={$t('decisions.no_pending')} />
     {:else}
       <div class="inbox-list" role="list" aria-label="Notifications">
         {#each visibleNotifications as n (n.id)}

@@ -311,6 +311,45 @@
       "saved": "Token saved"
     }
   },
+  "decisions": {
+    "title": "Decisions",
+    "all_types": "All types",
+    "show_dismissed": "Show Dismissed",
+    "all_caught_up": "All caught up!",
+    "no_pending": "No pending notifications.",
+    "show_more": "Show more ({count} remaining)"
+  },
+  "spec_dashboard": {
+    "title": "Specs",
+    "all_workspace": "All specs across workspaces",
+    "in_workspace": "Specs in this workspace",
+    "new_spec": "+ New Spec",
+    "refresh": "Refresh",
+    "no_specs": "No specs found",
+    "no_specs_registered": "No specs are registered.",
+    "no_specs_filter": "No specs match the current filters.",
+    "clear_filters": "Clear filters",
+    "new_spec_title": "New Spec",
+    "spec_path_label": "Spec Path",
+    "spec_path_placeholder": "system/my-feature.md",
+    "spec_content_label": "Content",
+    "path_required": "Path is required",
+    "saving": "Saving…",
+    "save_create_mr": "Save & Create MR"
+  },
+  "code_tab": {
+    "clone": "Clone",
+    "copy": "Copy",
+    "copied": "Copied!",
+    "branches": "Branches",
+    "commits": "Commits",
+    "merge_requests": "Merge Requests",
+    "merge_queue": "Merge Queue",
+    "no_branches": "No branches",
+    "no_commits": "No commits",
+    "no_mrs": "No merge requests",
+    "queue_empty": "Merge queue empty"
+  },
   "common": {
     "cancel": "Cancel",
     "close": "Close",
