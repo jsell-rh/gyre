@@ -523,6 +523,7 @@
     "no_mrs": "No merge requests",
     "queue_empty": "Merge queue empty",
     "filter_list": "Filter list",
+    "filter_placeholder": "Filter {tab}\u2026",
     "no_branches_filter": "No branches match your filter.",
     "no_branches_empty": "No branches found for this repository.",
     "no_commits_filter": "No commits match your filter.",

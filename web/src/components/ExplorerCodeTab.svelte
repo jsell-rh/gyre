@@ -205,7 +205,7 @@
     <input
       type="search"
       class="filter-input"
-      placeholder="Filter {$t(SUB_TABS.find(st => st.id === subTab)?.labelKey ?? '')}…"
+      placeholder={$t('code_tab.filter_placeholder', { values: { tab: $t(SUB_TABS.find(st => st.id === subTab)?.labelKey ?? '') } })}
       bind:value={filterQuery}
       aria-label={$t('code_tab.filter_list')}
     />
