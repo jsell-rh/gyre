@@ -513,11 +513,15 @@
         <!-- File blame view -->
         <div class="file-blame-view">
           <div class="file-blame-header">
-            <button class="back-to-files" onclick={() => { selectedFile = null; blameData = null; }}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
-              Back to files
-            </button>
-            <span class="file-blame-path mono">{selectedFile}</span>
+            <nav class="blame-breadcrumb" aria-label="File navigation">
+              <button class="breadcrumb-link" onclick={() => { selectedFile = null; blameData = null; }}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
+                Files
+              </button>
+              <span class="breadcrumb-sep" aria-hidden="true">/</span>
+              <span class="breadcrumb-current mono">{selectedFile}</span>
+            </nav>
+            <span class="blame-view-label">Blame View — agent attribution per line</span>
           </div>
 
           {#if reviewRouting.length > 0}
@@ -590,9 +594,14 @@
                             class="investigate-btn"
                             onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
                             disabled={investigateLoading === (line.sha ?? line.commit_sha)}
-                            title="Spawn investigation agent at this code's conversation context"
+                            title="Resume the agent conversation that produced this line to investigate decisions"
                           >
-                            {investigateLoading === (line.sha ?? line.commit_sha) ? '…' : '?'}
+                            {#if investigateLoading === (line.sha ?? line.commit_sha)}
+                              <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                            {:else}
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                            {/if}
+                            <span class="investigate-label">Investigate</span>
                           </button>
                         {/if}
                       </td>
@@ -924,7 +933,7 @@
                     {/if}
                   </div>
                 </td>
-                <td><span class="status-badge status-{agent.status}">{agent.status ?? 'unknown'}</span></td>
+                <td title={agent.status === 'active' ? 'Agent is actively running' : agent.status === 'idle' || agent.status === 'completed' ? 'Agent finished its work successfully' : agent.status === 'failed' ? 'Agent encountered an error' : agent.status === 'dead' ? 'Agent process was terminated' : agent.status === 'stopped' ? 'Agent was gracefully stopped' : ''}><span class="status-badge status-{agent.status}">{agent.status ?? 'unknown'}</span></td>
                 <td class="mono secondary">{agent.branch ?? '—'}</td>
                 <td class="secondary">{relativeTime(agent.created_at)}</td>
               </tr>
@@ -1449,37 +1458,58 @@
 
   .file-blame-header {
     display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    flex-direction: column;
+    gap: var(--space-1);
     padding: var(--space-2) var(--space-4);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
   }
 
-  .back-to-files {
+  .blame-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .breadcrumb-link {
     display: flex;
     align-items: center;
     gap: var(--space-1);
     background: none;
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius);
-    color: var(--color-text-secondary);
+    color: var(--color-link);
     cursor: pointer;
     font: inherit;
     font-size: var(--text-xs);
     padding: var(--space-1) var(--space-2);
     transition: background var(--transition-fast), color var(--transition-fast);
+    font-weight: 600;
   }
 
-  .back-to-files:hover {
+  .breadcrumb-link:hover {
     background: var(--color-surface-hover);
-    color: var(--color-text);
+    color: var(--color-primary);
   }
 
-  .file-blame-path {
+  .breadcrumb-sep {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+  }
+
+  .breadcrumb-current {
     font-size: var(--text-sm);
     color: var(--color-text);
     font-weight: 600;
+  }
+
+  .blame-view-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .investigate-label {
+    font-size: var(--text-xs);
   }
 
   .review-routing-bar {
@@ -1594,17 +1624,17 @@
   .investigate-btn {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
+    gap: var(--space-1);
+    padding: 2px var(--space-2);
     background: transparent;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: var(--text-xs);
-    font-weight: 700;
+    font-weight: 600;
     transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+    white-space: nowrap;
   }
 
   .investigate-btn:hover:not(:disabled) {
