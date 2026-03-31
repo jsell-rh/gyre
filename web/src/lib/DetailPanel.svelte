@@ -307,6 +307,7 @@
   let agentMessagesLoading = $state(false);
   let agentWorkload = $state(null);
   let agentWorkloadLoading = $state(false);
+  let agentTraceSpans = $state(null);
 
   // Reset MR/agent/task data when entity changes
   $effect(() => {
@@ -493,9 +494,15 @@
     }
     if (activeTab === 'trace' && !agentLogs && !agentLogsLoading) {
       agentLogsLoading = true;
-      api.agentLogs(id)
-        .then((d) => { agentLogs = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []); })
-        .catch(() => { agentLogs = []; })
+      const ag = agentDetail ?? entity.data ?? {};
+      const mrId = ag.mr_id;
+      Promise.all([
+        api.agentLogs(id),
+        mrId ? api.mrTrace(mrId).catch(() => null) : Promise.resolve(null),
+      ]).then(([d, trace]) => {
+        agentLogs = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []);
+        if (trace?.spans) agentTraceSpans = trace.spans;
+      }).catch(() => { agentLogs = []; })
         .finally(() => { agentLogsLoading = false; });
     }
     if (activeTab === 'chat' && !agentMessages && !agentMessagesLoading) {
@@ -2428,19 +2435,49 @@
             <div class="spec-skeleton">
               {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
-          {:else if Array.isArray(agentLogs) && agentLogs.length > 0}
-            <div class="trace-list">
-              {#each agentLogs as entry}
-                <div class="trace-entry">
-                  {#if entry.timestamp || entry.created_at}
-                    <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
-                  {/if}
-                  <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
-                </div>
-              {/each}
-            </div>
           {:else}
-            <p class="no-data">No trace logs available for this agent</p>
+            <!-- Structured trace spans from MR trace -->
+            {#if Array.isArray(agentTraceSpans) && agentTraceSpans.length > 0}
+              <span class="progress-section-label">Execution Trace ({agentTraceSpans.length} spans)</span>
+              <div class="trace-spans">
+                {#each agentTraceSpans as span}
+                  {@const durMs = (span.end_ms && span.start_ms) ? span.end_ms - span.start_ms : null}
+                  <div class="trace-span" class:trace-span-root={!span.parent_span_id}>
+                    <div class="trace-span-header">
+                      <span class="trace-span-name">{span.name}</span>
+                      {#if durMs != null}
+                        <span class="trace-span-dur">{durMs < 1000 ? durMs + 'ms' : (durMs / 1000).toFixed(1) + 's'}</span>
+                      {/if}
+                    </div>
+                    {#if span.attributes}
+                      {@const attrs = typeof span.attributes === 'string' ? JSON.parse(span.attributes) : span.attributes}
+                      <div class="trace-span-attrs">
+                        {#each Object.entries(attrs).slice(0, 5) as [key, val]}
+                          <span class="trace-span-attr"><span class="trace-attr-key">{key}:</span> <span class="trace-attr-val">{typeof val === 'object' ? JSON.stringify(val) : String(val)}</span></span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            <!-- Raw log entries -->
+            {#if Array.isArray(agentLogs) && agentLogs.length > 0}
+              <span class="progress-section-label">Log Output ({agentLogs.length} entries)</span>
+              <div class="trace-list">
+                {#each agentLogs as entry}
+                  <div class="trace-entry">
+                    {#if entry.timestamp || entry.created_at}
+                      <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                    {/if}
+                    <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                  </div>
+                {/each}
+              </div>
+            {:else if !agentTraceSpans?.length}
+              <p class="no-data">No trace data available for this agent</p>
+            {/if}
           {/if}
         </div>
 
@@ -3862,6 +3899,72 @@
     margin-top: var(--space-3);
     padding-top: var(--space-3);
     border-top: 1px solid var(--color-border);
+  }
+
+  /* ── Trace spans ────────────────────────────────────────────────── */
+  .trace-spans {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
+  }
+
+  .trace-span {
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--color-primary, #3b82f6);
+    font-size: var(--text-xs);
+  }
+
+  .trace-span-root {
+    border-left-color: var(--color-success, #22c55e);
+    background: var(--color-surface-elevated);
+  }
+
+  .trace-span-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .trace-span-name {
+    font-weight: 500;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+  }
+
+  .trace-span-dur {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+
+  .trace-span-attrs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+  }
+
+  .trace-span-attr {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .trace-attr-key {
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+  }
+
+  .trace-attr-val {
+    font-family: var(--font-mono);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-block;
+    vertical-align: bottom;
   }
 
   /* ── Clickable entity links ─────────────────────────────────────────────── */
