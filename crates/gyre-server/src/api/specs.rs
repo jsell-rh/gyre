@@ -46,6 +46,10 @@ pub struct SpecLedgerResponse {
     pub drift_status: String,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 impl From<SpecLedgerEntry> for SpecLedgerResponse {
@@ -63,6 +67,8 @@ impl From<SpecLedgerEntry> for SpecLedgerResponse {
             drift_status: e.drift_status,
             created_at: e.created_at,
             updated_at: e.updated_at,
+            repo_id: e.repo_id,
+            workspace_id: e.workspace_id,
         }
     }
 }
@@ -449,12 +455,20 @@ pub async fn approve_spec(
             // Emit SpecApproved event on the message bus (agent-runtime.md §1).
             // This is the single trigger for all agent work via the signal chain:
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
+            // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
+            let dest = match entry.workspace_id.as_deref() {
+                Some(ws_id) => gyre_common::message::Destination::Workspace(
+                    gyre_common::Id::new(ws_id),
+                ),
+                None => gyre_common::message::Destination::Broadcast,
+            };
             state
                 .emit_event(
-                    None, // workspace_id resolved by orchestrator registry
-                    gyre_common::message::Destination::Broadcast,
+                    entry.workspace_id.as_ref().map(|ws| gyre_common::Id::new(ws.as_str())),
+                    dest,
                     gyre_common::message::MessageKind::SpecApproved,
                     Some(serde_json::json!({
+                        "repo_id": entry.repo_id,
                         "spec_path": spec_path,
                         "spec_sha": req.sha,
                         "approved_by": event.approver_id,
@@ -970,6 +984,8 @@ mod tests {
                         drift_status: "unknown".to_string(),
                         created_at: 1700000000,
                         updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: None,
                     })
                     .await
                     .unwrap();
@@ -1226,6 +1242,8 @@ mod tests {
             drift_status: "unknown".to_string(),
             created_at: 1700000000,
             updated_at: 1700000000,
+            repo_id: None,
+            workspace_id: None,
         }
     }
 

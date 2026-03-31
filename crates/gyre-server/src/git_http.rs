@@ -470,6 +470,7 @@ pub async fn git_receive_pack(
                 &update.new_sha,
                 now,
                 Some(repo_id_clone.as_str()),
+                Some(repo_workspace_id_str.as_str()),
                 Some(&state_clone.workspaces),
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
