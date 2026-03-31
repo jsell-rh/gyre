@@ -94,6 +94,13 @@
       "settings": "⚙"
     },
     "agents_active": "{count} agent{count, plural, one {} other {s}} active",
+    "loading_agents": "loading agents\u2026",
+    "no_repo_selected": "No repo selected.",
+    "active_agents": "Active Agents",
+    "loading_agents_panel": "Loading agents\u2026",
+    "no_active_agents": "No active agents in this repo.",
+    "task_label": "Task: {id}",
+    "budget_label": "Budget: {pct}%",
     "clone_url_copied": "Clone URL copied!",
     "copy_clone_url": "Copy clone URL to clipboard"
   },
