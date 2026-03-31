@@ -303,6 +303,10 @@ export const api = {
   agentSpawnLog: (id) => request(`/agents/${id}/logs?limit=50&offset=0`),
   // Container audit record (M19.3) — 404 if agent was not container-spawned
   agentContainer: (id) => request(`/agents/${id}/container`),
+  // Agent workload attestation (G10) — pid, hostname, compute_target, stack_hash, alive
+  agentWorkload: (id) => request(`/agents/${id}/workload`),
+  // Agent touched paths (M13.4) — all branches and files written by this agent
+  agentTouchedPaths: (id) => request(`/agents/${id}/touched-paths`),
   // BCP (M23)
   bcpTargets: () => request('/admin/bcp/targets'),
   bcpDrill: () => request('/admin/bcp/drill', { method: 'POST' }),
