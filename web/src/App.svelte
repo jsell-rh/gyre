@@ -968,7 +968,7 @@
                 data-testid="ws-all-workspaces"
               >
                 <span class="ws-all-icon" aria-hidden="true">◎</span>
-                All Workspaces
+                {$t('topbar.all_workspaces')}
                 {#if mode === 'cross_workspace'}
                   <span class="ws-check" aria-hidden="true">✓</span>
                 {/if}
@@ -1000,7 +1000,7 @@
                 onclick={() => { wsDropdownOpen = false; createWsForm = { name: '', description: '' }; createWsModalOpen = true; }}
                 data-testid="ws-dropdown-create"
               >
-                + New Workspace
+                {$t('workspace_home.new_workspace')}
               </button>
             </div>
           {/if}
@@ -1368,15 +1368,15 @@
 {/if}
 
 <!-- Create Workspace modal (from dropdown) -->
-<Modal bind:open={createWsModalOpen} title="New Workspace" size="sm">
+<Modal bind:open={createWsModalOpen} title={$t('workspace_home.create_ws_title')} size="sm">
   <div class="token-modal">
-    <label class="token-label" for="ws-name-input">Name *</label>
+    <label class="token-label" for="ws-name-input">{$t('workspace_home.create_ws_name_label')}</label>
     <input
       id="ws-name-input"
       class="token-input"
       type="text"
       bind:value={createWsForm.name}
-      placeholder="e.g. Backend Team"
+      placeholder={$t('workspace_home.create_ws_name_placeholder')}
       onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
     />
     <label class="token-label" for="ws-desc-input">{$t('workspace_home.create_ws_desc_label')}</label>
@@ -1385,7 +1385,7 @@
       class="token-input"
       type="text"
       bind:value={createWsForm.description}
-      placeholder="What is this workspace for?"
+      placeholder={$t('workspace_home.create_ws_desc_placeholder')}
       onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
     />
     <div class="token-actions">
