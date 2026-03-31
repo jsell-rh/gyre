@@ -158,6 +158,8 @@
   function selectRepo(repo) {
     // In workspace-scope mode, selecting a repo loads its graph in this view
     selectedRepoId = repo.id;
+    clearConceptSearch();
+    loadGraph(repo.id);
   }
 
   async function loadRepos() {
