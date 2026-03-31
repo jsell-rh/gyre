@@ -75,9 +75,21 @@
     draft: '📝',
     pending: '⏳',
     approved: '✅',
+    rejected: '❌',
     implemented: '✅',
     merged: '✅',
   };
+
+  function specStatusTooltip(status) {
+    switch (status) {
+      case 'draft': return 'Spec has been synced from the repo but not yet submitted for approval';
+      case 'pending': return 'Spec is awaiting human approval before agents can implement it';
+      case 'approved': return 'Spec has been approved — agents can create tasks and begin implementation';
+      case 'rejected': return 'Spec was rejected — no further work should proceed on this spec';
+      case 'implemented': return 'All tasks linked to this spec have been completed';
+      default: return '';
+    }
+  }
 
   // ── Decisions state ────────────────────────────────────────────────────
   let decisionsLoading = $state(true);
@@ -992,6 +1004,7 @@
               <option value="draft">{$t('workspace_home.status_draft')}</option>
               <option value="pending">{$t('workspace_home.status_pending')}</option>
               <option value="approved">{$t('workspace_home.status_approved')}</option>
+              <option value="rejected">Rejected</option>
               <option value="implemented">{$t('workspace_home.status_implemented')}</option>
             </select>
           </div>
@@ -1043,7 +1056,7 @@
                   >
                     <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
                     <td class="spec-path">{spec.path}</td>
-                    <td class="spec-status">
+                    <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
                       <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
                       {spec.approval_status ?? spec.status ?? '—'}
                     </td>
