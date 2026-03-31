@@ -968,7 +968,7 @@ ok "Spec policy: $(echo "$SP_GET" | jq -c '{require_spec_ref,warn_stale_spec}')"
 step $((STEP++)) "ABAC policies"
 # =============================================================================
 POLICY_RESP=$(api_post "${API}/policies" "{
-  \"name\": \"e2e-allow-agents\",
+  \"name\": \"e2e-allow-agents-${RUN_ID}\",
   \"scope\": \"tenant\",
   \"effect\": \"allow\",
   \"conditions\": [{\"attribute\": \"subject.type\", \"operator\": \"equals\", \"value\": \"agent\"}],
