@@ -1604,6 +1604,27 @@ Instructions:
 Important: You MUST call gyre_agent_complete as your final action." 2>&1 || true
 
 echo "[agent] Claude Code finished"
+
+# Fallback: if Claude didn't call gyre_agent_complete, do it from the wrapper.
+# Check if the agent is still active (meaning complete wasn't called).
+AGENT_STATUS_CHECK=$(curl -sf -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
+  "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}" 2>/dev/null | jq -r '.status // "unknown"')
+
+if [ "$AGENT_STATUS_CHECK" = "active" ]; then
+  echo "[agent] Claude didn't call gyre_agent_complete — calling fallback..."
+  # Check if there are commits to push
+  if git log origin/${GYRE_BRANCH}..HEAD --oneline 2>/dev/null | grep -q .; then
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.extraHeader" \
+      GIT_CONFIG_VALUE_0="Authorization: Bearer ${GYRE_AUTH_TOKEN}" \
+      git push origin "${GYRE_BRANCH}" 2>&1 || true
+  fi
+  curl -sf -H "Authorization: Bearer $GYRE_AUTH_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"branch\":\"${GYRE_BRANCH}\",\"title\":\"feat: implement task via autonomous agent\",\"target_branch\":\"main\"}" \
+    "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}/complete" 2>/dev/null || true
+  echo "[agent] Fallback complete called"
+fi
 AGENT_WRAPPER
   chmod +x "$AGENT_SCRIPT"
   ok "Agent wrapper script: ${AGENT_SCRIPT}"
