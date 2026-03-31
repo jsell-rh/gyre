@@ -163,6 +163,20 @@
     finally { policiesLoading = false; }
   }
 
+  let deletingPolicyId = $state(null);
+
+  async function deleteAbacPolicy(policyId) {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    deletingPolicyId = policyId;
+    try {
+      await api.deleteWorkspaceAbacPolicy(wsId, policyId);
+      await loadAbacPolicies(wsId);
+    } catch (e) {
+      toastError($t('workspace_settings.trust.abac_delete_failed', { values: { error: e?.message ?? 'unknown' } }));
+    } finally { deletingPolicyId = null; }
+  }
+
   async function loadMembers(wsId) {
     membersLoading = true;
     membersError = null;
@@ -455,6 +469,15 @@
                   {#if policy.description}
                     <span class="policy-desc">{policy.description}</span>
                   {/if}
+                  <button
+                    class="policy-delete-btn"
+                    onclick={() => deleteAbacPolicy(policy.id)}
+                    disabled={deletingPolicyId === policy.id}
+                    aria-label="{$t('common.delete')} {policy.name ?? policy.id}"
+                    data-testid="delete-abac-policy-btn"
+                  >
+                    {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
+                  </button>
                 </div>
               {/each}
             </div>
@@ -1049,6 +1072,28 @@
     color: var(--color-text-muted);
     width: 100%;
   }
+
+  .policy-delete-btn {
+    margin-left: auto;
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .policy-delete-btn:hover:not(:disabled) {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .policy-delete-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .policy-delete-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* ── Toggle group ─────────────────────────────────────────────────── */
   .toggle-group {
