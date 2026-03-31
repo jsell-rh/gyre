@@ -431,7 +431,7 @@
           <input
             type="search"
             class="concept-input"
-            placeholder="Search concepts… (/)"
+            placeholder={$t('explorer_view.search_placeholder')}
             disabled={loading}
             value={conceptQuery}
             oninput={onSearchInput}
@@ -443,29 +443,29 @@
 
         <span aria-live="polite" class="sr-only">
           {#if conceptLoading}
-            Searching…
+            {$t('explorer_view.searching')}
           {:else if conceptNodes !== null && conceptQuery.trim()}
             {#if conceptNodes.length > 0}
-              {conceptNodes.length} concept{conceptNodes.length === 1 ? '' : 's'} found
+              {$t('explorer_view.concepts_found', { values: { count: conceptNodes.length } })}
             {:else}
-              No concepts found
+              {$t('explorer_view.no_concepts')}
             {/if}
           {/if}
         </span>
         {#if conceptLoading}
           <span class="search-loading">
             <span class="spinner" aria-hidden="true"></span>
-            Searching…
+            {$t('explorer_view.searching')}
           </span>
         {:else if conceptNodes !== null && conceptQuery.trim()}
           {#if conceptNodes.length > 0}
             <span class="concept-chip">
-              {conceptNodes.length} {conceptNodes.length === 1 ? 'node' : 'nodes'} matching '{conceptQuery.trim()}'
+              {$t('explorer_view.nodes_matching', { values: { count: conceptNodes.length, query: conceptQuery.trim() } })}
               <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
             </span>
           {:else}
             <span class="concept-chip no-results">
-              No nodes matching '{conceptQuery.trim()}'
+              {$t('explorer_view.no_nodes_matching', { values: { query: conceptQuery.trim() } })}
               <button class="chip-clear" onclick={clearConceptSearch} aria-label="Clear search">✕</button>
             </span>
           {/if}
@@ -478,7 +478,7 @@
           <input
             type="text"
             class="ask-input"
-            placeholder="Ask: How does auth work?"
+            placeholder={$t('explorer_view.ask_placeholder')}
             bind:value={askQuery}
             onkeydown={(e) => { if (e.key === 'Enter') submitAsk(); }}
             disabled={askLoading}
@@ -495,7 +495,7 @@
             {#if askLoading}
               <span class="spinner" aria-hidden="true"></span>
             {:else}
-              Ask
+              {$t('explorer_view.ask_btn')}
             {/if}
           </button>
         </div>
@@ -549,7 +549,7 @@
 
         {:else if graphError}
           <div class="graph-error" role="alert">
-            <p>Failed to load graph: {graphError}</p>
+            <p>{$t('explorer_view.graph_error', { values: { error: graphError } })}</p>
             <button onclick={() => loadGraph(selectedRepoId)} aria-label="Retry loading graph">{$t('common.retry')}</button>
           </div>
 
