@@ -1138,7 +1138,7 @@
                         <div class="progress-cell" title="{spec.tasks_done ?? 0} of {spec.tasks_total} tasks done ({pct}%)">
                           <span class="progress-text">{spec.tasks_done ?? 0}/{spec.tasks_total}</span>
                           <div class="progress-mini-bar">
-                            <div class="progress-mini-fill" style="width: {pct}%"></div>
+                            <div class="progress-mini-fill" class:progress-complete={pct === 100} style="width: {pct}%"></div>
                           </div>
                         </div>
                       {:else if spec.tasks_total != null}
@@ -2130,10 +2130,11 @@
 
   .progress-mini-fill {
     height: 100%;
-    background: var(--color-success);
+    background: var(--color-warning);
     border-radius: 2px;
     transition: width var(--transition-fast);
   }
+  .progress-mini-fill.progress-complete { background: var(--color-success); }
 
   .spec-activity {
     font-size: var(--text-xs);
