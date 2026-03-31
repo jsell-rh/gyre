@@ -2211,31 +2211,80 @@
               {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
           {:else}
-            {#each [Array.isArray(specLinks) ? specLinks : (specLinks?.links ?? [])] as linkArray}
-              {#if linkArray.length > 0}
-                <ul class="links-list">
-                  {#each linkArray as link}
-                    {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
-                    {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
-                    {@const direction = typeof link === 'object' ? link.direction : null}
-                    {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
-                    <li class="link-item" class:link-conflict={isConflict}>
-                      {#if kind}
-                        <Badge
-                          value={kind.replace(/_/g, ' ')}
-                          variant={isConflict ? 'danger' : 'info'}
-                        />
-                      {/if}
-                      <span class="link-direction">{direction === 'inbound' ? '← from' : '→ to'}</span>
-                      <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
-                      <span class="link-full-path mono">{target}</span>
-                    </li>
-                  {/each}
-                </ul>
-              {:else}
-                <p class="no-data">{$t('detail_panel.no_links')}</p>
-              {/if}
-            {/each}
+            {@const linkArray = Array.isArray(specLinks) ? specLinks : (specLinks?.links ?? [])}
+            {@const inbound = linkArray.filter(l => (typeof l === 'object' ? l.direction : null) === 'inbound')}
+            {@const outbound = linkArray.filter(l => (typeof l === 'object' ? l.direction : null) !== 'inbound')}
+
+            {#if linkArray.length > 0}
+              <!-- Visual spec relationship diagram -->
+              <div class="spec-link-diagram">
+                {#if inbound.length > 0}
+                  <div class="link-column link-column-inbound">
+                    {#each inbound as link}
+                      {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target)}
+                      {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
+                      <button class="link-node link-node-inbound" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })} title={target}>
+                        <span class="link-node-name">{target?.split('/').pop()}</span>
+                        {#if kind}<span class="link-node-kind">{kind.replace(/_/g, ' ')}</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                  <div class="link-arrows">
+                    {#each inbound as _}
+                      <span class="link-arrow">→</span>
+                    {/each}
+                  </div>
+                {/if}
+                <div class="link-column link-column-center">
+                  <div class="link-node link-node-current">
+                    <span class="link-node-name">{entity?.id?.split('/').pop()}</span>
+                    <span class="link-node-kind">current</span>
+                  </div>
+                </div>
+                {#if outbound.length > 0}
+                  <div class="link-arrows">
+                    {#each outbound as _}
+                      <span class="link-arrow">→</span>
+                    {/each}
+                  </div>
+                  <div class="link-column link-column-outbound">
+                    {#each outbound as link}
+                      {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target)}
+                      {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
+                      {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
+                      <button class="link-node link-node-outbound" class:link-node-conflict={isConflict} onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })} title={target}>
+                        <span class="link-node-name">{target?.split('/').pop()}</span>
+                        {#if kind}<span class="link-node-kind">{kind.replace(/_/g, ' ')}</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+
+              <!-- Detailed list below diagram -->
+              <span class="progress-section-label" style="margin-top: var(--space-4)">All Links ({linkArray.length})</span>
+              <ul class="links-list">
+                {#each linkArray as link}
+                  {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
+                  {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
+                  {@const direction = typeof link === 'object' ? link.direction : null}
+                  {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
+                  <li class="link-item" class:link-conflict={isConflict}>
+                    {#if kind}
+                      <Badge
+                        value={kind.replace(/_/g, ' ')}
+                        variant={isConflict ? 'danger' : 'info'}
+                      />
+                    {/if}
+                    <span class="link-direction">{direction === 'inbound' ? '← from' : '→ to'}</span>
+                    <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
+                    <span class="link-full-path mono">{target}</span>
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="no-data">{$t('detail_panel.no_links')}</p>
+            {/if}
           {/if}
         </div>
 
@@ -3832,6 +3881,76 @@
   }
 
   /* Links tab */
+  /* ── Spec link diagram ──────────────────────────────────────────────── */
+  .spec-link-diagram {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-2);
+    overflow-x: auto;
+  }
+
+  .link-column {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .link-arrows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    align-items: center;
+    color: var(--color-text-muted);
+    font-size: var(--text-lg);
+  }
+
+  .link-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-elevated, var(--color-bg));
+    cursor: pointer;
+    font-size: var(--text-xs);
+    min-width: 80px;
+    text-align: center;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .link-node:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface-elevated, var(--color-bg)));
+  }
+
+  .link-node-current {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface-elevated, var(--color-bg)));
+    cursor: default;
+    font-weight: 600;
+  }
+
+  .link-node-conflict {
+    border-color: var(--color-danger);
+  }
+
+  .link-node-name {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .link-node-kind {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
   .links-list {
     list-style: none;
     padding: 0;
