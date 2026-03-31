@@ -277,7 +277,7 @@ const { turnFile } = createHooksSettingsFile();
 
 let messageCount = 0;
 let lastHeartbeat = Date.now();
-const HEARTBEAT_INTERVAL_MS = 60_000;
+const HEARTBEAT_INTERVAL_MS = 15_000; // Must be < server's 60s stale timeout
 let conversationSha = null;
 
 try {
