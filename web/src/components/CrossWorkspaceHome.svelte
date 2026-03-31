@@ -8,12 +8,45 @@
    * Spec refs:
    *   ui-navigation.md §10 (Cross-Workspace View)
    */
+  import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import Modal from '../lib/Modal.svelte';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToWorkspaceSettings = getContext('goToWorkspaceSettings') ?? null;
+  const goToAgentRules = getContext('goToAgentRules') ?? null;
 
   let {
     onSelectWorkspace = undefined,
     onSettings = undefined,
+    onManageAgentRules = undefined,
   } = $props();
+
+  // ── Create Workspace form state ──────────────────────────────────────
+  let createWsOpen = $state(false);
+  let createWsForm = $state({ name: '', description: '' });
+  let createWsSaving = $state(false);
+
+  async function handleCreateWorkspace() {
+    const name = createWsForm.name.trim();
+    if (!name) return;
+    createWsSaving = true;
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
+      toastSuccess($t('cross_workspace.ws_created', { values: { name } }));
+      createWsOpen = false;
+      createWsForm = { name: '', description: '' };
+      await loadWorkspaces();
+      if (newWs && onSelectWorkspace) onSelectWorkspace(newWs);
+    } catch (e) {
+      toastError($t('cross_workspace.ws_create_failed', { values: { error: e.message || e } }));
+    } finally {
+      createWsSaving = false;
+    }
+  }
 
   // ── Notification type icons (HSI §8) ────────────────────────────────────
   const TYPE_ICONS = {
@@ -37,17 +70,89 @@
     merged: '✅',
   };
 
-  const KIND_LABELS = {
-    Persona: 'Persona',
-    Principle: 'Principle',
-    Standard: 'Standard',
-    Process: 'Process',
-  };
+  function kindLabel(kind) {
+    const key = `cross_workspace.kind_labels.${kind}`;
+    const val = $t(key);
+    return val !== key ? val : kind;
+  }
+
+  // ── Workspace name lookup map ────────────────────────────────────────────
+  let workspaceNameMap = $state({});
 
   // ── Decisions state ─────────────────────────────────────────────────────
   let decisionsLoading = $state(true);
   let decisionsError = $state(null);
   let notifications = $state([]);
+  let actionStates = $state({});
+  let showAllDecisions = $state(false);
+
+  function getBody(n) {
+    try { return JSON.parse(n.body || '{}'); } catch { return {}; }
+  }
+
+  function normalizeSpecPath(path) {
+    return path ? path.replace(/^specs\//, '') : path;
+  }
+
+  async function handleApproveSpec(n) {
+    const body = getBody(n);
+    if (!body.spec_path || !body.spec_sha) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
+    try {
+      await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.approved') } };
+    } catch (e) {
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('decisions.approval_failed') } };
+    }
+  }
+
+  async function handleRejectSpec(n) {
+    const body = getBody(n);
+    if (!body.spec_path) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
+    try {
+      await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected');
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.rejected') } };
+    } catch (e) {
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('decisions.rejection_failed') } };
+    }
+  }
+
+  async function handleRetry(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.enqueue(body.mr_id);
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.re_queued') } };
+    } catch (e) {
+      actionStates = { ...actionStates, [n.id]: { loading: false, success: false, message: e.message || $t('decisions.retry_failed') } };
+    }
+  }
+
+  async function handleDismiss(n) {
+    actionStates = { ...actionStates, [n.id]: { loading: true } };
+    try {
+      await api.markNotificationRead(n.id);
+      notifications = notifications.filter(item => item.id !== n.id);
+      actionStates = { ...actionStates, [n.id]: { loading: false } };
+    } catch {
+      toastError($t('decisions.dismiss_failed'));
+      actionStates = { ...actionStates, [n.id]: { loading: false } };
+    }
+  }
+
+  function typeLabel(type) {
+    const key = `cross_workspace.type_labels.${type}`;
+    const val = $t(key);
+    return val !== key ? val : type;
+  }
 
   // ── Workspaces state ────────────────────────────────────────────────────
   let workspacesLoading = $state(true);
@@ -58,6 +163,48 @@
   let specsLoading = $state(true);
   let specsError = $state(null);
   let specs = $state([]);
+  let specsSortCol = $state('path');
+  let specsSortDir = $state('asc');
+  let specsShowAll = $state(false);
+
+  function toggleSpecsSort(col) {
+    if (specsSortCol === col) {
+      specsSortDir = specsSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      specsSortCol = col;
+      specsSortDir = 'asc';
+    }
+  }
+
+  function specsSortArrow(col) {
+    if (specsSortCol !== col) return '↕';
+    return specsSortDir === 'asc' ? '↑' : '↓';
+  }
+
+  let sortedSpecs = $derived.by(() => {
+    return [...specs].sort((a, b) => {
+      if (specsSortCol === 'progress') {
+        const av = a.tasks_total ? (a.tasks_done ?? 0) / a.tasks_total : -1;
+        const bv = b.tasks_total ? (b.tasks_done ?? 0) / b.tasks_total : -1;
+        return specsSortDir === 'asc' ? av - bv : bv - av;
+      }
+      const av = String(a[specsSortCol] ?? '');
+      const bv = String(b[specsSortCol] ?? '');
+      const cmp = av.localeCompare(bv);
+      return specsSortDir === 'asc' ? cmp : -cmp;
+    });
+  });
+
+  function relTime(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - new Date(ts).getTime();
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return $t('common.time_just_now');
+    if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
+    const h = Math.floor(m / 60);
+    if (h < 24) return $t('common.time_hours_ago', { values: { count: h } });
+    return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
+  }
 
   // ── Briefing state ───────────────────────────────────────────────────────
   // Cross-workspace briefing: aggregate per-workspace briefings (§10)
@@ -72,8 +219,11 @@
 
   // ── Load all sections ────────────────────────────────────────────────────
   $effect(() => {
-    loadDecisions();
-    loadWorkspaces().then(() => loadBriefings());
+    // Load workspaces first so workspace name map is available for decisions
+    loadWorkspaces().then(() => {
+      loadDecisions();
+      loadBriefings();
+    });
     loadSpecs();
     loadAgentRules();
   });
@@ -82,10 +232,14 @@
     decisionsLoading = true;
     decisionsError = null;
     try {
-      const data = await api.myNotifications({ limit: 20, unread: true });
-      notifications = Array.isArray(data) ? data : (data?.items ?? []);
+      let data = await api.myNotifications();
+      data = Array.isArray(data) ? data : (data?.items ?? []);
+      // Exclude dismissed and resolved items
+      data = data.filter(n => !n.dismissed_at && !n.resolved_at);
+      data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
+      notifications = data;
     } catch (e) {
-      decisionsError = e?.message ?? 'Failed to load decisions';
+      decisionsError = e?.message ?? $t('cross_workspace.error_load_decisions');
     } finally {
       decisionsLoading = false;
     }
@@ -97,8 +251,9 @@
     try {
       const data = await api.workspaces();
       workspaces = Array.isArray(data) ? data : [];
+      workspaceNameMap = Object.fromEntries(workspaces.map(w => [w.id, w.name ?? w.id]));
     } catch (e) {
-      workspacesError = e?.message ?? 'Failed to load workspaces';
+      workspacesError = e?.message ?? $t('cross_workspace.error_load_workspaces');
     } finally {
       workspacesLoading = false;
     }
@@ -112,7 +267,7 @@
       const data = await api.specsForWorkspace(null);
       specs = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
-      specsError = e?.message ?? 'Failed to load specs';
+      specsError = e?.message ?? $t('cross_workspace.error_load_specs');
     } finally {
       specsLoading = false;
     }
@@ -142,7 +297,7 @@
         .filter((r) => r.status === 'fulfilled' && r.value.summary)
         .map((r) => r.value);
     } catch (e) {
-      briefingError = e?.message ?? 'Failed to load briefing';
+      briefingError = e?.message ?? $t('cross_workspace.error_load_briefing');
     } finally {
       briefingLoading = false;
     }
@@ -155,7 +310,7 @@
       const data = await api.getMetaSpecs({ scope: 'Global' });
       globalMetaSpecs = Array.isArray(data) ? data : (data?.items ?? []);
     } catch (e) {
-      rulesError = e?.message ?? 'Failed to load agent rules';
+      rulesError = e?.message ?? $t('cross_workspace.error_load_rules');
     } finally {
       rulesLoading = false;
     }
@@ -176,15 +331,15 @@
 <div class="cross-workspace-home" data-testid="cross-workspace-home">
   <div class="cwh-header">
     <div class="cwh-header-text">
-      <h1 class="cwh-title">All Workspaces</h1>
-      <p class="cwh-subtitle">Tenant-scope overview — decisions, workspaces, specs, briefing, and agent rules across your organization.</p>
+      <h1 class="cwh-title">{$t('cross_workspace.title')}</h1>
+      <p class="cwh-subtitle">{$t('cross_workspace.subtitle')}</p>
     </div>
     {#if onSettings}
       <button
         class="tenant-gear-btn"
         onclick={() => onSettings?.()}
-        aria-label="Tenant administration"
-        title="Tenant administration (/all/settings)"
+        aria-label={$t('cross_workspace.tenant_admin')}
+        title={$t('cross_workspace.tenant_admin_title')}
         data-testid="tenant-gear-btn"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -199,28 +354,48 @@
   <section class="cwh-section" data-testid="section-decisions" aria-labelledby="decisions-heading">
     <div class="section-header">
       <h2 class="section-title" id="decisions-heading">
-        Decisions
+        {$t('cross_workspace.sections.decisions')}
         {#if notifications.length > 0}
-          <span class="section-badge" aria-label="{notifications.length} pending">{notifications.length}</span>
+          <span class="section-badge" aria-label={$t('cross_workspace.pending_label', { values: { count: notifications.length } })}>{notifications.length}</span>
         {/if}
       </h2>
     </div>
 
     {#if decisionsLoading}
-      <div class="section-loading" aria-live="polite">Loading decisions…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_decisions')}</div>
     {:else if decisionsError}
       <div class="section-error" role="alert">{decisionsError}</div>
     {:else if notifications.length === 0}
-      <p class="section-empty">No decisions needed — system is running autonomously.</p>
+      <p class="section-empty">{$t('cross_workspace.decisions_empty')}</p>
     {:else}
       <ul class="decisions-list" role="list">
-        {#each notifications.slice(0, 5) as notif (notif.id)}
-          <li class="decision-item">
+        {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as notif (notif.id)}
+          {@const body = getBody(notif)}
+          {@const state = actionStates[notif.id] ?? {}}
+          <li class="decision-item" data-testid="cwh-decision-item">
             <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[notif.notification_type] ?? '•'}</span>
             <div class="decision-body">
-              <span class="decision-desc">{notif.message ?? notif.title ?? 'Decision pending'}</span>
-              {#if notif.workspace_name}
-                <span class="decision-ws-badge">{notif.workspace_name}</span>
+              <div class="decision-content">
+                <span class="decision-type">{typeLabel(notif.notification_type)}</span>
+                <span class="decision-desc">{notif.message ?? notif.title ?? $t('cross_workspace.decision_pending')}</span>
+              </div>
+              {#if notif.workspace_id && workspaceNameMap[notif.workspace_id]}
+                <span class="decision-ws-badge">{workspaceNameMap[notif.workspace_id]}</span>
+              {/if}
+            </div>
+            <div class="decision-actions">
+              {#if state.success}
+                <span class="action-feedback success">{state.message}</span>
+              {:else if state.loading}
+                <span class="action-feedback">…</span>
+              {:else}
+                {#if notif.notification_type === 'spec_approval' && body.spec_path && body.spec_sha}
+                  <button class="inline-btn approve" onclick={() => handleApproveSpec(notif)} aria-label={$t('cross_workspace.approve_spec')}>{$t('cross_workspace.approve')}</button>
+                  <button class="inline-btn reject" onclick={() => handleRejectSpec(notif)} aria-label={$t('cross_workspace.reject_spec')}>{$t('cross_workspace.reject')}</button>
+                {:else if notif.notification_type === 'gate_failure' && body.mr_id}
+                  <button class="inline-btn" onclick={() => handleRetry(notif)} aria-label={$t('cross_workspace.retry_gate')}>{$t('cross_workspace.retry')}</button>
+                {/if}
+                <button class="inline-btn secondary" onclick={() => handleDismiss(notif)} aria-label={$t('cross_workspace.dismiss')}>{$t('cross_workspace.dismiss')}</button>
               {/if}
             </div>
           </li>
@@ -228,7 +403,9 @@
       </ul>
       {#if notifications.length > 5}
         <div class="section-footer">
-          <span class="view-all-hint">{notifications.length - 5} more decisions…</span>
+          <button class="view-all-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>
+            {showAllDecisions ? $t('cross_workspace.show_fewer') : $t('cross_workspace.view_all_decisions', { values: { count: notifications.length } })}
+          </button>
         </div>
       {/if}
     {/if}
@@ -237,15 +414,22 @@
   <!-- ── Workspaces ────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-workspaces" aria-labelledby="workspaces-heading">
     <div class="section-header">
-      <h2 class="section-title" id="workspaces-heading">Workspaces</h2>
+      <h2 class="section-title" id="workspaces-heading">{$t('cross_workspace.sections.workspaces')}</h2>
+      <button
+        class="new-ws-btn"
+        onclick={() => { createWsForm = { name: '', description: '' }; createWsOpen = true; }}
+        data-testid="create-workspace-btn"
+      >
+        {$t('cross_workspace.new_workspace')}
+      </button>
     </div>
 
     {#if workspacesLoading}
-      <div class="section-loading" aria-live="polite">Loading workspaces…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_workspaces')}</div>
     {:else if workspacesError}
       <div class="section-error" role="alert">{workspacesError}</div>
     {:else if workspaces.length === 0}
-      <p class="section-empty">No workspaces found.</p>
+      <p class="section-empty">{$t('cross_workspace.workspaces_empty')}</p>
     {:else}
       <ul class="workspace-list" role="list">
         {#each workspaces as ws (ws.id)}
@@ -258,10 +442,10 @@
               <span class="workspace-name">{ws.name}</span>
               <span class="workspace-meta">
                 {#if ws.agent_count != null}
-                  <span>{ws.agent_count} agents</span>
+                  <span>{$t('cross_workspace.agents_count', { values: { count: ws.agent_count } })}</span>
                 {/if}
                 {#if ws.budget_pct != null}
-                  <span>Budget: {ws.budget_pct}%</span>
+                  <span>{$t('cross_workspace.budget_pct', { values: { pct: ws.budget_pct } })}</span>
                 {/if}
                 {#if ws.health}
                   <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
@@ -279,27 +463,44 @@
   <!-- ── Specs ─────────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-specs" aria-labelledby="specs-heading">
     <div class="section-header">
-      <h2 class="section-title" id="specs-heading">Specs</h2>
+      <h2 class="section-title" id="specs-heading">{$t('cross_workspace.sections.specs')}</h2>
     </div>
 
     {#if specsLoading}
-      <div class="section-loading" aria-live="polite">Loading specs…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_specs')}</div>
     {:else if specsError}
       <div class="section-error" role="alert">{specsError}</div>
     {:else if specs.length === 0}
-      <p class="section-empty">No specs found across workspaces.</p>
+      <p class="section-empty">{$t('cross_workspace.specs_empty')}</p>
     {:else}
       <table class="specs-table" data-testid="specs-table">
         <thead>
           <tr>
-            <th scope="col">Path</th>
-            <th scope="col">Workspace / Repo</th>
-            <th scope="col">Status</th>
+            <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>{$t('cross_workspace.col_path')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
+            </th>
+            <th scope="col" aria-sort={specsSortCol === 'workspace_name' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('workspace_name')}>{$t('cross_workspace.col_workspace_repo')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('workspace_name')}</span></button>
+            </th>
+            <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('cross_workspace.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
+            </th>
+            <th scope="col" aria-sort={specsSortCol === 'progress' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>{$t('workspace_home.col_progress')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('progress')}</span></button>
+            </th>
+            <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+              <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
+            </th>
           </tr>
         </thead>
         <tbody>
-          {#each specs.slice(0, 10) as spec (spec.path ?? spec.id)}
-            <tr class="spec-row">
+          {#each (specsShowAll ? sortedSpecs : sortedSpecs.slice(0, 10)) as spec (spec.path ?? spec.id)}
+            <tr class="spec-row" class:clickable={spec.workspace_id} onclick={() => {
+              if (spec.workspace_id) {
+                const ws = workspaces.find(w => w.id === spec.workspace_id);
+                if (ws && onSelectWorkspace) onSelectWorkspace(ws);
+              }
+            }} role={spec.workspace_id ? 'button' : undefined} tabindex={spec.workspace_id ? 0 : undefined} onkeydown={(e) => { if (e.key === 'Enter' && spec.workspace_id) { const ws = workspaces.find(w => w.id === spec.workspace_id); if (ws && onSelectWorkspace) onSelectWorkspace(ws); } }}>
               <td class="spec-path">{spec.path ?? spec.name ?? '—'}</td>
               <td class="spec-attribution">
                 {#if spec.workspace_name}
@@ -312,13 +513,23 @@
               <td class="spec-status">
                 <span>{SPEC_STATUS_ICONS[spec.status] ?? ''} {spec.status ?? '—'}</span>
               </td>
+              <td class="spec-progress">
+                {#if spec.tasks_total != null}
+                  {spec.tasks_done ?? 0}/{spec.tasks_total}
+                {:else}
+                  —
+                {/if}
+              </td>
+              <td class="spec-activity">{relTime(spec.updated_at)}</td>
             </tr>
           {/each}
         </tbody>
       </table>
-      {#if specs.length > 10}
+      {#if sortedSpecs.length > 10}
         <div class="section-footer">
-          <span class="view-all-hint">{specs.length - 10} more specs…</span>
+          <button class="view-all-btn" onclick={() => { specsShowAll = !specsShowAll; }}>
+            {specsShowAll ? $t('cross_workspace.show_fewer') : $t('cross_workspace.show_all_specs', { values: { count: sortedSpecs.length } })}
+          </button>
         </div>
       {/if}
     {/if}
@@ -327,16 +538,16 @@
   <!-- ── Briefing ─────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-briefing" aria-labelledby="briefing-heading">
     <div class="section-header">
-      <h2 class="section-title" id="briefing-heading">Briefing</h2>
-      <span class="section-scope-tag">Aggregated</span>
+      <h2 class="section-title" id="briefing-heading">{$t('cross_workspace.sections.briefing')}</h2>
+      <span class="section-scope-tag">{$t('cross_workspace.scope_aggregated')}</span>
     </div>
 
     {#if briefingLoading}
-      <div class="section-loading" aria-live="polite">Loading briefing…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_briefing')}</div>
     {:else if briefingError}
       <div class="section-error" role="alert">{briefingError}</div>
     {:else if briefingSummaries.length === 0}
-      <p class="section-empty">No briefing data available across workspaces.</p>
+      <p class="section-empty">{$t('cross_workspace.briefing_empty')}</p>
     {:else}
       <ul class="briefing-list" role="list">
         {#each briefingSummaries as item (item.workspaceName)}
@@ -352,26 +563,33 @@
   <!-- ── Agent Rules ────────────────────────────────────────────────────── -->
   <section class="cwh-section" data-testid="section-agent-rules" aria-labelledby="agent-rules-heading">
     <div class="section-header">
-      <h2 class="section-title" id="agent-rules-heading">Agent Rules</h2>
-      <span class="section-scope-tag">Tenant-level</span>
+      <h2 class="section-title" id="agent-rules-heading">{$t('cross_workspace.sections.agent_rules')}</h2>
+      <span class="section-scope-tag">{$t('cross_workspace.scope_tenant_level')}</span>
+      {#if onManageAgentRules}
+        <button
+          class="manage-rules-btn"
+          onclick={() => onManageAgentRules?.()}
+          data-testid="manage-tenant-rules-btn"
+        >{$t('cross_workspace.manage_tenant_rules')}</button>
+      {/if}
     </div>
 
     {#if rulesLoading}
-      <div class="section-loading" aria-live="polite">Loading agent rules…</div>
+      <div class="section-loading" aria-live="polite">{$t('cross_workspace.loading_agent_rules')}</div>
     {:else if rulesError}
       <div class="section-error" role="alert">{rulesError}</div>
     {:else if globalMetaSpecs.length === 0}
-      <p class="section-empty">No tenant-level agent rules defined.</p>
+      <p class="section-empty">{$t('cross_workspace.agent_rules_empty')}</p>
     {:else}
       {#each Object.entries(specsByKind) as [kind, items] (kind)}
         <div class="rules-group">
-          <h3 class="rules-group-title">{KIND_LABELS[kind] ?? kind}</h3>
+          <h3 class="rules-group-title">{kindLabel(kind)}</h3>
           <ul class="rules-list" role="list">
             {#each items as ms (ms.id)}
               <li class="rule-row">
                 <span class="rule-name">{ms.name ?? ms.path ?? '—'}</span>
                 {#if ms.required}
-                  <span class="rule-required" aria-label="Required">🔒</span>
+                  <span class="rule-required" aria-label={$t('cross_workspace.rule_required')}>🔒</span>
                 {/if}
                 <span class="rule-version">v{ms.version ?? 1}</span>
                 <span class="rule-status" class:status-approved={ms.status === 'Approved'}>
@@ -385,6 +603,38 @@
     {/if}
   </section>
 </div>
+
+<!-- Create Workspace modal -->
+<Modal bind:open={createWsOpen} title={$t('cross_workspace.new_workspace')} size="sm">
+  <div class="create-ws-form">
+    <label class="create-ws-label">{$t('cross_workspace.create_ws_name_label')}
+      <input
+        class="create-ws-input"
+        bind:value={createWsForm.name}
+        placeholder={$t('cross_workspace.create_ws_name_placeholder')}
+        onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+      />
+    </label>
+    <label class="create-ws-label">{$t('cross_workspace.create_ws_desc_label')}
+      <input
+        class="create-ws-input"
+        bind:value={createWsForm.description}
+        placeholder={$t('cross_workspace.create_ws_desc_placeholder')}
+        onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspace()}
+      />
+    </label>
+    <div class="create-ws-actions">
+      <button class="create-ws-cancel" onclick={() => (createWsOpen = false)}>{$t('cross_workspace.create_ws_cancel')}</button>
+      <button
+        class="create-ws-submit"
+        onclick={handleCreateWorkspace}
+        disabled={createWsSaving || !createWsForm.name?.trim()}
+      >
+        {createWsSaving ? $t('cross_workspace.create_ws_creating') : $t('cross_workspace.create_ws_submit')}
+      </button>
+    </div>
+  </div>
+</Modal>
 
 <style>
   .cross-workspace-home {
@@ -499,6 +749,24 @@
     padding: 2px var(--space-2);
   }
 
+  .manage-rules-btn {
+    margin-left: auto;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    padding: 0;
+  }
+
+  .manage-rules-btn:hover { text-decoration: underline; }
+
+  .manage-rules-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
   .section-loading,
   .section-empty {
     padding: var(--space-6);
@@ -522,9 +790,23 @@
     border-top: 1px solid var(--color-border);
   }
 
-  .view-all-hint {
+  .view-all-btn {
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    color: var(--color-primary);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    padding: 0;
+  }
+
+  .view-all-btn:hover {
+    text-decoration: underline;
+  }
+
+  .view-all-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Decisions ────────────────────────────────────────────────────────── */
@@ -560,11 +842,25 @@
     min-width: 0;
   }
 
+  .decision-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .decision-type {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
   .decision-desc {
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
-    flex: 1;
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -578,6 +874,70 @@
     padding: 1px var(--space-2);
     white-space: nowrap;
     flex-shrink: 0;
+  }
+
+  .decision-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .action-feedback {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .action-feedback.success {
+    color: var(--color-success);
+  }
+
+  .inline-btn {
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .inline-btn:hover {
+    border-color: var(--color-border-strong);
+    color: var(--color-text);
+  }
+
+  .inline-btn.approve {
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+    color: var(--color-success);
+  }
+
+  .inline-btn.approve:hover {
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+    border-color: var(--color-success);
+  }
+
+  .inline-btn.reject {
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
+    color: var(--color-danger);
+  }
+
+  .inline-btn.reject:hover {
+    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
+    border-color: var(--color-danger);
+  }
+
+  .inline-btn.secondary {
+    color: var(--color-text-muted);
+  }
+
+  .inline-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Workspaces ───────────────────────────────────────────────────────── */
@@ -643,7 +1003,7 @@
   }
 
   .specs-table th {
-    padding: var(--space-2) var(--space-6);
+    padding: 0;
     text-align: left;
     font-size: var(--text-xs);
     font-weight: 600;
@@ -654,6 +1014,37 @@
     background: var(--color-surface-elevated);
   }
 
+  .sort-btn {
+    width: 100%;
+    text-align: left;
+    padding: var(--space-2) var(--space-6);
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    transition: color var(--transition-fast);
+  }
+
+  .sort-btn:hover { color: var(--color-text); }
+
+  .sort-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .sort-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.6;
+  }
+
   .spec-row {
     border-bottom: 1px solid var(--color-border);
     transition: background var(--transition-fast);
@@ -662,6 +1053,13 @@
   .spec-row:last-child { border-bottom: none; }
 
   .spec-row:hover { background: var(--color-surface-elevated); }
+
+  .spec-row.clickable { cursor: pointer; }
+
+  .spec-row.clickable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
 
   .spec-row td {
     padding: var(--space-3) var(--space-6);
@@ -703,6 +1101,19 @@
   }
 
   .spec-status { white-space: nowrap; }
+
+  .spec-progress {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .spec-activity {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
 
   /* ── Briefing ─────────────────────────────────────────────────────────── */
   .briefing-list {
@@ -791,6 +1202,103 @@
   }
 
   .rule-status.status-approved { color: var(--color-success); }
+
+  /* ── New Workspace button ──────────────────────────────────────────── */
+  .new-ws-btn {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .new-ws-btn:hover { background: var(--color-primary-hover); }
+
+  .new-ws-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Create Workspace modal form ──────────────────────────────────── */
+  .create-ws-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .create-ws-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .create-ws-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    transition: border-color var(--transition-fast);
+  }
+
+  .create-ws-input:focus:not(:focus-visible) { outline: none; }
+
+  .create-ws-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-color: var(--color-focus);
+  }
+
+  .create-ws-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .create-ws-cancel {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+
+  .create-ws-cancel:hover { border-color: var(--color-text-muted); }
+
+  .create-ws-submit {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .create-ws-submit:hover { background: var(--color-primary-hover); }
+  .create-ws-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .create-ws-cancel:focus-visible,
+  .create-ws-submit:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
 
   /* ── Responsive ───────────────────────────────────────────────────────── */
   @media (max-width: 768px) {

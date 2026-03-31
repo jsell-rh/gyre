@@ -395,7 +395,7 @@ describe('ArchPreviewCanvas — ghost overlay rendering', () => {
 
   it('shows empty state when no nodes', () => {
     const { container } = render(ArchPreviewCanvas, { props: { nodes: [], edges: [] } });
-    expect(container.innerHTML).toContain('No architecture data');
+    expect(container.innerHTML).toContain('No graph data');
   });
 
   it('renders SVG with nodes', () => {

@@ -1,5 +1,6 @@
 <script>
   import { api } from './api.js';
+  import { t } from 'svelte-i18n';
 
   let { open = $bindable(false), onnavigate = undefined } = $props();
   let query = $state('');
@@ -13,15 +14,15 @@
 
   const ENTITY_ICONS = { task: 'T', agent: 'G', mr: 'M', spec: 'S' };
 
-  const SHORTCUTS = [
-    { label: 'Inbox', view: 'inbox', icon: '1' },
-    { label: 'Briefing', view: 'briefing', icon: '2' },
-    { label: 'Explorer', view: 'explorer', icon: '3' },
-    { label: 'Specs', view: 'specs', icon: '4' },
-    { label: 'Meta-specs', view: 'meta-specs', icon: '5' },
-    { label: 'Admin', view: 'admin', icon: '6' },
-    { label: 'My Profile', view: 'profile', icon: 'P' },
+  const SHORTCUT_DEFS = [
+    { labelKey: 'workspace_home.sections.decisions', view: 'inbox', icon: '1' },
+    { labelKey: 'workspace_home.sections.briefing', view: 'briefing', icon: '2' },
+    { labelKey: 'workspace_home.sections.specs', view: 'specs', icon: '3' },
+    { labelKey: 'topbar.agent_rules_label', view: 'meta-specs', icon: '4' },
+    { labelKey: 'user_profile.title', view: 'profile', icon: 'P' },
   ];
+
+  let SHORTCUTS = $derived(SHORTCUT_DEFS.map(s => ({ ...s, label: $t(s.labelKey) })));
 
   // Combined results: API entity hits + nav shortcuts.
   let results = $derived(
@@ -130,7 +131,7 @@
   <div
     class="search-dialog"
     role="dialog"
-    aria-label="Quick navigation"
+    aria-label={$t('search.dialog_label')}
     aria-modal="true"
     bind:this={dialogEl}
     onkeydown={(e) => {
@@ -158,11 +159,11 @@
         bind:value={query}
         onkeydown={onkeydown}
         type="text"
-        placeholder="Search tasks, agents, specs, MRs..."
+        placeholder={$t('search.placeholder')}
         class="search-input"
         autocomplete="off"
         spellcheck="false"
-        aria-label="Search or navigate"
+        aria-label={$t('search.input_label')}
         aria-autocomplete="list"
         aria-controls="search-listbox"
         aria-activedescendant={results.length > 0 ? `search-option-${selected}` : undefined}
@@ -171,14 +172,14 @@
         aria-haspopup="listbox"
       />
       {#if searching}
-        <span class="search-spinner" aria-label="Searching...">⟳</span>
+        <span class="search-spinner" aria-label={$t('search.searching')}>⟳</span>
       {:else}
         <kbd class="search-esc" aria-hidden="true">Esc</kbd>
       {/if}
     </div>
 
     {#if results.length > 0}
-      <ul class="search-results" role="listbox" id="search-listbox" aria-label="Search results">
+      <ul class="search-results" role="listbox" id="search-listbox" aria-label={$t('search.results_label')}>
         {#each results as item, i}
           <li
             role="option"
@@ -205,13 +206,13 @@
         {/each}
       </ul>
     {:else if query.trim().length >= 2 && !searching}
-      <div class="search-empty" role="status">{searchError ? 'Search failed — check your connection' : `No results for "${query}"`}</div>
+      <div class="search-empty" role="status">{searchError ? $t('search.search_failed') : $t('search.no_results', { values: { query } })}</div>
     {/if}
 
     <div class="search-footer" aria-hidden="true">
-      <span><kbd>↑↓</kbd> navigate</span>
-      <span><kbd>↵</kbd> select</span>
-      <span><kbd>Esc</kbd> close</span>
+      <span><kbd>↑↓</kbd> {$t('search.hint_navigate')}</span>
+      <span><kbd>↵</kbd> {$t('search.hint_select')}</span>
+      <span><kbd>Esc</kbd> {$t('search.hint_close')}</span>
     </div>
   </div>
 {/if}

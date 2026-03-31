@@ -10,6 +10,8 @@ vi.mock('../lib/api.js', () => ({
     workspaces: vi.fn(),
     updateMe: vi.fn(),
     markNotificationRead: vi.fn(),
+    getNotificationPreferences: vi.fn(),
+    updateNotificationPreferences: vi.fn(),
   },
 }));
 
@@ -46,7 +48,7 @@ const JUDGMENTS = [
   { event_type: 'trust_override', spec_path: null, resource_id: 'ws-1', timestamp: new Date(Date.now() - 86400000).toISOString(), workspace_name: 'Platform' },
 ];
 
-const CTX = new Map([['navigate', vi.fn()]]);
+const CTX = new Map([['navigate', vi.fn()], ['goToWorkspaceHome', vi.fn()]]);
 const r = (props = {}) => render(UserProfile, { props, context: CTX });
 
 beforeEach(() => {
@@ -58,6 +60,8 @@ beforeEach(() => {
   api.workspaces.mockResolvedValue([...WORKSPACES]);
   api.updateMe.mockResolvedValue({ ...ME, display_name: 'Updated Name' });
   api.markNotificationRead.mockResolvedValue({});
+  api.getNotificationPreferences.mockResolvedValue({});
+  api.updateNotificationPreferences.mockResolvedValue({});
 });
 
 describe('UserProfile', () => {
@@ -189,16 +193,16 @@ describe('UserProfile', () => {
     expect(checkboxes.length).toBe(10);
   });
 
-  it('saves notification preferences to localStorage', async () => {
+  it('saves notification preferences via server API', async () => {
+    api.updateNotificationPreferences.mockResolvedValue({});
     const { findByText } = r();
     const prefsTab = await findByText('Notification Preferences');
     await fireEvent.click(prefsTab);
     const saveBtn = await findByText('Save Preferences');
     await fireEvent.click(saveBtn);
-    const stored = localStorage.getItem('gyre_notif_prefs');
-    expect(stored).toBeTruthy();
-    const parsed = JSON.parse(stored);
-    expect(parsed.SpecApproval).toBe(true);
+    expect(api.updateNotificationPreferences).toHaveBeenCalled();
+    const arg = api.updateNotificationPreferences.mock.calls[0][0];
+    expect(arg.SpecApproval).toBe(true);
   });
 
   it('shows notifications in Notifications tab', async () => {

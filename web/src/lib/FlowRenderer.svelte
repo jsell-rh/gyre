@@ -7,6 +7,7 @@
    * Spec ref: ui-layout.md §4 (flow layout detail)
    */
 
+  import { t } from 'svelte-i18n';
   import ExplorerCanvas from './ExplorerCanvas.svelte';
   import FlowCanvas from './FlowCanvas.svelte';
   import NodeBadge from './NodeBadge.svelte';
@@ -124,7 +125,7 @@
 
 <div class="flow-renderer" data-testid="flow-renderer">
   <!-- Playback Controls -->
-  <div class="flow-controls" role="toolbar" aria-label="Flow animation controls">
+  <div class="flow-controls" role="toolbar" aria-label={$t('flow_renderer.controls_label')}>
     <button
       class="ctrl-btn play-btn"
       class:playing
@@ -158,7 +159,7 @@
         step="1000"
         value={currentTime}
         oninput={onScrub}
-        aria-label="Animation scrubber"
+        aria-label={$t('flow_renderer.scrubber_label')}
       />
     </label>
 
@@ -166,7 +167,7 @@
       {(currentTime / 1000).toFixed(1)}s
     </span>
 
-    <div class="speed-controls" role="group" aria-label="Playback speed">
+    <div class="speed-controls" role="group" aria-label={$t('flow_renderer.playback_speed')}>
       {#each [0.25, 0.5, 1, 2, 5] as s}
         <button
           class="speed-btn"

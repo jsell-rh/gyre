@@ -149,8 +149,11 @@ describe('CrossWorkspaceHome', () => {
   });
 
   it('shows workspace badge on each decision', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-pay', name: 'Payments', slug: 'payments' },
+    ]);
     api.myNotifications.mockResolvedValue([
-      { id: 'n1', notification_type: 'gate_failure', message: 'Gate failed', workspace_name: 'Payments' },
+      { id: 'n1', notification_type: 'gate_failure', message: 'Gate failed', workspace_id: 'ws-pay' },
     ]);
     const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {

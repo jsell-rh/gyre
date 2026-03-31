@@ -17,6 +17,7 @@
    *   scope       — 'tenant' | 'workspace' | 'repo'
    */
   import { getContext, onDestroy } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -33,28 +34,22 @@
 
   // ─── Constants ───────────────────────────────────────────────────────────────
 
-  const KIND_LABELS = {
-    'meta:persona':   'Persona',
-    'meta:principle': 'Principle',
-    'meta:standard':  'Standard',
-    'meta:process':   'Process',
-  };
   const KIND_COLORS = {
     'meta:persona':   'purple',
-    'meta:principle': 'blue',
-    'meta:standard':  'orange',
-    'meta:process':   'green',
+    'meta:principle': 'info',
+    'meta:standard':  'warning',
+    'meta:process':   'success',
   };
-  const META_KINDS = Object.keys(KIND_LABELS);
+  const META_KINDS = ['meta:persona', 'meta:principle', 'meta:standard', 'meta:process'];
 
-  function kindBadgeVariant(kind) { return KIND_COLORS[kind] || 'gray'; }
-  function kindLabel(kind) { return KIND_LABELS[kind] || kind; }
+  function kindBadgeVariant(kind) { return KIND_COLORS[kind] || 'muted'; }
+  function kindLabel(kind) { return $t(`meta_specs.kind_labels.${kind}`) || kind; }
 
   function approvalVariant(status) {
-    if (status === 'Approved') return 'green';
-    if (status === 'Pending') return 'yellow';
-    if (status === 'Rejected') return 'red';
-    return 'gray';
+    if (status === 'Approved') return 'success';
+    if (status === 'Pending') return 'warning';
+    if (status === 'Rejected') return 'danger';
+    return 'muted';
   }
 
   function approvalIcon(status) {
@@ -188,9 +183,9 @@
       specs = specs.map(s => s.id === selected.id ? updated : s);
       selected = updated;
       editDirty = false;
-      toastSuccess('Saved — content change bumped to v' + updated.version);
+      toastSuccess($t('meta_specs.toast.saved_version', { values: { version: updated.version } }));
     } catch (e) {
-      toastError('Save failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.save_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     editSaving = false;
   }
@@ -202,9 +197,9 @@
       const updated = await api.updateMetaSpec(selected.id, { approval_status: 'Approved' });
       specs = specs.map(s => s.id === selected.id ? updated : s);
       selected = updated;
-      toastSuccess('Approved — now active in all bound workspaces');
+      toastSuccess($t('meta_specs.toast.approved'));
     } catch (e) {
-      toastError('Approve failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.approve_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     approvalSaving = null;
   }
@@ -216,9 +211,9 @@
       const updated = await api.updateMetaSpec(selected.id, { approval_status: 'Rejected' });
       specs = specs.map(s => s.id === selected.id ? updated : s);
       selected = updated;
-      toastSuccess('Rejected');
+      toastSuccess($t('meta_specs.toast.rejected'));
     } catch (e) {
-      toastError('Reject failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.reject_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     approvalSaving = null;
   }
@@ -229,15 +224,15 @@
       const updated = await api.updateMetaSpec(spec.id, { required: !spec.required });
       specs = specs.map(s => s.id === spec.id ? updated : s);
       if (selected?.id === spec.id) selected = updated;
-      toastSuccess(updated.required ? 'Marked as required — all agents must load this' : 'Marked as optional');
+      toastSuccess(updated.required ? $t('meta_specs.toast.marked_required') : $t('meta_specs.toast.marked_optional'));
     } catch (e) {
-      toastError('Update failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.update_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     requiredSaving = null;
   }
 
   async function handleCreate() {
-    if (!createForm.name.trim()) { toastError('Name is required'); return; }
+    if (!createForm.name.trim()) { toastError($t('meta_specs.toast.name_required')); return; }
     createSaving = true;
     try {
       const payload = {
@@ -255,9 +250,9 @@
       createMode = false;
       createForm = { kind: 'meta:persona', name: '', scope: 'Global', scope_id: '', prompt: '', required: false };
       selectSpec(created, true);
-      toastSuccess('Created "' + created.name + '" — now pending review');
+      toastSuccess($t('meta_specs.toast.created', { values: { name: created.name } }));
     } catch (e) {
-      toastError('Create failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.create_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     createSaving = false;
   }
@@ -282,9 +277,9 @@
         }
       }
       deleteTarget = null;
-      toastSuccess('Deleted');
+      toastSuccess($t('meta_specs.toast.deleted'));
     } catch (e) {
-      toastError('Delete failed (may have active bindings): ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.delete_failed', { values: { error: e?.message ?? 'unknown error' } }));
     }
     deleteSaving = false;
   }
@@ -304,7 +299,7 @@
     // Fallback: add as suggestion
     const id = `suggestion-${nextSuggestionId++}`;
     editSuggestions = [...editSuggestions, { id, content: `# Suggested addition\n${text}` }];
-    return 'Suggestion added below the editor.';
+    return $t('meta_specs.toast.suggestion_added');
   }
 
   function acceptSuggestion(s) {
@@ -425,7 +420,7 @@
       });
       usedPreviewId = res?.preview_id ?? null;
       if (res && !usedPreviewId) previewApiResult = res;
-    } catch { toastInfo('Preview not available from server — showing example layout'); }
+    } catch { toastInfo($t('meta_specs.toast.preview_unavailable')); }
 
     if (usedPreviewId) {
       previewId = usedPreviewId;
@@ -485,9 +480,9 @@
     publishSaving = true;
     try {
       await api.publishPersona(workspaceId, selectedMsId, { content: selectedMsContent });
-      toastSuccess('Published successfully');
+      toastSuccess($t('meta_specs.toast.published'));
     } catch (e) {
-      toastError('Publish failed: ' + (e?.message ?? 'unknown error'));
+      toastError($t('meta_specs.toast.publish_failed', { values: { error: e?.message ?? 'unknown error' } }));
     } finally {
       publishSaving = false;
     }
@@ -507,7 +502,7 @@
 
     const id = `ws-suggestion-${wsNextSuggId++}`;
     wsSuggestions = [...wsSuggestions, { id, content: `+ ${text}\n# Suggested addition` }];
-    return 'Suggestion added below the editor.';
+    return $t('meta_specs.toast.suggestion_added');
   }
 
   function wsAcceptSuggestion(s) {
@@ -550,13 +545,13 @@
 <!-- ─── Repo scope redirect ──────────────────────────────────────────────────── -->
 {#if scope === 'repo'}
   <div class="meta-specs-view">
-    <div class="view-header"><h1 class="page-title">Meta-Specs</h1></div>
+    <div class="view-header"><h1 class="page-title">{$t('meta_specs.title')}</h1></div>
     <div class="repo-redirect">
-      Meta-specs are workspace-scoped.
+      {$t('meta_specs.repo_redirect.workspace_scoped')}
       {#if workspaceId}
-        <button class="link-btn" onclick={handleRepoRedirect}>View workspace editor</button>
+        <button class="link-btn" onclick={handleRepoRedirect}>{$t('meta_specs.repo_redirect.view_workspace_editor')}</button>
       {:else}
-        Select a workspace to edit meta-specs.
+        {$t('meta_specs.repo_redirect.select_workspace')}
       {/if}
     </div>
   </div>
@@ -566,28 +561,28 @@
 {#if scope === 'workspace'}
   <div class="meta-specs-view workspace-view" aria-busy={wsLoading}>
     <div class="view-header">
-      <h2>Meta-Specs</h2>
-      <p class="subtitle">Preview how persona and principle changes affect your workspace specs.</p>
+      <h2>{$t('meta_specs.title')}</h2>
+      <p class="subtitle">{$t('meta_specs.workspace.subtitle')}</p>
     </div>
 
     {#if wsLoading}
       <div class="split-layout"><div class="split-left"><Skeleton /></div><div class="split-right"><Skeleton /></div></div>
     {:else if wsError}
-      <div role="alert"><EmptyState title="Failed to load" description={wsError} /></div>
-      <button class="retry-btn" onclick={loadWorkspaceData}>Retry</button>
+      <div role="alert"><EmptyState title={$t('meta_specs.workspace.failed_to_load')} description={wsError} /></div>
+      <button class="retry-btn" onclick={loadWorkspaceData}>{$t('common.retry')}</button>
     {:else}
       <div class="split-layout" data-testid="preview-loop">
         <!-- LEFT: Meta-spec editor -->
         <div class="split-left">
           <div class="editor-header">
-            <label class="persona-label" for="ms-select">Meta-spec</label>
+            <label class="persona-label" for="ms-select">{$t('meta_specs.workspace.meta_spec_label')}</label>
             <select
               id="ms-select"
               class="persona-select"
               value={selectedMsId}
               onchange={(e) => onMsChange(e.target.value)}
               disabled={previewState === 'running'}
-              aria-label="Persona"
+              aria-label={$t('meta_specs.workspace.persona_aria')}
             >
               {#each wsMetaSpecs as ms (ms.id)}
                 <option value={ms.id}>[{kindLabel(ms.kind)}] {ms.name}</option>
@@ -596,7 +591,7 @@
           </div>
 
           {#if previewState === 'running'}
-            <div class="persona-diff" role="region" aria-label="Meta-spec diff (read-only)">
+            <div class="persona-diff" role="region" aria-label={$t('meta_specs.workspace.diff_readonly_aria')}>
               {#each selectedMsContent.split('\n') as line}
                 <div class="diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
               {/each}
@@ -605,8 +600,8 @@
             <textarea
               class="persona-textarea"
               bind:value={selectedMsContent}
-              placeholder="Enter prompt content for this meta-spec…"
-              aria-label="Persona system prompt"
+              placeholder={$t('meta_specs.workspace.textarea_placeholder')}
+              aria-label={$t('meta_specs.workspace.textarea_aria')}
               data-testid="persona-textarea"
             ></textarea>
 
@@ -627,11 +622,11 @@
 
             <div class="editor-actions">
               {#if previewState === 'complete'}
-                <Button variant="secondary" onclick={iterate}>Iterate</Button>
+                <Button variant="secondary" onclick={iterate}>{$t('meta_specs.workspace.iterate')}</Button>
               {:else}
-                <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>Preview</Button>
+                <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>{$t('meta_specs.workspace.preview')}</Button>
               {/if}
-              <Button variant="primary" onclick={publish} disabled={publishSaving}>{publishSaving ? 'Publishing\u2026' : 'Publish'}</Button>
+              <Button variant="primary" onclick={publish} disabled={publishSaving}>{publishSaving ? $t('meta_specs.workspace.publishing') : $t('meta_specs.workspace.publish')}</Button>
             </div>
           {/if}
         </div>
@@ -641,10 +636,10 @@
           {#if previewState === 'editing'}
             <div class="spec-selector">
               <div class="spec-selector-header">
-                <span class="spec-selector-title">Preview against specs:</span>
+                <span class="spec-selector-title">{$t('meta_specs.workspace.preview_against')}</span>
                 <div class="spec-selector-shortcuts">
-                  <button class="link-btn" onclick={selectAll}>Select All</button>
-                  <button class="link-btn" onclick={clearAll}>Clear</button>
+                  <button class="link-btn" onclick={selectAll}>{$t('meta_specs.workspace.select_all')}</button>
+                  <button class="link-btn" onclick={clearAll}>{$t('meta_specs.workspace.clear')}</button>
                 </div>
               </div>
               <div class="spec-checklist">
@@ -654,47 +649,47 @@
                     <span class="spec-check-path">{spec.path}</span>
                   </label>
                 {:else}
-                  <p class="empty-specs">No specs available in this workspace.</p>
+                  <p class="empty-specs">{$t('meta_specs.workspace.no_specs_available')}</p>
                 {/each}
               </div>
             </div>
 
           {:else if previewState === 'running'}
             <div class="preview-progress" data-testid="preview-running" aria-live="polite">
-              <div class="progress-header" role="status">Preview: Running</div>
+              <div class="progress-header" role="status">{$t('meta_specs.workspace.preview_running')}</div>
               <div class="progress-list">
                 {#each previewProgress as item (item.path)}
                   <div class="progress-item">
                     <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
                     <span class="progress-path">{item.path}</span>
-                    <span class="progress-status">{item.status === 'complete' ? 'Complete' : 'Agent implementing…'}</span>
+                    <span class="progress-status">{item.status === 'complete' ? $t('meta_specs.workspace.status_complete') : $t('meta_specs.workspace.agent_implementing')}</span>
                   </div>
                 {/each}
               </div>
-              <div class="progress-summary">Progress: {previewProgress.filter(p => p.status === 'complete').length}/{previewProgress.length} specs</div>
-              <Button variant="secondary" onclick={cancelPreview}>Cancel Preview <kbd>Esc</kbd></Button>
+              <div class="progress-summary">{$t('meta_specs.workspace.progress_label', { values: { done: previewProgress.filter(p => p.status === 'complete').length, total: previewProgress.length } })}</div>
+              <Button variant="secondary" onclick={cancelPreview}>{$t('meta_specs.workspace.cancel_preview')} <kbd>Esc</kbd></Button>
             </div>
 
           {:else}
             <div class="impact-panel" data-testid="preview-complete">
               {#if isSimulatedPreview}
-                <div class="sim-banner" role="status">⚠ Preview unavailable — showing example layout only.</div>
+                <div class="sim-banner" role="status">{$t('meta_specs.workspace.sim_banner')}</div>
               {/if}
-              <div class="impact-tabs" role="tablist" aria-label="Impact view" tabindex="0"
+              <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0"
                 onkeydown={(e) => {
                   const tabs = ['architecture', 'code-diff'];
                   const ids = ['impact-tab-arch', 'impact-tab-diff'];
                   const idx = tabs.indexOf(impactTab);
                   if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
+                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx - 1 + 2) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
                 }}
               >
-                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>Architecture</button>
-                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} tabindex={impactTab === 'code-diff' ? 0 : -1} onclick={() => impactTab = 'code-diff'}>Code Diff</button>
+                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>{$t('meta_specs.workspace.architecture')}</button>
+                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} tabindex={impactTab === 'code-diff' ? 0 : -1} onclick={() => impactTab = 'code-diff'}>{$t('meta_specs.workspace.code_diff')}</button>
               </div>
               {#if isSimulatedPreview}
                 <div class="impact-content impact-unavailable" role="tabpanel" id={impactTab === 'architecture' ? 'impact-panel-arch' : 'impact-panel-diff'} aria-labelledby={impactTab === 'architecture' ? 'impact-tab-arch' : 'impact-tab-diff'}>
-                  <span class="impact-unavailable-label">Preview unavailable — showing example layout.</span>
+                  <span class="impact-unavailable-label">{$t('meta_specs.workspace.preview_unavailable_label')}</span>
                   {#if impactTab === 'architecture'}
                     <div class="arch-diff">
                       <div class="arch-line add">+ ErrorHandler module (payment-domain)</div>
@@ -721,7 +716,7 @@
                       <div class="arch-line" class:add={line.startsWith('+')} class:mod={line.startsWith('~')} class:ctx={line.startsWith('=')}>{line}</div>
                     {/each}
                   {:else}
-                    <span class="impact-empty">No architecture changes detected.</span>
+                    <span class="impact-empty">{$t('meta_specs.workspace.no_arch_changes')}</span>
                   {/if}
                 </div>
               {:else}
@@ -737,7 +732,7 @@
                     {#each previewProgress as item (item.path)}
                       <div class="code-diff-file">
                         <div class="code-diff-path">{item.path}</div>
-                        <pre class="code-diff-body">No diff available.</pre>
+                        <pre class="code-diff-body">{$t('meta_specs.workspace.no_diff_available')}</pre>
                       </div>
                     {/each}
                   {/if}
@@ -756,19 +751,19 @@
     <!-- Top bar -->
     <div class="top-bar">
       <div class="top-bar-left">
-        <h1 class="page-title">Meta-Specs</h1>
-        <p class="subtitle">Your primary encoding mechanism — personas, principles, standards, and process norms.</p>
+        <h1 class="page-title">{$t('meta_specs.title')}</h1>
+        <p class="subtitle">{$t('meta_specs.subtitle')}</p>
       </div>
       <div class="top-bar-actions">
-        <Button variant="primary" onclick={() => { if (editDirty) { discardTarget = { action: 'create' }; return; } createMode = true; selected = null; editDirty = false; }}>+ New Meta-spec</Button>
+        <Button variant="primary" onclick={() => { if (editDirty) { discardTarget = { action: 'create' }; return; } createMode = true; selected = null; editDirty = false; }}>{$t('meta_specs.new_meta_spec')}</Button>
       </div>
     </div>
 
     <!-- Filter pills -->
-    <div class="filter-pills" role="group" aria-label="Filter by kind">
-      <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} aria-pressed={kindFilter === 'all'}>All</button>
+    <div class="filter-pills" role="group" aria-label={$t('meta_specs.filter_by_kind')}>
+      <button class="pill" class:active={kindFilter === 'all'} onclick={() => kindFilter = 'all'} aria-pressed={kindFilter === 'all'}>{$t('meta_specs.filter_all')}</button>
       {#each META_KINDS as k}
-        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} aria-pressed={kindFilter === k}>{KIND_LABELS[k]}</button>
+        <button class="pill" class:active={kindFilter === k} onclick={() => kindFilter = k} aria-pressed={kindFilter === k}>{kindLabel(k)}</button>
       {/each}
     </div>
 
@@ -778,16 +773,16 @@
         <div class="spec-editor"><Skeleton /></div>
       </div>
     {:else if error}
-      <div role="alert"><EmptyState title="Failed to load meta-specs" description={error} /></div>
-      <button class="retry-btn" onclick={loadTenantSpecs}>Retry</button>
+      <div role="alert"><EmptyState title={$t('meta_specs.failed_to_load')} description={error} /></div>
+      <button class="retry-btn" onclick={loadTenantSpecs}>{$t('common.retry')}</button>
     {:else}
       <div class="creative-surface">
         <!-- Sidebar: list of meta-specs -->
-        <nav class="spec-sidebar" aria-label="Meta-specs list">
+        <nav class="spec-sidebar" aria-label={$t('meta_specs.sidebar_aria')}>
           {#if filtered.length === 0}
             <div class="sidebar-empty">
-              <p>No meta-specs yet.</p>
-              <button class="link-btn" onclick={() => createMode = true}>Create one</button>
+              <p>{$t('meta_specs.no_meta_specs_yet')}</p>
+              <button class="link-btn" onclick={() => createMode = true}>{$t('meta_specs.create_one')}</button>
             </div>
           {:else}
             {#each filtered as spec (spec.id)}
@@ -804,7 +799,7 @@
                 <div class="sidebar-item-meta">
                   <Badge value={kindLabel(spec.kind)} variant={kindBadgeVariant(spec.kind)} />
                   {#if spec.required}
-                    <span class="required-chip">Required</span>
+                    <span class="required-chip">{$t('common.required')}</span>
                   {/if}
                   <span class="ver-chip">v{spec.version}</span>
                 </div>
@@ -819,11 +814,11 @@
             <!-- ─── Create panel ───────────────────────────────────────── -->
             <div class="create-panel">
               <div class="create-panel-header">
-                <h3>New Meta-spec</h3>
-                <p class="create-subtitle">Define how agents think, behave, and communicate across your platform.</p>
+                <h3>{$t('meta_specs.create.title')}</h3>
+                <p class="create-subtitle">{$t('meta_specs.create.subtitle')}</p>
               </div>
 
-              <div class="create-kind-grid" role="group" aria-label="Select kind">
+              <div class="create-kind-grid" role="group" aria-label={$t('meta_specs.create.select_kind')}>
                 {#each META_KINDS as k}
                   <button
                     class="kind-card"
@@ -831,12 +826,12 @@
                     onclick={() => createForm.kind = k}
                     aria-pressed={createForm.kind === k}
                   >
-                    <span class="kind-card-label">{KIND_LABELS[k]}</span>
+                    <span class="kind-card-label">{kindLabel(k)}</span>
                     <span class="kind-card-desc">{
-                      k === 'meta:persona' ? 'Who the agent is — identity, tone, expertise' :
-                      k === 'meta:principle' ? 'What to prioritize — values and trade-offs' :
-                      k === 'meta:standard' ? 'How to write code — conventions and patterns' :
-                      'How to work — workflows and ceremonies'
+                      k === 'meta:persona' ? $t('meta_specs.create.kind_persona_desc') :
+                      k === 'meta:principle' ? $t('meta_specs.create.kind_principle_desc') :
+                      k === 'meta:standard' ? $t('meta_specs.create.kind_standard_desc') :
+                      $t('meta_specs.create.kind_process_desc')
                     }</span>
                   </button>
                 {/each}
@@ -844,46 +839,46 @@
 
               <div class="form-row">
                 <div class="form-field form-field-grow">
-                  <label for="cf-name">Name</label>
-                  <input id="cf-name" type="text" bind:value={createForm.name} placeholder="e.g. backend-engineer, no-mocking-principle" required aria-required="true" />
+                  <label for="cf-name">{$t('meta_specs.create.name_label')}</label>
+                  <input id="cf-name" type="text" bind:value={createForm.name} placeholder={$t('meta_specs.create.name_placeholder')} required aria-required="true" />
                 </div>
                 <div class="form-field">
-                  <label for="cf-scope">Scope</label>
+                  <label for="cf-scope">{$t('meta_specs.create.scope_label')}</label>
                   <select id="cf-scope" bind:value={createForm.scope}>
-                    <option value="Global">Global (all workspaces)</option>
-                    <option value="Workspace">Specific workspace</option>
+                    <option value="Global">{$t('meta_specs.create.scope_global')}</option>
+                    <option value="Workspace">{$t('meta_specs.create.scope_workspace')}</option>
                   </select>
                 </div>
               </div>
 
               {#if createForm.scope === 'Workspace'}
                 <div class="form-field">
-                  <label for="cf-scope-id">Workspace ID</label>
-                  <input id="cf-scope-id" type="text" bind:value={createForm.scope_id} placeholder="workspace UUID" />
+                  <label for="cf-scope-id">{$t('meta_specs.create.workspace_id_label')}</label>
+                  <input id="cf-scope-id" type="text" bind:value={createForm.scope_id} placeholder={$t('meta_specs.create.workspace_id_placeholder')} />
                 </div>
               {/if}
 
               <div class="form-field">
-                <label for="cf-prompt">Content / Prompt</label>
-                <textarea id="cf-prompt" bind:value={createForm.prompt} placeholder="Write the system prompt that will be injected into every agent bound to this meta-spec. Be specific about behaviors, constraints, and tone." rows="10"></textarea>
+                <label for="cf-prompt">{$t('meta_specs.create.content_label')}</label>
+                <textarea id="cf-prompt" bind:value={createForm.prompt} placeholder={$t('meta_specs.create.content_placeholder')} rows="10"></textarea>
               </div>
 
               <div class="form-field form-field-inline">
                 <input id="cf-required" type="checkbox" bind:checked={createForm.required} />
-                <label for="cf-required">Required — org-wide mandatory (all agents must load this)</label>
+                <label for="cf-required">{$t('meta_specs.create.required_label')}</label>
               </div>
 
               <div class="create-actions">
-                <Button variant="secondary" onclick={() => createMode = false}>Cancel</Button>
+                <Button variant="secondary" onclick={() => createMode = false}>{$t('common.cancel')}</Button>
                 <Button variant="primary" onclick={handleCreate} disabled={createSaving}>
-                  {createSaving ? 'Creating…' : 'Create Meta-spec'}
+                  {createSaving ? $t('meta_specs.create.creating') : $t('meta_specs.create.create_btn')}
                 </Button>
               </div>
             </div>
 
           {:else if !selected}
             <div class="editor-empty">
-              <EmptyState title="Select or create a meta-spec" description="Choose from the list on the left, or create a new one." />
+              <EmptyState title={$t('meta_specs.select_or_create')} description={$t('meta_specs.select_or_create_desc')} />
             </div>
 
           {:else}
@@ -894,7 +889,7 @@
                 <Badge value={kindLabel(selected.kind)} variant={kindBadgeVariant(selected.kind)} />
                 <Badge value={selected.approval_status} variant={approvalVariant(selected.approval_status)} />
                 {#if selected.required}
-                  <span class="required-chip">Required</span>
+                  <span class="required-chip">{$t('common.required')}</span>
                 {/if}
                 <span class="ver-chip">v{selected.version}</span>
               </div>
@@ -904,18 +899,18 @@
                   class:required-on={selected.required}
                   onclick={() => handleRequiredToggle(selected)}
                   disabled={requiredSaving === selected.id}
-                  aria-label={selected.required ? 'Required — click to make optional' : 'Optional — click to make required'}
+                  aria-label={selected.required ? $t('meta_specs.required_toggle.click_optional') : $t('meta_specs.required_toggle.click_required')}
                 >
-                  {selected.required ? 'Required' : 'Optional'}
+                  {selected.required ? $t('common.required') : $t('common.optional')}
                 </button>
-                <Button variant="danger" size="sm" onclick={() => deleteTarget = selected}>Delete</Button>
+                <Button variant="danger" size="sm" onclick={() => deleteTarget = selected}>{$t('common.delete')}</Button>
               </div>
             </div>
 
             <div
               class="editor-tabs"
               role="tablist"
-              aria-label="Meta-spec editor"
+              aria-label={$t('meta_specs.edit.meta_spec_editor_aria')}
               tabindex="0"
               onkeydown={(e) => {
                 const tabs = ['edit', 'impact', 'history', 'approval'];
@@ -924,10 +919,10 @@
                 if (e.key === 'ArrowLeft')  { e.preventDefault(); onEditorTabChange(tabs[(idx + tabs.length - 1) % tabs.length]); }
               }}
             >
-              <button class="editor-tab" role="tab" id="etab-edit" aria-controls="epanel-edit" aria-selected={editorTab === 'edit'} class:active={editorTab === 'edit'} tabindex={editorTab === 'edit' ? 0 : -1} onclick={() => onEditorTabChange('edit')}>Edit</button>
-              <button class="editor-tab" role="tab" id="etab-impact" aria-controls="epanel-impact" aria-selected={editorTab === 'impact'} class:active={editorTab === 'impact'} tabindex={editorTab === 'impact' ? 0 : -1} onclick={() => onEditorTabChange('impact')}>Impact</button>
-              <button class="editor-tab" role="tab" id="etab-history" aria-controls="epanel-history" aria-selected={editorTab === 'history'} class:active={editorTab === 'history'} tabindex={editorTab === 'history' ? 0 : -1} onclick={() => onEditorTabChange('history')}>History</button>
-              <button class="editor-tab" role="tab" id="etab-approval" aria-controls="epanel-approval" aria-selected={editorTab === 'approval'} class:active={editorTab === 'approval'} tabindex={editorTab === 'approval' ? 0 : -1} onclick={() => onEditorTabChange('approval')}>Approval</button>
+              <button class="editor-tab" role="tab" id="etab-edit" aria-controls="epanel-edit" aria-selected={editorTab === 'edit'} class:active={editorTab === 'edit'} tabindex={editorTab === 'edit' ? 0 : -1} onclick={() => onEditorTabChange('edit')}>{$t('meta_specs.editor_tabs.edit')}</button>
+              <button class="editor-tab" role="tab" id="etab-impact" aria-controls="epanel-impact" aria-selected={editorTab === 'impact'} class:active={editorTab === 'impact'} tabindex={editorTab === 'impact' ? 0 : -1} onclick={() => onEditorTabChange('impact')}>{$t('meta_specs.editor_tabs.impact')}</button>
+              <button class="editor-tab" role="tab" id="etab-history" aria-controls="epanel-history" aria-selected={editorTab === 'history'} class:active={editorTab === 'history'} tabindex={editorTab === 'history' ? 0 : -1} onclick={() => onEditorTabChange('history')}>{$t('meta_specs.editor_tabs.history')}</button>
+              <button class="editor-tab" role="tab" id="etab-approval" aria-controls="epanel-approval" aria-selected={editorTab === 'approval'} class:active={editorTab === 'approval'} tabindex={editorTab === 'approval' ? 0 : -1} onclick={() => onEditorTabChange('approval')}>{$t('meta_specs.editor_tabs.approval')}</button>
             </div>
 
             <!-- Edit tab -->
@@ -937,8 +932,8 @@
                   class="spec-textarea"
                   bind:value={editContent}
                   oninput={() => editDirty = true}
-                  placeholder="System prompt content…"
-                  aria-label="Meta-spec content"
+                  placeholder={$t('meta_specs.edit.textarea_placeholder')}
+                  aria-label={$t('meta_specs.edit.textarea_aria')}
                   data-testid="spec-textarea"
                 ></textarea>
 
@@ -958,9 +953,9 @@
                 />
 
                 <div class="edit-actions">
-                  <span class="word-count" aria-live="polite">{editContent.split(/\s+/).filter(Boolean).length} words</span>
+                  <span class="word-count" aria-live="polite">{$t('meta_specs.edit.words', { values: { count: editContent.split(/\s+/).filter(Boolean).length } })}</span>
                   <Button variant="primary" onclick={saveEdit} disabled={!editDirty || editSaving}>
-                    {editSaving ? 'Saving…' : editDirty ? 'Save (creates v' + (selected.version + 1) + ')' : 'Saved'}
+                    {editSaving ? $t('meta_specs.edit.saving') : editDirty ? $t('meta_specs.edit.save_version', { values: { version: selected.version + 1 } }) : $t('meta_specs.edit.saved')}
                   </Button>
                 </div>
               </div>
@@ -971,24 +966,24 @@
                 <!-- Metric cards (usage stats — data available via future endpoint) -->
                 <div class="metric-grid">
                   <div class="metric-card">
-                    <div class="metric-label">Bound workspaces</div>
+                    <div class="metric-label">{$t('meta_specs.impact.bound_workspaces')}</div>
                     <div class="metric-value">{blastResult?.affected_workspaces?.length ?? '—'}</div>
-                    <div class="metric-sub">currently binding this spec</div>
+                    <div class="metric-sub">{$t('meta_specs.impact.currently_binding')}</div>
                   </div>
                   <div class="metric-card">
-                    <div class="metric-label">Affected repos</div>
+                    <div class="metric-label">{$t('meta_specs.impact.affected_repos')}</div>
                     <div class="metric-value">{blastResult?.affected_repos?.length ?? '—'}</div>
-                    <div class="metric-sub">transitively impacted</div>
+                    <div class="metric-sub">{$t('meta_specs.impact.transitively_impacted')}</div>
                   </div>
                   <div class="metric-card metric-card-dim">
-                    <div class="metric-label">Agent runs</div>
+                    <div class="metric-label">{$t('meta_specs.impact.agent_runs')}</div>
                     <div class="metric-value">—</div>
-                    <div class="metric-sub">usage tracking coming soon</div>
+                    <div class="metric-sub">{$t('meta_specs.impact.usage_coming_soon')}</div>
                   </div>
                   <div class="metric-card metric-card-dim">
-                    <div class="metric-label">Gate failures</div>
+                    <div class="metric-label">{$t('meta_specs.impact.gate_failures')}</div>
                     <div class="metric-value">—</div>
-                    <div class="metric-sub">drift analytics coming soon</div>
+                    <div class="metric-sub">{$t('meta_specs.impact.drift_coming_soon')}</div>
                   </div>
                 </div>
 
@@ -999,43 +994,43 @@
                 {:else if blastResult}
                   <!-- Binding panel -->
                   <div class="binding-section">
-                    <h4 class="binding-title">Bound Workspaces</h4>
+                    <h4 class="binding-title">{$t('meta_specs.impact.bound_workspaces_title')}</h4>
                     {#if blastResult.affected_workspaces?.length}
                       <div class="binding-list">
                         {#each blastResult.affected_workspaces as ws}
                           <div class="binding-row">
                             <span class="mono">{ws.id}</span>
-                            <Badge value="active" variant="green" />
+                            <Badge value={$t('meta_specs.impact.active')} variant="success" />
                           </div>
                         {/each}
                       </div>
                     {:else}
-                      <p class="impact-empty">No workspaces currently bind this meta-spec.</p>
+                      <p class="impact-empty">{$t('meta_specs.impact.no_workspaces_bind')}</p>
                     {/if}
                   </div>
 
                   <div class="binding-section">
-                    <h4 class="binding-title">Transitively Affected Repos</h4>
+                    <h4 class="binding-title">{$t('meta_specs.impact.transitively_affected_title')}</h4>
                     {#if blastResult.affected_repos?.length}
                       <div class="binding-list">
                         {#each blastResult.affected_repos as repo}
                           <div class="binding-row">
                             <span class="mono">{repo.id}</span>
-                            <Badge value={repo.reason} variant="gray" />
+                            <Badge value={repo.reason} variant="muted" />
                             <span class="mono text-muted">{repo.workspace_id}</span>
                           </div>
                         {/each}
                       </div>
                     {:else}
-                      <p class="impact-empty">No repos affected.</p>
+                      <p class="impact-empty">{$t('meta_specs.impact.no_repos_affected')}</p>
                     {/if}
                   </div>
 
                   <!-- Affected repos — clickable to Architecture tab with meta-spec overlays -->
                   {#if blastResult.affected_repos?.length}
                     <div class="binding-section">
-                      <h4 class="binding-title">View in Architecture</h4>
-                      <p class="impact-sub">Click a repo to see governed nodes highlighted with predicted changes.</p>
+                      <h4 class="binding-title">{$t('meta_specs.impact.view_in_architecture')}</h4>
+                      <p class="impact-sub">{$t('meta_specs.impact.view_in_architecture_desc')}</p>
                       <div class="binding-list">
                         {#each blastResult.affected_repos as repo}
                           {@const archUrl = `/workspaces/${repo.workspace_id}/r/${repo.id}/architecture?show_overlays=metaspec:${selected.id}`}
@@ -1043,10 +1038,10 @@
                             class="arch-nav-row"
                             href={archUrl}
                             data-testid="arch-nav-link"
-                            aria-label="View {repo.id} in Architecture tab with meta-spec overlays"
+                            aria-label={$t('meta_specs.impact.view_repo_arch_aria', { values: { repoId: repo.id } })}
                           >
                             <span class="mono">{repo.id}</span>
-                            <span class="arch-nav-hint">Architecture ↗</span>
+                            <span class="arch-nav-hint">{$t('meta_specs.impact.architecture_link_hint')}</span>
                           </a>
                         {/each}
                       </div>
@@ -1055,17 +1050,17 @@
 
                   <!-- Drift section -->
                   <div class="binding-section">
-                    <h4 class="binding-title">Version Drift</h4>
+                    <h4 class="binding-title">{$t('meta_specs.impact.version_drift_title')}</h4>
                     <div class="drift-notice">
                       <p class="drift-text">
-                        This spec is at <strong>v{selected.version}</strong>.
-                        Workspace-level drift tracking (repos built under older versions) is available after the spec-bindings API is extended.
+                        {$t('meta_specs.impact.drift_text_prefix')} <strong>v{selected.version}</strong>.
+                        {$t('meta_specs.impact.drift_text_suffix')}
                       </p>
                     </div>
                   </div>
                 {:else}
                   <div class="impact-cta">
-                    <button class="link-btn" onclick={loadBlastRadius}>Load blast radius</button>
+                    <button class="link-btn" onclick={loadBlastRadius}>{$t('meta_specs.impact.load_blast_radius')}</button>
                   </div>
                 {/if}
               </div>
@@ -1076,7 +1071,7 @@
                 {#if versionsLoading}
                   <Skeleton />
                 {:else if versions.length === 0}
-                  <EmptyState title="No version history" description="Save content changes to create new versions." />
+                  <EmptyState title={$t('meta_specs.history.no_history_title')} description={$t('meta_specs.history.no_history_desc')} />
                 {:else}
                   <div class="version-timeline">
                     {#each versions as ver, i (ver.version)}
@@ -1090,7 +1085,7 @@
                         >
                           <span class="ver-badge">v{ver.version}</span>
                           <span class="ver-hash mono">{ver.content_hash?.slice(0, 10)}</span>
-                          {#if i === 0}<Badge value="current" variant="green" />{/if}
+                          {#if i === 0}<Badge value={$t('meta_specs.history.current')} variant="success" />{/if}
                         </button>
 
                         {#if diffVersion?.version === ver.version}
@@ -1098,13 +1093,13 @@
                             {#if prev}
                               {@const diffLines = computeDiff(prev.prompt, ver.prompt)}
                               {#if diffLines.length === 0}
-                                <p class="impact-empty">No changes (identical content).</p>
+                                <p class="impact-empty">{$t('meta_specs.history.no_changes')}</p>
                               {:else}
                                 <pre class="diff-output">{#each diffLines as dl}<span class="dl-{dl.type}">{dl.type === 'add' ? '+' : dl.type === 'remove' ? '-' : ' '} {dl.text}
 </span>{/each}</pre>
                               {/if}
                             {:else}
-                              <pre class="diff-output">{ver.prompt || '(empty)'}</pre>
+                              <pre class="diff-output">{ver.prompt || $t('meta_specs.history.empty_content')}</pre>
                             {/if}
                           </div>
                         {/if}
@@ -1118,24 +1113,24 @@
             {:else}
               <div class="editor-panel" role="tabpanel" id="epanel-approval" aria-labelledby="etab-approval">
                 <!-- Approval flow visualization -->
-                <div class="approval-flow" aria-label="Approval workflow">
-                  <div class="flow-step" class:flow-done={selected.approval_status !== 'Pending' || true} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
+                <div class="approval-flow" aria-label={$t('meta_specs.approval.workflow_aria')}>
+                  <div class="flow-step" class:flow-done={selected.approval_status !== 'Pending'} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
                     <div class="flow-step-icon flow-icon-done">✓</div>
-                    <div class="flow-step-label">Draft</div>
+                    <div class="flow-step-label">{$t('meta_specs.approval.draft')}</div>
                   </div>
                   <div class="flow-connector" class:flow-done={selected.approval_status === 'Approved' || selected.approval_status === 'Rejected'}></div>
                   <div class="flow-step" class:flow-active={selected.approval_status === 'Pending'} class:flow-done={selected.approval_status === 'Approved' || selected.approval_status === 'Rejected'} aria-current={selected.approval_status === 'Pending' ? 'step' : undefined}>
                     <div class="flow-step-icon {selected.approval_status === 'Pending' ? 'flow-icon-active' : selected.approval_status !== 'Pending' ? 'flow-icon-done' : ''}">
                       {approvalIcon(selected.approval_status === 'Pending' ? 'Pending' : 'Approved')}
                     </div>
-                    <div class="flow-step-label">Review</div>
+                    <div class="flow-step-label">{$t('meta_specs.approval.review')}</div>
                   </div>
                   <div class="flow-connector" class:flow-done={selected.approval_status === 'Approved'}></div>
                   <div class="flow-step" class:flow-active={selected.approval_status === 'Approved'} class:flow-rejected={selected.approval_status === 'Rejected'} aria-current={selected.approval_status === 'Approved' ? 'step' : undefined}>
                     <div class="flow-step-icon {selected.approval_status === 'Approved' ? 'flow-icon-done' : selected.approval_status === 'Rejected' ? 'flow-icon-rejected' : ''}">
                       {selected.approval_status === 'Approved' ? '✓' : selected.approval_status === 'Rejected' ? '✗' : '◎'}
                     </div>
-                    <div class="flow-step-label">{selected.approval_status === 'Rejected' ? 'Rejected' : 'Approved'}</div>
+                    <div class="flow-step-label">{selected.approval_status === 'Rejected' ? $t('meta_specs.approval.rejected') : $t('meta_specs.approval.approved')}</div>
                   </div>
                 </div>
 
@@ -1144,11 +1139,11 @@
                     <Badge value={selected.approval_status} variant={approvalVariant(selected.approval_status)} />
                     <span class="approval-status-text">
                       {#if selected.approval_status === 'Approved'}
-                        Approved by <code>{selected.approved_by || 'unknown'}</code> — active in all bound workspaces.
+                        {$t('meta_specs.approval.approved_by', { values: { user: selected.approved_by || 'unknown' } })}
                       {:else if selected.approval_status === 'Pending'}
-                        Awaiting review. Approve to make active, or reject to block.
+                        {$t('meta_specs.approval.pending_text')}
                       {:else}
-                        Rejected — content changes will reset to Pending for re-review.
+                        {$t('meta_specs.approval.rejected_text')}
                       {/if}
                     </span>
                   </div>
@@ -1156,33 +1151,33 @@
                   {#if selected.approval_status === 'Pending'}
                     <div class="approval-actions">
                       <Button variant="primary" onclick={handleApprove} disabled={approvalSaving !== null}>
-                        {approvalSaving === 'approve' ? 'Approving…' : 'Approve'}
+                        {approvalSaving === 'approve' ? $t('meta_specs.approval.approving') : $t('meta_specs.approval.approve')}
                       </Button>
                       <Button variant="danger" onclick={handleReject} disabled={approvalSaving !== null}>
-                        {approvalSaving === 'reject' ? 'Rejecting…' : 'Reject'}
+                        {approvalSaving === 'reject' ? $t('meta_specs.approval.rejecting') : $t('meta_specs.approval.reject')}
                       </Button>
                     </div>
                   {:else if selected.approval_status === 'Approved'}
                     <div class="approval-actions">
                       <Button variant="danger" onclick={handleReject} disabled={approvalSaving !== null}>
-                        {approvalSaving === 'reject' ? 'Revoking…' : 'Revoke Approval'}
+                        {approvalSaving === 'reject' ? $t('meta_specs.approval.revoking') : $t('meta_specs.approval.revoke_approval')}
                       </Button>
                     </div>
                   {:else}
                     <div class="approval-actions">
                       <Button variant="primary" onclick={handleApprove} disabled={approvalSaving !== null}>
-                        {approvalSaving === 'approve' ? 'Approving…' : 'Re-approve'}
+                        {approvalSaving === 'approve' ? $t('meta_specs.approval.re_approving') : $t('meta_specs.approval.re_approve')}
                       </Button>
                     </div>
                   {/if}
                 </div>
 
                 <div class="approval-meta">
-                  <div class="approval-meta-row"><span>Scope</span><span>{selected.scope}{selected.scope_id ? ' / ' + selected.scope_id : ''}</span></div>
-                  <div class="approval-meta-row"><span>Created by</span><code>{selected.created_by}</code></div>
-                  <div class="approval-meta-row"><span>Version</span><span>v{selected.version}</span></div>
+                  <div class="approval-meta-row"><span>{$t('meta_specs.approval.scope_label')}</span><span>{selected.scope}{selected.scope_id ? ' / ' + selected.scope_id : ''}</span></div>
+                  <div class="approval-meta-row"><span>{$t('meta_specs.approval.created_by_label')}</span><code>{selected.created_by}</code></div>
+                  <div class="approval-meta-row"><span>{$t('meta_specs.approval.version_label')}</span><span>v{selected.version}</span></div>
                   {#if selected.approved_by}
-                    <div class="approval-meta-row"><span>Approved by</span><code>{selected.approved_by}</code></div>
+                    <div class="approval-meta-row"><span>{$t('meta_specs.approval.approved_by_label')}</span><code>{selected.approved_by}</code></div>
                   {/if}
                 </div>
               </div>
@@ -1195,26 +1190,26 @@
 
   <!-- Discard unsaved changes confirmation modal -->
   {#if discardTarget}
-    <Modal open={true} title="Unsaved Changes" onclose={() => discardTarget = null}>
-      <p class="delete-confirm-text">You have unsaved changes. Discard them?</p>
+    <Modal open={true} title={$t('meta_specs.discard_modal.title')} onclose={() => discardTarget = null}>
+      <p class="delete-confirm-text">{$t('meta_specs.discard_modal.message')}</p>
       <div class="form-actions">
-        <Button variant="secondary" onclick={() => discardTarget = null}>Keep Editing</Button>
-        <Button variant="danger" onclick={() => { const t = discardTarget; discardTarget = null; editDirty = false; if (t.action === 'select') { selectSpec(t.spec, true); } else if (t.action === 'create') { createMode = true; selected = null; } }}>Discard</Button>
+        <Button variant="secondary" onclick={() => discardTarget = null}>{$t('meta_specs.discard_modal.keep_editing')}</Button>
+        <Button variant="danger" onclick={() => { const t = discardTarget; discardTarget = null; editDirty = false; if (t.action === 'select') { selectSpec(t.spec, true); } else if (t.action === 'create') { createMode = true; selected = null; } }}>{$t('meta_specs.discard_modal.discard')}</Button>
       </div>
     </Modal>
   {/if}
 
   <!-- Delete confirmation modal -->
   {#if deleteTarget}
-    <Modal open={true} title="Delete Meta-spec" onclose={() => deleteTarget = null}>
+    <Modal open={true} title={$t('meta_specs.delete_modal.title')} onclose={() => deleteTarget = null}>
       <p class="delete-confirm-text">
-        Are you sure you want to delete <strong>{deleteTarget.name}</strong>?
-        This cannot be undone. If active bindings exist, deletion will fail with 409.
+        {$t('meta_specs.delete_modal.confirm_prefix')} <strong>{deleteTarget.name}</strong>?
+        {$t('meta_specs.delete_modal.confirm_suffix')}
       </p>
       <div class="form-actions">
-        <Button variant="secondary" onclick={() => deleteTarget = null}>Cancel</Button>
+        <Button variant="secondary" onclick={() => deleteTarget = null}>{$t('common.cancel')}</Button>
         <Button variant="danger" onclick={handleDelete} disabled={deleteSaving}>
-          {deleteSaving ? 'Deleting…' : 'Delete'}
+          {deleteSaving ? $t('meta_specs.delete_modal.deleting') : $t('common.delete')}
         </Button>
       </div>
     </Modal>
