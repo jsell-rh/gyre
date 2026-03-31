@@ -103,13 +103,17 @@ api_post() {
   fi
 }
 
-# Git helper — runs git with a specific Bearer token
+# Git helper — runs git with a specific Bearer token.
+# Uses GIT_CONFIG_GLOBAL=/dev/null to ignore any global git config
+# that might set a conflicting http.<url>.extraHeader.
 git_with_token() {
   local dir="$1"
   local token="$2"
   shift 2
   GIT_TERMINAL_PROMPT=0 \
   GIT_ASKPASS=true \
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_COUNT=1 \
   GIT_CONFIG_KEY_0="http.extraHeader" \
   GIT_CONFIG_VALUE_0="Authorization: Bearer ${token}" \
