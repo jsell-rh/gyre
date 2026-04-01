@@ -148,7 +148,7 @@
   // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
   // /profile                                   → user profile
 
-  const REPO_TABS = ['specs', 'tasks', 'mrs', 'architecture', 'decisions', 'code', 'settings'];
+  const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
 
   // ── Entity detail state ─────────────────────────────────────────────

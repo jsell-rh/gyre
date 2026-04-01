@@ -34,6 +34,7 @@
     { id: 'specs',        labelKey: 'repo_mode.tabs.specs' },
     { id: 'tasks',        labelKey: 'repo_mode.tabs.tasks' },
     { id: 'mrs',          labelKey: 'repo_mode.tabs.mrs' },
+    { id: 'agents',       labelKey: 'repo_mode.tabs.agents' },
     { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
     { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
     { id: 'code',         labelKey: 'repo_mode.tabs.code' },
@@ -74,6 +75,26 @@
     return () => { aborted = true; };
   });
 
+  // ── All agents for this repo (for Agents tab) ────────────────────────
+  let allAgents = $state([]);
+  let allAgentsLoading = $state(false);
+  let allAgentsLoaded = $state(false);
+
+  $effect(() => {
+    if (activeTab !== 'agents') return;
+    const repoId = repo?.id;
+    if (!repoId || allAgentsLoaded) return;
+    let aborted = false;
+    allAgentsLoading = true;
+    api.agents({ repoId })
+      .then(list => { if (!aborted) { allAgents = Array.isArray(list) ? list : []; allAgentsLoading = false; allAgentsLoaded = true; } })
+      .catch(() => { if (!aborted) { allAgents = []; allAgentsLoading = false; allAgentsLoaded = true; } });
+    return () => { aborted = true; };
+  });
+
+  // Reset when repo changes
+  $effect(() => { if (repo?.id) allAgentsLoaded = false; });
+
   // ── Tasks for this repo ──────────────────────────────────────────────
   let repoTasks = $state([]);
   let tasksLoading = $state(false);
@@ -93,7 +114,7 @@
 
   // Reset when repo changes
   $effect(() => {
-    if (repo?.id) { tasksLoaded = false; mrsLoaded = false; }
+    if (repo?.id) { tasksLoaded = false; mrsLoaded = false; allAgentsLoaded = false; }
   });
 
   // ── MRs for this repo ────────────────────────────────────────────────
@@ -444,7 +465,7 @@
         onclick={() => onTabChange?.(tab.id)}
         title={tab.titleKey ? $t(tab.titleKey) : $t(tab.labelKey)}
       >
-        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{/if}
+        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{:else if tab.id === 'agents' && activeAgents.length > 0}<span class="tab-badge tab-badge-info">{activeAgents.length}</span>{/if}
       </button>
     {/each}
   </div>
@@ -638,6 +659,45 @@
                       <span class="queue-badge" title="In merge queue at position {mr.queue_position + 1}">#{mr.queue_position + 1}</span>
                     {/if}
                   </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+    {:else if activeTab === 'agents'}
+      <div class="list-tab">
+        {#if allAgentsLoading}
+          <p class="list-loading">Loading agents...</p>
+        {:else if allAgents.length === 0}
+          <div class="list-empty">
+            <p>No agents for this repository yet.</p>
+            <p class="list-empty-hint">Agents are spawned when tasks are assigned for implementation.</p>
+          </div>
+        {:else}
+          <table class="entity-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Name</th>
+                <th>Task</th>
+                <th>Branch</th>
+                <th>MR</th>
+                <th>Duration</th>
+                <th>Spawned</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each allAgents as agent}
+                {@const dur = (agent.completed_at && agent.created_at) ? Math.round(agent.completed_at - agent.created_at) : null}
+                <tr class="entity-row" onclick={() => goToEntityDetail?.('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('agent', agent.id, agent); }}>
+                  <td title={agent.status === 'active' ? 'Currently working' : agent.status === 'idle' || agent.status === 'completed' ? 'Work complete' : agent.status === 'failed' ? 'Agent failed' : agent.status === 'dead' ? 'Agent died (killed or crashed)' : ''}><Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} /></td>
+                  <td class="cell-title">{agent.name ?? shortId(agent.id)}</td>
+                  <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('task', agent.task_id ?? agent.current_task_id, {}); }} title={agent.task_id ?? agent.current_task_id}>{entityName('task', agent.task_id ?? agent.current_task_id)}</button>{/if}</td>
+                  <td class="cell-mono">{agent.branch ?? ''}</td>
+                  <td class="cell-mono">{#if agent.mr_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', agent.mr_id, {}); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
+                  <td class="cell-time">{#if dur}{dur < 60 ? dur + 's' : dur < 3600 ? Math.round(dur / 60) + 'm' : Math.round(dur / 3600) + 'h'}{:else if agent.status === 'active' && agent.created_at}{@const elapsed = Math.round((Date.now() / 1000 - agent.created_at) / 60)}{elapsed}m{/if}</td>
+                  <td class="cell-time">{fmtRelTime(agent.created_at)}</td>
                 </tr>
               {/each}
             </tbody>
@@ -928,6 +988,10 @@
     line-height: 16px;
     display: inline-block;
     vertical-align: middle;
+  }
+
+  .tab-badge-info {
+    background: var(--color-info, #1e90ff);
   }
 
   /* ── Tab content ────────────────────────────────────────────────────── */
