@@ -1540,6 +1540,7 @@
       'gate_failed': 'Gate failed',
       'GateResult': 'Gate completed',
       'enqueued': 'Enqueued for merge',
+      'MergeQueueEnqueued': 'Enqueued for merge',
       'merged': 'Merged',
       'Merged': 'Merged to main',
       'closed': 'Closed',
@@ -1547,17 +1548,24 @@
       'comment_added': 'Comment added',
       'graph_extracted': 'Graph extracted',
       'GraphDelta': 'Architecture updated',
+      'GraphExtraction': 'Architecture extracted',
       'GitPush': 'Code pushed',
+      'SpecLifecycleTrigger': 'Spec lifecycle triggered',
+      'AgentSpawned': 'Agent spawned',
+      'AgentCompleted': 'Agent completed',
+      'ConversationTurn': 'Agent conversation',
       'attestation_created': 'Attestation signed',
     };
     return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
   }
 
   function timelineEventVariant(evt) {
-    if (evt === 'merged' || evt === 'Merged' || evt === 'gate_passed') return 'success';
+    if (evt === 'merged' || evt === 'Merged' || evt === 'gate_passed' || evt === 'AgentCompleted') return 'success';
     if (evt === 'gate_failed' || evt === 'closed') return 'danger';
     if (evt?.startsWith('gate_') || evt === 'GateResult') return 'warning';
-    if (evt === 'GraphDelta' || evt === 'graph_extracted') return 'info';
+    if (evt === 'GraphDelta' || evt === 'graph_extracted' || evt === 'GraphExtraction') return 'info';
+    if (evt === 'AgentSpawned' || evt === 'SpecLifecycleTrigger') return 'info';
+    if (evt === 'MergeQueueEnqueued' || evt === 'enqueued') return 'warning';
     return 'info';
   }
 
@@ -1586,12 +1594,26 @@
       const specName = detail.spec_path.split('/').pop();
       return specName + (detail.task_id ? ' — task created' : '');
     }
-    // Agent events have {agent_id, commit_sha, files_changed}
+    // GraphExtraction events have {commit_sha, nodes_added, nodes_modified}
+    if (detail.nodes_added !== undefined || detail.nodes_modified !== undefined) {
+      const parts = [];
+      if (detail.nodes_added) parts.push(`+${detail.nodes_added} nodes`);
+      if (detail.nodes_modified) parts.push(`~${detail.nodes_modified} modified`);
+      if (detail.commit_sha) parts.push(`@ ${detail.commit_sha.slice(0, 7)}`);
+      return parts.join(', ') || null;
+    }
+    // Agent events have {agent_id, commit_sha, files_changed, status, persona}
     if (detail.agent_id) {
       const parts = [];
+      if (detail.persona) parts.push(detail.persona);
+      if (detail.status) parts.push(detail.status);
       if (detail.commit_sha) parts.push(detail.commit_sha.slice(0, 7));
       if (detail.files_changed) parts.push(`${detail.files_changed} files`);
       return parts.length > 0 ? parts.join(', ') : null;
+    }
+    // MergeQueueEnqueued events have {position}
+    if (detail.position !== undefined) {
+      return `Queue position: #${detail.position + 1}`;
     }
     // Merged events with empty detail
     if (Object.keys(detail).length === 0) return null;
