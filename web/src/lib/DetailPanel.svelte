@@ -1546,6 +1546,21 @@
     return JSON.stringify(detail);
   }
 
+  /** Format a log entry object into a human-readable string */
+  function formatLogEntry(entry) {
+    if (typeof entry === 'string') return entry;
+    const msg = entry.message ?? entry.content ?? entry.line ?? entry.text;
+    if (msg) return msg;
+    // Format structured entries nicely instead of raw JSON
+    const parts = [];
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === 'timestamp' || k === 'created_at' || k === 'level' || k === 'id') continue;
+      if (v === null || v === undefined) continue;
+      parts.push(`${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+    }
+    return parts.length > 0 ? parts.join(' | ') : JSON.stringify(entry);
+  }
+
   /** Flatten structured hunk objects into a line array with computed line numbers */
   function computeHunkLines(hunks, fileStatus) {
     const result = [];
@@ -1648,7 +1663,7 @@
         </button>
       {/if}
       <div class="panel-entity">
-        <span class="entity-type">{entity.type}</span>
+        <span class="entity-type">{entity.type === 'mr' ? 'Merge Request' : entity.type === 'spec' ? 'Specification' : entity.type === 'agent' ? 'Agent' : entity.type === 'task' ? 'Task' : entity.type === 'node' ? 'Architecture Node' : entity.type === 'commit' ? 'Commit' : entity.type}</span>
         <span class="entity-id">{entity.data?.name ?? entity.data?.title ?? (entity.type === 'spec' ? (entity.id?.split('/').pop() ?? entity.id) : entity.type === 'commit' ? ((entity.data?.sha ?? entity.id ?? '').slice(0, 7)) : entityName(entity.type, entity.id))}</span>
       </div>
       <div class="panel-actions">
@@ -2215,6 +2230,18 @@
                 </div>
               {/if}
 
+              <!-- Conversation provenance link -->
+              {#if ag.conversation_sha}
+                <div class="agent-container-info">
+                  <span class="progress-section-label">Decision Trail</span>
+                  <p class="conv-sha-info">
+                    This agent's reasoning was recorded.
+                    <button class="entity-link" onclick={() => { activeTab = 'ask-why'; }} title="View the agent's conversation and decision-making process">View Conversation →</button>
+                  </p>
+                  <code class="sha-badge mono copyable" title="Click to copy conversation SHA: {ag.conversation_sha}" onclick={() => copyId(ag.conversation_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.conversation_sha); }}>{ag.conversation_sha.slice(0, 12)}...</code>
+                </div>
+              {/if}
+
               <!-- Recent logs preview -->
               {#if Array.isArray(agentLogs) && agentLogs.length > 0}
                 <div class="agent-recent-logs">
@@ -2225,7 +2252,7 @@
                         {#if entry.timestamp || entry.created_at}
                           <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
                         {/if}
-                        <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                        <span class="trace-msg">{formatLogEntry(entry)}</span>
                       </div>
                     {/each}
                   </div>
@@ -3067,7 +3094,12 @@
                         value={ev.event}
                         variant={ev.event === 'approved' ? 'success' : ev.event === 'rejected' || ev.event === 'invalidated' || ev.event === 'revoked' ? 'danger' : 'muted'}
                       />
-                      <span class="history-user mono">{ev.user_id || ev.approver_id || '—'}</span>
+                      {@const reviewerId = ev.user_id || ev.approver_id}
+                      {#if reviewerId}
+                        <span class="history-user mono" title={reviewerId}>{reviewerId === 'human-reviewer' || reviewerId === 'system' ? reviewerId : entityName('agent', reviewerId)}</span>
+                      {:else}
+                        <span class="history-user mono">—</span>
+                      {/if}
                       <span class="history-time">{fmtDate(ev.timestamp || ev.approved_at)}</span>
                     </div>
                     {#if ev.sha || ev.spec_sha}
@@ -3147,7 +3179,7 @@
                       {#if entry.level}
                         <span class="log-level-badge log-level-{entryLevel}">{entryLevel}</span>
                       {/if}
-                      <span class="log-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                      <span class="log-msg">{formatLogEntry(entry)}</span>
                     </div>
                   {/each}
                   {#if filteredLogs.length === 0}
@@ -3757,7 +3789,7 @@
                     {#if entry.timestamp || entry.created_at}
                       <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
                     {/if}
-                    <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                    <span class="trace-msg">{formatLogEntry(entry)}</span>
                   </div>
                 {/each}
               </div>
@@ -3847,6 +3879,9 @@
                         <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
                       </span>
                     {/if}
+                    {#if mr.merge_commit_sha}
+                      <code class="sha-badge mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -3881,7 +3916,7 @@
                         {/if}
                       </div>
                       <div class="conv-turn-content">
-                        {turn.content ?? turn.text ?? turn.message ?? JSON.stringify(turn)}
+                        {turn.content ?? turn.text ?? turn.message ?? formatLogEntry(turn)}
                       </div>
                     </div>
                   {/each}
@@ -4201,6 +4236,12 @@
     word-break: break-word;
     max-height: 150px;
     overflow-y: auto;
+  }
+
+  .conv-sha-info {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin-bottom: var(--space-2);
   }
 
   .conv-meta {
