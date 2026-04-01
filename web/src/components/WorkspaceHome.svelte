@@ -677,6 +677,60 @@
     return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
   }
 
+  // ── Merge Queue state ───────────────────────────────────────────────────
+  let mergeQueueLoading = $state(true);
+  let mergeQueueItems = $state([]);
+
+  async function loadMergeQueue() {
+    mergeQueueLoading = true;
+    try {
+      const [all, graph] = await Promise.all([
+        api.mergeQueue().catch(() => []),
+        api.mergeQueueGraph().catch(() => ({ nodes: [], edges: [] })),
+      ]);
+      const allItems = Array.isArray(all) ? all : [];
+      // Enrich queue items with MR details
+      const mrIds = allItems.map(e => e.merge_request_id ?? e.mr_id).filter(Boolean);
+      const mrDetails = {};
+      await Promise.all(mrIds.slice(0, 20).map(id =>
+        api.mergeRequest(id).then(mr => { mrDetails[id] = mr; }).catch(() => {})
+      ));
+      // Filter to workspace repos if we have a repo list
+      const repoIds = new Set(repos.map(r => r.id));
+      mergeQueueItems = allItems
+        .filter(e => {
+          if (repoIds.size === 0) return true;
+          const mrId = e.merge_request_id ?? e.mr_id;
+          const mr = mrDetails[mrId];
+          return mr ? repoIds.has(mr.repository_id ?? mr.repo_id) : true;
+        })
+        .map(e => {
+          const mrId = e.merge_request_id ?? e.mr_id;
+          const mr = mrDetails[mrId] ?? {};
+          // Find deps from graph edges
+          const graphEdges = graph?.edges ?? [];
+          const deps = graphEdges.filter(edge => (edge.target ?? edge.to) === mrId).map(edge => edge.source ?? edge.from);
+          const blocks = graphEdges.filter(edge => (edge.source ?? edge.from) === mrId).map(edge => edge.target ?? edge.to);
+          return {
+            ...e,
+            _mr: mr,
+            _title: mr.title ?? shortId(mrId),
+            _status: mr.status,
+            _branch: mr.source_branch,
+            _agent: mr.author_agent_id,
+            _spec_ref: mr.spec_ref,
+            _deps: deps,
+            _blocks: blocks,
+          };
+        })
+        .sort((a, b) => (a.position ?? a.priority ?? 0) - (b.position ?? b.priority ?? 0));
+    } catch {
+      mergeQueueItems = [];
+    } finally {
+      mergeQueueLoading = false;
+    }
+  }
+
   // ── Activity feed state ─────────────────────────────────────────────────
   let activityLoading = $state(true);
   let activityEvents = $state([]);
@@ -776,6 +830,7 @@
     loadActivity();
     loadBudget();
     loadArchGraph();
+    loadMergeQueue();
   });
 </script>
 
@@ -1503,6 +1558,64 @@
           {/if}
         </div>
       </section>
+
+      <!-- ── Merge Queue ──────────────────────────────────────────────────── -->
+      {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+        <section class="home-section" aria-labelledby="section-merge-queue" data-testid="section-merge-queue">
+          <div class="section-header">
+            <h2 class="section-title" id="section-merge-queue">Merge Queue
+              <span class="section-badge">{mergeQueueItems.length}</span>
+            </h2>
+          </div>
+          <div class="section-body">
+            <div class="merge-queue-pipeline">
+              {#each mergeQueueItems as item, idx}
+                {@const mrId = item.merge_request_id ?? item.mr_id}
+                <div class="mq-item" class:mq-item-first={idx === 0}>
+                  <div class="mq-item-position">#{idx + 1}</div>
+                  <div class="mq-item-content">
+                    <button class="mq-item-title" onclick={() => openDetailPanel?.({ type: 'mr', id: mrId, data: item._mr })} title="View merge request">
+                      {item._title}
+                    </button>
+                    <div class="mq-item-meta">
+                      {#if item._branch}
+                        <span class="mq-branch mono">{item._branch}</span>
+                      {/if}
+                      {#if item._agent}
+                        <button class="ws-entity-link mq-agent" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: item._agent, data: {} }); }} title={item._agent}>
+                          {entityName('agent', item._agent)}
+                        </button>
+                      {/if}
+                      {#if item._spec_ref}
+                        {@const specPath = item._spec_ref.split('@')[0]}
+                        <button class="ws-entity-link mq-spec" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath } }); }} title={item._spec_ref}>
+                          {specPath.split('/').pop()}
+                        </button>
+                      {/if}
+                    </div>
+                    {#if item._deps.length > 0 || item._blocks.length > 0}
+                      <div class="mq-deps">
+                        {#if item._deps.length > 0}
+                          <span class="mq-dep-label">waits for {item._deps.length}</span>
+                        {/if}
+                        {#if item._blocks.length > 0}
+                          <span class="mq-dep-label">blocks {item._blocks.length}</span>
+                        {/if}
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="mq-item-status">
+                    <span class="mq-status-badge mq-status-{item.status ?? 'waiting'}">{item.status ?? 'waiting'}</span>
+                  </div>
+                  {#if idx < mergeQueueItems.length - 1}
+                    <div class="mq-connector"></div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </div>
+        </section>
+      {/if}
 
       <!-- ── Agents ──────────────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-agents" data-testid="section-agents">
@@ -3286,6 +3399,133 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 600;
+  }
+
+  /* ── Merge Queue pipeline ──────────────────────────────────────────── */
+  .merge-queue-pipeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: var(--space-2) 0;
+  }
+
+  .mq-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-left: 3px solid var(--color-border);
+    position: relative;
+    transition: background var(--transition-fast);
+  }
+
+  .mq-item:hover {
+    background: var(--color-surface-hover, rgba(255,255,255,0.03));
+  }
+
+  .mq-item-first {
+    border-left-color: var(--color-primary);
+  }
+
+  .mq-item-position {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    min-width: 24px;
+    text-align: center;
+    padding-top: 2px;
+    font-weight: 600;
+  }
+
+  .mq-item-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .mq-item-title {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-link);
+    cursor: pointer;
+    text-align: left;
+    text-decoration: none;
+  }
+
+  .mq-item-title:hover {
+    text-decoration: underline;
+  }
+
+  .mq-item-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .mq-branch {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-alt, rgba(255,255,255,0.05));
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+  }
+
+  .mq-agent, .mq-spec {
+    font-size: var(--text-xs);
+  }
+
+  .mq-deps {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+  }
+
+  .mq-dep-label {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-alt, rgba(255,255,255,0.04));
+    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm);
+  }
+
+  .mq-item-status {
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+
+  .mq-status-badge {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-alt, rgba(255,255,255,0.06));
+    color: var(--color-text-secondary);
+  }
+
+  .mq-status-running, .mq-status-processing {
+    background: var(--color-warning-bg, rgba(234,179,8,0.15));
+    color: var(--color-warning, #eab308);
+  }
+
+  .mq-status-passed, .mq-status-ready {
+    background: var(--color-success-bg, rgba(34,197,94,0.15));
+    color: var(--color-success, #22c55e);
+  }
+
+  .mq-status-failed, .mq-status-blocked {
+    background: var(--color-danger-bg, rgba(239,68,68,0.15));
+    color: var(--color-danger, #ef4444);
+  }
+
+  .mq-connector {
+    display: none; /* vertical border-left provides visual continuity */
   }
 
   @media (prefers-reduced-motion: reduce) {
