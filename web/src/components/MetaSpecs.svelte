@@ -32,6 +32,23 @@
 
   const navigate = getContext('navigate');
 
+  // Human-friendly entity name resolution
+  let entityNameCache = $state({});
+  function resolveEntityName(type, id) {
+    if (!id) return '';
+    const key = `${type}:${id}`;
+    if (entityNameCache[key]) return entityNameCache[key];
+    if (entityNameCache[key] === null) return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    entityNameCache = { ...entityNameCache, [key]: null };
+    const fetcher = type === 'repo' ? api.repo(id).then(r => r?.name) :
+                    type === 'workspace' ? api.workspace(id).then(w => w?.name) :
+                    Promise.resolve(null);
+    fetcher.then(name => {
+      if (name) entityNameCache = { ...entityNameCache, [key]: name };
+    }).catch(() => {});
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
+
   // ─── Constants ───────────────────────────────────────────────────────────────
 
   const KIND_COLORS = {
@@ -1015,9 +1032,9 @@
                       <div class="binding-list">
                         {#each blastResult.affected_repos as repo}
                           <div class="binding-row">
-                            <span class="mono">{repo.id}</span>
+                            <span class="mono">{resolveEntityName('repo', repo.id)}</span>
                             <Badge value={repo.reason} variant="muted" />
-                            <span class="mono text-muted">{repo.workspace_id}</span>
+                            <span class="mono text-muted">{resolveEntityName('workspace', repo.workspace_id)}</span>
                           </div>
                         {/each}
                       </div>
@@ -1040,7 +1057,7 @@
                             data-testid="arch-nav-link"
                             aria-label={$t('meta_specs.impact.view_repo_arch_aria', { values: { repoId: repo.id } })}
                           >
-                            <span class="mono">{repo.id}</span>
+                            <span class="mono">{resolveEntityName('repo', repo.id)}</span>
                             <span class="arch-nav-hint">{$t('meta_specs.impact.architecture_link_hint')}</span>
                           </a>
                         {/each}
