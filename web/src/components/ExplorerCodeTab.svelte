@@ -617,12 +617,12 @@
                     <tbody>
                       {#each lines as line, i}
                         {@const agentId = line.agent_id ?? line.agent}
-                        {@const lineContent = line.content ?? line.text ?? ''}
+                        {@const lineContent = line.content ?? line.text ?? line.line ?? ''}
                         {@const lineNum = line.line_number ?? (i + 1)}
                         <tr class="code-line" onclick={() => { if (agentId) fileViewMode = 'blame'; }} title={agentId ? `Written by ${resolveEntityName('agent', agentId)} — click for blame view` : ''}>
                           <td class="code-gutter-agent" style="border-left: 3px solid {agentColor(agentId)}"></td>
                           <td class="code-line-num">{lineNum}</td>
-                          <td class="code-line-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang)}</pre></td>
+                          <td class="code-line-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang) || '&nbsp;'}</pre></td>
                         </tr>
                       {/each}
                     </tbody>
