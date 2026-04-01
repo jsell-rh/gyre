@@ -30,6 +30,7 @@ vi.mock('../lib/api.js', () => ({
     adminHealth: vi.fn().mockResolvedValue(null),
     adminJobs: vi.fn().mockResolvedValue([]),
     adminRunJob: vi.fn().mockResolvedValue({}),
+    version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234' }),
   },
 }));
 
