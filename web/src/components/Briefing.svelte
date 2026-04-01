@@ -31,13 +31,17 @@
     const key = `${type}:${id}`;
     if (entityNameCache[key]) return entityNameCache[key];
     if (entityNameCache[key] === null) return id.length > 12 ? id.slice(0, 8) + '...' : id;
-    entityNameCache = { ...entityNameCache, [key]: null };
-    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                    Promise.resolve(null);
-    fetcher.then(name => {
-      if (name) entityNameCache = { ...entityNameCache, [key]: name };
-    }).catch(() => {});
+    // Defer state mutation to avoid Svelte 5 unsafe mutation during render
+    queueMicrotask(() => {
+      if (entityNameCache[key] !== undefined) return;
+      entityNameCache = { ...entityNameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) entityNameCache = { ...entityNameCache, [key]: name };
+      }).catch(() => {});
+    });
     return id.length > 12 ? id.slice(0, 8) + '...' : id;
   }
 
