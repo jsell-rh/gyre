@@ -268,6 +268,9 @@
   let repoDepsLoading = $state(false);
   let repoRisks = $state(null);
   let repoRisksLoading = $state(false);
+  let graphTypes = $state(null);
+  let graphModules = $state(null);
+  let graphTimeline = $state(null);
 
   $effect(() => {
     if (!selectedRepoId || explorerTab !== 'architecture') return;
@@ -278,9 +281,15 @@
       api.repoDependencies(selectedRepoId).catch(() => []),
       api.repoDependents(selectedRepoId).catch(() => []),
       api.repoGraphRisks(selectedRepoId).catch(() => []),
-    ]).then(([deps, depts, risks]) => {
+      api.repoGraphTypes(selectedRepoId).catch(() => ({ nodes: [] })),
+      api.repoGraphModules(selectedRepoId).catch(() => ({ nodes: [] })),
+      api.graphTimeline(selectedRepoId).catch(() => []),
+    ]).then(([deps, depts, risks, types, modules, timeline]) => {
       repoDeps = { dependencies: Array.isArray(deps) ? deps : [], dependents: Array.isArray(depts) ? depts : [] };
       repoRisks = Array.isArray(risks) ? risks : [];
+      graphTypes = types?.nodes ?? (Array.isArray(types) ? types : []);
+      graphModules = modules?.nodes ?? (Array.isArray(modules) ? modules : []);
+      graphTimeline = Array.isArray(timeline) ? timeline : [];
     }).finally(() => { repoDepsLoading = false; repoRisksLoading = false; });
   });
 
@@ -289,6 +298,9 @@
     if (selectedRepoId) {
       repoDeps = null;
       repoRisks = null;
+      graphTypes = null;
+      graphModules = null;
+      graphTimeline = null;
     }
   });
 </script>
@@ -595,9 +607,49 @@
           />
         {/if}
 
-        <!-- Repo dependencies & risks (below graph, architecture tab only) -->
-        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length)}
+        <!-- Repo dependencies, risks, types, modules, timeline (below graph, architecture tab only) -->
+        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
           <div class="arch-insights">
+            <!-- Graph Types (structs/enums extracted from code) -->
+            {#if graphTypes?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Types ({graphTypes.length})</h3>
+                <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
+                <div class="arch-type-grid">
+                  {#each graphTypes.slice(0, 20) as node}
+                    <div class="arch-type-card" title={node.qualified_name ?? node.name}>
+                      <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
+                      <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
+                      {#if node.doc_comment}
+                        <span class="arch-type-doc">{node.doc_comment.slice(0, 80)}{node.doc_comment.length > 80 ? '...' : ''}</span>
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if graphTypes.length > 20}
+                    <span class="arch-more">+{graphTypes.length - 20} more</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            <!-- Graph Modules -->
+            {#if graphModules?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Modules ({graphModules.length})</h3>
+                <p class="arch-insight-desc">Module hierarchy extracted from the codebase.</p>
+                <ul class="arch-dep-list">
+                  {#each graphModules.slice(0, 15) as mod}
+                    <li class="arch-dep-item">
+                      <span class="mono">{mod.qualified_name ?? mod.name}</span>
+                      {#if mod.doc_comment}
+                        <span class="arch-mod-doc">{mod.doc_comment.slice(0, 60)}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+
             {#if repoDeps && (repoDeps.dependencies.length > 0 || repoDeps.dependents.length > 0)}
               <div class="arch-insight-section">
                 <h3 class="arch-insight-title">Cross-Repo Dependencies</h3>
@@ -638,6 +690,31 @@
                     </li>
                   {/each}
                 </ul>
+              </div>
+            {/if}
+
+            <!-- Architecture Timeline (deltas over time) -->
+            {#if graphTimeline?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Architecture Timeline ({graphTimeline.length} changes)</h3>
+                <p class="arch-insight-desc">How the architecture has evolved over time.</p>
+                <div class="arch-timeline">
+                  {#each graphTimeline.slice(0, 10) as delta}
+                    <div class="arch-timeline-entry">
+                      <span class="arch-timeline-time">{delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '—'}</span>
+                      <span class="arch-timeline-label">{delta.change_type ?? delta.event ?? 'change'}</span>
+                      {#if delta.added_count || delta.removed_count}
+                        <span class="arch-timeline-stats">
+                          {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
+                          {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
+                        </span>
+                      {/if}
+                      {#if delta.commit_sha}
+                        <code class="mono" style="font-size: var(--text-xs); color: var(--color-text-muted)">{delta.commit_sha.slice(0, 7)}</code>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
               </div>
             {/if}
           </div>
@@ -1344,6 +1421,92 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  /* ── Graph types grid ──────────────────────────────────────────────── */
+  .arch-type-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .arch-type-card {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+  }
+
+  .arch-type-kind {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .arch-type-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .arch-type-doc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.3;
+  }
+
+  .arch-mod-doc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: var(--space-2);
+  }
+
+  .arch-more {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: var(--space-2);
+  }
+
+  /* ── Architecture timeline ───────────────────────────────────────────── */
+  .arch-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .arch-timeline-entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    font-size: var(--text-xs);
+  }
+
+  .arch-timeline-time {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    min-width: 80px;
+  }
+
+  .arch-timeline-label {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .arch-timeline-stats {
+    display: flex;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+  }
+
+  .diff-ins { color: var(--color-success); }
+  .diff-del { color: var(--color-danger); }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
