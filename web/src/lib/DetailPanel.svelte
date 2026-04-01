@@ -1454,6 +1454,16 @@
     }
   }
 
+  async function updateTaskStatusFromDetail(tk, newStatus) {
+    try {
+      await api.updateTaskStatus(entity.id, newStatus);
+      toastSuccess(`Task → ${newStatus.replace(/_/g, ' ')}`);
+      taskDetail = { ...tk, status: newStatus };
+    } catch (e) {
+      toastError('Failed to update: ' + (e.message ?? e));
+    }
+  }
+
   /** Explain spec approval status in human terms */
   function specStatusExplain(spec) {
     if (!spec?.approval_status) return '';
@@ -2440,14 +2450,29 @@
                 </div>
               {/if}
 
-              <!-- Spawn agent action for unassigned tasks -->
-              {#if !tk.assigned_to && tk.repo_id && (tk.status === 'backlog' || tk.status === 'in_progress')}
-                <div class="mr-actions">
+              <!-- Task actions -->
+              <div class="mr-actions">
+                <!-- Status transitions -->
+                {#if tk.status === 'backlog'}
+                  <Button variant="primary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'in_progress')}>Start</Button>
+                {:else if tk.status === 'in_progress'}
+                  <Button variant="primary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'done')}>Mark Done</Button>
+                  <Button variant="secondary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'blocked')}>Block</Button>
+                {:else if tk.status === 'blocked'}
+                  <Button variant="primary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'in_progress')}>Unblock</Button>
+                {:else if tk.status === 'review'}
+                  <Button variant="primary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'done')}>Approve</Button>
+                  <Button variant="secondary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'in_progress')}>Needs Work</Button>
+                {:else if tk.status === 'done'}
+                  <Button variant="secondary" size="sm" onclick={() => updateTaskStatusFromDetail(tk, 'in_progress')}>Reopen</Button>
+                {/if}
+                <!-- Spawn agent for unassigned tasks -->
+                {#if !tk.assigned_to && tk.repo_id && (tk.status === 'backlog' || tk.status === 'in_progress')}
                   <Button variant="primary" onclick={spawnAgentForTask} disabled={spawnAgentLoading}>
                     {spawnAgentLoading ? 'Spawning...' : 'Spawn Agent'}
                   </Button>
-                </div>
-              {/if}
+                {/if}
+              </div>
 
               <!-- Quick view: linked agents and MRs (loaded eagerly) -->
               {#if !taskAgents && !taskAgentsLoading}
@@ -3910,7 +3935,19 @@
                 {/each}
               </div>
             {:else if !agentTraceSpans?.length}
-              <p class="no-data">No trace data available for this agent</p>
+              <div class="attestation-pending">
+                <div class="att-pending-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                </div>
+                <p class="att-pending-title">No trace data yet</p>
+                <p class="att-pending-desc">Trace data appears here when:</p>
+                <ul class="att-pending-list">
+                  <li>The agent completes and creates a merge request</li>
+                  <li>The MR's repository has a <code>trace_capture</code> gate configured</li>
+                  <li>The gate emits OTLP spans during merge queue processing</li>
+                </ul>
+                <p class="att-pending-desc">Log output from the agent will appear above once the agent posts logs via the Gyre API.</p>
+              </div>
             {/if}
           {/if}
         </div>
