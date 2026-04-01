@@ -3131,7 +3131,7 @@
                 {/each}
               </div>
             {:else}
-              <p class="no-data">No messages for this agent</p>
+              <p class="no-data">No messages yet. You can send typed messages (FreeText, TaskAssignment, ReviewRequest) to active agents via the workspace message bus.</p>
             {/if}
 
             <!-- Send message form -->
@@ -3415,7 +3415,7 @@
               <p class="no-data">No file details available</p>
             {/if}
           {:else}
-            <p class="no-data">No diff data available</p>
+            <p class="no-data">No diff data available — the merge request may have been merged directly or the source branch has been deleted.</p>
           {/if}
         </div>
 
@@ -3542,7 +3542,7 @@
               {/each}
             </ul>
           {:else}
-            <p class="no-data">No gates configured for this merge request</p>
+            <p class="no-data">No gate results for this merge request. Quality gates (tests, lint, traces) are configured per-repository in Settings and run automatically when an MR is enqueued.</p>
           {/if}
         </div>
 
@@ -3734,7 +3734,7 @@
               {/each}
             </div>
           {:else}
-            <p class="no-data">No timeline events for this merge request</p>
+            <p class="no-data">No SDLC timeline events recorded yet. Events are created as the MR moves through the lifecycle: creation, enqueue, gate execution, merge, and attestation signing.</p>
           {/if}
         </div>
 
