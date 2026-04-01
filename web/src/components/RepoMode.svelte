@@ -542,9 +542,15 @@
                         {#if mr._gates.details?.length > 0}
                           <span class="gate-names-repo">
                             {#each mr._gates.details as g}
-                              <span class="gate-tag gate-tag-{g.status}" title="{g.name}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 100) : ''}{g.error ? '\nError: ' + g.error.slice(0, 100) : ''}">{g.name}{#if g.gate_type && g.name !== g.gate_type.replace(/_/g, ' ')} · {g.gate_type.replace(/_/g, ' ')}{/if}{#if g.required === false} <span class="gate-advisory-inline">(advisory)</span>{/if}</span>
+                              <span class="gate-tag gate-tag-{g.status}" title="{g.name}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}">{g.name}{#if g.duration_ms} <span class="gate-duration-inline">{g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's'}</span>{/if}{#if g.required === false} <span class="gate-advisory-inline">(advisory)</span>{/if}</span>
                             {/each}
                           </span>
+                          {#if mr._gates.failed > 0}
+                            {@const failedGate = mr._gates.details.find(g => g.status === 'failed')}
+                            {#if failedGate?.output}
+                              <span class="gate-error-preview" title="Click to see full gate details">{failedGate.output.split('\n')[0]?.slice(0, 80)}{failedGate.output.length > 80 ? '...' : ''}</span>
+                            {/if}
+                          {/if}
                         {/if}
                       </button>
                     {/if}
@@ -1345,6 +1351,27 @@
     font-size: 0.7em;
     opacity: 0.7;
     font-style: italic;
+  }
+
+  .gate-duration-inline {
+    font-size: 0.8em;
+    opacity: 0.6;
+    font-family: var(--font-mono);
+  }
+
+  .gate-error-preview {
+    display: block;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 6%, transparent);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 250px;
   }
 
   /* ── Entity link buttons in tables ──────────────────────────────────── */
