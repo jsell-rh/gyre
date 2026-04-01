@@ -62,6 +62,7 @@
   let blameData = $state(null);
   let blameLoading = $state(false);
   let reviewRouting = $state([]);
+  let fileViewMode = $state('code'); // 'code' | 'blame'
   let loading = $state(true);
   let error = $state(null);
   let filterQuery = $state('');
@@ -139,11 +140,7 @@
         const mrList = await api.mergeRequests({ repository_id: repoId });
         // Enrich MRs with gate results summary
         mrs = Array.isArray(mrList) ? mrList : [];
-        // Fetch gate definitions for this repo to resolve names
-        let codeDefs = [];
-        try { codeDefs = await api.repoGates(repoId); } catch { /* best effort */ }
-        const codeDefMap = Object.fromEntries((Array.isArray(codeDefs) ? codeDefs : []).map(g => [g.id, g]));
-        // Load gate results for each MR in parallel (best-effort)
+        // Load gate results for each MR in parallel (best-effort, API enriches names)
         const gatePromises = mrs.map(mr =>
           api.mrGates(mr.id).then(gates => {
             const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
@@ -151,12 +148,12 @@
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
             const total = arr.length;
             const details = arr.map(g => {
-              const def = codeDefMap[g.gate_id] ?? {};
+              const gateType = (g.gate_type ?? '').replace(/_/g, ' ');
               return {
-                name: g.name ?? g.gate_name ?? def.name ?? ((g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || `Gate ${shortName(g.gate_id ?? g.id)}`),
+                name: g.gate_name ?? g.name ?? gateType || 'Quality gate',
                 status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
-                gate_type: g.gate_type ?? def.gate_type,
-                required: g.required ?? def.required,
+                gate_type: g.gate_type,
+                required: g.required,
               };
             });
             return { id: mr.id, passed, failed, total, details };
@@ -559,18 +556,21 @@
       {#if fileTree.length === 0}
         <EmptyState title="No files tracked" message="File data appears after agents commit code. Try viewing Hot Files or Provenance for available data." />
       {:else if selectedFile}
-        <!-- File blame view -->
+        <!-- File view (code or blame) -->
         <div class="file-blame-view">
           <div class="file-blame-header">
             <nav class="blame-breadcrumb" aria-label="File navigation">
-              <button class="breadcrumb-link" onclick={() => { selectedFile = null; blameData = null; }}>
+              <button class="breadcrumb-link" onclick={() => { selectedFile = null; blameData = null; fileViewMode = 'code'; }}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
                 Files
               </button>
               <span class="breadcrumb-sep" aria-hidden="true">/</span>
               <span class="breadcrumb-current mono">{selectedFile}</span>
             </nav>
-            <span class="blame-view-label">Blame View — agent attribution per line</span>
+            <div class="file-view-toggle">
+              <button class="view-toggle-btn" class:active={fileViewMode === 'code'} onclick={() => { fileViewMode = 'code'; }} title="View source code">Code</button>
+              <button class="view-toggle-btn" class:active={fileViewMode === 'blame'} onclick={() => { fileViewMode = 'blame'; }} title="View with agent attribution">Blame</button>
+            </div>
           </div>
 
           {#if reviewRouting.length > 0}
@@ -591,85 +591,106 @@
           {:else if blameData}
             {@const lines = Array.isArray(blameData) ? blameData : (blameData.lines ?? blameData.blame ?? [])}
             {#if lines.length > 0}
-              <div class="blame-code-viewer">
-                <table class="blame-table">
-                  <thead>
-                    <tr>
-                      <th scope="col" class="blame-col-marker"></th>
-                      <th scope="col" class="blame-col-line">#</th>
-                      <th scope="col" class="blame-col-agent">Agent</th>
-                      <th scope="col" class="blame-col-sha">Commit</th>
-                      <th scope="col" class="blame-col-spec">Spec</th>
-                      <th scope="col" class="blame-col-action"></th>
-                      <th scope="col" class="blame-col-content">Content</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each lines as line, i}
-                      {@const agentId = line.agent_id ?? line.agent}
-                      {@const specRef = line.spec_ref ?? line.spec_path}
-                      {@const lineContent = line.content ?? line.text ?? ''}
-                      <tr class="blame-row" class:blame-agent-row={!!agentId}>
-                        <td class="blame-marker" style="border-left: 3px solid {agentColor(agentId)}" title={agentId ? `Agent: ${resolveEntityName('agent', agentId)}` : ''}></td>
-                        <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
-                        <td class="blame-agent">
-                          {#if agentId}
-                            <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title="View agent: {agentId}">
-                              <span class="agent-icon" aria-hidden="true">&#x2699;</span>
-                              {resolveEntityName('agent', agentId)}
-                            </button>
-                          {:else}
-                            <span class="secondary">{line.author ?? '—'}</span>
-                          {/if}
-                        </td>
-                        <td class="blame-sha mono">
-                          {#if line.sha ?? line.commit_sha}
-                            <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {(line.sha ?? line.commit_sha).slice(0, 7)}">
-                              {(line.sha ?? line.commit_sha).slice(0, 7)}
-                            </button>
-                          {:else}
-                            —
-                          {/if}
-                        </td>
-                        <td class="blame-spec">
-                          {#if specRef}
-                            {@const specName = specRef.split('@')[0]?.split('/').pop()}
-                            <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
-                              {specName}
-                            </button>
-                          {:else}
-                            <span class="secondary">—</span>
-                          {/if}
-                        </td>
-                        <td class="blame-action">
-                          {#if agentId && (line.sha ?? line.commit_sha)}
-                            <button
-                              class="investigate-btn-prominent"
-                              onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
-                              disabled={investigateLoading === (line.sha ?? line.commit_sha)}
-                              title="Spawn an interrogation agent to discuss why this code was written this way"
-                            >
-                              {#if investigateLoading === (line.sha ?? line.commit_sha)}
-                                <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                                <span>Spawning...</span>
-                              {:else}
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-                                <span>Ask why</span>
-                              {/if}
-                            </button>
-                          {/if}
-                        </td>
-                        <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang)}</pre></td>
+              {#if fileViewMode === 'code'}
+                <!-- Clean code view with line numbers and agent color gutter -->
+                <div class="code-viewer">
+                  <table class="code-table-viewer">
+                    <tbody>
+                      {#each lines as line, i}
+                        {@const agentId = line.agent_id ?? line.agent}
+                        {@const lineContent = line.content ?? line.text ?? ''}
+                        {@const lineNum = line.line_number ?? (i + 1)}
+                        <tr class="code-line" onclick={() => { if (agentId) fileViewMode = 'blame'; }} title={agentId ? `Written by ${resolveEntityName('agent', agentId)} — click for blame view` : ''}>
+                          <td class="code-gutter-agent" style="border-left: 3px solid {agentColor(agentId)}"></td>
+                          <td class="code-line-num">{lineNum}</td>
+                          <td class="code-line-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang)}</pre></td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else}
+                <!-- Blame view with agent attribution -->
+                <div class="blame-code-viewer">
+                  <table class="blame-table">
+                    <thead>
+                      <tr>
+                        <th scope="col" class="blame-col-marker"></th>
+                        <th scope="col" class="blame-col-line">#</th>
+                        <th scope="col" class="blame-col-agent">Agent</th>
+                        <th scope="col" class="blame-col-sha">Commit</th>
+                        <th scope="col" class="blame-col-spec">Spec</th>
+                        <th scope="col" class="blame-col-action"></th>
+                        <th scope="col" class="blame-col-content">Content</th>
                       </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {#each lines as line, i}
+                        {@const agentId = line.agent_id ?? line.agent}
+                        {@const specRef = line.spec_ref ?? line.spec_path}
+                        {@const lineContent = line.content ?? line.text ?? ''}
+                        <tr class="blame-row" class:blame-agent-row={!!agentId}>
+                          <td class="blame-marker" style="border-left: 3px solid {agentColor(agentId)}" title={agentId ? `Agent: ${resolveEntityName('agent', agentId)}` : ''}></td>
+                          <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
+                          <td class="blame-agent">
+                            {#if agentId}
+                              <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title="View agent: {agentId}">
+                                <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                                {resolveEntityName('agent', agentId)}
+                              </button>
+                            {:else}
+                              <span class="secondary">{line.author ?? '—'}</span>
+                            {/if}
+                          </td>
+                          <td class="blame-sha mono">
+                            {#if line.sha ?? line.commit_sha}
+                              <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {(line.sha ?? line.commit_sha).slice(0, 7)}">
+                                {(line.sha ?? line.commit_sha).slice(0, 7)}
+                              </button>
+                            {:else}
+                              —
+                            {/if}
+                          </td>
+                          <td class="blame-spec">
+                            {#if specRef}
+                              {@const specName = specRef.split('@')[0]?.split('/').pop()}
+                              <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
+                                {specName}
+                              </button>
+                            {:else}
+                              <span class="secondary">—</span>
+                            {/if}
+                          </td>
+                          <td class="blame-action">
+                            {#if agentId && (line.sha ?? line.commit_sha)}
+                              <button
+                                class="investigate-btn-prominent"
+                                onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
+                                disabled={investigateLoading === (line.sha ?? line.commit_sha)}
+                                title="Spawn an interrogation agent to discuss why this code was written this way"
+                              >
+                                {#if investigateLoading === (line.sha ?? line.commit_sha)}
+                                  <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                                  <span>Spawning...</span>
+                                {:else}
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                                  <span>Ask why</span>
+                                {/if}
+                              </button>
+                            {/if}
+                          </td>
+                          <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang)}</pre></td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
             {:else}
-              <p class="no-data">No blame data available for this file</p>
+              <p class="no-data">No file data available</p>
             {/if}
           {:else}
-            <p class="no-data">Blame data not available. File may not have been committed by an agent.</p>
+            <p class="no-data">File data not available. File may not have been committed by an agent.</p>
           {/if}
         </div>
       {:else}
@@ -1570,9 +1591,85 @@
     font-weight: 600;
   }
 
-  .blame-view-label {
+  .file-view-toggle {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .view-toggle-btn {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--color-border);
     font-size: var(--text-xs);
+    font-family: var(--font-body);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .view-toggle-btn:last-child { border-right: none; }
+
+  .view-toggle-btn.active {
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+  }
+
+  .view-toggle-btn:hover:not(.active) {
+    background: var(--color-surface-elevated);
+  }
+
+  /* Clean code viewer */
+  .code-viewer {
+    overflow: auto;
+    max-height: calc(100vh - 200px);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .code-table-viewer {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  .code-line {
+    cursor: default;
+    transition: background var(--transition-fast);
+  }
+
+  .code-line:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .code-line[title]:not([title=""]) {
+    cursor: pointer;
+  }
+
+  .code-gutter-agent {
+    width: 4px;
+    padding: 0;
+  }
+
+  .code-line-num {
+    padding: 0 var(--space-2) 0 var(--space-3);
+    text-align: right;
     color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    user-select: none;
+    white-space: nowrap;
+    min-width: 40px;
+    border-right: 1px solid var(--color-border);
+  }
+
+  .code-line-content {
+    padding: 0 var(--space-3);
+    white-space: pre;
+    tab-size: 4;
   }
 
   .review-routing-bar {
