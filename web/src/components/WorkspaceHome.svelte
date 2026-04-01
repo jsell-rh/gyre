@@ -143,7 +143,7 @@
   let specsStatusFilter = $state('');
 
   // ── Architecture state ─────────────────────────────────────────────────
-  let archExpanded = $state(false);
+  let archExpanded = $state(true);
   let archLoading = $state(false);
   let archError = $state(null);
   let archGraph = $state(null); // { nodes: [], edges: [] }
@@ -493,6 +493,12 @@
   }
 
   // ── Spec navigation ────────────────────────────────────────────────────
+  function viewAllForTab(tab) {
+    if (repos.length === 1 && onSelectRepo) {
+      onSelectRepo(repos[0], tab);
+    }
+  }
+
   function navigateToSpec(spec) {
     const repo = repoMap[spec.repo_id];
     if (repo && onSelectRepo) {
@@ -769,6 +775,7 @@
     loadAgents();
     loadActivity();
     loadBudget();
+    loadArchGraph();
   });
 </script>
 
@@ -901,7 +908,7 @@
           </div>
           <div class="section-body">
             <div class="prov-flow-bar">
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-specs')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Specs section">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('specs') : document.getElementById('section-specs')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open Specs tab' : 'Jump to Specs section'}>
                 <span class="prov-flow-count">{provenanceSummary.approved + provenanceSummary.pending}</span>
                 <span class="prov-flow-label">Specs</span>
                 {#if provenanceSummary.pending > 0}
@@ -909,7 +916,7 @@
                 {/if}
               </button>
               <span class="prov-flow-arrow">→</span>
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-tasks')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Tasks section">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('tasks') : document.getElementById('section-tasks')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open Tasks tab' : 'Jump to Tasks section'}>
                 <span class="prov-flow-count">{provenanceSummary.totalTasks}</span>
                 <span class="prov-flow-label">Tasks</span>
                 {#if provenanceSummary.inProgressTasks > 0}
@@ -925,7 +932,7 @@
                 {/if}
               </button>
               <span class="prov-flow-arrow">→</span>
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-mrs')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to MRs section">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('mrs') : document.getElementById('section-mrs')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open MRs tab' : 'Jump to MRs section'}>
                 <span class="prov-flow-count">{wsMrs.length}</span>
                 <span class="prov-flow-label">MRs</span>
                 {#if provenanceSummary.openMrs > 0}
@@ -958,7 +965,17 @@
             <div class="activity-timeline">
               {#each activityEvents.slice(0, 15) as event, i}
                 {@const variant = activityVariant(event)}
-                <div class="activity-item">
+                {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                <button
+                  class="activity-item activity-item-clickable"
+                  onclick={() => {
+                    if (primaryType && primaryId) {
+                      const data = event.entity_id ? event : primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : {};
+                      openDetailPanel?.({ type: primaryType, id: primaryId, data });
+                    }
+                  }}
+                >
                   <div class="activity-dot activity-dot-{variant}"></div>
                   {#if i < Math.min(activityEvents.length, 15) - 1}<div class="activity-line"></div>{/if}
                   <div class="activity-content">
@@ -968,27 +985,26 @@
                       <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
                     {/if}
                     {#if event.entity_id && event.entity_type}
-                      <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: event.entity_type, id: event.entity_id, data: event })} title="View {event.entity_type}">{entityName(event.entity_type, event.entity_id)}</button>
+                      <span class="activity-entity-name">{entityName(event.entity_type, event.entity_id)}</span>
                     {:else}
-                      {@const evtStr = (event.event_type ?? event.type ?? '').toLowerCase()}
                       {#if event.agent_id}
-                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'agent', id: event.agent_id, data: {} })} title="View agent">{entityName('agent', event.agent_id)}</button>
+                        <span class="activity-entity-name">{entityName('agent', event.agent_id)}</span>
                       {/if}
                       {#if event.mr_id}
-                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'mr', id: event.mr_id, data: {} })} title="View MR">{entityName('mr', event.mr_id)}</button>
+                        <span class="activity-entity-name">{entityName('mr', event.mr_id)}</span>
                       {/if}
                       {#if event.task_id && !event.agent_id}
-                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'task', id: event.task_id, data: {} })} title="View task">{entityName('task', event.task_id)}</button>
+                        <span class="activity-entity-name">{entityName('task', event.task_id)}</span>
                       {/if}
                       {#if event.spec_path && !event.agent_id && !event.mr_id}
-                        <button class="ws-entity-link activity-entity-link" onclick={() => openDetailPanel?.({ type: 'spec', id: event.spec_path, data: { path: event.spec_path, repo_id: event.repo_id } })} title="View spec">{event.spec_path.split('/').pop()}</button>
+                        <span class="activity-entity-name">{event.spec_path.split('/').pop()}</span>
                       {/if}
                     {/if}
                     {#if event.timestamp ?? event.created_at}
                       <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                     {/if}
                   </div>
-                </div>
+                </button>
               {/each}
             </div>
           {/if}
@@ -1341,6 +1357,9 @@
               <span class="section-badge">{wsTasks.length}</span>
             {/if}
           </h2>
+          {#if wsTasks.length > 10 && repos.length === 1}
+            <button class="section-action-btn" onclick={() => viewAllForTab('tasks')}>View All</button>
+          {/if}
         </div>
         <div class="section-body">
           {#if tasksLoading}
@@ -1383,7 +1402,12 @@
               </tbody>
             </table>
             {#if wsTasks.length > 10}
-              <p class="show-more-hint">{wsTasks.length - 10} more tasks not shown</p>
+              <p class="show-more-hint">
+                {wsTasks.length - 10} more tasks not shown
+                {#if repos.length === 1}
+                  <button class="view-all-link" onclick={() => viewAllForTab('tasks')}>View All</button>
+                {/if}
+              </p>
             {/if}
           {/if}
         </div>
@@ -1397,6 +1421,9 @@
               <span class="section-badge">{wsMrs.length}</span>
             {/if}
           </h2>
+          {#if wsMrs.length > 10 && repos.length === 1}
+            <button class="section-action-btn" onclick={() => viewAllForTab('mrs')}>View All</button>
+          {/if}
         </div>
         <div class="section-body">
           {#if mrsLoading}
@@ -1466,7 +1493,12 @@
               </tbody>
             </table>
             {#if wsMrs.length > 10}
-              <p class="show-more-hint">{wsMrs.length - 10} more MRs not shown</p>
+              <p class="show-more-hint">
+                {wsMrs.length - 10} more MRs not shown
+                {#if repos.length === 1}
+                  <button class="view-all-link" onclick={() => viewAllForTab('mrs')}>View All</button>
+                {/if}
+              </p>
             {/if}
           {/if}
         </div>
@@ -1518,6 +1550,7 @@
             {#if wsAgents.length > 10}
               <p class="show-more-hint">{wsAgents.length - 10} more agents not shown</p>
             {/if}
+
           {/if}
         </div>
       </section>
@@ -1542,7 +1575,7 @@
                     <div class="budget-meter">
                       <div class="budget-meter-header">
                         <span class="budget-meter-label">Concurrent Agents</span>
-                        <span class="budget-meter-value">{activeCount} / {config.max_concurrent_agents}</span>
+                        <span class="budget-meter-value">{activeCount} of {config.max_concurrent_agents} agent {config.max_concurrent_agents === 1 ? 'slot' : 'slots'} used</span>
                       </div>
                       <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
                         <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
@@ -1555,7 +1588,7 @@
                     <div class="budget-meter">
                       <div class="budget-meter-header">
                         <span class="budget-meter-label">Tokens Today</span>
-                        <span class="budget-meter-value">{usedTokens.toLocaleString()} / {config.max_tokens_per_day.toLocaleString()}</span>
+                        <span class="budget-meter-value">{usedTokens.toLocaleString()} of {config.max_tokens_per_day.toLocaleString()} tokens used ({pct}%)</span>
                       </div>
                       <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
                         <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
@@ -1568,7 +1601,7 @@
                     <div class="budget-meter">
                       <div class="budget-meter-header">
                         <span class="budget-meter-label">Cost Today</span>
-                        <span class="budget-meter-value">${usedCost.toFixed(2)} / ${config.max_cost_per_day.toFixed(2)}</span>
+                        <span class="budget-meter-value">${usedCost.toFixed(2)} of ${config.max_cost_per_day.toFixed(2)} budget used ({pct}%)</span>
                       </div>
                       <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
                         <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
@@ -2963,6 +2996,25 @@
     font-style: italic;
   }
 
+  .view-all-link {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-style: normal;
+    font-weight: 500;
+    padding: 0;
+    margin-left: var(--space-2);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .view-all-link:hover {
+    color: var(--color-primary-hover);
+  }
+
   @media (max-width: 768px) {
     .workspace-home {
       padding: var(--space-4);
@@ -3058,6 +3110,32 @@
     position: relative;
     padding-left: 24px;
     min-height: 32px;
+    border: none;
+    background: none;
+    text-align: left;
+    width: 100%;
+    font-family: inherit;
+  }
+
+  .activity-item-clickable {
+    cursor: pointer;
+    border-radius: var(--radius);
+    transition: background var(--transition-fast);
+  }
+
+  .activity-item-clickable:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .activity-item-clickable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+  }
+
+  .activity-entity-name {
+    color: var(--color-primary);
+    font-weight: 500;
+    font-size: var(--text-xs);
   }
 
   .activity-dot {
