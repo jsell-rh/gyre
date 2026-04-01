@@ -20,6 +20,7 @@
   import AgentCardPanel from './AgentCardPanel.svelte';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   let {
     workspace = null,
@@ -483,7 +484,7 @@
             </thead>
             <tbody>
               {#each repoTasks as task}
-                <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'task', id: task.id, data: task }); }}>
+                <tr class="entity-row" onclick={() => goToEntityDetail?.('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('task', task.id, task); }}>
                   <td title={task.status === 'blocked' ? `Blocked${task.depends_on?.length ? ` by ${task.depends_on.length} task(s)` : ''}` : task.status === 'in_progress' && task.assigned_to ? `In progress — assigned to agent` : task.status === 'done' ? 'Completed' : task.status === 'backlog' ? 'Awaiting assignment' : ''}><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
@@ -537,7 +538,7 @@
             </thead>
             <tbody>
               {#each repoMrs as mr}
-                <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
+                <tr class="entity-row" onclick={() => goToEntityDetail?.('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('mr', mr.id, mr); }}>
                   <td title={mr.queue_position != null ? `Position ${mr.queue_position + 1} in merge queue — gates will run before merge` : mr.status === 'merged' ? `Merged${mr.merge_commit_sha ? ' at ' + mr.merge_commit_sha.slice(0, 7) : ''}` : mr.status === 'open' ? 'Open — ready to enqueue for merge' : mr.status === 'closed' ? 'Closed without merging' : ''}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
@@ -545,7 +546,7 @@
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
-                      <button class="gate-cell-repo gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}${g.duration_ms ? ' · ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
+                      <button class="gate-cell-repo gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}${g.duration_ms ? ' · ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
                         <span class="gate-summary-compact">
                           {#if mr._gates.failed > 0}
                             <span class="gate-fail-compact">✗{mr._gates.failed}</span>
