@@ -35,6 +35,8 @@
             icon: ENTITY_ICONS[r.entity_type] ?? '?',
             entityType: r.entity_type,
             entityId: r.entity_id,
+            repoId: r.facets?.repo_id ?? null,
+            workspaceId: r.facets?.workspace_id ?? null,
             view: entityView(r.entity_type),
           })),
           ...SHORTCUTS.filter(s => s.label.toLowerCase().includes(query.toLowerCase())),
@@ -108,7 +110,7 @@
 
   function navigate(item) {
     open = false;
-    onnavigate?.(item.view, { entityType: item.entityType, entityId: item.entityId });
+    onnavigate?.(item.view, { entityType: item.entityType, entityId: item.entityId, repo_id: item.repoId, workspace_id: item.workspaceId });
   }
 
   function onkeydown(e) {

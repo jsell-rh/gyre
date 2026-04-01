@@ -1575,10 +1575,12 @@
 <SearchBar bind:open={searchOpen} onnavigate={(v, opts) => {
   if (v === 'profile') { goToProfile(); return; }
   if (v === 'meta-specs') { goToAgentRules(); return; }
-  // Entity search results: open detail panel for the matched entity
+  // Entity search results: open full-page detail for the matched entity
   if (opts?.entityType && opts?.entityId) {
-    if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
-    tick().then(() => openDetailPanel({ type: opts.entityType, id: opts.entityId }));
+    const data = {};
+    if (opts.repo_id) data.repo_id = opts.repo_id;
+    if (opts.workspace_id) data.workspace_id = opts.workspace_id;
+    tick().then(() => openDetailPanel({ type: opts.entityType, id: opts.entityId, data }));
     return;
   }
   // For section-based views, navigate to workspace home and scroll to the section
