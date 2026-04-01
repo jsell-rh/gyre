@@ -306,15 +306,8 @@
     try {
       const data = await api.mergeRequests({ workspace_id: workspace.id });
       const mrList = Array.isArray(data) ? data : [];
-      // Collect unique repo IDs to fetch gate definitions
-      const repoIds = [...new Set(mrList.map(m => m.repository_id ?? m.repo_id).filter(Boolean))];
-      const allGateDefs = {};
-      await Promise.all(repoIds.slice(0, 5).map(rid =>
-        api.repoGates(rid).then(defs => {
-          for (const d of (Array.isArray(defs) ? defs : [])) allGateDefs[d.id] = d;
-        }).catch(() => {})
-      ));
       // Enrich first 10 MRs with gate results (best-effort)
+      // The API enriches gate_name, gate_type, required, command from definitions
       const toEnrich = mrList.slice(0, 10);
       const gatePromises = toEnrich.map(mr =>
         api.mrGates(mr.id).then(gates => {
@@ -322,12 +315,12 @@
           const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
           const details = arr.map(g => {
-            const def = allGateDefs[g.gate_id] ?? {};
+            const gateType = (g.gate_type ?? '').replace(/_/g, ' ');
             return {
-              name: g.name ?? g.gate_name ?? def.name ?? ((g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || 'Gate'),
+              name: g.gate_name ?? g.name ?? gateType || 'Quality gate',
               status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
-              gate_type: g.gate_type ?? def.gate_type,
-              required: g.required ?? def.required,
+              gate_type: g.gate_type,
+              required: g.required,
             };
           });
           return { id: mr.id, passed, failed, total: arr.length, details };
