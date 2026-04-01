@@ -2490,22 +2490,26 @@
               <!-- File tree summary (like GitHub) -->
               <div class="diff-file-tree">
                 {#each mrDiff.files as file}
+                  {@const statusLower = (file.status ?? 'modified').toLowerCase()}
                   <span class="diff-tree-item">
-                    <span class="diff-tree-status diff-tree-status-{file.status ?? 'modified'}">{file.status === 'added' ? '+' : file.status === 'deleted' ? '-' : '~'}</span>
+                    <span class="diff-tree-status diff-tree-status-{statusLower}">{statusLower === 'added' ? '+' : statusLower === 'deleted' ? '-' : '~'}</span>
                     <span class="diff-tree-path mono">{file.path}</span>
                   </span>
                 {/each}
               </div>
               <div class="diff-file-list">
                 {#each mrDiff.files as file, idx}
+                  {@const fileStatusLower = (file.status ?? 'modified').toLowerCase()}
+                  {@const fileAdds = file.insertions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'add').length, 0) : null)}
+                  {@const fileDels = file.deletions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'delete').length, 0) : null)}
                   <details class="diff-file" open={mrDiff.files.length <= 5}>
                     <summary class="diff-file-header">
-                      <Badge value={file.status ?? 'modified'} variant={file.status === 'added' ? 'success' : file.status === 'deleted' ? 'danger' : 'info'} />
+                      <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
-                      {#if file.insertions != null || file.deletions != null}
+                      {#if fileAdds != null || fileDels != null}
                         <span class="diff-file-stats">
-                          {#if file.insertions}<span class="diff-ins">+{file.insertions}</span>{/if}
-                          {#if file.deletions}<span class="diff-del">-{file.deletions}</span>{/if}
+                          {#if fileAdds}<span class="diff-ins">+{fileAdds}</span>{/if}
+                          {#if fileDels}<span class="diff-del">-{fileDels}</span>{/if}
                         </span>
                       {/if}
                     </summary>
@@ -2519,6 +2523,28 @@
                               <td class="diff-gutter diff-gutter-new">{pline.newNum}</td>
                               <td class="diff-code">{#if pline.type === 'hunk'}<span class="diff-hunk-text">{pline.text}</span>{:else}<span class="diff-prefix">{pline.text.charAt(0)}</span>{@html highlightLine(pline.text.slice(1), lang)}{/if}</td>
                             </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    {:else if file.hunks?.length > 0}
+                      {@const lang = detectLang(file.path ?? '')}
+                      <table class="diff-table">
+                        <tbody>
+                          {#each file.hunks as hunk}
+                            <tr class="diff-tr diff-tr-hunk">
+                              <td class="diff-gutter diff-gutter-old"></td>
+                              <td class="diff-gutter diff-gutter-new"></td>
+                              <td class="diff-code"><span class="diff-hunk-text">{hunk.header}</span></td>
+                            </tr>
+                            {#each hunk.lines as line}
+                              {@const lineType = line.type === 'add' ? 'add' : line.type === 'delete' ? 'del' : 'ctx'}
+                              {@const prefix = lineType === 'add' ? '+' : lineType === 'del' ? '-' : ' '}
+                              <tr class="diff-tr diff-tr-{lineType}">
+                                <td class="diff-gutter diff-gutter-old">{lineType !== 'add' ? '' : ''}</td>
+                                <td class="diff-gutter diff-gutter-new">{lineType !== 'del' ? '' : ''}</td>
+                                <td class="diff-code"><span class="diff-prefix">{prefix}</span>{@html highlightLine(line.content, lang)}</td>
+                              </tr>
+                            {/each}
                           {/each}
                         </tbody>
                       </table>
