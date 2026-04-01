@@ -68,6 +68,10 @@ pub struct CompleteAgentRequest {
     pub branch: String,
     pub title: String,
     pub target_branch: String,
+    /// SHA-256 of the agent's conversation blob (HSI §5 provenance).
+    /// Stored in KV so the merge attestation can include it.
+    #[serde(default)]
+    pub conversation_sha: Option<String>,
 }
 
 // ── Interrogation agent helpers ───────────────────────────────────────────────
@@ -1156,6 +1160,16 @@ pub async fn complete_agent(
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
         }
+    }
+
+    // Store conversation SHA in KV for merge attestation (HSI §5).
+    // The merge processor looks up `conv_sha:{agent_id}` in the `agent_provenance` bucket.
+    if let Some(ref sha) = req.conversation_sha {
+        let kv_key = format!("conv_sha:{}", id);
+        let _ = state
+            .kv_store
+            .kv_set("agent_provenance", &kv_key, sha.clone())
+            .await;
     }
 
     // Transition agent to Idle
