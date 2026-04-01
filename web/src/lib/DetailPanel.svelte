@@ -15,6 +15,7 @@
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetailCtx = getContext('goToEntityDetail') ?? null;
 
   /**
    * DetailPanel — slide-in panel from the right.
@@ -1292,7 +1293,11 @@
 
   /** Navigate to an entity in the detail panel. */
   function navigateTo(type, id, data) {
-    openDetailPanel?.({ type, id, data: data ?? {} });
+    if (fullPage && goToEntityDetailCtx) {
+      goToEntityDetailCtx(type, id, data ?? {});
+    } else {
+      openDetailPanel?.({ type, id, data: data ?? {} });
+    }
   }
 
   /** Queue entity name resolution outside of template rendering. */
