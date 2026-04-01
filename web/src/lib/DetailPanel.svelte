@@ -638,11 +638,57 @@
 
   // Load conversation provenance for ask-why tab
   // Use enriched mrDetail or agentDetail as source, since conversation_sha is loaded asynchronously
+  let convResolutionAttempted = $state(false);
+  let effectiveConvSha = $derived(entity?.data?.conversation_sha ?? mrDetail?.conversation_sha ?? agentDetail?.conversation_sha ?? null);
+
+  // Reset convResolutionAttempted when entity changes
+  $effect(() => {
+    if (entity) convResolutionAttempted = false;
+  });
+
   $effect(() => {
     if (activeTab !== 'ask-why') return;
-    const convSha = entity?.data?.conversation_sha
-      ?? mrDetail?.conversation_sha
-      ?? agentDetail?.conversation_sha;
+    const convSha = effectiveConvSha;
+
+    // If no conversation_sha yet, try to resolve it from the attestation or agent
+    if (!convSha && !conversationLoading && !convResolutionAttempted) {
+      convResolutionAttempted = true;
+      conversationLoading = true;
+
+      (async () => {
+        try {
+          // For MRs: try attestation first
+          if (entity?.type === 'mr') {
+            const att = mrAttestation ?? await api.mrAttestation(entity.id).catch(() => null);
+            if (!mrAttestation && att) mrAttestation = att;
+            const attConvSha = att?.attestation?.conversation_sha ?? att?.conversation_sha;
+            if (attConvSha) {
+              if (mrDetail) mrDetail = { ...mrDetail, conversation_sha: attConvSha };
+              const data = await api.conversationProvenance(attConvSha).catch(() => null);
+              conversationData = data;
+              return;
+            }
+          }
+          // Try via agent
+          const agentId = entity?.data?.author_agent_id ?? mrDetail?.author_agent_id ?? agentDetail?.id;
+          if (agentId) {
+            const ag = agentDetail ?? await api.agent(agentId).catch(() => null);
+            if (ag?.conversation_sha) {
+              const data = await api.conversationProvenance(ag.conversation_sha).catch(() => null);
+              conversationData = data;
+              return;
+            }
+          }
+          conversationData = null;
+        } catch {
+          conversationData = null;
+        } finally {
+          conversationLoading = false;
+        }
+      })();
+      return;
+    }
+
     if (!convSha || conversationData || conversationLoading) return;
     conversationLoading = true;
     api.conversationProvenance(convSha)
@@ -3366,8 +3412,7 @@
 
       {:else if activeTab === 'ask-why'}
         <div class="tab-pane ask-why">
-          {@const convSha = entity.data?.conversation_sha ?? mrDetail?.conversation_sha ?? agentDetail?.conversation_sha}
-          {#if convSha}
+          {#if effectiveConvSha}
             <!-- Conversation History -->
             {#if conversationLoading}
               <div class="spec-skeleton">
