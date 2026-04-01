@@ -906,23 +906,60 @@
           </div>
         {:else if releaseData}
           <div class="release-result">
+            {#if !releaseData.has_release}
+              <p class="tab-desc">No releasable changes found since the last tag.</p>
+            {/if}
             <dl class="release-meta">
               <dt>Suggested version</dt>
               <dd class="release-version">{releaseData.next_version ?? 'N/A'}</dd>
+              {#if releaseData.current_tag}
+                <dt>Current tag</dt>
+                <dd class="mono">{releaseData.current_tag}</dd>
+              {/if}
               {#if releaseData.current_version}
                 <dt>Current version</dt>
                 <dd class="mono">{releaseData.current_version}</dd>
+              {/if}
+              {#if releaseData.bump_type}
+                <dt>Bump type</dt>
+                <dd>{releaseData.bump_type}</dd>
               {/if}
               {#if releaseData.commit_count != null}
                 <dt>Commits since last release</dt>
                 <dd>{releaseData.commit_count}</dd>
               {/if}
+              {#if releaseData.branch}
+                <dt>Branch analyzed</dt>
+                <dd class="mono">{releaseData.branch}</dd>
+              {/if}
             </dl>
+            {#if releaseData.sections?.length > 0}
+              <div class="release-changelog">
+                <h3 class="release-section-title">Changes by Category</h3>
+                {#each releaseData.sections as section}
+                  <details class="release-section-group" open>
+                    <summary class="release-section-summary">{section.title ?? section.kind ?? 'Other'} ({section.entries?.length ?? 0})</summary>
+                    <ul class="release-entry-list">
+                      {#each (section.entries ?? []) as entry}
+                        <li class="release-entry">
+                          <span class="release-entry-msg">{entry.message ?? entry.summary ?? entry}</span>
+                          {#if entry.sha}<code class="mono release-entry-sha">{entry.sha.slice(0, 7)}</code>{/if}
+                          {#if entry.scope}<span class="release-entry-scope">({entry.scope})</span>{/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  </details>
+                {/each}
+              </div>
+            {/if}
             {#if releaseData.changelog}
               <div class="release-changelog">
-                <h3 class="release-section-title">Changelog</h3>
+                <h3 class="release-section-title">Full Changelog</h3>
                 <pre class="release-changelog-pre">{releaseData.changelog}</pre>
               </div>
+            {/if}
+            {#if releaseData.mr_id}
+              <p class="tab-desc">Release MR created: <code class="mono">{releaseData.mr_id}</code></p>
             {/if}
             <div class="action-row action-row-left">
               <button class="btn-secondary" onclick={prepareRelease}>Regenerate</button>
