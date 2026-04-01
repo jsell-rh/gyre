@@ -1178,7 +1178,15 @@
                         {dec.decision ?? '—'}
                       </span>
                     </td>
-                    <td class="mono" title={dec.subject?.id ?? dec.subject_id ?? ''}>{dec.subject?.type ? `${dec.subject.type}: ${resolveEntityName(dec.subject.type, dec.subject.id)}` : (dec.subject_id ? resolveEntityName('agent', dec.subject_id) : '—')}</td>
+                    <td class="mono" title={dec.subject?.id ?? dec.subject_id ?? ''}>
+                      {#if dec.subject?.type && dec.subject?.id}
+                        {dec.subject.type}: <button class="audit-entity-btn" onclick={() => nav(dec.subject.type, dec.subject.id, {})}>{resolveEntityName(dec.subject.type, dec.subject.id)}</button>
+                      {:else if dec.subject_id}
+                        <button class="audit-entity-btn" onclick={() => nav('agent', dec.subject_id, {})}>{resolveEntityName('agent', dec.subject_id)}</button>
+                      {:else}
+                        —
+                      {/if}
+                    </td>
                     <td>{dec.action ?? '—'}</td>
                     <td>{dec.resource?.type ?? dec.resource_type ?? '—'}</td>
                     <td class="mono">{dec.matched_policy ?? dec.policy_name ?? '—'}</td>
@@ -1298,7 +1306,7 @@
               <tbody>
                 {#each costSummary as entry (entry.agent_id ?? entry.id)}
                   <tr>
-                    <td class="mono" title={entry.agent_id ?? entry.id ?? ''}>{resolveEntityName('agent', entry.agent_id ?? entry.id)}</td>
+                    <td class="mono" title={entry.agent_id ?? entry.id ?? ''}><button class="audit-entity-btn" onclick={() => nav('agent', entry.agent_id ?? entry.id, {})}>{resolveEntityName('agent', entry.agent_id ?? entry.id)}</button></td>
                     <td>{entry.total_cost != null ? `$${entry.total_cost.toFixed(4)}` : '—'}</td>
                     <td>{entry.total_tokens?.toLocaleString() ?? entry.tokens?.toLocaleString() ?? '—'}</td>
                     <td>{entry.count ?? entry.entries ?? '—'}</td>
