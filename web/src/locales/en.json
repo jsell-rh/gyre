@@ -957,6 +957,7 @@
     "workspace_title": "Workspace Architecture",
     "workspace_desc": "Select a workspace repository to explore its knowledge graph",
     "system_title": "System Explorer",
+    "architecture_title": "Architecture",
     "system_subtitle": "Realized architecture — navigate the living knowledge graph",
     "sub_tabs": {
       "architecture": "Architecture",
