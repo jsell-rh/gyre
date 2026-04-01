@@ -12,6 +12,7 @@
 
   // Use shell context API for detail panel — S4.1 app shell manages the split layout
   const openDetailPanel = getContext('openDetailPanel');
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
   const goToAgentRules = getContext('goToAgentRules');
@@ -135,7 +136,11 @@
   }
 
   function openDetail(entity) {
-    openDetailPanel?.(entity);
+    if (goToEntityDetail && entity?.type) {
+      goToEntityDetail(entity.type, entity.id, entity.data ?? {});
+    } else {
+      openDetailPanel?.(entity);
+    }
   }
 
   // Pagination
