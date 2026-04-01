@@ -67,6 +67,40 @@
     }
   }
 
+  // ── Spec approval quick actions ──────────────────────────────────────────────
+  let approvingSpec = $state(null);
+  let rejectingSpec = $state(null);
+
+  async function quickApprove(spec, e) {
+    e?.stopPropagation();
+    if (approvingSpec) return;
+    approvingSpec = spec.path;
+    try {
+      await api.approveSpec(spec.path, spec.current_sha);
+      toastSuccess(`Spec "${spec.path.split('/').pop()}" approved`);
+      specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'approved' } : s);
+    } catch (err) {
+      toastError('Approve failed: ' + (err.message ?? err));
+    } finally {
+      approvingSpec = null;
+    }
+  }
+
+  async function quickReject(spec, e) {
+    e?.stopPropagation();
+    if (rejectingSpec) return;
+    rejectingSpec = spec.path;
+    try {
+      await api.rejectSpec(spec.path, 'Rejected via dashboard');
+      toastSuccess(`Spec "${spec.path.split('/').pop()}" rejected`);
+      specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'rejected' } : s);
+    } catch (err) {
+      toastError('Reject failed: ' + (err.message ?? err));
+    } finally {
+      rejectingSpec = null;
+    }
+  }
+
   // New spec modal
   let showNewSpec = $state(false);
   let newSpecPath = $state('');
@@ -482,6 +516,7 @@
                 <span class="sort-arrow" aria-hidden="true">{sortArrow('updated_at')}</span>
               </button>
             </th>
+            <th scope="col" class="col-actions"></th>
           </tr>
         </thead>
         <tbody>
@@ -533,6 +568,16 @@
                 {/if}
               </td>
               <td class="col-time">{relTime(spec.updated_at)}</td>
+              <td class="col-actions">
+                {#if spec.approval_status === 'pending' && spec.current_sha}
+                  <button class="spec-action-btn spec-action-approve" onclick={(e) => quickApprove(spec, e)} disabled={approvingSpec === spec.path} title="Approve this spec — agents can begin implementation">
+                    {approvingSpec === spec.path ? '...' : 'Approve'}
+                  </button>
+                  <button class="spec-action-btn spec-action-reject" onclick={(e) => quickReject(spec, e)} disabled={rejectingSpec === spec.path} title="Reject this spec — blocks further work">
+                    {rejectingSpec === spec.path ? '...' : 'Reject'}
+                  </button>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -880,6 +925,38 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     white-space: nowrap;
+  }
+
+  .col-actions {
+    width: 1%;
+    white-space: nowrap;
+    text-align: right;
+  }
+
+  .spec-action-btn {
+    padding: 2px var(--space-2);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: opacity var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .spec-action-btn:hover { opacity: 0.85; }
+  .spec-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .spec-action-approve {
+    background: var(--color-success);
+    color: white;
+    margin-right: var(--space-1);
+  }
+
+  .spec-action-reject {
+    background: var(--color-danger);
+    color: white;
   }
 
   /* ── Repo progress list ──────────────────────────────────────────────────── */
