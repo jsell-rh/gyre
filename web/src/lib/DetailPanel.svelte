@@ -1390,9 +1390,15 @@
 
   async function sendMessage() {
     if (!newMessageText?.trim() || !entity || sendingMessage) return;
+    const ag = agentDetail ?? entity.data ?? {};
+    const wsId = ag.workspace_id;
+    if (!wsId) {
+      toastError('Agent has no workspace — cannot send message');
+      return;
+    }
     sendingMessage = true;
     try {
-      await api.sendAgentMessage(entity.id, { content: newMessageText.trim(), kind: 'FreeText' });
+      await api.sendAgentMessage(wsId, entity.id, { content: newMessageText.trim(), kind: 'FreeText' });
       toastSuccess('Message sent');
       newMessageText = '';
       // Reload messages
