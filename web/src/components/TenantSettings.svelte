@@ -77,6 +77,45 @@
   let policiesError = $state(null);
   let policyDecisions = $state([]);
   let policyDecisionsLoading = $state(false);
+  let showPolicyForm = $state(false);
+  let policyFormSaving = $state(false);
+  let policyForm = $state({ name: '', scope: 'tenant', effect: 'allow', actions: 'push', resource_types: 'repo', priority: 100, condition_attr: 'subject.type', condition_op: 'equals', condition_val: 'agent' });
+  let deletingPolicyId = $state(null);
+
+  async function createPolicy() {
+    if (!policyForm.name.trim()) return;
+    policyFormSaving = true;
+    try {
+      await api.createPolicy({
+        name: policyForm.name.trim(),
+        scope: policyForm.scope,
+        effect: policyForm.effect,
+        conditions: [{ attribute: policyForm.condition_attr, operator: policyForm.condition_op, value: policyForm.condition_val }],
+        actions: policyForm.actions.split(',').map(s => s.trim()).filter(Boolean),
+        resource_types: policyForm.resource_types.split(',').map(s => s.trim()).filter(Boolean),
+        priority: parseInt(policyForm.priority) || 100,
+      });
+      showPolicyForm = false;
+      policyForm = { name: '', scope: 'tenant', effect: 'allow', actions: 'push', resource_types: 'repo', priority: 100, condition_attr: 'subject.type', condition_op: 'equals', condition_val: 'agent' };
+      loadPolicies();
+    } catch (e) {
+      policiesError = 'Create failed: ' + (e?.message ?? e);
+    } finally {
+      policyFormSaving = false;
+    }
+  }
+
+  async function deletePolicy(id) {
+    deletingPolicyId = id;
+    try {
+      await api.deletePolicy(id);
+      policies = policies.filter(p => p.id !== id);
+    } catch (e) {
+      policiesError = 'Delete failed: ' + (e?.message ?? e);
+    } finally {
+      deletingPolicyId = null;
+    }
+  }
 
   // ── Analytics ────────────────────────────────────────────────────────
   let analyticsTop = $state([]);
@@ -770,6 +809,53 @@
           <p class="panel-desc">Attribute-based access control policies governing agent actions, git push, and resource access across the tenant.</p>
         </div>
 
+        <!-- Create Policy button -->
+        <div class="panel-actions" style="margin-bottom: var(--space-4)">
+          <button class="action-btn" onclick={() => (showPolicyForm = !showPolicyForm)}>
+            {showPolicyForm ? 'Cancel' : '+ Create Policy'}
+          </button>
+        </div>
+
+        {#if showPolicyForm}
+          <div class="create-form" style="margin-bottom: var(--space-6)">
+            <div class="form-row">
+              <label class="form-label">Name <input class="form-input" bind:value={policyForm.name} placeholder="e.g. allow-agent-push" /></label>
+              <label class="form-label">Effect
+                <select class="form-input" bind:value={policyForm.effect}>
+                  <option value="allow">Allow</option>
+                  <option value="deny">Deny</option>
+                </select>
+              </label>
+              <label class="form-label">Priority <input class="form-input" type="number" bind:value={policyForm.priority} /></label>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Actions <input class="form-input" bind:value={policyForm.actions} placeholder="push, read, spawn" /></label>
+              <label class="form-label">Resource Types <input class="form-input" bind:value={policyForm.resource_types} placeholder="repo, agent" /></label>
+              <label class="form-label">Scope
+                <select class="form-input" bind:value={policyForm.scope}>
+                  <option value="tenant">Tenant</option>
+                  <option value="workspace">Workspace</option>
+                </select>
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Condition Attribute <input class="form-input" bind:value={policyForm.condition_attr} placeholder="subject.type" /></label>
+              <label class="form-label">Operator
+                <select class="form-input" bind:value={policyForm.condition_op}>
+                  <option value="equals">equals</option>
+                  <option value="not_equals">not_equals</option>
+                  <option value="contains">contains</option>
+                  <option value="in">in</option>
+                </select>
+              </label>
+              <label class="form-label">Value <input class="form-input" bind:value={policyForm.condition_val} placeholder="agent" /></label>
+            </div>
+            <button class="action-btn action-btn-primary" onclick={createPolicy} disabled={policyFormSaving || !policyForm.name.trim()}>
+              {policyFormSaving ? 'Creating...' : 'Create Policy'}
+            </button>
+          </div>
+        {/if}
+
         {#if policiesLoading}
           <div class="panel-loading" aria-live="polite">Loading policies…</div>
         {:else if policiesError}
@@ -786,6 +872,7 @@
                   <th scope="col"><button class="sort-btn">Actions</button></th>
                   <th scope="col"><button class="sort-btn">Resources</button></th>
                   <th scope="col"><button class="sort-btn">Priority</button></th>
+                  <th scope="col"></th>
                 </tr>
               </thead>
               <tbody>
@@ -801,12 +888,19 @@
                     <td class="mono">{(policy.actions ?? []).join(', ') || '—'}</td>
                     <td class="mono">{(policy.resource_types ?? []).join(', ') || '—'}</td>
                     <td>{policy.priority ?? '—'}</td>
+                    <td>
+                      {#if policy.id}
+                        <button class="delete-btn" onclick={() => deletePolicy(policy.id)} disabled={deletingPolicyId === policy.id} title="Delete policy">
+                          {deletingPolicyId === policy.id ? '...' : '✕'}
+                        </button>
+                      {/if}
+                    </td>
                   </tr>
                 {/each}
               </tbody>
             </table>
           {:else}
-            <div class="panel-empty">No ABAC policies configured.</div>
+            <div class="panel-empty">No ABAC policies configured. Create one above to control agent access.</div>
           {/if}
 
           {#if policyDecisions.length > 0}
@@ -1407,6 +1501,50 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
+
+  /* ── Create policy form ──────────────────────────────────────────────── */
+  .create-form {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .form-row {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .form-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex: 1;
+    min-width: 150px;
+  }
+
+  .panel-actions {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .action-btn-primary {
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+    border-color: var(--color-primary);
+  }
+
+  .action-btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+  .action-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* ── Inline forms ────────────────────────────────────────────────────── */
   .action-bar {
