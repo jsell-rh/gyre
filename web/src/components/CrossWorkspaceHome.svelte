@@ -449,26 +449,50 @@
     {:else}
       <ul class="workspace-list" role="list">
         {#each workspaces as ws (ws.id)}
+          {@const wsSpecs = specs.filter(s => s.workspace_id === ws.id)}
+          {@const wsNotifs = notifications.filter(n => n.workspace_id === ws.id)}
+          {@const wsPendingSpecs = wsSpecs.filter(s => (s.approval_status ?? s.status) === 'pending').length}
+          {@const wsApprovedSpecs = wsSpecs.filter(s => (s.approval_status ?? s.status) === 'approved').length}
           <li class="workspace-row">
             <button
               class="workspace-btn"
               onclick={() => onSelectWorkspace?.(ws)}
               data-testid="workspace-row-{ws.id}"
             >
-              <span class="workspace-name">{ws.name}</span>
-              <span class="workspace-meta">
-                {#if ws.agent_count != null}
-                  <span>{$t('cross_workspace.agents_count', { values: { count: ws.agent_count } })}</span>
-                {/if}
-                {#if ws.budget_pct != null}
-                  <span>{$t('cross_workspace.budget_pct', { values: { pct: ws.budget_pct } })}</span>
-                {/if}
+              <div class="workspace-btn-top">
+                <span class="workspace-name">{ws.name}</span>
                 {#if ws.health}
                   <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
                     {ws.health === 'healthy' ? '●' : '⚠'} {ws.health}
                   </span>
                 {/if}
-              </span>
+              </div>
+              {#if ws.description}
+                <span class="workspace-description">{ws.description}</span>
+              {/if}
+              <div class="workspace-stats-row">
+                {#if wsSpecs.length > 0}
+                  <span class="ws-stat-chip" title="{wsSpecs.length} specs">
+                    📋 {wsSpecs.length} specs
+                    {#if wsPendingSpecs > 0}<span class="ws-stat-alert">{wsPendingSpecs} pending</span>{/if}
+                    {#if wsApprovedSpecs > 0}<span class="ws-stat-active">{wsApprovedSpecs} approved</span>{/if}
+                  </span>
+                {/if}
+                {#if wsNotifs.length > 0}
+                  <span class="ws-stat-chip ws-stat-decisions" title="{wsNotifs.length} decisions pending">
+                    ⚡ {wsNotifs.length} decisions
+                  </span>
+                {/if}
+                {#if ws.agent_count != null && ws.agent_count > 0}
+                  <span class="ws-stat-chip">▶ {ws.agent_count} agents</span>
+                {/if}
+                {#if ws.budget_pct != null}
+                  <span class="ws-stat-chip">💰 {ws.budget_pct}% budget</span>
+                {/if}
+                {#if wsSpecs.length === 0 && wsNotifs.length === 0 && !ws.agent_count}
+                  <span class="ws-stat-chip ws-stat-empty">No activity</span>
+                {/if}
+              </div>
             </button>
           </li>
         {/each}
@@ -1045,8 +1069,7 @@
 
   .workspace-btn {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
     width: 100%;
     padding: var(--space-3) var(--space-6);
     background: transparent;
@@ -1054,7 +1077,7 @@
     cursor: pointer;
     text-align: left;
     transition: background var(--transition-fast);
-    gap: var(--space-4);
+    gap: var(--space-2);
   }
 
   .workspace-btn:hover {
@@ -1066,10 +1089,67 @@
     outline-offset: -2px;
   }
 
+  .workspace-btn-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
+
   .workspace-name {
     font-size: var(--text-sm);
     font-weight: 500;
     color: var(--color-text);
+  }
+
+  .workspace-description {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .workspace-stats-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .ws-stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+
+  .ws-stat-empty {
+    color: var(--color-text-muted);
+    border: none;
+    background: none;
+    font-style: italic;
+  }
+
+  .ws-stat-decisions {
+    color: var(--color-warning);
+    border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
+  }
+
+  .ws-stat-alert {
+    color: var(--color-warning);
+    font-weight: 500;
+    margin-left: 2px;
+  }
+
+  .ws-stat-active {
+    color: var(--color-success);
+    font-weight: 500;
+    margin-left: 2px;
   }
 
   .workspace-meta {
