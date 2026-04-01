@@ -2778,6 +2778,7 @@
             {:else if agentWorkload}
               {@const ag = normalizeAgent(agentWorkload.agent) ?? agentDetail ?? entity.data ?? {}}
               {#if Array.isArray(agentLogs) && agentLogs.length > 0}
+                {@const logLevels = [...new Set(agentLogs.map(e => e.level ?? (e.message?.startsWith('ERROR') || e.message?.startsWith('error') ? 'error' : e.message?.startsWith('WARN') || e.message?.startsWith('warn') ? 'warn' : 'info')))]}
                 <div class="log-filter-bar">
                   <input
                     type="text"
@@ -2785,17 +2786,47 @@
                     placeholder="Filter logs..."
                     bind:value={agentLogFilter}
                   />
+                  {#if logLevels.length > 1}
+                    <div class="log-level-pills">
+                      {#each logLevels as lvl}
+                        {@const levelLower = (lvl ?? 'info').toLowerCase()}
+                        <button class="log-level-pill log-level-{levelLower}" class:active={agentLogFilter === `level:${levelLower}`} onclick={() => { agentLogFilter = agentLogFilter === `level:${levelLower}` ? '' : `level:${levelLower}`; }} title="Filter to {levelLower} logs">
+                          {levelLower}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
                   {#if agentLogFilter}
-                    {@const matchCount = agentLogs.filter(e => { const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e); return txt.toLowerCase().includes(agentLogFilter.toLowerCase()); }).length}
+                    {@const matchCount = agentLogs.filter(e => {
+                      if (agentLogFilter.startsWith('level:')) {
+                        const filterLevel = agentLogFilter.slice(6);
+                        const entryLevel = (e.level ?? (e.message?.startsWith('ERROR') || e.message?.startsWith('error') ? 'error' : e.message?.startsWith('WARN') || e.message?.startsWith('warn') ? 'warn' : 'info')).toLowerCase();
+                        return entryLevel === filterLevel;
+                      }
+                      const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e);
+                      return txt.toLowerCase().includes(agentLogFilter.toLowerCase());
+                    }).length}
                     <span class="log-filter-count">{matchCount}/{agentLogs.length}</span>
                   {/if}
                 </div>
-                {@const filteredLogs = agentLogFilter ? agentLogs.filter(e => { const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e); return txt.toLowerCase().includes(agentLogFilter.toLowerCase()); }) : agentLogs}
+                {@const filteredLogs = agentLogFilter ? agentLogs.filter(e => {
+                  if (agentLogFilter.startsWith('level:')) {
+                    const filterLevel = agentLogFilter.slice(6);
+                    const entryLevel = (e.level ?? (e.message?.startsWith('ERROR') || e.message?.startsWith('error') ? 'error' : e.message?.startsWith('WARN') || e.message?.startsWith('warn') ? 'warn' : 'info')).toLowerCase();
+                    return entryLevel === filterLevel;
+                  }
+                  const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e);
+                  return txt.toLowerCase().includes(agentLogFilter.toLowerCase());
+                }) : agentLogs}
                 <div class="trace-list">
                   {#each filteredLogs as entry}
-                    <div class="trace-entry">
+                    {@const entryLevel = (entry.level ?? (entry.message?.startsWith('ERROR') || entry.message?.startsWith('error') ? 'error' : entry.message?.startsWith('WARN') || entry.message?.startsWith('warn') ? 'warn' : 'info')).toLowerCase()}
+                    <div class="trace-entry" class:trace-entry-error={entryLevel === 'error'} class:trace-entry-warn={entryLevel === 'warn' || entryLevel === 'warning'}>
                       {#if entry.timestamp || entry.created_at}
                         <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                      {/if}
+                      {#if entry.level}
+                        <span class="log-level-badge log-level-{entryLevel}">{entryLevel}</span>
                       {/if}
                       <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
                     </div>
@@ -6204,6 +6235,61 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     white-space: nowrap;
+  }
+
+  .log-level-pills {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .log-level-pill {
+    padding: 1px var(--space-2);
+    font-size: 10px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
+  .log-level-pill.active {
+    border-color: var(--color-primary);
+    background: var(--color-primary);
+    color: white;
+  }
+
+  .log-level-pill.log-level-error { border-color: var(--color-danger); }
+  .log-level-pill.log-level-error.active { background: var(--color-danger); }
+  .log-level-pill.log-level-warn, .log-level-pill.log-level-warning { border-color: var(--color-warning); }
+  .log-level-pill.log-level-warn.active, .log-level-pill.log-level-warning.active { background: var(--color-warning); }
+
+  .log-level-badge {
+    font-size: 9px;
+    padding: 0 var(--space-1);
+    border-radius: 2px;
+    text-transform: uppercase;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+  }
+
+  .log-level-badge.log-level-error { background: var(--color-danger); color: white; }
+  .log-level-badge.log-level-warn, .log-level-badge.log-level-warning { background: var(--color-warning); color: var(--color-text); }
+  .log-level-badge.log-level-info { background: var(--color-info, var(--color-primary)); color: white; opacity: 0.7; }
+  .log-level-badge.log-level-debug { background: var(--color-border); color: var(--color-text-muted); }
+
+  .trace-entry-error {
+    background: rgba(255, 50, 50, 0.05);
+    border-left: 2px solid var(--color-danger);
+  }
+
+  .trace-entry-warn {
+    background: rgba(255, 200, 0, 0.05);
+    border-left: 2px solid var(--color-warning);
   }
 
   /* ── MR deps section ───────────────────────────────────────────────────── */
