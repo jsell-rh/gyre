@@ -569,8 +569,14 @@
         .finally(() => { mrGatesLoading = false; });
     }
     if (activeTab === 'attestation' && !mrAttestation && !mrAttestationLoading) {
-      mrAttestationLoading = true;
       const mr = mrDetail ?? entity.data ?? {};
+      const mrStatus = mr.status ?? entity.data?.status;
+      // Skip fetching attestation for open/non-merged MRs — it doesn't exist yet
+      if (mrStatus && mrStatus !== 'merged') {
+        mrAttestation = null;
+        return;
+      }
+      mrAttestationLoading = true;
       const repoId = mr.repository_id ?? mr.repo_id ?? entity.data?.repository_id ?? entity.data?.repo_id;
       Promise.all([
         api.mrAttestation(id),
