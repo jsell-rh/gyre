@@ -51,6 +51,9 @@ pub struct AgentResponse {
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<u64>,
+    /// Spec path resolved from the agent's task (enriched at query time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_path: Option<String>,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -76,6 +79,7 @@ impl From<Agent> for AgentResponse {
             branch: None,
             task_id: None,
             completed_at: None,
+            spec_path: None,
         }
     }
 }
@@ -225,6 +229,16 @@ pub async fn get_agent(
     if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(&id)).await {
         if let Some(wt) = worktrees.first() {
             resp = resp.with_worktree(wt);
+        }
+    }
+    // Resolve spec_path from the linked task
+    let task_id_str = resp
+        .task_id
+        .clone()
+        .or_else(|| resp.current_task_id.clone());
+    if let Some(ref tid) = task_id_str {
+        if let Ok(Some(task)) = state.tasks.find_by_id(&Id::new(tid)).await {
+            resp.spec_path = task.spec_path;
         }
     }
     Ok(Json(resp))
