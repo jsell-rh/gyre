@@ -1136,6 +1136,20 @@
     }
   }
 
+  /** Explain spec approval status in human terms */
+  function specStatusExplain(spec) {
+    if (!spec?.approval_status) return '';
+    switch (spec.approval_status) {
+      case 'pending': return 'Awaiting human approval before agents can begin work';
+      case 'approved': return 'Approved — agents can create tasks and implement this spec';
+      case 'rejected': return 'Rejected — no further implementation should proceed';
+      case 'draft': return 'Synced from repo but not yet submitted for approval';
+      case 'deprecated': return 'No longer active — superseded by a newer spec';
+      case 'implemented': return 'All linked tasks have been completed';
+      default: return '';
+    }
+  }
+
   /** Explain task status in human terms */
   function taskStatusExplain(tk) {
     if (!tk?.status) return '';
@@ -2085,6 +2099,7 @@
                 <dt>{$t('detail_panel.status')}</dt>
                 <dd>
                   <Badge value={entity.data.approval_status} variant={specStatusColor(entity.data.approval_status)} />
+                  <span class="status-explain">{specStatusExplain(entity.data)}</span>
                 </dd>
               {/if}
               {#if entity.data?.owner}
@@ -2144,7 +2159,10 @@
               {/if}
               {#if sd.approval_status}
                 <dt>{$t('detail_panel.status')}</dt>
-                <dd><Badge value={sd.approval_status} variant={specStatusColor(sd.approval_status)} /></dd>
+                <dd>
+                  <Badge value={sd.approval_status} variant={specStatusColor(sd.approval_status)} />
+                  <span class="status-explain">{specStatusExplain(sd)}</span>
+                </dd>
               {/if}
               {#if sd.owner}
                 <dt>{$t('detail_panel.owner')}</dt><dd class="mono">{sd.owner}</dd>
