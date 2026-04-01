@@ -635,19 +635,23 @@
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('mrs');
             return;
-          case '4': // g 4 → Architecture tab (repo mode only)
+          case '4': // g 4 → Agents tab (repo mode only)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('agents');
+            return;
+          case '5': // g 5 → Architecture tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('architecture');
             return;
-          case '5': // g 5 → Decisions tab (repo mode only)
+          case '6': // g 6 → Decisions tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('decisions');
             return;
-          case '6': // g 6 → Code tab (repo mode only)
+          case '7': // g 7 → Code tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('code');
             return;
-          case '7': // g 7 → Settings tab (repo mode only)
+          case '8': // g 8 → Settings tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('settings');
             return;
@@ -1621,10 +1625,13 @@
           <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>{$t('shortcuts.workspace_settings')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>{$t('shortcuts.agent_rules')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>{$t('shortcuts.specs_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>{$t('shortcuts.architecture_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>{$t('shortcuts.decisions_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>{$t('shortcuts.code_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>{$t('shortcuts.settings_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>{$t('shortcuts.tasks_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>{$t('shortcuts.mrs_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>{$t('shortcuts.agents_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>{$t('shortcuts.architecture_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 6</kbd></dt><dd>{$t('shortcuts.decisions_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 7</kbd></dt><dd>{$t('shortcuts.code_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 8</kbd></dt><dd>{$t('shortcuts.settings_tab')}</dd></div>
           <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>{$t('shortcuts.close_panel')}</dd></div>
           <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>{$t('shortcuts.focus_search')}</dd></div>
           <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>{$t('shortcuts.toggle_shortcuts')}</dd></div>
