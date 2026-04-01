@@ -460,7 +460,7 @@
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
-                      <button class="gate-cell-repo gate-cell-clickable" title="View gate details: {mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join(', ') ?? ''}" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
+                      <button class="gate-cell-repo gate-cell-clickable" title="View gate details: {mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name && g.name !== 'Gate' ? g.name : g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'Gate'}${g.required === false ? ' (advisory)' : ''}`).join(', ') ?? ''}" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
                         <span class="gate-summary-compact">
                           {#if mr._gates.failed > 0}
                             <span class="gate-fail-compact">✗{mr._gates.failed}</span>
@@ -475,7 +475,7 @@
                         {#if mr._gates.details?.length > 0}
                           <span class="gate-names-repo">
                             {#each mr._gates.details as g}
-                              <span class="gate-tag gate-tag-{g.status}">{g.name}{#if g.gate_type} · {g.gate_type.replace(/_/g, ' ')}{/if}</span>
+                              <span class="gate-tag gate-tag-{g.status}">{g.name && g.name !== 'Gate' ? g.name : g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'Gate'}{#if g.name && g.name !== 'Gate' && g.gate_type} · {g.gate_type.replace(/_/g, ' ')}{/if}</span>
                             {/each}
                           </span>
                         {/if}

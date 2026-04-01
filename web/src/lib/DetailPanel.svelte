@@ -1324,7 +1324,7 @@
                   </div>
                   {#if mr.merge_commit_sha}
                     <div class="status-journey-sha">
-                      <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 10)}</code>
+                      <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</code>
                     </div>
                   {/if}
                 </div>
@@ -1461,7 +1461,7 @@
                         {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
                         <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
                           <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
-                          <span class="gate-detail-name">{gate.name ?? gate.gate_name ?? (gate.gate_id ? `Gate ${shortId(gate.gate_id)}` : 'Gate')}</span>
+                          <span class="gate-detail-name">{gate.name && gate.name !== 'Gate' ? gate.name : gate.gate_name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : gate.gate_id ? `Gate ${shortId(gate.gate_id)}` : 'Gate')}</span>
                           {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
                         </button>
@@ -1515,7 +1515,7 @@
                 <div class="mr-merged-info">
                   <Badge value="merged" variant="success" />
                   {#if mr.merge_commit_sha}
-                    <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 10)}</code>
+                    <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</code>
                   {/if}
                   {#if mr._commitSig}
                     <span class="sig-badge" title="Commit signed with {mr._commitSig.algorithm ?? 'unknown'}">
@@ -1870,7 +1870,7 @@
                 <dt>Parents</dt><dd class="mono">{c.parents.map(p => p.slice(0, 7)).join(', ')}</dd>
               {/if}
               {#if c.conversation_sha}
-                <dt>Conversation</dt><dd class="mono copyable" title="Click to copy: {c.conversation_sha}" onclick={() => copyId(c.conversation_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(c.conversation_sha); }}>{c.conversation_sha.slice(0, 12)}...</dd>
+                <dt>Conversation</dt><dd><code class="sha-badge mono copyable" title="Click to copy: {c.conversation_sha}" onclick={() => copyId(c.conversation_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(c.conversation_sha); }}>{c.conversation_sha.slice(0, 7)}</code></dd>
               {/if}
             </dl>
 
@@ -2019,7 +2019,7 @@
                 <dt>{$t('detail_panel.kind')}</dt><dd>{sd.kind}</dd>
               {/if}
               {#if sd.current_sha}
-                <dt>{$t('detail_panel.sha')}</dt><dd class="mono">{sd.current_sha.slice(0, 7)}</dd>
+                <dt>{$t('detail_panel.sha')}</dt><dd><code class="sha-badge mono copyable" title="Click to copy: {sd.current_sha}" onclick={() => copyId(sd.current_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sd.current_sha); }}>{sd.current_sha.slice(0, 7)}</code></dd>
               {/if}
               {#if sd.drift_status && sd.drift_status !== 'none'}
                 <dt>Drift</dt><dd><Badge value={sd.drift_status} variant={sd.drift_status === 'drifted' ? 'warning' : 'muted'} /></dd>
@@ -2403,7 +2403,8 @@
                       <span class="history-time">{fmtDate(ev.timestamp || ev.approved_at)}</span>
                     </div>
                     {#if ev.sha || ev.spec_sha}
-                      <span class="history-sha mono">{(ev.sha || ev.spec_sha).slice(0, 7)}</span>
+                      {@const evSha = ev.sha || ev.spec_sha}
+                      <code class="sha-badge mono copyable" title="Click to copy: {evSha}" onclick={() => copyId(evSha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(evSha); }}>{evSha.slice(0, 7)}</code>
                     {/if}
                     {#if ev.reason}
                       <p class="history-reason">{ev.reason}</p>
@@ -2683,7 +2684,7 @@
                 {#if att.merge_commit_sha}
                   <dt>Merge commit</dt>
                   <dd>
-                    <code class="sha-badge mono copyable" title="Click to copy: {att.merge_commit_sha}" onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 10)}</code>
+                    <code class="sha-badge mono copyable" title="Click to copy: {att.merge_commit_sha}" onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 7)}</code>
                   </dd>
                 {/if}
                 {#if att.merged_at}
@@ -2798,10 +2799,10 @@
                     {/if}
                     {#if evt.sha || evt.commit_sha}
                       {@const sha = evt.sha ?? evt.commit_sha}
-                      <span class="timeline-sha mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 7)}</span>
+                      <code class="sha-badge mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 7)}</code>
                     {/if}
                     {#if evt.mr_id}
-                      <button class="entity-link mono" onclick={() => navigateTo('mr', evt.mr_id)} title={evt.mr_id}>MR {shortId(evt.mr_id)}</button>
+                      <button class="entity-link mono" onclick={() => navigateTo('mr', evt.mr_id)} title={evt.mr_id}>{entityName('mr', evt.mr_id)}</button>
                     {/if}
                   </div>
                 </div>
@@ -2832,7 +2833,7 @@
                           (review.decision === 'changes_requested' || review.status === 'changes_requested') ? 'danger' : 'info'
                         }
                       />
-                      <span class="review-author mono">{review.reviewer ?? review.reviewer_agent_id ?? review.user_id ?? shortId(review.reviewer_id)}</span>
+                      <span class="review-author mono">{review.reviewer ?? (review.reviewer_agent_id ? entityName('agent', review.reviewer_agent_id) : review.user_id ?? shortId(review.reviewer_id))}</span>
                       <span class="review-time">{fmtDate(review.created_at ?? review.timestamp)}</span>
                     </div>
                     {#if review.body}
