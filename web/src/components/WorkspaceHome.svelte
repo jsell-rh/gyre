@@ -786,12 +786,61 @@
     activityLoading = true;
     try {
       const data = await api.activity(30);
-      activityEvents = Array.isArray(data) ? data : [];
+      const events = Array.isArray(data) ? data : [];
+      if (events.length > 0) {
+        activityEvents = events;
+      } else {
+        // Activity API may return empty — synthesize from notifications
+        // which contain rich event data (agent completions, gate failures, etc.)
+        const wsId = workspace?.id;
+        const notifs = wsId
+          ? await api.myNotifications({ workspace_id: wsId, limit: 30 }).catch(() => ({ notifications: [] }))
+          : await api.myNotifications({ limit: 30 }).catch(() => ({ notifications: [] }));
+        const notifList = notifs?.notifications ?? (Array.isArray(notifs) ? notifs : []);
+        activityEvents = notifList.map(n => {
+          const body = parseNotifBody(n);
+          const typeMap = {
+            'AgentCompleted': 'agent_completed',
+            'AgentFailed': 'agent_failed',
+            'MrMerged': 'merged',
+            'MrCreated': 'mr_created',
+            'SpecApproved': 'spec_approved',
+            'SpecRejected': 'spec_rejected',
+            'GateFailure': 'gate_failed',
+            'TaskCreated': 'task_created',
+            'spec_approval': 'spec_approval',
+            'gate_failure': 'gate_failed',
+            'agent_clarification': 'agent_clarification',
+            'budget_warning': 'budget_warning',
+          };
+          return {
+            event_type: typeMap[n.notification_type] ?? n.notification_type,
+            title: n.title ?? '',
+            description: n.message ?? n.description ?? body.description ?? '',
+            entity_type: body.mr_id ? 'mr' : body.agent_id ? 'agent' : body.spec_path ? 'spec' : body.task_id ? 'task' : null,
+            entity_id: body.mr_id ?? body.agent_id ?? body.spec_path ?? body.task_id ?? n.entity_ref ?? null,
+            entity_name: body.mr_title ?? body.agent_name ?? (body.spec_path ? body.spec_path.split('/').pop() : null),
+            agent_id: body.agent_id,
+            mr_id: body.mr_id,
+            task_id: body.task_id,
+            spec_path: body.spec_path,
+            repo_id: n.repo_id,
+            timestamp: n.created_at,
+          };
+        });
+      }
     } catch {
       activityEvents = [];
     } finally {
       activityLoading = false;
     }
+  }
+
+  /** Parse notification body JSON safely */
+  function parseNotifBody(n) {
+    if (!n.body) return {};
+    try { return typeof n.body === 'string' ? JSON.parse(n.body) : n.body; }
+    catch { return {}; }
   }
 
   function activityIcon(event) {
