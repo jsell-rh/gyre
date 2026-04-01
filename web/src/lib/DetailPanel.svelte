@@ -116,14 +116,11 @@
         { id: 'history', label: 'Logs' },
         { id: 'trace',   label: $t('detail_panel.tabs.trace') },
       );
-      if (data.conversation_sha !== undefined) {
-        result.push({
-          id: 'ask-why',
-          label: $t('detail_panel.tabs.ask_why'),
-          disabled: !data.conversation_sha,
-          title: data.conversation_sha ? undefined : $t('detail_panel.conversation_unavailable'),
-        });
-      }
+      // Always show ask-why for agents — conversation_sha is loaded async from agent detail
+      result.push({
+        id: 'ask-why',
+        label: $t('detail_panel.tabs.ask_why'),
+      });
       return result;
     }
 
