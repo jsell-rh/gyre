@@ -1132,26 +1132,37 @@
           buf += decoder.decode(value, { stream: true });
           const lines = buf.split('\n');
           buf = lines.pop() ?? '';
+          let currentEvent = '';
           for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const raw = line.slice(6);
+            // Track SSE event type from `event:` lines
+            if (line.startsWith('event:')) {
+              currentEvent = line.slice(6).trim();
+              continue;
+            }
+            if (!line.startsWith('data: ') && !line.startsWith('data:')) continue;
+            const raw = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
             if (raw === '[DONE]') { done = true; break; }
             try {
               const parsed = JSON.parse(raw);
-              if (parsed.event === 'partial' || parsed.type === 'partial') {
+              // Use event type from either SSE event: line or from JSON payload
+              const evtType = parsed.event ?? parsed.type ?? currentEvent;
+              if (evtType === 'partial' || (!evtType && parsed.text != null)) {
                 llmExplanation += parsed.text ?? parsed.explanation ?? '';
-              } else if (parsed.event === 'complete' || parsed.type === 'complete') {
+              } else if (evtType === 'complete') {
+                // Complete event: if it has a full text field, use it as the suggestion
+                const fullText = parsed.text ?? parsed.explanation ?? llmExplanation;
                 llmSuggestion = {
                   diff: parsed.diff ?? [],
-                  explanation: parsed.explanation ?? llmExplanation,
+                  explanation: fullText,
                 };
                 done = true; break;
-              } else if (parsed.event === 'error' || parsed.type === 'error') {
+              } else if (evtType === 'error') {
                 throw new Error(parsed.message ?? 'LLM error');
               }
             } catch (pe) {
               if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
             }
+            currentEvent = '';
           }
         }
       }
@@ -2739,10 +2750,10 @@
             {#if llmSuggestion}
               <div class="suggestion-block" role="region" aria-label={$t('detail_panel.suggested_change')}>
                 <div class="suggestion-hdr">
-                  <span class="suggestion-lbl">{$t('detail_panel.suggested_change')}</span>
+                  <span class="suggestion-lbl">{llmSuggestion.diff?.length > 0 ? $t('detail_panel.suggested_change') : 'LLM Response'}</span>
                 </div>
                 {#if llmSuggestion.explanation}
-                  <p class="suggestion-expl">{llmSuggestion.explanation}</p>
+                  <div class="suggestion-expl">{@html renderMarkdown(llmSuggestion.explanation)}</div>
                 {/if}
                 {#if llmSuggestion.diff?.length > 0}
                   <div class="suggestion-diff">
@@ -2758,17 +2769,23 @@
                   </div>
                 {/if}
                 <div class="suggestion-btns">
-                  <Button variant="primary" onclick={acceptSuggestion}>{$t('detail_panel.accept')}</Button>
-                  <Button variant="secondary" onclick={editSuggestion}>{$t('detail_panel.edit_btn')}</Button>
+                  {#if llmSuggestion.diff?.length > 0}
+                    <Button variant="primary" onclick={acceptSuggestion}>{$t('detail_panel.accept')}</Button>
+                    <Button variant="secondary" onclick={editSuggestion}>{$t('detail_panel.edit_btn')}</Button>
+                  {/if}
                   <Button variant="secondary" onclick={dismissSuggestion}>{$t('detail_panel.dismiss')}</Button>
                 </div>
               </div>
             {/if}
 
-            {#if llmStreaming && llmExplanation}
+            {#if llmStreaming}
               <div class="llm-streaming" aria-live="polite">
                 <span class="streaming-lbl">{$t('detail_panel.thinking')}</span>
-                <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
+                {#if llmExplanation}
+                  <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
+                {:else}
+                  <p class="streaming-txt"><span class="blink-cursor" aria-hidden="true"></span></p>
+                {/if}
               </div>
             {/if}
 
