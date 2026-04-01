@@ -1136,6 +1136,37 @@
     }
   }
 
+  /** Explain task status in human terms */
+  function taskStatusExplain(tk) {
+    if (!tk?.status) return '';
+    switch (tk.status) {
+      case 'backlog': return 'Waiting to be picked up by an agent';
+      case 'in_progress': return tk.assigned_to ? `Being worked on by agent ${tk.assigned_to.slice(0, 8)}` : 'An agent is actively implementing this';
+      case 'done': return 'Implementation complete — code has been submitted';
+      case 'blocked': return tk.depends_on?.length ? `Blocked by ${tk.depends_on.length} dependency/ies` : 'Waiting for a dependency or human input';
+      case 'cancelled': return 'Cancelled — the associated spec may have been rejected';
+      case 'review': return 'Implementation submitted, awaiting review';
+      default: return '';
+    }
+  }
+
+  /** Explain MR status in human terms */
+  function mrStatusExplain(mr) {
+    if (!mr?.status) return '';
+    switch (mr.status) {
+      case 'open': {
+        if (mr._gateSummary?.failed > 0) return `Blocked — ${mr._gateSummary.failed} gate(s) failed`;
+        if (mr.queue_position) return `In merge queue at position #${mr.queue_position}`;
+        if (mr.has_conflicts) return 'Has merge conflicts with the target branch';
+        return 'Ready for review or to be enqueued for merge';
+      }
+      case 'merged': return mr.merge_commit_sha ? `Merged as ${mr.merge_commit_sha.slice(0, 7)}` : 'Successfully merged into the target branch';
+      case 'closed': return 'Closed without merging — may have been superseded';
+      case 'queued': return `Waiting in the merge queue — gates must pass before merge`;
+      default: return '';
+    }
+  }
+
   /** Explain agent status in human terms — the "why" behind the status badge */
   function agentStatusExplain(ag) {
     if (!ag?.status) return '';
@@ -1384,6 +1415,7 @@
                 <dt>Status</dt>
                 <dd>
                   <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
+                  <span class="status-explain">{mrStatusExplain(mr)}</span>
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if mr.description}
@@ -1865,6 +1897,7 @@
                 <dt>Status</dt>
                 <dd>
                   <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
+                  <span class="status-explain">{taskStatusExplain(tk)}</span>
                   {#if tk.status && tk.status !== 'backlog'}
                     <span class="status-story">
                       <span class="status-step status-step-info">Created</span>
