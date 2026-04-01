@@ -730,7 +730,7 @@
               </button>
               <button
                 class="agent-row-detail-btn"
-                onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}
+                onclick={() => { agentPanelOpen = false; goToEntityDetail?.('agent', agent.id, agent); }}
                 title="Open full agent detail"
               >→</button>
             </div>
@@ -739,12 +739,12 @@
                 <AgentCardPanel agentId={agent.id} />
                 <div class="agent-row-actions">
                   {#if tId}
-                    <button class="agent-action-link" onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'task', id: tId, data: {} }); }}>View Task</button>
+                    <button class="agent-action-link" onclick={() => { agentPanelOpen = false; goToEntityDetail?.('task', tId, {}); }}>View Task</button>
                   {/if}
                   {#if agent.mr_id}
-                    <button class="agent-action-link" onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'mr', id: agent.mr_id, data: {} }); }}>View MR</button>
+                    <button class="agent-action-link" onclick={() => { agentPanelOpen = false; goToEntityDetail?.('mr', agent.mr_id, {}); }}>View MR</button>
                   {/if}
-                  <button class="agent-action-link agent-action-primary" onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>Full Detail →</button>
+                  <button class="agent-action-link agent-action-primary" onclick={() => { agentPanelOpen = false; goToEntityDetail?.('agent', agent.id, agent); }}>Full Detail →</button>
                 </div>
               </div>
             {/if}
