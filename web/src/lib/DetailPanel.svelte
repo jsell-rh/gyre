@@ -353,6 +353,9 @@
   let agentWorkloadLoading = $state(false);
   let agentTraceSpans = $state(null);
   let agentLogFilter = $state('');
+  let agentLogStreaming = $state(false);
+  let agentLogStreamSource = null;
+  let logListEl = $state(null);
 
   // Reset MR/agent/task data when entity changes
   $effect(() => {
@@ -694,6 +697,53 @@
         }
       }).catch(() => { agentWorkload = null; })
         .finally(() => { agentWorkloadLoading = false; });
+    }
+  });
+
+  // SSE live log streaming for active agents
+  $effect(() => {
+    const isActive = entity?.type === 'agent' && activeTab === 'history';
+    const agentStatus = agentDetail?.status ?? entity?.data?.status;
+    const isLive = agentStatus === 'active' || agentStatus === 'running' || agentStatus === 'spawning';
+
+    if (isActive && isLive && entity?.id) {
+      const token = localStorage.getItem('gyre_token') ?? '';
+      const url = api.agentLogStreamUrl(entity.id);
+      const es = new EventSource(`${url}?token=${encodeURIComponent(token)}`);
+      agentLogStreaming = true;
+      agentLogStreamSource = es;
+
+      es.onmessage = (evt) => {
+        try {
+          const parsed = JSON.parse(evt.data);
+          const entry = typeof parsed === 'string' ? { message: parsed } : parsed;
+          agentLogs = [...(agentLogs ?? []), entry];
+          // Auto-scroll to bottom
+          queueMicrotask(() => {
+            if (logListEl) logListEl.scrollTop = logListEl.scrollHeight;
+          });
+        } catch {
+          agentLogs = [...(agentLogs ?? []), { message: evt.data }];
+        }
+      };
+      es.onerror = () => {
+        agentLogStreaming = false;
+        es.close();
+        agentLogStreamSource = null;
+      };
+
+      return () => {
+        es.close();
+        agentLogStreamSource = null;
+        agentLogStreaming = false;
+      };
+    } else {
+      // Cleanup if conditions change
+      if (agentLogStreamSource) {
+        agentLogStreamSource.close();
+        agentLogStreamSource = null;
+        agentLogStreaming = false;
+      }
     }
   });
 
@@ -2950,6 +3000,12 @@
               {@const ag = normalizeAgent(agentWorkload.agent) ?? agentDetail ?? entity.data ?? {}}
               {#if Array.isArray(agentLogs) && agentLogs.length > 0}
                 {@const logLevels = [...new Set(agentLogs.map(e => e.level ?? (e.message?.startsWith('ERROR') || e.message?.startsWith('error') ? 'error' : e.message?.startsWith('WARN') || e.message?.startsWith('warn') ? 'warn' : 'info')))]}
+                {#if agentLogStreaming}
+                  <div class="log-live-indicator">
+                    <span class="log-live-dot"></span>
+                    <span class="log-live-text">Live — streaming new log entries</span>
+                  </div>
+                {/if}
                 <div class="log-filter-bar">
                   <input
                     type="text"
@@ -2989,17 +3045,17 @@
                   const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e);
                   return txt.toLowerCase().includes(agentLogFilter.toLowerCase());
                 }) : agentLogs}
-                <div class="trace-list">
+                <div class="log-terminal" bind:this={logListEl}>
                   {#each filteredLogs as entry}
                     {@const entryLevel = (entry.level ?? (entry.message?.startsWith('ERROR') || entry.message?.startsWith('error') ? 'error' : entry.message?.startsWith('WARN') || entry.message?.startsWith('warn') ? 'warn' : 'info')).toLowerCase()}
-                    <div class="trace-entry" class:trace-entry-error={entryLevel === 'error'} class:trace-entry-warn={entryLevel === 'warn' || entryLevel === 'warning'}>
+                    <div class="log-line" class:log-line-error={entryLevel === 'error'} class:log-line-warn={entryLevel === 'warn' || entryLevel === 'warning'}>
                       {#if entry.timestamp || entry.created_at}
-                        <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                        <span class="log-ts">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
                       {/if}
                       {#if entry.level}
                         <span class="log-level-badge log-level-{entryLevel}">{entryLevel}</span>
                       {/if}
-                      <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
+                      <span class="log-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
                     </div>
                   {/each}
                   {#if filteredLogs.length === 0}
@@ -6675,6 +6731,88 @@
   .trace-entry-warn {
     background: rgba(255, 200, 0, 0.05);
     border-left: 2px solid var(--color-warning);
+  }
+
+  /* ── Terminal-style log viewer ─────────────────────────────────────────── */
+  .log-terminal {
+    background: #0d1117;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    max-height: 500px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    padding: var(--space-1) 0;
+  }
+
+  .log-line {
+    display: flex;
+    gap: var(--space-2);
+    padding: 1px var(--space-3);
+    color: #c9d1d9;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .log-line:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .log-line-error {
+    background: rgba(248, 81, 73, 0.08);
+    border-left: 2px solid #f85149;
+  }
+
+  .log-line-warn {
+    background: rgba(210, 153, 34, 0.08);
+    border-left: 2px solid #d29922;
+  }
+
+  .log-ts {
+    color: #484f58;
+    white-space: nowrap;
+    flex-shrink: 0;
+    user-select: none;
+  }
+
+  .log-msg {
+    color: #c9d1d9;
+    word-break: break-word;
+  }
+
+  .log-line-error .log-msg { color: #f85149; }
+  .log-line-warn .log-msg { color: #d29922; }
+
+  .log-live-indicator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 25%, transparent);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+  }
+
+  .log-live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: log-pulse 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes log-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .log-live-text {
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    font-weight: 600;
   }
 
   /* ── MR deps section ───────────────────────────────────────────────────── */
