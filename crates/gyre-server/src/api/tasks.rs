@@ -82,6 +82,8 @@ pub struct TaskResponse {
     pub order: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    pub workspace_id: String,
+    pub repo_id: String,
 }
 
 impl From<Task> for TaskResponse {
@@ -103,6 +105,8 @@ impl From<Task> for TaskResponse {
             task_type: t.task_type.map(|tt| task_type_str(&tt)),
             order: t.order,
             depends_on: t.depends_on.into_iter().map(|id| id.to_string()).collect(),
+            workspace_id: t.workspace_id.to_string(),
+            repo_id: t.repo_id.to_string(),
         }
     }
 }
