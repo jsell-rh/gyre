@@ -28,6 +28,7 @@
 
   // Shell context — openDetailPanel may not exist (e.g. in tests or older shell)
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   // ── List state ──────────────────────────────────────────────────────────────
   let specs = $state([]);
@@ -204,10 +205,12 @@
     return sortDir === 'asc' ? '↑' : '↓';
   }
 
-  // ── Row click → open detail panel ──────────────────────────────────────────
+  // ── Row click → open full-page detail ──────────────────────────────────────
   function handleRowClick(spec) {
     selectedPath = spec.path;
-    if (openDetailPanel) {
+    if (goToEntityDetail) {
+      goToEntityDetail('spec', spec.path, { ...spec, repo_id: repoId });
+    } else if (openDetailPanel) {
       openDetailPanel({
         type: 'spec',
         id: spec.path,
@@ -386,7 +389,7 @@
             {#each nodes as node}
               {@const nodeEdges = edges.filter(e => e.source === node.id || e.from === node.id || e.target === node.id || e.to === node.id)}
               {@const specData = specs.find(s => s.path === node.id || s.path === node.path)}
-              <button class="spec-graph-card" onclick={() => { const path = node.id ?? node.path; openDetailPanel?.({ type: 'spec', id: path, data: { path, repo_id: specData?.repo_id ?? repoId } }); }}>
+              <button class="spec-graph-card" onclick={() => { const path = node.id ?? node.path; const d = { path, repo_id: specData?.repo_id ?? repoId }; goToEntityDetail ? goToEntityDetail('spec', path, d) : openDetailPanel?.({ type: 'spec', id: path, data: d }); }}>
                 <div class="sgc-header">
                   <span class="sgc-name">{(node.label ?? node.id ?? '').split('/').pop()}</span>
                   {#if specData?.approval_status}
