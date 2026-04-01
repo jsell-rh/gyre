@@ -986,7 +986,7 @@
                   <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[n.notification_type] ?? '•'}</span>
                   <div class="decision-content">
                     <span class="decision-type">{typeLabel(n.notification_type)}</span>
-                    <span class="decision-desc">{n.message ?? n.description ?? body.description ?? ''}</span>
+                    <span class="decision-desc">{n.title ?? n.message ?? n.description ?? body.description ?? ''}</span>
                     <div class="decision-refs">
                       {#if body.spec_path}
                         <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()}</button>
