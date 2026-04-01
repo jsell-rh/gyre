@@ -2692,6 +2692,9 @@
                     <summary class="diff-file-header">
                       <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
+                      {#if goToRepoTab && fileStatusLower !== 'deleted'}
+                        <button class="diff-blame-link" onclick={(e) => { e.preventDefault(); e.stopPropagation(); goToRepoTab('code', { subTab: 'files', file: file.path }); close(); }} title="View blame & agent attribution for {file.path}">Blame</button>
+                      {/if}
                       {#if fileAdds != null || fileDels != null}
                         <span class="diff-file-stats">
                           {#if fileAdds}<span class="diff-ins">+{fileAdds}</span>{/if}
@@ -4521,6 +4524,25 @@
 
   .diff-file-header:hover {
     background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-border));
+  }
+
+  .diff-blame-link {
+    background: none;
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    padding: 1px var(--space-2);
+    opacity: 0;
+    transition: opacity var(--transition-fast), background var(--transition-fast);
+    flex-shrink: 0;
+  }
+  .diff-file-header:hover .diff-blame-link { opacity: 1; }
+  .diff-blame-link:hover {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    border-color: var(--color-primary);
   }
 
   .diff-file-path {
