@@ -1929,23 +1929,43 @@
               </div>
             {:else}
               {@const tk = taskDetail ?? entity.data ?? {}}
+              <!-- Status journey visualization -->
+              {#if tk.status && tk.status !== 'backlog'}
+                {@const taskPhases = (() => {
+                  const p = [{ label: 'Created', variant: 'info', time: tk.created_at }];
+                  if (tk.assigned_to) p.push({ label: 'Assigned', variant: 'warning', time: null });
+                  if (tk.status === 'in_progress' || tk.status === 'review' || tk.status === 'done') {
+                    p.push({ label: 'In Progress', variant: 'warning', time: null });
+                  }
+                  if (tk.status === 'review') p.push({ label: 'Review', variant: 'info', time: null });
+                  if (tk.status === 'done') p.push({ label: 'Done', variant: 'success', time: tk.updated_at });
+                  if (tk.status === 'blocked') p.push({ label: 'Blocked', variant: 'danger', time: null });
+                  if (tk.status === 'cancelled') p.push({ label: 'Cancelled', variant: 'muted', time: null });
+                  return p;
+                })()}
+                <div class="mr-status-journey">
+                  <div class="status-journey-track">
+                    {#each taskPhases as step, i}
+                      <div class="status-journey-node status-journey-node-{step.variant}" title={step.time ? fmtDate(step.time) : ''}>
+                        <span class="status-journey-dot"></span>
+                        <span class="status-journey-label">{step.label}</span>
+                        {#if step.time}
+                          <span class="status-journey-time">{fmtDate(step.time)}</span>
+                        {/if}
+                      </div>
+                      {#if i < taskPhases.length - 1}
+                        <span class="status-journey-connector"></span>
+                      {/if}
+                    {/each}
+                  </div>
+                </div>
+              {/if}
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
                 <dt>Status</dt>
                 <dd>
                   <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
                   <span class="status-explain">{taskStatusExplain(tk)}</span>
-                  {#if tk.status && tk.status !== 'backlog'}
-                    <span class="status-story">
-                      <span class="status-step status-step-info">Created</span>
-                      <span class="status-step-arrow">→</span>
-                      {#if tk.assigned_to}
-                        <span class="status-step status-step-warning">Assigned</span>
-                        <span class="status-step-arrow">→</span>
-                      {/if}
-                      <span class="status-step status-step-{taskStatusColor(tk.status)}">{tk.status}</span>
-                    </span>
-                  {/if}
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if tk.priority}
@@ -2007,6 +2027,74 @@
                       </button>
                     {/if}
                   </div>
+                </div>
+              {/if}
+
+              <!-- Quick view: linked agents and MRs (loaded eagerly) -->
+              {#if !taskAgents && !taskAgentsLoading}
+                <!-- Trigger activity data load for preview -->
+                {(() => {
+                  const wsId = tk.workspace_id;
+                  const rId = tk.repo_id ?? tk.repository_id;
+                  const tId = entity.id;
+                  queueMicrotask(() => {
+                    if (taskAgents || taskAgentsLoading) return;
+                    taskAgentsLoading = true;
+                    taskMrsLoading = true;
+                    Promise.all([
+                      api.agents({ workspaceId: wsId, repoId: rId }).then(list => {
+                        const all = Array.isArray(list) ? list : [];
+                        return all.filter(a => (a.task_id ?? a.current_task_id) === tId);
+                      }).catch(() => []),
+                      api.mergeRequests(rId ? { repository_id: rId } : {}).then(list => {
+                        const all = Array.isArray(list) ? list : [];
+                        return all.filter(m => m.task_id === tId);
+                      }).catch(() => []),
+                    ]).then(([agents, mrs]) => {
+                      taskAgents = agents;
+                      taskMrs = mrs;
+                    }).finally(() => { taskAgentsLoading = false; taskMrsLoading = false; });
+                  });
+                  return '';
+                })()}
+              {/if}
+              {#if Array.isArray(taskAgents) && taskAgents.length > 0}
+                <div class="task-linked-entities">
+                  <span class="progress-section-label">Agents ({taskAgents.length})</span>
+                  <ul class="task-list">
+                    {#each taskAgents.slice(0, 3) as agent}
+                      <li class="task-item clickable-row" onclick={() => navigateTo('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('agent', agent.id, agent); }}>
+                        <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : agent.status === 'failed' ? 'danger' : 'muted'} />
+                        <span class="task-title">{agent.name ?? shortId(agent.id)}</span>
+                        {#if agent.branch}<span class="task-agent mono">{agent.branch}</span>{/if}
+                      </li>
+                    {/each}
+                    {#if taskAgents.length > 3}
+                      <li class="task-item"><button class="view-all-logs-btn" onclick={() => { activeTab = 'activity'; }}>View all {taskAgents.length} agents →</button></li>
+                    {/if}
+                  </ul>
+                </div>
+              {/if}
+              {#if Array.isArray(taskMrs) && taskMrs.length > 0}
+                <div class="task-linked-entities">
+                  <span class="progress-section-label">Merge Requests ({taskMrs.length})</span>
+                  <ul class="task-list">
+                    {#each taskMrs.slice(0, 3) as mr}
+                      <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id, mr); }}>
+                        <Badge value={mr.status ?? 'open'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
+                        <span class="task-title">{mr.title ?? shortId(mr.id)}</span>
+                        {#if mr.diff_stats}
+                          <span class="diff-stat-compact">
+                            <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                            <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                          </span>
+                        {/if}
+                      </li>
+                    {/each}
+                    {#if taskMrs.length > 3}
+                      <li class="task-item"><button class="view-all-logs-btn" onclick={() => { activeTab = 'activity'; }}>View all {taskMrs.length} MRs →</button></li>
+                    {/if}
+                  </ul>
                 </div>
               {/if}
             {/if}
@@ -4110,6 +4198,10 @@
     background: var(--color-success);
     border-radius: var(--radius-sm);
     transition: width var(--transition-slow);
+  }
+
+  .task-linked-entities {
+    margin-top: var(--space-3);
   }
 
   .task-list {
