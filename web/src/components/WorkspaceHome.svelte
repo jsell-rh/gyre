@@ -317,7 +317,7 @@
           const details = arr.map(g => {
             const gateType = (g.gate_type ?? '').replace(/_/g, ' ');
             return {
-              name: g.gate_name ?? g.name ?? gateType || 'Quality gate',
+              name: g.gate_name ?? g.name ?? (gateType || 'Quality gate'),
               status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
               gate_type: g.gate_type,
               required: g.required,
