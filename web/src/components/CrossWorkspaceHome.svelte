@@ -657,7 +657,7 @@
             <tbody>
               {#each wsBreakdown as ws}
                 <tr>
-                  <td>{workspaceNameMap[ws.workspace_id] ?? ws.workspace_name ?? ws.workspace_id?.slice(0, 8) ?? '—'}</td>
+                  <td>{workspaceNameMap[ws.workspace_id] ?? ws.workspace_name ?? (ws.workspace_id ? 'Workspace ' + ws.workspace_id.slice(0, 6) : '—')}</td>
                   <td>{ws.active_agents ?? ws.agents ?? '—'}</td>
                   <td>{(ws.tokens_today ?? ws.tokens ?? 0).toLocaleString()}</td>
                   <td>${(ws.cost_today ?? ws.cost ?? 0).toFixed(2)}</td>

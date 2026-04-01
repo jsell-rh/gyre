@@ -703,9 +703,39 @@
     return '•';
   }
 
+  const ACTIVITY_LABELS = {
+    'created': 'MR created',
+    'mr_created': 'MR created',
+    'commit_pushed': 'Commits pushed',
+    'gate_started': 'Gate started',
+    'gate_passed': 'Gate passed',
+    'gate_failed': 'Gate failed',
+    'GateResult': 'Gate completed',
+    'enqueued': 'Enqueued for merge',
+    'merged': 'Merged',
+    'Merged': 'Merged to main',
+    'closed': 'Closed',
+    'review_submitted': 'Review submitted',
+    'comment_added': 'Comment added',
+    'graph_extracted': 'Graph extracted',
+    'GraphDelta': 'Architecture updated',
+    'GitPush': 'Code pushed',
+    'attestation_created': 'Attestation signed',
+    'agent_spawned': 'Agent spawned',
+    'agent_completed': 'Agent completed',
+    'agent_failed': 'Agent failed',
+    'spec_approved': 'Spec approved',
+    'spec_rejected': 'Spec rejected',
+    'spec_created': 'Spec created',
+    'spec_updated': 'Spec updated',
+    'task_created': 'Task created',
+    'task_completed': 'Task completed',
+    'task_assigned': 'Task assigned',
+  };
+
   function activityLabel(event) {
     const t = event.event_type ?? event.event ?? event.type ?? '';
-    return t.replace(/_/g, ' ').replace(/\./g, ' ');
+    return ACTIVITY_LABELS[t] ?? t.replace(/_/g, ' ').replace(/\./g, ' ');
   }
 
   function activityVariant(event) {
