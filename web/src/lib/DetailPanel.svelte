@@ -3014,6 +3014,10 @@
             {#if mrDiff.files?.length > 0}
               <!-- File tree summary (like GitHub — click to jump) -->
               <div class="diff-file-tree">
+                <div class="diff-tree-actions">
+                  <button class="diff-expand-btn" onclick={() => { mrDiff.files.forEach((_, i) => { const el = document.getElementById(`diff-file-${i}`); if (el) el.open = true; }); }} title="Expand all files">Expand all</button>
+                  <button class="diff-expand-btn" onclick={() => { mrDiff.files.forEach((_, i) => { const el = document.getElementById(`diff-file-${i}`); if (el) el.open = false; }); }} title="Collapse all files">Collapse all</button>
+                </div>
                 {#each mrDiff.files as file, idx}
                   {@const statusLower = (file.status ?? 'modified').toLowerCase()}
                   <button class="diff-tree-item diff-tree-clickable" onclick={() => { const el = document.getElementById(`diff-file-${idx}`); if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }} title="Jump to {file.path}">
@@ -3027,7 +3031,7 @@
                   {@const fileStatusLower = (file.status ?? 'modified').toLowerCase()}
                   {@const fileAdds = file.insertions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'add').length, 0) : null)}
                   {@const fileDels = file.deletions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'delete').length, 0) : null)}
-                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 5}>
+                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 10}>
                     <summary class="diff-file-header">
                       <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
@@ -4889,6 +4893,25 @@
     border-radius: var(--radius);
     margin-bottom: var(--space-2);
   }
+
+  .diff-tree-actions {
+    display: flex;
+    gap: var(--space-2);
+    width: 100%;
+    margin-bottom: var(--space-1);
+  }
+
+  .diff-expand-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-link, var(--color-primary));
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .diff-expand-btn:hover { text-decoration: underline; }
 
   .diff-tree-item {
     display: inline-flex;
