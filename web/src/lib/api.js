@@ -252,8 +252,17 @@ export const api = {
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
   // Agent messages (distinct from logs — typed messages: TaskAssignment, ReviewRequest, etc.)
   agentMessages: (id) => request(`/agents/${id}/messages`),
-  sendAgentMessage: (id, data) =>
-    request(`/agents/${id}/messages`, { method: 'POST', body: JSON.stringify(data) }),
+  // Send message via workspace message bus (POST /workspaces/:wsId/messages)
+  // Server expects: { to: { agent: "<id>" }, kind: "FreeText", payload: {...} }
+  sendAgentMessage: (workspaceId, agentId, data) =>
+    request(`/workspaces/${workspaceId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        to: { agent: agentId },
+        kind: data.kind ?? 'FreeText',
+        payload: data.payload ?? { content: data.content },
+      }),
+    }),
   // MR dependencies
   mrDependencies: (id) => request(`/merge-requests/${id}/dependencies`),
   setMrDependencies: (id, data) =>
