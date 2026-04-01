@@ -17,7 +17,7 @@ use gyre_common::{
     Id,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -373,6 +373,17 @@ impl ExtractionContext {
         self.extract_endpoints_from_text(&content, &rel_path, &module_id);
         self.extract_diesel_tables(&content, &rel_path, &module_id);
 
+        // --- Pass 2: walk function bodies for Calls edges ---
+        let mut call_visitor = CallVisitor {
+            name_to_id: &self.name_to_id,
+            module_qname: module_qname.clone(),
+            current_fn_id: None,
+            new_edges: Vec::new(),
+            seen: HashSet::new(),
+        };
+        call_visitor.visit_file(&syntax);
+        self.edges.extend(call_visitor.new_edges);
+
         Ok(())
     }
 
@@ -688,6 +699,98 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 syn::visit::visit_item(self, item);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call-site visitor (second pass — emits Calls edges)
+// ---------------------------------------------------------------------------
+
+struct CallVisitor<'a> {
+    name_to_id: &'a HashMap<String, Id>,
+    module_qname: String,
+    current_fn_id: Option<Id>,
+    new_edges: Vec<GraphEdge>,
+    seen: HashSet<(String, String)>,
+}
+
+impl<'a> CallVisitor<'a> {
+    fn emit_call(&mut self, from_id: &Id, to_id: &Id) {
+        let key = (from_id.to_string(), to_id.to_string());
+        if self.seen.contains(&key) {
+            return;
+        }
+        self.seen.insert(key);
+        self.new_edges.push(GraphEdge {
+            id: ExtractionContext::new_id(),
+            repo_id: ExtractionContext::placeholder_repo_id(),
+            source_id: from_id.clone(),
+            target_id: to_id.clone(),
+            edge_type: EdgeType::Calls,
+            metadata: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+        });
+    }
+
+    fn resolve_callee(&self, callee: &str) -> Option<Id> {
+        let qname = format!("{}::{}", self.module_qname, callee);
+        if let Some(id) = self.name_to_id.get(&qname) {
+            return Some(id.clone());
+        }
+        if let Some(id) = self.name_to_id.get(callee) {
+            return Some(id.clone());
+        }
+        let short = callee.rsplit("::").next().unwrap_or(callee);
+        if short != callee {
+            let qname2 = format!("{}::{}", self.module_qname, short);
+            if let Some(id) = self.name_to_id.get(&qname2) {
+                return Some(id.clone());
+            }
+        }
+        None
+    }
+}
+
+impl<'ast, 'a> Visit<'ast> for CallVisitor<'a> {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        let name = f.sig.ident.to_string();
+        let qname = format!("{}::{}", self.module_qname, name);
+        let prev = self.current_fn_id.take();
+        self.current_fn_id = self.name_to_id.get(&qname).cloned();
+        syn::visit::visit_item_fn(self, f);
+        self.current_fn_id = prev;
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let Some(from_id) = self.current_fn_id.clone() {
+            if let syn::Expr::Path(ep) = &*call.func {
+                let callee = path_to_string(&ep.path);
+                if let Some(to_id) = self.resolve_callee(&callee) {
+                    if from_id != to_id {
+                        self.emit_call(&from_id, &to_id);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        if let Some(from_id) = self.current_fn_id.clone() {
+            let method_name = mc.method.to_string();
+            let suffix = format!("::{}", method_name);
+            let target = self
+                .name_to_id
+                .iter()
+                .find(|(qname, id)| qname.ends_with(&suffix) && from_id != **id)
+                .map(|(_, id)| id.clone());
+            if let Some(to_id) = target {
+                self.emit_call(&from_id, &to_id);
+            }
+        }
+        syn::visit::visit_expr_method_call(self, mc);
     }
 }
 
@@ -1071,6 +1174,57 @@ diesel::table! {
                 .any(|n| n.node_type == NodeType::Table && n.qualified_name == "agents"),
             "should extract 'agents' table node"
         );
+    }
+
+    #[test]
+    fn extract_calls_edges() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "pub fn caller() { callee(); }\npub fn callee() -> i32 { 42 }\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "abc123");
+        assert!(result.errors.is_empty());
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert!(!calls_edges.is_empty(), "should have Calls edges");
+    }
+
+    #[test]
+    fn extract_calls_edges_deduplicates() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "pub fn caller() { callee(); callee(); callee(); }\npub fn callee() -> i32 { 42 }\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "abc123");
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(calls_edges.len(), 1, "should deduplicate Calls edges");
     }
 
     #[test]

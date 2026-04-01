@@ -18,7 +18,7 @@ use gyre_common::{
     Id,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -225,7 +225,111 @@ impl GoExtractionContext {
             }
         }
 
+        // --- Pass 2: walk for call expressions and emit Calls edges ---
+        self.extract_calls(root, source, &pkg_qname);
+
         Ok(())
+    }
+
+    fn extract_calls(&mut self, root: tree_sitter::Node, source: &[u8], pkg_qname: &str) {
+        let mut fn_calls: Vec<(Id, String)> = Vec::new();
+        self.collect_calls_from_node(root, source, pkg_qname, None, &mut fn_calls);
+
+        let mut seen = HashSet::new();
+        for (from_id, callee_name) in fn_calls {
+            if let Some(to_id) = self.resolve_go_callee(&callee_name, pkg_qname) {
+                if from_id != to_id {
+                    let key = (from_id.to_string(), to_id.to_string());
+                    if seen.insert(key) {
+                        let edge = self.make_edge(EdgeType::Calls, from_id, to_id);
+                        self.edges.push(edge);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_calls_from_node(
+        &self,
+        node: tree_sitter::Node,
+        source: &[u8],
+        pkg_qname: &str,
+        current_fn_id: Option<&Id>,
+        results: &mut Vec<(Id, String)>,
+    ) {
+        let mut new_fn_id = current_fn_id;
+        let owned_id: Option<Id> = match node.kind() {
+            "function_declaration" => {
+                let fn_name = find_child_text(&node, "identifier", source);
+                if !fn_name.is_empty() {
+                    let qname = format!("{pkg_qname}.{fn_name}");
+                    self.name_to_id.get(&qname).cloned()
+                } else {
+                    None
+                }
+            }
+            "method_declaration" => {
+                let method_name = find_child_text(&node, "field_identifier", source);
+                if !method_name.is_empty() {
+                    let receiver_type = extract_receiver_type(&node, source);
+                    let qname = if receiver_type.is_empty() {
+                        format!("{pkg_qname}.{method_name}")
+                    } else {
+                        format!("{pkg_qname}.{receiver_type}.{method_name}")
+                    };
+                    self.name_to_id.get(&qname).cloned()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if owned_id.is_some() {
+            new_fn_id = owned_id.as_ref();
+        }
+
+        if node.kind() == "call_expression" {
+            if let Some(from_id) = new_fn_id {
+                if let Some(callee) = self.extract_go_call_name(node, source) {
+                    results.push((from_id.clone(), callee));
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.collect_calls_from_node(child, source, pkg_qname, new_fn_id, results);
+            }
+        }
+    }
+
+    fn extract_go_call_name(&self, call_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+        let func = call_node.child_by_field_name("function")?;
+        match func.kind() {
+            "identifier" => func.utf8_text(source).ok().map(|s| s.to_string()),
+            "selector_expression" => func
+                .child_by_field_name("field")
+                .and_then(|f| f.utf8_text(source).ok())
+                .map(|s| s.to_string()),
+            _ => None,
+        }
+    }
+
+    fn resolve_go_callee(&self, callee: &str, pkg_qname: &str) -> Option<Id> {
+        let qname = format!("{pkg_qname}.{callee}");
+        if let Some(id) = self.name_to_id.get(&qname) {
+            return Some(id.clone());
+        }
+        if let Some(id) = self.name_to_id.get(callee) {
+            return Some(id.clone());
+        }
+        let suffix = format!(".{callee}");
+        for (qn, id) in &self.name_to_id {
+            if qn.ends_with(&suffix) {
+                return Some(id.clone());
+            }
+        }
+        None
     }
 
     /// Get existing package node or create a new one.
@@ -712,6 +816,34 @@ func (s *Server) stop() {}
             unexported_method.is_none(),
             "unexported method stop must not be extracted"
         );
+    }
+
+    #[test]
+    fn extract_calls_edges() {
+        let src = r#"package service
+
+func Caller() {
+    Callee()
+}
+
+func Callee() int {
+    return 42
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("service/svc.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert!(!calls_edges.is_empty(), "should have Calls edges");
     }
 
     #[test]
