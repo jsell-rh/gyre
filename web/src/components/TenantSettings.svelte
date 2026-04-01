@@ -24,6 +24,7 @@
     { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
     { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
     { id: 'policies',   label: 'Policies' },
+    { id: 'llm',        label: 'LLM Defaults' },
     { id: 'analytics',  label: 'Analytics' },
     { id: 'audit',      labelKey: 'tenant_settings.tabs.audit' },
     { id: 'health',     labelKey: 'tenant_settings.tabs.health' },
@@ -117,6 +118,19 @@
     }
   }
 
+  // ── LLM Defaults ──────────────────────────────────────────────────────
+  const LLM_FEATURES = ['briefing-ask', 'spec-assist', 'explorer-generate', 'graph-predict'];
+  let adminLlmConfigs = $state({});
+  let adminLlmPrompts = $state({});
+  let adminLlmLoading = $state(false);
+  let adminLlmError = $state(null);
+  let adminLlmEditFeature = $state(null);
+  let adminLlmEditModel = $state('');
+  let adminLlmEditMaxTokens = $state('');
+  let adminLlmEditPrompt = $state('');
+  let adminLlmSaving = $state(false);
+  let adminLlmSaved = $state(false);
+
   // ── Analytics ────────────────────────────────────────────────────────
   let analyticsTop = $state([]);
   let analyticsLoading = $state(false);
@@ -182,6 +196,9 @@
     }
     if (tab === 'policies') {
       if (untrack(() => policies.length === 0 && !policiesLoading)) loadPolicies();
+    }
+    if (tab === 'llm') {
+      if (untrack(() => Object.keys(adminLlmConfigs).length === 0 && !adminLlmLoading)) loadAdminLlm();
     }
     if (tab === 'analytics') {
       if (untrack(() => analyticsTop.length === 0 && !analyticsLoading)) loadAnalytics();
@@ -329,6 +346,64 @@
       policiesError = e?.message ?? 'Failed to load policies';
     } finally {
       policiesLoading = false;
+    }
+  }
+
+  // ── LLM Defaults ─────────────────────────────────────────────────────
+  async function loadAdminLlm() {
+    adminLlmLoading = true;
+    adminLlmError = null;
+    try {
+      const cfgMap = {};
+      const promptMap = {};
+      await Promise.all(LLM_FEATURES.map(async (f) => {
+        try {
+          const cfg = await api.adminLlmConfigGet(f);
+          if (cfg?.model_name) cfgMap[f] = cfg;
+        } catch { /* not configured */ }
+        try {
+          const p = await api.adminLlmPromptGet(f);
+          if (p?.content) promptMap[f] = p;
+        } catch { /* not configured */ }
+      }));
+      adminLlmConfigs = cfgMap;
+      adminLlmPrompts = promptMap;
+    } catch (e) {
+      adminLlmError = e?.message ?? 'Failed to load LLM defaults';
+    } finally {
+      adminLlmLoading = false;
+    }
+  }
+
+  function editAdminLlm(feature) {
+    adminLlmEditFeature = feature;
+    const cfg = adminLlmConfigs[feature];
+    adminLlmEditModel = cfg?.model_name ?? '';
+    adminLlmEditMaxTokens = cfg?.max_tokens ? String(cfg.max_tokens) : '';
+    adminLlmEditPrompt = adminLlmPrompts[feature]?.content ?? '';
+    adminLlmSaved = false;
+  }
+
+  async function saveAdminLlm() {
+    if (!adminLlmEditFeature) return;
+    adminLlmSaving = true;
+    adminLlmSaved = false;
+    try {
+      if (adminLlmEditModel.trim()) {
+        const data = { model_name: adminLlmEditModel.trim() };
+        if (adminLlmEditMaxTokens.trim()) data.max_tokens = parseInt(adminLlmEditMaxTokens);
+        await api.adminLlmConfigSet(adminLlmEditFeature, data);
+      }
+      if (adminLlmEditPrompt.trim()) {
+        await api.adminLlmPromptSet(adminLlmEditFeature, { content: adminLlmEditPrompt.trim() });
+      }
+      adminLlmSaved = true;
+      setTimeout(() => { adminLlmSaved = false; }, 2000);
+      await loadAdminLlm();
+    } catch (e) {
+      showToast('Failed to save: ' + (e?.message ?? e), { type: 'error' });
+    } finally {
+      adminLlmSaving = false;
     }
   }
 
@@ -933,6 +1008,86 @@
                 {/each}
               </tbody>
             </table>
+          {/if}
+        {/if}
+      </div>
+
+    <!-- ── LLM Defaults ─────────────────────────────────────────────── -->
+    {:else if activeTab === 'llm'}
+      <div id="tab-panel-llm" role="tabpanel" aria-label="LLM Defaults" class="tab-panel" data-testid="tenant-tab-llm">
+        <div class="panel-header">
+          <h2 class="panel-title">LLM Default Configuration</h2>
+          <p class="panel-desc">Set tenant-wide default models and prompt templates. Workspaces can override these per-feature.</p>
+        </div>
+
+        {#if adminLlmLoading}
+          <div class="panel-loading" aria-live="polite">Loading LLM defaults...</div>
+        {:else if adminLlmError}
+          <div class="panel-error" role="alert">{adminLlmError}</div>
+        {:else}
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>Default Model</th>
+                <th>Default Prompt</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each LLM_FEATURES as feature}
+                {@const cfg = adminLlmConfigs[feature]}
+                {@const prompt = adminLlmPrompts[feature]}
+                <tr>
+                  <td>
+                    <div class="llm-feature-cell">
+                      <span class="llm-feature-name">{feature.replace(/-/g, ' ')}</span>
+                    </div>
+                  </td>
+                  <td>
+                    {#if cfg?.model_name}
+                      <code class="mono">{cfg.model_name}</code>
+                    {:else}
+                      <span class="muted-text">not set</span>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if prompt?.content}
+                      <span class="prompt-preview-text" title={prompt.content}>{prompt.content.slice(0, 50)}...</span>
+                    {:else}
+                      <span class="muted-text">built-in</span>
+                    {/if}
+                  </td>
+                  <td>
+                    <button class="edit-btn" onclick={() => editAdminLlm(feature)}>Configure</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+
+          {#if adminLlmEditFeature}
+            <div class="llm-edit-panel">
+              <h3 class="llm-edit-heading">Configure: {adminLlmEditFeature.replace(/-/g, ' ')}</h3>
+              <div class="llm-field">
+                <label class="llm-field-label" for="admin-llm-model">Default model</label>
+                <input id="admin-llm-model" class="llm-field-input" bind:value={adminLlmEditModel} placeholder="e.g. claude-sonnet-4-20250514" />
+              </div>
+              <div class="llm-field">
+                <label class="llm-field-label" for="admin-llm-tokens">Max tokens</label>
+                <input id="admin-llm-tokens" class="llm-field-input" type="number" bind:value={adminLlmEditMaxTokens} placeholder="e.g. 4096" />
+              </div>
+              <div class="llm-field">
+                <label class="llm-field-label" for="admin-llm-prompt">Default prompt template</label>
+                <textarea id="admin-llm-prompt" class="llm-field-textarea" rows="5" bind:value={adminLlmEditPrompt} placeholder="Use {{context}} and {{question}} as template variables"></textarea>
+              </div>
+              <div class="llm-edit-actions">
+                <button class="edit-btn" onclick={() => { adminLlmEditFeature = null; }}>Cancel</button>
+                <button class="edit-btn edit-btn-primary" onclick={saveAdminLlm} disabled={adminLlmSaving}>
+                  {adminLlmSaving ? 'Saving...' : adminLlmSaved ? 'Saved!' : 'Save Defaults'}
+                </button>
+              </div>
+            </div>
           {/if}
         {/if}
       </div>
@@ -1738,6 +1893,57 @@
     .budget-grid { grid-template-columns: repeat(2, 1fr); }
     .td-detail { max-width: 150px; }
   }
+
+  /* ── LLM Defaults ─────────────────────────────────────────────────── */
+  .llm-feature-cell { display: flex; flex-direction: column; }
+  .llm-feature-name { font-weight: 600; text-transform: capitalize; }
+  .muted-text { color: var(--color-text-muted); font-size: var(--text-xs); font-style: italic; }
+  .prompt-preview-text { font-size: var(--text-xs); color: var(--color-text-secondary); font-family: var(--font-mono); }
+  .edit-btn {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+  }
+  .edit-btn:hover { background: var(--color-surface-elevated); }
+  .edit-btn-primary { background: var(--color-primary); color: white; border-color: var(--color-primary); }
+  .edit-btn-primary:hover { opacity: 0.9; }
+  .llm-edit-panel {
+    margin-top: var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface-elevated);
+  }
+  .llm-edit-heading { font-size: var(--text-sm); font-weight: 600; margin: 0 0 var(--space-3); text-transform: capitalize; }
+  .llm-field { margin-bottom: var(--space-3); }
+  .llm-field-label { display: block; font-size: var(--text-xs); font-weight: 600; color: var(--color-text-secondary); margin-bottom: var(--space-1); }
+  .llm-field-input {
+    width: 100%; max-width: 400px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font: inherit; font-size: var(--text-sm);
+  }
+  .llm-field-input:focus { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+  .llm-field-textarea {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-mono); font-size: var(--text-xs);
+    resize: vertical;
+  }
+  .llm-field-textarea:focus { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+  .llm-edit-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-3); }
 
   @media (prefers-reduced-motion: reduce) {
     .back-btn, .tab-btn, .refresh-btn, .run-btn { transition: none; }
