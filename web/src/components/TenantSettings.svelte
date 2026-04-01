@@ -31,6 +31,7 @@
     { id: 'audit',      labelKey: 'tenant_settings.tabs.audit' },
     { id: 'health',     labelKey: 'tenant_settings.tabs.health' },
     { id: 'jobs',       labelKey: 'tenant_settings.tabs.jobs' },
+    { id: 'bcp',        label: 'BCP' },
   ];
 
   let activeTab = $state('users');
@@ -143,6 +144,22 @@
   let activityLog = $state([]);
   let activityLoading = $state(false);
 
+  // ── BCP (Business Continuity) ─────────────────────────────────────────
+  let bcpTargets = $state(null);
+  let bcpLoading = $state(false);
+  let bcpDrillRunning = $state(false);
+  let bcpDrillResult = $state(null);
+  let snapshots = $state([]);
+  let snapshotsLoading = $state(false);
+  let retention = $state(null);
+  let retentionLoading = $state(false);
+  let creatingSnapshot = $state(false);
+
+  // ── Live Audit Stream ───────────────────────────────────────────────
+  let auditStreamEvents = $state([]);
+  let auditStreaming = $state(false);
+  let auditStreamSource = null;
+
   // ── Audit detail expansion ───────────────────────────────────────────
   let expandedAuditId = $state(null);
 
@@ -205,6 +222,15 @@
     }
     if (tab === 'analytics') {
       if (untrack(() => analyticsTop.length === 0 && !analyticsLoading)) loadAnalytics();
+    }
+    if (tab === 'bcp') {
+      if (untrack(() => !bcpTargets && !bcpLoading)) loadBcp();
+    }
+    // Start/stop audit stream based on tab
+    if (tab === 'audit') {
+      startAuditStream();
+    } else {
+      stopAuditStream();
     }
   });
 
@@ -432,6 +458,94 @@
       analyticsError = e?.message ?? 'Failed to load analytics';
     } finally {
       analyticsLoading = false;
+    }
+  }
+
+  // ── BCP ────────────────────────────────────────────────────────────────
+  async function loadBcp() {
+    bcpLoading = true;
+    try {
+      const [targets, snaps, ret] = await Promise.all([
+        api.bcpTargets().catch(() => null),
+        api.adminListSnapshots().catch(() => []),
+        api.adminRetention().catch(() => null),
+      ]);
+      bcpTargets = targets;
+      snapshots = Array.isArray(snaps) ? snaps : (snaps?.items ?? []);
+      retention = ret;
+    } catch {
+      bcpTargets = null;
+    } finally {
+      bcpLoading = false;
+    }
+  }
+
+  async function runBcpDrill() {
+    bcpDrillRunning = true;
+    bcpDrillResult = null;
+    try {
+      const result = await api.bcpDrill();
+      bcpDrillResult = result;
+      showToast('BCP drill completed', { type: 'success' });
+      // Refresh snapshots
+      api.adminListSnapshots().then(s => { snapshots = Array.isArray(s) ? s : []; }).catch(() => {});
+    } catch (e) {
+      showToast('BCP drill failed: ' + (e?.message ?? e), { type: 'error' });
+      bcpDrillResult = { error: e?.message ?? 'Unknown error' };
+    } finally {
+      bcpDrillRunning = false;
+    }
+  }
+
+  async function createSnapshot() {
+    creatingSnapshot = true;
+    try {
+      await api.adminCreateSnapshot();
+      showToast('Snapshot created', { type: 'success' });
+      api.adminListSnapshots().then(s => { snapshots = Array.isArray(s) ? s : []; }).catch(() => {});
+    } catch (e) {
+      showToast('Snapshot failed: ' + (e?.message ?? e), { type: 'error' });
+    } finally {
+      creatingSnapshot = false;
+    }
+  }
+
+  async function deleteSnapshot(id) {
+    try {
+      await api.adminDeleteSnapshot(id);
+      snapshots = snapshots.filter(s => s.id !== id);
+      showToast('Snapshot deleted', { type: 'success' });
+    } catch (e) {
+      showToast('Delete failed: ' + (e?.message ?? e), { type: 'error' });
+    }
+  }
+
+  // ── Live Audit Stream ────────────────────────────────────────────────
+  function startAuditStream() {
+    if (auditStreaming || auditStreamSource) return;
+    const token = localStorage.getItem('gyre_token') ?? '';
+    const url = api.auditStreamUrl();
+    const es = new EventSource(`${url}?token=${encodeURIComponent(token)}`);
+    auditStreaming = true;
+    auditStreamSource = es;
+    es.onmessage = (evt) => {
+      try {
+        const event = JSON.parse(evt.data);
+        auditStreamEvents = [event, ...auditStreamEvents].slice(0, 50);
+      } catch { /* ignore parse errors */ }
+    };
+    es.onerror = () => {
+      auditStreaming = false;
+      es.close();
+      auditStreamSource = null;
+    };
+  }
+
+  function stopAuditStream() {
+    if (auditStreamSource) {
+      auditStreamSource.close();
+      auditStreamSource = null;
+      auditStreaming = false;
     }
   }
 
@@ -726,6 +840,33 @@
           <h2 class="panel-title">{$t('tenant_settings.audit.title')}</h2>
           <p class="panel-desc">{$t('tenant_settings.audit.desc')}</p>
         </div>
+
+        {#if auditStreaming && auditStreamEvents.length > 0}
+          <div class="live-stream-section">
+            <div class="live-stream-header">
+              <span class="live-dot"></span>
+              <span class="live-label">Live Stream ({auditStreamEvents.length} events)</span>
+            </div>
+            <div class="live-stream-list">
+              {#each auditStreamEvents.slice(0, 10) as event}
+                <div class="live-event">
+                  <span class="live-event-time">{fmtTimestamp(event.timestamp ?? event.created_at)}</span>
+                  <span class="live-event-type">{(event.event_type ?? event.type ?? '—').replace(/_/g, ' ')}</span>
+                  {#if event.actor ?? event.user_id ?? event.agent_id}
+                    <span class="live-event-actor mono">{event.actor ?? resolveEntityName('agent', event.agent_id ?? event.user_id)}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </div>
+        {:else if auditStreaming}
+          <div class="live-stream-section">
+            <div class="live-stream-header">
+              <span class="live-dot"></span>
+              <span class="live-label">Connected — waiting for events...</span>
+            </div>
+          </div>
+        {/if}
 
         <div class="filter-bar" data-testid="audit-filter-bar">
           <label for="audit-filter-type" class="filter-label">{$t('tenant_settings.audit.event_type')}</label>
@@ -1198,6 +1339,99 @@
             </div>
           {:else if costSummary.length === 0 && analyticsTop.length === 0}
             <div class="panel-empty">No analytics data available yet. Activity will appear here as agents work.</div>
+          {/if}
+        {/if}
+      </div>
+
+    {:else if activeTab === 'bcp'}
+      <div id="tab-panel-bcp" role="tabpanel" aria-label="BCP" class="tab-panel" data-testid="tenant-tab-bcp">
+        <div class="panel-header">
+          <h2 class="panel-title">Business Continuity</h2>
+          <p class="panel-desc">Disaster recovery targets, database snapshots, and data retention policies.</p>
+        </div>
+
+        <!-- BCP Targets (RTO/RPO) -->
+        {#if bcpLoading}
+          <p class="loading-text">Loading...</p>
+        {:else}
+          {#if bcpTargets}
+            <h3 class="sub-heading">Recovery Targets</h3>
+            <dl class="bcp-targets">
+              {#if bcpTargets.rto_seconds != null}
+                <dt>RTO (Recovery Time Objective)</dt>
+                <dd>{bcpTargets.rto_seconds < 3600 ? `${Math.round(bcpTargets.rto_seconds / 60)}m` : `${(bcpTargets.rto_seconds / 3600).toFixed(1)}h`}</dd>
+              {/if}
+              {#if bcpTargets.rpo_seconds != null}
+                <dt>RPO (Recovery Point Objective)</dt>
+                <dd>{bcpTargets.rpo_seconds < 3600 ? `${Math.round(bcpTargets.rpo_seconds / 60)}m` : `${(bcpTargets.rpo_seconds / 3600).toFixed(1)}h`}</dd>
+              {/if}
+            </dl>
+          {/if}
+
+          <!-- BCP Drill -->
+          <h3 class="sub-heading" style="margin-top: var(--space-4)">Drill</h3>
+          <p class="panel-desc">Run a BCP drill to verify backup/restore works. Creates a snapshot and verifies it.</p>
+          <div class="bcp-drill-section">
+            <button class="btn btn-primary" onclick={runBcpDrill} disabled={bcpDrillRunning}>
+              {bcpDrillRunning ? 'Running drill...' : 'Run BCP Drill'}
+            </button>
+            {#if bcpDrillResult}
+              <div class="bcp-drill-result" class:bcp-drill-error={bcpDrillResult.error}>
+                {#if bcpDrillResult.error}
+                  <span class="bcp-result-icon">✗</span> Drill failed: {bcpDrillResult.error}
+                {:else}
+                  <span class="bcp-result-icon bcp-result-ok">✓</span> Drill completed successfully
+                  {#if bcpDrillResult.snapshot_id}
+                    <span class="bcp-result-detail mono">Snapshot: {shortId(bcpDrillResult.snapshot_id)}</span>
+                  {/if}
+                {/if}
+              </div>
+            {/if}
+          </div>
+
+          <!-- Snapshots -->
+          <h3 class="sub-heading" style="margin-top: var(--space-4)">Snapshots</h3>
+          <div class="bcp-snapshot-actions">
+            <button class="btn btn-secondary" onclick={createSnapshot} disabled={creatingSnapshot}>
+              {creatingSnapshot ? 'Creating...' : '+ Create Snapshot'}
+            </button>
+          </div>
+          {#if snapshots.length > 0}
+            <table class="settings-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Created</th>
+                  <th>Size</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each snapshots as snap}
+                  <tr>
+                    <td class="mono">{shortId(snap.id ?? snap.snapshot_id)}</td>
+                    <td>{fmtTimestamp(snap.created_at ?? snap.timestamp)}</td>
+                    <td>{snap.size_bytes ? `${(snap.size_bytes / 1024).toFixed(0)} KB` : '—'}</td>
+                    <td>
+                      <button class="btn-danger-sm" onclick={() => deleteSnapshot(snap.id ?? snap.snapshot_id)} title="Delete snapshot">Delete</button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {:else}
+            <p class="panel-empty">No snapshots. Create one or run a BCP drill.</p>
+          {/if}
+
+          <!-- Retention Policies -->
+          {#if retention}
+            <h3 class="sub-heading" style="margin-top: var(--space-4)">Retention Policies</h3>
+            <dl class="bcp-targets">
+              {#each Object.entries(retention) as [key, value]}
+                <dt>{key.replace(/_/g, ' ')}</dt>
+                <dd>{typeof value === 'number' ? (value < 86400 ? `${Math.round(value / 3600)}h` : `${Math.round(value / 86400)}d`) : JSON.stringify(value)}</dd>
+              {/each}
+            </dl>
           {/if}
         {/if}
       </div>
@@ -2021,7 +2255,132 @@
   .llm-field-textarea:focus { outline: 2px solid var(--color-focus); outline-offset: 1px; }
   .llm-edit-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-3); }
 
+  /* ── Live audit stream ─────────────────────────────────────────────── */
+  .live-stream-section {
+    margin-bottom: var(--space-4);
+    border: 1px solid color-mix(in srgb, var(--color-success) 25%, transparent);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--color-success) 5%, transparent);
+    overflow: hidden;
+  }
+
+  .live-stream-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-success) 15%, transparent);
+  }
+
+  .live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: live-pulse 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .live-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-success);
+  }
+
+  .live-stream-list {
+    padding: var(--space-1) 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .live-event {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-xs);
+  }
+
+  .live-event-time { color: var(--color-text-muted); font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
+  .live-event-type { font-weight: 600; color: var(--color-text); }
+  .live-event-actor { color: var(--color-text-secondary); }
+
+  /* ── BCP tab ─────────────────────────────────────────────────────────── */
+  .bcp-targets {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-1) var(--space-4);
+    font-size: var(--text-sm);
+    padding: var(--space-2) 0;
+  }
+
+  .bcp-targets dt { font-weight: 600; color: var(--color-text-muted); }
+  .bcp-targets dd { margin: 0; color: var(--color-text); }
+
+  .bcp-drill-section {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+  }
+
+  .bcp-drill-result {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 25%, transparent);
+  }
+
+  .bcp-drill-error {
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 25%, transparent);
+  }
+
+  .bcp-result-icon { font-size: var(--text-base); }
+  .bcp-result-ok { color: var(--color-success); }
+  .bcp-drill-error .bcp-result-icon { color: var(--color-danger); }
+  .bcp-result-detail { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+  .bcp-snapshot-actions {
+    margin-bottom: var(--space-2);
+  }
+
+  .btn {
+    padding: var(--space-2) var(--space-4);
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--color-primary); color: white; }
+  .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+  .btn-secondary { background: var(--color-surface-elevated); color: var(--color-text); border: 1px solid var(--color-border); }
+  .btn-secondary:hover:not(:disabled) { border-color: var(--color-border-strong); }
+  .btn-danger-sm {
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-danger);
+    border-radius: var(--radius-sm);
+    color: var(--color-danger);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .btn-danger-sm:hover { background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+
   @media (prefers-reduced-motion: reduce) {
     .back-btn, .tab-btn, .refresh-btn, .run-btn { transition: none; }
+    .live-dot { animation: none; }
   }
 </style>
