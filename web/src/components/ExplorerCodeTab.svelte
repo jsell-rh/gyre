@@ -10,6 +10,7 @@
   let { repoId = null, repo = null } = $props();
 
   const openDetailPanel = getContext('openDetailPanel');
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   let subTab = $state('files');
   const SUB_TABS = [
@@ -251,7 +252,11 @@
   }
 
   function onRowClick(row, type) {
-    openDetailPanel?.({ type, id: row.id, data: row });
+    if (goToEntityDetail && (type === 'mr' || type === 'task' || type === 'agent' || type === 'spec')) {
+      goToEntityDetail(type, row.id, row);
+    } else {
+      openDetailPanel?.({ type, id: row.id, data: row });
+    }
   }
 
   // Lightweight entity name cache for human-friendly display
