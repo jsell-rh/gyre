@@ -659,9 +659,15 @@
     e?.stopPropagation();
     const path = normalizeSpecPath(spec.path);
     if (!path) return;
+    const reason = prompt('Rejection reason (required):', '');
+    if (reason === null) return; // cancelled
+    if (!reason.trim()) {
+      toastError('A rejection reason is required');
+      return;
+    }
     specActionLoading = spec.path;
     try {
-      await api.rejectSpec(path, 'Rejected from workspace home');
+      await api.rejectSpec(path, reason.trim());
       toastSuccess(`Spec "${spec.path.split('/').pop()}" rejected`);
       specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'rejected' } : s);
     } catch (e) {
