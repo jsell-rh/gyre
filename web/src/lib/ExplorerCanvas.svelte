@@ -31,6 +31,9 @@
     edges = [],
     onSelectNode = undefined,
     showSpecLinkage = false,
+    // Exposed for FlowCanvas overlay synchronization
+    nodePositions = $bindable({}),
+    currentViewBox = $bindable({ x: 0, y: 0, w: 900, h: 600 }),
   } = $props();
 
   // Shell context API (S4.1)
@@ -44,6 +47,10 @@
 
   let nodePositionsMap = $state({});
   let layoutPending = $state(false);
+
+  // Sync internal positions/viewBox to bindable props for overlay consumers (FlowCanvas)
+  $effect(() => { nodePositions = nodePositionsMap; });
+  $effect(() => { currentViewBox = viewBox; });
 
   // ── Pan/zoom ───────────────────────────────────────────────────────────────
   let svgEl = $state(null);
