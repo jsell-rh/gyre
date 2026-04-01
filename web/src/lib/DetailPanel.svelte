@@ -11,6 +11,7 @@
   import { api } from './api.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
   import { detectLang, highlightLine } from './syntaxHighlight.js';
+  import { renderMarkdown } from './markdown.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -1873,7 +1874,7 @@
                     {#if mrSpecPreviewLoading}
                       <Skeleton width="100%" height="60px" />
                     {:else if mrSpecPreview?.content}
-                      <pre class="spec-preview-content">{mrSpecPreview.content}</pre>
+                      <div class="spec-content-rendered spec-preview-rendered">{@html renderMarkdown(mrSpecPreview.content)}</div>
                     {:else}
                       <p class="no-data no-data-sm">Spec content not available. <button class="entity-link" onclick={() => navigateTo('spec', previewSpecPath, { path: previewSpecPath, repo_id: mr.repository_id ?? mr.repo_id })}>Open spec →</button></p>
                     {/if}
@@ -2313,7 +2314,7 @@
                     {#if taskSpecPreviewLoading}
                       <Skeleton width="100%" height="60px" />
                     {:else if taskSpecPreview?.content}
-                      <pre class="spec-preview-content">{taskSpecPreview.content}</pre>
+                      <div class="spec-content-rendered spec-preview-rendered">{@html renderMarkdown(taskSpecPreview.content)}</div>
                     {:else}
                       <p class="no-data no-data-sm">Spec content not available. <button class="entity-link" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })}>Open spec →</button></p>
                     {/if}
@@ -2647,8 +2648,8 @@
                 </button>
               {/if}
             </div>
-            <div class="spec-content-box">
-              <pre class="spec-content-pre">{specDetail.content}</pre>
+            <div class="spec-content-box spec-content-rendered">
+              {@html renderMarkdown(specDetail.content)}
             </div>
           {:else}
             {@const sd = specDetail ?? entity.data ?? {}}
@@ -4436,6 +4437,33 @@
     word-break: break-word;
     color: var(--color-text);
   }
+
+  /* Rendered markdown styles */
+  .spec-content-rendered {
+    padding: var(--space-4);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    line-height: 1.7;
+    color: var(--color-text);
+  }
+
+  .spec-content-rendered :global(.md-h1) { font-size: var(--text-xl); font-weight: 700; margin: 0 0 var(--space-3); padding-bottom: var(--space-2); border-bottom: 1px solid var(--color-border); }
+  .spec-content-rendered :global(.md-h2) { font-size: var(--text-lg); font-weight: 600; margin: var(--space-4) 0 var(--space-2); }
+  .spec-content-rendered :global(.md-h3) { font-size: var(--text-base); font-weight: 600; margin: var(--space-3) 0 var(--space-1); }
+  .spec-content-rendered :global(.md-h4),
+  .spec-content-rendered :global(.md-h5),
+  .spec-content-rendered :global(.md-h6) { font-size: var(--text-sm); font-weight: 600; margin: var(--space-2) 0 var(--space-1); }
+  .spec-content-rendered :global(.md-p) { margin: 0 0 var(--space-2); }
+  .spec-content-rendered :global(.md-blockquote) { margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); border-left: 3px solid var(--color-primary); background: color-mix(in srgb, var(--color-primary) 5%, transparent); color: var(--color-text-secondary); font-style: italic; }
+  .spec-content-rendered :global(.md-list) { margin: 0 0 var(--space-2); padding-left: var(--space-5); }
+  .spec-content-rendered :global(.md-list li) { margin: 0 0 var(--space-1); }
+  .spec-content-rendered :global(.md-code) { font-family: var(--font-mono); font-size: var(--text-xs); background: var(--color-surface); padding: 1px 4px; border-radius: var(--radius-sm); border: 1px solid var(--color-border); }
+  .spec-content-rendered :global(.md-codeblock) { margin: 0 0 var(--space-2); padding: var(--space-3); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow-x: auto; }
+  .spec-content-rendered :global(.md-codeblock code) { font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
+  .spec-content-rendered :global(.md-hr) { border: none; border-top: 1px solid var(--color-border); margin: var(--space-4) 0; }
+  .spec-content-rendered :global(a) { color: var(--color-link); text-decoration: underline; text-underline-offset: 2px; }
+  .spec-content-rendered :global(strong) { font-weight: 600; }
+  .spec-content-rendered :global(em) { font-style: italic; }
 
   .spec-hint {
     font-size: var(--text-xs);
