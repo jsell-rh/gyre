@@ -58,6 +58,7 @@
   let health = $state(null);
   let healthLoading = $state(false);
   let healthError = $state(null);
+  let versionInfo = $state(null);
 
   // ── Jobs ──────────────────────────────────────────────────────────────
   let jobs = $state([]);
@@ -265,7 +266,12 @@
     healthLoading = true;
     healthError = null;
     try {
-      health = await api.adminHealth();
+      const [h, v] = await Promise.all([
+        api.adminHealth(),
+        api.version().catch(() => null),
+      ]);
+      health = h;
+      versionInfo = v;
     } catch (e) {
       healthError = e?.message ?? $t('tenant_settings.error_load_health');
     } finally {
@@ -808,6 +814,15 @@
         {:else if !health}
           <div class="panel-empty">{$t('tenant_settings.health.empty')}</div>
         {:else}
+          {#if versionInfo}
+            <div class="version-banner" data-testid="version-banner">
+              <span class="version-label">Gyre Server</span>
+              {#if versionInfo.version}<span class="version-value">{versionInfo.version}</span>{/if}
+              {#if versionInfo.commit}<span class="version-commit mono">{typeof versionInfo.commit === 'string' ? versionInfo.commit.slice(0, 7) : versionInfo.commit}</span>{/if}
+              {#if versionInfo.build_date}<span class="version-date">{versionInfo.build_date}</span>{/if}
+              {#if versionInfo.rust_version}<span class="version-rust">Rust {versionInfo.rust_version}</span>{/if}
+            </div>
+          {/if}
           <div class="health-grid" data-testid="health-grid">
             {#each Object.entries(health) as [component, status] (component)}
               {@const ok = status === 'ok' || status === 'healthy' || status === true}
@@ -1536,6 +1551,35 @@
     font-weight: 600;
     color: var(--color-text-secondary);
     margin: 0 0 var(--space-3) 0;
+  }
+
+  /* ── Version banner ─────────────────────────────────────────────────── */
+  .version-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-4);
+    font-size: var(--text-sm);
+    flex-wrap: wrap;
+  }
+
+  .version-label {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .version-value {
+    font-weight: 600;
+    color: var(--color-primary);
+  }
+
+  .version-commit, .version-date, .version-rust {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
   }
 
   /* ── Health grid ─────────────────────────────────────────────────────── */
