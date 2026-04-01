@@ -1302,6 +1302,9 @@
                         <span class="activity-entity-name">{event.spec_path.split('/').pop()}</span>
                       {/if}
                     {/if}
+                    {#if event.repo_id && repoMap[event.repo_id]}
+                      <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                    {/if}
                     {#if event.timestamp ?? event.created_at}
                       <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                     {/if}
@@ -3766,6 +3769,17 @@
     font-size: 10px;
     white-space: nowrap;
     margin-left: auto;
+  }
+
+  .activity-repo-tag {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    white-space: nowrap;
   }
 
   /* ── Budget & Cost ──────────────────────────────────────────────────── */
