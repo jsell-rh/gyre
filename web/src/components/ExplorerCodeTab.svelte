@@ -198,11 +198,10 @@
           if (ac.files) ac.files.forEach(f => pathSet.add(f));
           if (ac.path) pathSet.add(ac.path);
         }
-        // Also collect file paths from MR diffs (best-effort, covers human-pushed files)
+        // Always collect file paths from MR diffs — most reliable source
         const mrArr = Array.isArray(mrList) ? mrList : [];
-        if (pathSet.size === 0 && mrArr.length > 0) {
-          // Only fetch diffs if we have no files from other sources
-          const diffPromises = mrArr.slice(0, 5).map(mr =>
+        if (mrArr.length > 0) {
+          const diffPromises = mrArr.slice(0, 10).map(mr =>
             api.mrDiff(mr.id).then(d => d?.files ?? []).catch(() => [])
           );
           const diffResults = await Promise.all(diffPromises);
