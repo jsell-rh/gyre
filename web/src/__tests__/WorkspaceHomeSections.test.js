@@ -42,6 +42,8 @@ vi.mock('../lib/api.js', () => ({
     task: vi.fn().mockResolvedValue({ title: 'test-task' }),
     mergeRequest: vi.fn().mockResolvedValue({ title: 'test-mr' }),
     activity: vi.fn().mockResolvedValue([]),
+    mergeQueue: vi.fn().mockResolvedValue([]),
+    mergeQueueGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
   },
 }));
 
