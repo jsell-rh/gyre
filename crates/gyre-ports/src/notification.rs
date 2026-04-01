@@ -36,6 +36,10 @@ pub trait NotificationRepository: Send + Sync {
     /// When `workspace_id` is None, counts across all workspaces (badge count).
     async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
 
+    /// List most recent notifications across all users (for activity feed).
+    /// Ordered by created_at descending.
+    async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>>;
+
     /// Returns true if there is a recent dismissal for the given (workspace, user, type)
     /// within `days` days. Used by the trust-suggestion job to suppress re-creation.
     async fn has_recent_dismissal(
