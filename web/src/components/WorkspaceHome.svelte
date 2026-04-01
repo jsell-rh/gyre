@@ -1938,19 +1938,29 @@
                 {@const actor = event.actor ?? event.user_id ?? event.agent_id ?? '—'}
                 {@const target = event.target ?? event.entity_type ?? ''}
                 {@const targetId = event.target_id ?? event.entity_id ?? ''}
-                <div class="activity-item">
+                {@const clickableType = target === 'agent' || target === 'mr' || target === 'task' || target === 'spec' ? target : null}
+                <button
+                  class="activity-item activity-item-clickable"
+                  onclick={() => {
+                    if (clickableType && targetId) {
+                      const data = clickableType === 'spec' ? { path: targetId, repo_id: event.repo_id } : {};
+                      openDetailPanel?.({ type: clickableType, id: targetId, data });
+                    }
+                  }}
+                  disabled={!clickableType || !targetId}
+                >
                   <div class="activity-dot activity-dot-info"></div>
                   <div class="activity-content">
                     <span class="activity-label">{eventType.replace(/_/g, ' ')}</span>
                     {#if target}
-                      <span class="activity-detail">{target}{targetId ? `: ${targetId.slice(0, 8)}...` : ''}</span>
+                      <span class="activity-detail">{target}{#if targetId}: <span class="mono">{entityName(target, targetId)}</span>{/if}</span>
                     {/if}
-                    <span class="activity-entity-name mono">{actor.length > 12 ? actor.slice(0, 8) + '...' : actor}</span>
+                    <span class="activity-entity-name mono">{actor.length > 12 ? entityName('agent', actor) : actor}</span>
                     {#if event.timestamp ?? event.created_at}
                       <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                     {/if}
                   </div>
-                </div>
+                </button>
               {/each}
             </div>
           </div>
