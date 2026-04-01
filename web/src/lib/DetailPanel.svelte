@@ -315,6 +315,7 @@
   let agentWorkload = $state(null);
   let agentWorkloadLoading = $state(false);
   let agentTraceSpans = $state(null);
+  let agentLogFilter = $state('');
 
   // Reset MR/agent/task data when entity changes
   $effect(() => {
@@ -333,6 +334,7 @@
       agentLogs = null;
       agentMessages = null;
       agentWorkload = null;
+      agentLogFilter = '';
     }
     if (entity?.type === 'task') {
       taskDetail = null;
@@ -1533,28 +1535,42 @@
               </div>
             {:else}
               {@const ag = agentDetail ?? entity.data ?? {}}
+              {#if ag.status && ag.status !== 'pending'}
+                {@const phases = (() => {
+                  const p = [{ label: 'Spawned', variant: 'info', time: ag.created_at }];
+                  p.push({ label: 'Active', variant: 'success', time: ag.created_at });
+                  if (ag._touchedPaths) {
+                    const paths = Array.isArray(ag._touchedPaths) ? ag._touchedPaths : (ag._touchedPaths?.paths ?? ag._touchedPaths?.files ?? []);
+                    if (paths.length > 0) p.push({ label: `${paths.length} files`, variant: 'warning', time: null });
+                  }
+                  if (ag.status !== 'active') {
+                    p.push({ label: ag.status === 'completed' ? 'Completed' : ag.status === 'failed' ? 'Failed' : ag.status === 'dead' ? 'Dead' : ag.status === 'idle' ? 'Idle' : ag.status === 'stopped' ? 'Stopped' : ag.status, variant: ag.status === 'completed' ? 'success' : ag.status === 'idle' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : 'muted', time: ag.completed_at });
+                  }
+                  if (ag.mr_id) p.push({ label: 'MR Created', variant: 'success', time: null });
+                  return p;
+                })()}
+                <div class="mr-status-journey">
+                  <div class="status-journey-track">
+                    {#each phases as step, i}
+                      <div class="status-journey-node status-journey-node-{step.variant}" title={step.time ? fmtDate(step.time) : ''}>
+                        <span class="status-journey-dot"></span>
+                        <span class="status-journey-label">{step.label}</span>
+                        {#if step.time}
+                          <span class="status-journey-time">{fmtDate(step.time)}</span>
+                        {/if}
+                      </div>
+                      {#if i < phases.length - 1}
+                        <span class="status-journey-connector"></span>
+                      {/if}
+                    {/each}
+                  </div>
+                </div>
+              {/if}
               <dl class="entity-meta">
                 <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
                 <dt>Status</dt>
                 <dd>
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
-                  {#if ag.status && ag.status !== 'pending'}
-                    <span class="status-story">
-                      <span class="status-step status-step-info">Spawned</span>
-                      <span class="status-step-arrow">→</span>
-                      {#if ag.status === 'active'}
-                        <span class="status-step status-step-success">Active</span>
-                      {:else}
-                        <span class="status-step status-step-success">Active</span>
-                        <span class="status-step-arrow">→</span>
-                        <span class="status-step status-step-{ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : 'muted'}">{ag.status}</span>
-                      {/if}
-                      {#if ag.mr_id}
-                        <span class="status-step-arrow">→</span>
-                        <span class="status-step status-step-success">MR created</span>
-                      {/if}
-                    </span>
-                  {/if}
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if ag.agent_type}
@@ -1615,20 +1631,30 @@
                 <div class="agent-container-info">
                   <span class="progress-section-label">Runtime</span>
                   <dl class="entity-meta">
+                    {#if ag._workload.alive !== undefined}
+                      <dt>Status</dt>
+                      <dd>
+                        {#if ag._workload.alive}
+                          <Badge value="Live" variant="success" />
+                        {:else}
+                          <Badge value="Exited" variant="muted" />
+                          {#if ag._container?.exit_code !== undefined && ag._container?.exit_code !== null}
+                            <span class="exit-code-explain">(code {ag._container.exit_code}{ag._container.exit_code === 0 ? ' — clean' : ag._container.exit_code === 137 ? ' — killed (OOM/SIGKILL)' : ag._container.exit_code === 143 ? ' — terminated (SIGTERM)' : ag._container.exit_code === 1 ? ' — error' : ''})</span>
+                          {/if}
+                        {/if}
+                      </dd>
+                    {/if}
                     {#if ag._workload.compute_target}
-                      <dt>Compute</dt><dd>{ag._workload.compute_target}</dd>
+                      <dt>Running on</dt><dd>{ag._workload.compute_target}</dd>
                     {/if}
                     {#if ag._workload.hostname}
-                      <dt>Host</dt><dd class="mono">{ag._workload.hostname}</dd>
-                    {/if}
-                    {#if ag._workload.alive !== undefined}
-                      <dt>Alive</dt><dd><Badge value={ag._workload.alive ? 'yes' : 'no'} variant={ag._workload.alive ? 'success' : 'muted'} /></dd>
+                      <dt>Hostname</dt><dd class="mono">{ag._workload.hostname}</dd>
                     {/if}
                     {#if ag._workload.pid}
-                      <dt>PID</dt><dd class="mono">{ag._workload.pid}</dd>
+                      <dt>Process</dt><dd class="mono">PID {ag._workload.pid}</dd>
                     {/if}
                     {#if ag._workload.attested_at}
-                      <dt>Attested</dt><dd>{fmtDate(ag._workload.attested_at)}</dd>
+                      <dt>Last Heartbeat</dt><dd>{fmtDate(ag._workload.attested_at)}</dd>
                     {/if}
                   </dl>
                 </div>
@@ -1660,7 +1686,13 @@
                     <span class="progress-section-label">Files Modified</span>
                     <div class="touched-paths-list">
                       {#each paths.slice(0, 10) as p}
-                        <span class="touched-path mono">{typeof p === 'string' ? p : (p.path ?? p.file ?? JSON.stringify(p))}</span>
+                        {@const filePath = typeof p === 'string' ? p : (p.path ?? p.file ?? JSON.stringify(p))}
+                        {@const fileStatus = typeof p === 'object' ? (p.status ?? p.change_type ?? 'modified') : 'modified'}
+                        {@const statusLower = fileStatus.toLowerCase()}
+                        <span class="touched-path mono">
+                          <span class="touched-path-status touched-path-status-{statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? 'added' : statusLower === 'deleted' || statusLower === 'removed' ? 'deleted' : 'modified'}">{statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? '+' : statusLower === 'deleted' || statusLower === 'removed' ? '-' : '~'}</span>
+                          {filePath}
+                        </span>
                       {/each}
                       {#if paths.length > 10}
                         <span class="touched-path-more">+{paths.length - 10} more files</span>
@@ -1674,22 +1706,41 @@
               {#if ag._costs}
                 <div class="agent-container-info">
                   <span class="progress-section-label">LLM Usage</span>
-                  <dl class="entity-meta">
-                    <dt>Total Tokens</dt><dd>{ag._costs.totalTokens.toLocaleString()}</dd>
-                    {#if ag._costs.totalCost > 0}
-                      <dt>Total Cost</dt><dd>${ag._costs.totalCost.toFixed(4)}</dd>
-                    {/if}
-                  </dl>
                   {#if Object.keys(ag._costs.models).length > 0}
-                    <div class="cost-model-breakdown">
-                      {#each Object.entries(ag._costs.models) as [model, usage]}
-                        <div class="cost-model-row">
-                          <span class="cost-model-name mono">{model}</span>
-                          <span class="cost-model-tokens">{(usage.input + usage.output).toLocaleString()} tokens</span>
-                          {#if usage.cost > 0}<span class="cost-model-cost">${usage.cost.toFixed(4)}</span>{/if}
-                        </div>
-                      {/each}
-                    </div>
+                    <table class="cost-table">
+                      <thead>
+                        <tr>
+                          <th>Model</th>
+                          <th class="cost-col-right">Input</th>
+                          <th class="cost-col-right">Output</th>
+                          <th class="cost-col-right">Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each Object.entries(ag._costs.models) as [model, usage]}
+                          <tr>
+                            <td class="mono">{model}</td>
+                            <td class="cost-col-right">{usage.input.toLocaleString()}</td>
+                            <td class="cost-col-right">{usage.output.toLocaleString()}</td>
+                            <td class="cost-col-right mono">{usage.cost > 0 ? `$${usage.cost.toFixed(4)}` : '—'}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                      <tfoot>
+                        <tr class="cost-total-row">
+                          <td>Total</td>
+                          <td class="cost-col-right" colspan="2">{ag._costs.totalTokens.toLocaleString()} tokens</td>
+                          <td class="cost-col-right mono">{ag._costs.totalCost > 0 ? `$${ag._costs.totalCost.toFixed(4)}` : '—'}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  {:else}
+                    <dl class="entity-meta">
+                      <dt>Total Tokens</dt><dd>{ag._costs.totalTokens.toLocaleString()}</dd>
+                      {#if ag._costs.totalCost > 0}
+                        <dt>Total Cost</dt><dd>${ag._costs.totalCost.toFixed(4)}</dd>
+                      {/if}
+                    </dl>
                   {/if}
                 </div>
               {/if}
@@ -2422,10 +2473,22 @@
               </div>
             {:else if agentWorkload}
               {@const ag = normalizeAgent(agentWorkload.agent) ?? agentDetail ?? entity.data ?? {}}
-              <!-- Agent execution logs (full log stream) -->
               {#if Array.isArray(agentLogs) && agentLogs.length > 0}
+                <div class="log-filter-bar">
+                  <input
+                    type="text"
+                    class="log-filter-input"
+                    placeholder="Filter logs..."
+                    bind:value={agentLogFilter}
+                  />
+                  {#if agentLogFilter}
+                    {@const matchCount = agentLogs.filter(e => { const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e); return txt.toLowerCase().includes(agentLogFilter.toLowerCase()); }).length}
+                    <span class="log-filter-count">{matchCount}/{agentLogs.length}</span>
+                  {/if}
+                </div>
+                {@const filteredLogs = agentLogFilter ? agentLogs.filter(e => { const txt = e.message ?? e.content ?? e.line ?? JSON.stringify(e); return txt.toLowerCase().includes(agentLogFilter.toLowerCase()); }) : agentLogs}
                 <div class="trace-list">
-                  {#each agentLogs as entry}
+                  {#each filteredLogs as entry}
                     <div class="trace-entry">
                       {#if entry.timestamp || entry.created_at}
                         <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
@@ -2433,6 +2496,9 @@
                       <span class="trace-msg">{entry.message ?? entry.content ?? entry.line ?? JSON.stringify(entry)}</span>
                     </div>
                   {/each}
+                  {#if filteredLogs.length === 0}
+                    <p class="no-data">No logs matching "{agentLogFilter}"</p>
+                  {/if}
                 </div>
               {:else}
                 <p class="no-data">No execution logs available for this agent</p>
@@ -5391,6 +5457,8 @@
   }
 
   .touched-path {
+    display: flex;
+    align-items: center;
     font-size: var(--text-xs);
     color: var(--color-text-secondary);
     padding: 2px 0;
@@ -5435,6 +5503,94 @@
     color: var(--color-text);
     font-family: var(--font-mono);
     margin-left: auto;
+  }
+
+  .cost-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-xs);
+  }
+
+  .cost-table th {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    text-align: left;
+  }
+
+  .cost-table td {
+    padding: var(--space-1) var(--space-2);
+    color: var(--color-text-secondary);
+  }
+
+  .cost-col-right {
+    text-align: right;
+  }
+
+  .cost-total-row {
+    border-top: 1px solid var(--color-border);
+    font-weight: 600;
+  }
+
+  .cost-total-row td {
+    color: var(--color-text);
+    padding-top: var(--space-2);
+  }
+
+  .exit-code-explain {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: var(--space-1);
+  }
+
+  .touched-path-status {
+    display: inline-block;
+    width: 14px;
+    text-align: center;
+    font-weight: 700;
+    margin-right: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .touched-path-status-added { color: var(--color-success); }
+  .touched-path-status-modified { color: var(--color-warning); }
+  .touched-path-status-deleted { color: var(--color-danger); }
+
+  .log-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+
+  .log-filter-input {
+    flex: 1;
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+  }
+
+  .log-filter-input::placeholder {
+    color: var(--color-text-muted);
+  }
+
+  .log-filter-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 1px var(--color-primary);
+  }
+
+  .log-filter-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
   }
 
   /* ── MR deps section ───────────────────────────────────────────────────── */
