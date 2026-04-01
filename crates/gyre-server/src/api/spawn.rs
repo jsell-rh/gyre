@@ -1032,7 +1032,13 @@ pub async fn spawn_agent(
     Ok((
         StatusCode::CREATED,
         Json(SpawnAgentResponse {
-            agent: AgentResponse::from(agent),
+            agent: {
+                let mut r = AgentResponse::from(agent);
+                r.repo_id = Some(req.repo_id.clone());
+                r.branch = Some(req.branch.clone());
+                r.task_id = Some(req.task_id.clone());
+                r
+            },
             token,
             worktree_path,
             clone_url,
