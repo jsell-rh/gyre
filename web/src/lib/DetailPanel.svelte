@@ -2937,6 +2937,22 @@
                   </ul>
                 </details>
               {/if}
+              {#if att.completion_summary}
+                <div class="att-completion-block">
+                  <span class="progress-section-label">Agent Summary</span>
+                  <p class="att-completion-text">{att.completion_summary}</p>
+                </div>
+              {/if}
+              {#if att.meta_specs_used?.length > 0}
+                <div class="att-meta-specs">
+                  <span class="progress-section-label">Meta-specs Applied ({att.meta_specs_used.length})</span>
+                  <div class="att-meta-list">
+                    {#each att.meta_specs_used as ms}
+                      <span class="cap-tag">{ms.name ?? ms.id ?? ms}</span>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
               {#if mrAttestation.signature}
                 <div class="att-sig-block">
                   <span class="att-sig-label">Signature</span>
@@ -4909,6 +4925,32 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-family: var(--font-mono);
+  }
+
+  .att-completion-block {
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-info) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 20%, transparent);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+  }
+
+  .att-completion-text {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    margin: var(--space-1) 0 0;
+    line-height: 1.5;
+  }
+
+  .att-meta-specs {
+    margin-bottom: var(--space-2);
+  }
+
+  .att-meta-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
   }
 
   .att-sig-block {
