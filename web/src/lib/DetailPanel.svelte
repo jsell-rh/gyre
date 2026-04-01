@@ -101,6 +101,7 @@
         { id: 'commits',     label: 'Commits' },
         { id: 'timeline',    label: 'Timeline' },
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
+        { id: 'trace',       label: 'Trace' },
         { id: 'reviews',     label: 'Reviews' },
         { id: 'attestation', label: $t('detail_panel.tabs.attestation') },
       );
@@ -317,6 +318,8 @@
   let mrAttestationLoading = $state(false);
   let mrTimeline = $state(null);
   let mrTimelineLoading = $state(false);
+  let mrTrace = $state(null);
+  let mrTraceLoading = $state(false);
   let mrReviews = $state(null);
   let mrReviewsLoading = $state(false);
   let mrComments = $state(null);
@@ -367,6 +370,7 @@
       mrGates = null;
       mrAttestation = null;
       mrTimeline = null;
+      mrTrace = null;
       mrReviews = null;
       mrComments = null;
       mrDeps = null;
@@ -603,6 +607,13 @@
         .then((d) => { mrTimeline = Array.isArray(d) ? d : (d?.events ?? []); })
         .catch(() => { mrTimeline = []; })
         .finally(() => { mrTimelineLoading = false; });
+    }
+    if (activeTab === 'trace' && !mrTrace && !mrTraceLoading) {
+      mrTraceLoading = true;
+      api.mrTrace(id)
+        .then((d) => { mrTrace = d && !d.error ? d : null; })
+        .catch(() => { mrTrace = null; })
+        .finally(() => { mrTraceLoading = false; });
     }
     if (activeTab === 'reviews' && !mrReviews && !mrReviewsLoading) {
       mrReviewsLoading = true;
@@ -3699,6 +3710,70 @@
             </div>
           {:else}
             <p class="no-data">No timeline events for this merge request</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'trace' && entity.type === 'mr'}
+        <div class="tab-pane">
+          {#if mrTraceLoading}
+            <div class="spec-skeleton">
+              {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else if mrTrace}
+            {@const spans = mrTrace.spans ?? []}
+            {@const traceId = mrTrace.trace_id ?? mrTrace.id ?? ''}
+            {@const rootSpans = mrTrace.root_spans ?? spans.filter(s => !s.parent_span_id).length}
+            <div class="timeline-summary">
+              <span class="timeline-summary-count">{spans.length} spans</span>
+              {#if rootSpans > 0}
+                <span class="timeline-summary-duration">{rootSpans} root span{rootSpans !== 1 ? 's' : ''}</span>
+              {/if}
+              {#if traceId}
+                <code class="sha-badge mono copyable" title="Click to copy trace ID: {traceId}" onclick={() => copyId(traceId)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(traceId); }}>trace:{traceId.length > 16 ? traceId.slice(0, 12) + '...' : traceId}</code>
+              {/if}
+            </div>
+            {#if spans.length > 0}
+              <div class="trace-spans">
+                {#each spans as span}
+                  {@const durUs = span.duration_us ?? 0}
+                  {@const durMs = durUs > 0 ? Math.round(durUs / 1000) : ((span.end_ms && span.start_ms) ? span.end_ms - span.start_ms : null)}
+                  <div class="trace-span" class:trace-span-root={!span.parent_span_id}>
+                    <div class="trace-span-header">
+                      <span class="trace-span-name">{span.operation_name ?? span.name ?? 'span'}</span>
+                      {#if span.service_name}
+                        <span class="gate-type-badge">{span.service_name}</span>
+                      {/if}
+                      {#if durMs != null && durMs > 0}
+                        <span class="trace-span-dur">{durMs < 1000 ? durMs + 'ms' : (durMs / 1000).toFixed(1) + 's'}</span>
+                      {/if}
+                      {#if span.graph_node_id}
+                        <button class="entity-link mono" onclick={() => navigateTo('node', span.graph_node_id, { id: span.graph_node_id })} title="Linked to graph node: {span.graph_node_id}">graph</button>
+                      {/if}
+                    </div>
+                    {#if span.attributes}
+                      {@const attrs = typeof span.attributes === 'string' ? (() => { try { return JSON.parse(span.attributes); } catch { return {}; } })() : span.attributes}
+                      {#if Object.keys(attrs).length > 0}
+                        <div class="trace-span-attrs">
+                          {#each Object.entries(attrs).slice(0, 8) as [key, val]}
+                            <span class="trace-span-attr"><span class="trace-attr-key">{key}:</span> <span class="trace-attr-val">{typeof val === 'object' ? JSON.stringify(val) : String(val)}</span></span>
+                          {/each}
+                        </div>
+                      {/if}
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data">Trace captured but contains no spans</p>
+            {/if}
+          {:else}
+            <div class="attestation-pending">
+              <div class="att-pending-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </div>
+              <p class="att-pending-title">No trace data available</p>
+              <p class="att-pending-desc">Trace data is captured when a <code>trace_capture</code> gate is configured on the repository. It records execution spans during gate evaluation, providing flow visualization of the merge process.</p>
+            </div>
           {/if}
         </div>
 
