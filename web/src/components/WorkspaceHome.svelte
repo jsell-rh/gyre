@@ -616,6 +616,42 @@
     });
   });
 
+  // ── Spec quick actions ─────────────────────────────────────────────────
+  let specActionLoading = $state(null); // spec path being acted on
+
+  async function quickApproveSpec(spec, e) {
+    e?.stopPropagation();
+    const path = normalizeSpecPath(spec.path);
+    const sha = spec.current_sha;
+    if (!path || !sha) { toastError('Missing spec path or SHA'); return; }
+    specActionLoading = spec.path;
+    try {
+      await api.approveSpec(path, sha);
+      toastSuccess(`Spec "${spec.path.split('/').pop()}" approved`);
+      specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'approved' } : s);
+    } catch (e) {
+      toastError('Failed to approve: ' + (e.message || e));
+    } finally {
+      specActionLoading = null;
+    }
+  }
+
+  async function quickRejectSpec(spec, e) {
+    e?.stopPropagation();
+    const path = normalizeSpecPath(spec.path);
+    if (!path) return;
+    specActionLoading = spec.path;
+    try {
+      await api.rejectSpec(path, 'Rejected from workspace home');
+      toastSuccess(`Spec "${spec.path.split('/').pop()}" rejected`);
+      specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'rejected' } : s);
+    } catch (e) {
+      toastError('Failed to reject: ' + (e.message || e));
+    } finally {
+      specActionLoading = null;
+    }
+  }
+
   // ── Derived: meta-spec aggregates ─────────────────────────────────────
   // Tag each meta-spec with its scope for badge display
   let allMetaSpecs = $derived([
@@ -1364,6 +1400,7 @@
                   <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
                   </th>
+                  <th scope="col" class="ws-th-action"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1399,6 +1436,16 @@
                       {/if}
                     </td>
                     <td class="spec-activity">{relTime(spec.updated_at)}</td>
+                    <td class="ws-cell-action">
+                      {#if (spec.approval_status ?? spec.status) === 'pending'}
+                        <button class="ws-quick-action-btn ws-quick-action-in_progress" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionLoading === spec.path} title="Approve this spec">
+                          {specActionLoading === spec.path ? '...' : 'Approve'}
+                        </button>
+                        <button class="ws-quick-action-btn ws-quick-action-blocked" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionLoading === spec.path} title="Reject this spec">
+                          Reject
+                        </button>
+                      {/if}
+                    </td>
                   </tr>
                 {/each}
               </tbody>
