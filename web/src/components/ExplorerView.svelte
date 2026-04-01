@@ -40,6 +40,7 @@
 
   // Filter panel state
   let filterVisible = $state(false);
+  let insightsCollapsed = $state(true);
   let activeFilters = $state(null);
 
   function onFilterChange(filters) {
@@ -609,7 +610,18 @@
 
         <!-- Repo dependencies, risks, types, modules, timeline (below graph, architecture tab only) -->
         {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
-          <div class="arch-insights">
+          <div class="arch-insights-toggle">
+            <button
+              class="arch-insights-btn"
+              onclick={() => insightsCollapsed = !insightsCollapsed}
+              aria-expanded={!insightsCollapsed}
+              aria-controls="arch-insights-panel"
+            >
+              <span class="arch-toggle-icon" class:open={!insightsCollapsed}>&#9654;</span>
+              Architecture Insights
+            </button>
+          </div>
+          <div class="arch-insights" id="arch-insights-panel" class:collapsed={insightsCollapsed}>
             <!-- Graph Types (structs/enums extracted from code) -->
             {#if graphTypes?.length > 0}
               <div class="arch-insight-section">
@@ -1320,13 +1332,57 @@
   .ask-error { color: var(--color-danger); }
 
   /* ── Architecture insights (deps + risks) ────────────────────────── */
+  .arch-insights-toggle {
+    border-top: 1px solid var(--color-border);
+    padding: var(--space-2) var(--space-6);
+    flex-shrink: 0;
+  }
+
+  .arch-insights-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: none;
+    border: none;
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    padding: var(--space-1) 0;
+    font-family: var(--font-body);
+  }
+
+  .arch-insights-btn:hover {
+    color: var(--color-text);
+  }
+
+  .arch-toggle-icon {
+    display: inline-block;
+    font-size: 10px;
+    transition: transform 0.15s ease;
+  }
+
+  .arch-toggle-icon.open {
+    transform: rotate(90deg);
+  }
+
   .arch-insights {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
     padding: var(--space-4) var(--space-6);
-    border-top: 1px solid var(--color-border);
     flex-shrink: 0;
+    overflow: hidden;
+    max-height: 600px;
+    transition: max-height 0.2s ease, padding 0.2s ease, opacity 0.2s ease;
+  }
+
+  .arch-insights.collapsed {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    pointer-events: none;
   }
 
   .arch-insight-section {
