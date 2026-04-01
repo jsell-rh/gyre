@@ -20,6 +20,16 @@
 
   const goToAgentRules = getContext('goToAgentRules');
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+
+  /** Navigate to full-page entity detail view (falls back to side panel) */
+  function nav(type, id, data) {
+    if (goToEntityDetail) {
+      goToEntityDetail(type, id, data ?? {});
+    } else if (openDetailPanel) {
+      openDetailPanel({ type, id, data: data ?? {} });
+    }
+  }
 
   let {
     workspace = null,
@@ -1015,16 +1025,16 @@
                     <span class="decision-desc">{n.title ?? n.message ?? n.description ?? body.description ?? ''}</span>
                     <div class="decision-refs">
                       {#if body.spec_path}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()}</button>
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', normalizeSpecPath(body.spec_path), { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()}</button>
                       {/if}
                       {#if body.mr_id}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: body.mr_id, data: {} }); }} title="View merge request">🔀 {entityName('mr', body.mr_id)}</button>
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', body.mr_id, {}); }} title="View merge request">🔀 {entityName('mr', body.mr_id)}</button>
                       {/if}
                       {#if body.agent_id}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: body.agent_id, data: {} }); }} title="View agent">▶ {entityName('agent', body.agent_id)}</button>
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', body.agent_id, {}); }} title="View agent">▶ {entityName('agent', body.agent_id)}</button>
                       {/if}
                       {#if body.task_id}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: body.task_id, data: {} }); }} title="View task">☑ {entityName('task', body.task_id)}</button>
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', body.task_id, {}); }} title="View task">☑ {entityName('task', body.task_id)}</button>
                       {/if}
                       {#if n.repo_id && repoMap[n.repo_id]}
                         <button
@@ -1063,13 +1073,13 @@
                         >{$t('common.retry')}</button>
                         <button
                           class="inline-btn secondary"
-                          onclick={() => openDetailPanel?.({ type: 'mr', id: body.mr_id, data: { _openTab: 'gates' } })}
+                          onclick={() => nav('mr', body.mr_id, { _openTab: 'gates' })}
                           title="View gate details"
                         >View Gates</button>
                       {:else if n.notification_type === 'agent_clarification' && body.agent_id}
                         <button
                           class="inline-btn"
-                          onclick={() => openDetailPanel?.({ type: 'agent', id: body.agent_id, data: { _openTab: 'chat' } })}
+                          onclick={() => nav('agent', body.agent_id, { _openTab: 'chat' })}
                           title="View agent messages"
                         >Respond</button>
                       {:else if n.notification_type === 'budget_warning'}
@@ -1179,7 +1189,7 @@
                   onclick={() => {
                     if (primaryType && primaryId) {
                       const data = event.entity_id ? event : primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : {};
-                      openDetailPanel?.({ type: primaryType, id: primaryId, data });
+                      nav(primaryType, primaryId, data);
                     }
                   }}
                 >
@@ -1611,13 +1621,13 @@
               </thead>
               <tbody>
                 {#each wsTasks.slice(0, 10) as task}
-                  <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'task', id: task.id, data: task }); }}>
+                  <tr class="ws-entity-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('task', task.id, task); }}>
                     <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task.status)}>{task.status ?? 'backlog'}</span></td>
                     <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
                     <td>{#if task.priority}<span class="priority-badge priority-{task.priority}">{task.priority}</span>{/if}</td>
                     <td class="ws-cell-type">{task.task_type ?? ''}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, {}); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }} title="Go to repo">{repoMap[task.repo_id].name}</button>{:else}{repoMap[task.repo_id]?.name ?? ''}{/if}</td>
                     <td class="ws-cell-time">{relTime(task.created_at)}</td>
                     <td class="ws-cell-action">
@@ -1678,14 +1688,14 @@
               </thead>
               <tbody>
                 {#each wsMrs.slice(0, 10) as mr}
-                  <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'mr', id: mr.id, data: mr }); }}>
+                  <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('mr', mr.id, mr); }}>
                     <td><span class="status-badge status-{mr.queue_position != null ? 'queued' : (mr.status ?? 'open')}" title={mrStatusTooltip(mr)}>{mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')}</span>{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                     <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, {}); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
                     <td>
                       {#if mr._gates?.total > 0}
-                        <button class="gate-cell-ws gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
+                        <button class="gate-cell-ws gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
                           <span class="gate-summary-inline">
                             {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
                             {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
@@ -1710,7 +1720,7 @@
                     <td class="ws-cell-mono ws-cell-link">
                       {#if mr.spec_ref}
                         {@const specPath = mr.spec_ref.split('@')[0]}
-                        <button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? mr.repo_id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>
+                        <button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>
                       {/if}
                     </td>
                     <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }} title="Go to repo">{repoMap[mr.repository_id].name}</button>{:else}{repoMap[mr.repository_id]?.name ?? ''}{/if}</td>
@@ -1751,7 +1761,7 @@
                 <div class="mq-item" class:mq-item-first={idx === 0}>
                   <div class="mq-item-position">#{idx + 1}</div>
                   <div class="mq-item-content">
-                    <button class="mq-item-title" onclick={() => openDetailPanel?.({ type: 'mr', id: mrId, data: item._mr })} title="View merge request">
+                    <button class="mq-item-title" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
                       {item._title}
                     </button>
                     <div class="mq-item-meta">
@@ -1759,13 +1769,13 @@
                         <span class="mq-branch mono">{item._branch}</span>
                       {/if}
                       {#if item._agent}
-                        <button class="ws-entity-link mq-agent" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: item._agent, data: {} }); }} title={item._agent}>
+                        <button class="ws-entity-link mq-agent" onclick={(e) => { e.stopPropagation(); nav('agent', item._agent, {}); }} title={item._agent}>
                           {entityName('agent', item._agent)}
                         </button>
                       {/if}
                       {#if item._spec_ref}
                         {@const specPath = item._spec_ref.split('@')[0]}
-                        <button class="ws-entity-link mq-spec" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath } }); }} title={item._spec_ref}>
+                        <button class="ws-entity-link mq-spec" onclick={(e) => { e.stopPropagation(); nav('spec', specPath, { path: specPath }); }} title={item._spec_ref}>
                           {specPath.split('/').pop()}
                         </button>
                       {/if}
@@ -1775,13 +1785,13 @@
                         {#if item._deps.length > 0}
                           <span class="mq-dep-label">waits for</span>
                           {#each item._deps as depId}
-                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: depId, data: {} }); }} title="View dependency">{entityName('mr', depId)}</button>
+                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); nav('mr', depId, {}); }} title="View dependency">{entityName('mr', depId)}</button>
                           {/each}
                         {/if}
                         {#if item._blocks.length > 0}
                           <span class="mq-dep-label">blocks</span>
                           {#each item._blocks as blockId}
-                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: blockId, data: {} }); }} title="View dependent">{entityName('mr', blockId)}</button>
+                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); nav('mr', blockId, {}); }} title="View dependent">{entityName('mr', blockId)}</button>
                           {/each}
                         {/if}
                       </div>
@@ -1832,14 +1842,14 @@
                 {#each wsAgents.slice(0, 10) as agent}
                   {@const taskId = agent.task_id ?? agent.current_task_id}
                   {@const spawnedAt = agent.created_at ?? agent.spawned_at}
-                  <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>
+                  <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', agent.id, agent); }}>
                     <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span></td>
                     <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: agent.spec_path, data: { path: agent.spec_path, repo_id: agent.repo_id } }); }} title={agent.spec_path}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: taskId, data: {} }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }} title={agent.spec_path}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, {}); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
                     <td class="ws-cell-time">{fmtDuration(spawnedAt, agent.completed_at)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: agent.mr_id, data: {} }); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, {}); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }} title="Go to repo">{repoMap[agent.repo_id].name}</button>{:else}{repoMap[agent.repo_id]?.name ?? ''}{/if}</td>
                   </tr>
                 {/each}
@@ -1925,7 +1935,7 @@
                       </thead>
                       <tbody>
                         {#each entries.slice(0, 5) as entry}
-                          <tr class="entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: entry.agent_id, data: {} })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: entry.agent_id, data: {} }); }}>
+                          <tr class="entity-row" onclick={() => nav('agent', entry.agent_id, {})} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', entry.agent_id, {}); }}>
                             <td class="cell-title">{entityName('agent', entry.agent_id)}</td>
                             <td>{(entry.total_tokens ?? entry.tokens ?? 0).toLocaleString()}</td>
                             <td>${(entry.total_cost ?? entry.cost ?? 0).toFixed(2)}</td>
@@ -1964,7 +1974,7 @@
                   onclick={() => {
                     if (clickableType && targetId) {
                       const data = clickableType === 'spec' ? { path: targetId, repo_id: event.repo_id } : {};
-                      openDetailPanel?.({ type: clickableType, id: targetId, data });
+                      nav(clickableType, targetId, data);
                     }
                   }}
                   disabled={!clickableType || !targetId}

@@ -324,14 +324,40 @@
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
   }
 
-  /** Navigate to a full-page entity detail view within repo mode. */
-  function goToEntityDetail(entityType, entityId, data) {
-    if (!currentRepo || !currentWorkspace) return;
+  /** Navigate to a full-page entity detail view within repo mode.
+   *  Works from any mode — if currentRepo is not set, resolves it from data.repo_id / data.repository_id. */
+  async function goToEntityDetail(entityType, entityId, data) {
+    if (!currentWorkspace) return;
+    const d = data ?? {};
     const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
+
+    // If we're not in repo mode or the entity belongs to a different repo, resolve context
+    const entityRepoId = d.repo_id ?? d.repository_id;
+    if (!currentRepo && entityRepoId) {
+      // Resolve repo name from the ID so we can build the URL
+      try {
+        const repos = await api.workspaceRepos(currentWorkspace.id);
+        const repo = (repos ?? []).find(r => r.id === entityRepoId);
+        if (repo) {
+          currentRepo = { id: repo.id, name: repo.name };
+          repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
+        } else {
+          // Fallback: try to get repo directly
+          const repoDetail = await api.repo(entityRepoId).catch(() => null);
+          if (repoDetail?.name) {
+            currentRepo = { id: entityRepoId, name: repoDetail.name };
+            repoIdCache.set(`${currentWorkspace.id}:${repoDetail.name}`, entityRepoId);
+          }
+        }
+      } catch { /* best effort */ }
+    }
+    if (!currentRepo) return; // Can't navigate without repo context
+
+    mode = 'repo';
     repoTab = parentTab;
-    entityDetail = { type: entityType, id: entityId, data: data ?? {} };
+    entityDetail = { type: entityType, id: entityId, data: d };
     // Pre-cache entity name for breadcrumb from provided data
-    const name = data?.title ?? data?.name;
+    const name = d.title ?? d.name;
     if (name && entityType !== 'spec') {
       breadcrumbNameCache = { ...breadcrumbNameCache, [`${entityType}:${entityId}`]: name };
     }
