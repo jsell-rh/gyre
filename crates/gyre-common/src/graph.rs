@@ -4,7 +4,7 @@ use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// Universal node types in the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
     Package,
@@ -16,6 +16,7 @@ pub enum NodeType {
     Component,
     Table,
     Constant,
+    Field,
 }
 
 /// Typed relationship between two graph nodes.
