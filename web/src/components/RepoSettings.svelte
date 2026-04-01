@@ -53,6 +53,8 @@
   let gates = $state([]);
   let gatesLoading = $state(false);
   let gatesError = $state(null);
+  let recentGateResults = $state([]);
+  let gateResultsLoading = $state(false);
   let addGateOpen = $state(false);
   let newGateName = $state('');
   let newGateType = $state('test_command');
@@ -168,11 +170,37 @@
     gatesError = null;
     try {
       gates = await api.repoGates(repoId) ?? [];
+      // Load recent gate results from MRs (best-effort)
+      loadRecentGateResults(repoId);
     } catch (e) {
       gatesError = e.message;
       gates = [];
     }
     finally { gatesLoading = false; }
+  }
+
+  async function loadRecentGateResults(repoId) {
+    gateResultsLoading = true;
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId });
+      const mrList = (Array.isArray(mrs) ? mrs : []).slice(0, 5);
+      const gateDefMap = Object.fromEntries(gates.map(g => [g.id, g]));
+      const results = await Promise.all(mrList.map(async (mr) => {
+        const gateData = await api.mrGates(mr.id).catch(() => []);
+        const arr = Array.isArray(gateData) ? gateData : (gateData?.gates ?? []);
+        return arr.map(g => ({
+          ...g,
+          mr_id: mr.id,
+          mr_title: mr.title,
+          mr_status: mr.status,
+          gate_name: g.gate_name ?? gateDefMap[g.gate_id]?.name ?? g.name,
+          gate_type: g.gate_type ?? gateDefMap[g.gate_id]?.gate_type,
+          required: g.required ?? gateDefMap[g.gate_id]?.required,
+        }));
+      }));
+      recentGateResults = results.flat().sort((a, b) => (b.finished_at ?? b.started_at ?? 0) - (a.finished_at ?? a.started_at ?? 0)).slice(0, 15);
+    } catch { recentGateResults = []; }
+    finally { gateResultsLoading = false; }
   }
 
   async function createGate() {
@@ -664,6 +692,46 @@
               </div>
             </div>
           {/if}
+        {/if}
+
+        <!-- Recent Gate Results -->
+        <h3 class="section-title">Recent Gate Results</h3>
+        <p class="tab-desc">Results from the most recent merge request gate checks.</p>
+        {#if gateResultsLoading}
+          <p class="loading-text">Loading recent results...</p>
+        {:else if recentGateResults.length === 0}
+          <p class="empty-text">No gate results yet. Results appear after MRs are enqueued for merge.</p>
+        {:else}
+          <div class="gate-results-list">
+            {#each recentGateResults as result}
+              {@const passed = result.status === 'Passed' || result.status === 'passed'}
+              {@const failed = result.status === 'Failed' || result.status === 'failed'}
+              <div class="gate-result-row" class:gate-result-pass={passed} class:gate-result-fail={failed}>
+                <span class="gate-result-icon">{passed ? '✓' : failed ? '✗' : '○'}</span>
+                <span class="gate-result-name">{result.gate_name ?? 'Gate'}</span>
+                {#if result.gate_type}
+                  <span class="gate-kind">{result.gate_type.replace(/_/g, ' ')}</span>
+                {/if}
+                {#if result.required !== undefined}
+                  <span class="gate-required" class:required={result.required}>{result.required ? 'required' : 'advisory'}</span>
+                {/if}
+                <button class="gate-result-mr" onclick={() => openDetailPanel?.({ type: 'mr', id: result.mr_id, data: { _openTab: 'gates' } })} title="View MR: {result.mr_title}">
+                  {result.mr_title ?? 'MR'}
+                  <span class="gate-result-mr-status status-badge status-{result.mr_status}">{result.mr_status}</span>
+                </button>
+                {#if result.duration_ms || (result.started_at && result.finished_at)}
+                  {@const dur = result.duration_ms ?? Math.round((result.finished_at - result.started_at) * 1000)}
+                  <span class="gate-result-duration">{dur < 1000 ? dur + 'ms' : (dur / 1000).toFixed(1) + 's'}</span>
+                {/if}
+                {#if result.output && failed}
+                  <details class="gate-result-output">
+                    <summary>Output</summary>
+                    <pre class="gate-output-pre">{result.output}</pre>
+                  </details>
+                {/if}
+              </div>
+            {/each}
+          </div>
         {/if}
 
         <!-- Push Gates Section -->
@@ -1483,6 +1551,90 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin: 0;
+  }
+
+  .gate-results-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: var(--space-4);
+  }
+
+  .gate-result-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    flex-wrap: wrap;
+  }
+
+  .gate-result-pass { border-left: 3px solid var(--color-success); }
+  .gate-result-fail { border-left: 3px solid var(--color-danger); }
+
+  .gate-result-icon {
+    font-weight: 700;
+    width: 16px;
+    text-align: center;
+  }
+
+  .gate-result-pass .gate-result-icon { color: var(--color-success); }
+  .gate-result-fail .gate-result-icon { color: var(--color-danger); }
+
+  .gate-result-name {
+    font-weight: 500;
+  }
+
+  .gate-result-mr {
+    background: none;
+    border: none;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .gate-result-mr:hover { text-decoration: underline; }
+
+  .gate-result-mr-status {
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .gate-result-duration {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .gate-result-output {
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  .gate-result-output summary {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+  }
+
+  .gate-output-pre {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    max-height: 200px;
   }
 
   .btn-gate-delete {
