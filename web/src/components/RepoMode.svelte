@@ -104,18 +104,29 @@
       .then(async (list) => {
         if (aborted) return;
         const mrList = Array.isArray(list) ? list : [];
+        // Fetch gate definitions for this repo to resolve names
+        let gateDefs = [];
+        try { gateDefs = await api.repoGates(repoId); } catch { /* best effort */ }
+        const gateDefMap = Object.fromEntries((Array.isArray(gateDefs) ? gateDefs : []).map(g => [g.id, g]));
         // Enrich MRs with gate results summary (best-effort, parallel)
         const gatePromises = mrList.map(mr =>
           api.mrGates(mr.id).then(gates => {
             const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-            const details = arr.map(g => ({
-              name: g.name ?? g.gate_name ?? 'Gate',
-              status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
-              gate_type: g.gate_type,
-              required: g.required,
-            }));
+            const details = arr.map(g => {
+              const def = gateDefMap[g.gate_id] ?? {};
+              return {
+                name: g.name ?? g.gate_name ?? def.name ?? (g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || `Gate ${shortId(g.gate_id ?? g.id)}`,
+                status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
+                gate_type: g.gate_type ?? def.gate_type,
+                required: g.required ?? def.required,
+                command: g.command ?? def.command,
+                output: g.output,
+                error: g.error,
+                duration_ms: g.duration_ms ?? ((g.started_at && g.finished_at) ? Math.round((g.finished_at - g.started_at) * 1000) : null),
+              };
+            });
             return { id: mr.id, passed, failed, total: arr.length, details };
           }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0, details: [] }))
         );
@@ -460,7 +471,7 @@
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
-                      <button class="gate-cell-repo gate-cell-clickable" title="View gate details: {mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name && g.name !== 'Gate' ? g.name : g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'Gate'}${g.required === false ? ' (advisory)' : ''}`).join(', ') ?? ''}" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
+                      <button class="gate-cell-repo gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}${g.duration_ms ? ' · ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: mr.id, data: { ...mr, _openTab: 'gates' } }); }}>
                         <span class="gate-summary-compact">
                           {#if mr._gates.failed > 0}
                             <span class="gate-fail-compact">✗{mr._gates.failed}</span>
@@ -475,7 +486,7 @@
                         {#if mr._gates.details?.length > 0}
                           <span class="gate-names-repo">
                             {#each mr._gates.details as g}
-                              <span class="gate-tag gate-tag-{g.status}">{g.name && g.name !== 'Gate' ? g.name : g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'Gate'}{#if g.name && g.name !== 'Gate' && g.gate_type} · {g.gate_type.replace(/_/g, ' ')}{/if}</span>
+                              <span class="gate-tag gate-tag-{g.status}" title="{g.name}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 100) : ''}{g.error ? '\nError: ' + g.error.slice(0, 100) : ''}">{g.name}{#if g.gate_type && g.name !== g.gate_type.replace(/_/g, ' ')} · {g.gate_type.replace(/_/g, ' ')}{/if}{#if g.required === false} <span class="gate-advisory-inline">(advisory)</span>{/if}</span>
                             {/each}
                           </span>
                         {/if}
@@ -1209,6 +1220,12 @@
   .gate-tag-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .gate-tag-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
   .gate-tag-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  .gate-advisory-inline {
+    font-size: 0.7em;
+    opacity: 0.7;
+    font-style: italic;
+  }
 
   /* ── Entity link buttons in tables ──────────────────────────────────── */
   .entity-link-btn {
