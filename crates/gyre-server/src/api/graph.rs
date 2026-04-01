@@ -851,11 +851,19 @@ pub async fn get_workspace_briefing(
         })
         .collect();
 
-    // Stub summary string.
+    // Build human-readable summary string.
     let summary = {
-        use std::time::{Duration, UNIX_EPOCH};
-        let since_dt = UNIX_EPOCH + Duration::from_secs(since);
-        let since_str = format!("{:?}", since_dt);
+        let since_str = {
+            let now = now_secs();
+            let diff = now.saturating_sub(since);
+            if diff < 3600 {
+                format!("{} minute(s) ago", diff / 60)
+            } else if diff < 86400 {
+                format!("{} hour(s) ago", diff / 3600)
+            } else {
+                format!("{} day(s) ago", diff / 86400)
+            }
+        };
         format!(
             "{} MR(s) merged, {} task(s) in progress since {}",
             mrs_merged,

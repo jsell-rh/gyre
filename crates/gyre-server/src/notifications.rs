@@ -59,12 +59,22 @@ pub async fn notify_gate_failure(
         author_agent_id.clone()
     };
 
+    // Resolve MR title for human-friendly notification
+    let mr_label = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+
     notify(
         state,
         workspace_id.clone(),
         user_id,
         NotificationType::GateFailure,
-        format!("Gate '{gate_name}' failed on MR {mr_id}"),
+        format!("Gate '{gate_name}' failed on MR {mr_label}"),
         tenant_id,
     )
     .await;
@@ -92,14 +102,24 @@ pub async fn notify_mr_merged(
         return; // No human to notify
     };
 
-    // Use BudgetWarning as a low-priority informational notification.
+    // Resolve MR title for human-friendly notification
+    let mr_label = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+
+    // Use SuggestedSpecLink as a low-priority informational notification.
     // A dedicated MrMerged type can be added to NotificationType when needed.
     notify(
         state,
         workspace_id.clone(),
         user_id,
         NotificationType::SuggestedSpecLink,
-        format!("MR {mr_id} was merged"),
+        format!("MR {mr_label} was merged"),
         tenant_id,
     )
     .await;
