@@ -1268,37 +1268,37 @@
                     {/if}
                     <div class="repo-stats-row">
                       {#if repoSpecCount > 0}
-                        <span class="repo-stat-chip" title="{repoSpecCount} specs{repoPendingSpecs > 0 ? `, ${repoPendingSpecs} pending approval` : ''}">
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoSpecCount} specs{repoPendingSpecs > 0 ? `, ${repoPendingSpecs} pending approval` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'specs'); }}>
                           <span class="repo-stat-icon">📋</span>
                           <span class="repo-stat-num">{repoSpecCount}</span>
                           <span class="repo-stat-label">specs</span>
                           {#if repoPendingSpecs > 0}<span class="repo-stat-alert">{repoPendingSpecs} pending</span>{/if}
-                        </span>
+                        </button>
                       {/if}
                       {#if repoTaskCount > 0}
-                        <span class="repo-stat-chip" title="{repoTaskCount} tasks{repoActiveTaskCount > 0 ? `, ${repoActiveTaskCount} in progress` : ''}">
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoTaskCount} tasks{repoActiveTaskCount > 0 ? `, ${repoActiveTaskCount} in progress` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'code'); }}>
                           <span class="repo-stat-icon">☑</span>
                           <span class="repo-stat-num">{repoTaskCount}</span>
                           <span class="repo-stat-label">tasks</span>
                           {#if repoActiveTaskCount > 0}<span class="repo-stat-active">{repoActiveTaskCount} active</span>{/if}
-                        </span>
+                        </button>
                       {/if}
                       {#if repoAgentCount > 0}
-                        <span class="repo-stat-chip" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''}">
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'code'); }}>
                           <span class="repo-stat-icon">▶</span>
                           <span class="repo-stat-num">{repoAgentCount}</span>
                           <span class="repo-stat-label">agents</span>
                           {#if repoActiveAgentCount > 0}<span class="repo-stat-active">{repoActiveAgentCount} running</span>{/if}
-                        </span>
+                        </button>
                       {/if}
                       {#if repoMrCount > 0}
-                        <span class="repo-stat-chip" title="{repoMrCount} MRs: {repoMergedMrCount} merged, {repoOpenMrCount} open">
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoMrCount} MRs: {repoMergedMrCount} merged, {repoOpenMrCount} open — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'mrs'); }}>
                           <span class="repo-stat-icon">🔀</span>
                           <span class="repo-stat-num">{repoMrCount}</span>
                           <span class="repo-stat-label">MRs</span>
                           {#if repoOpenMrCount > 0}<span class="repo-stat-alert">{repoOpenMrCount} open</span>{/if}
                           {#if repoMergedMrCount > 0}<span class="repo-stat-merged">{repoMergedMrCount} merged</span>{/if}
-                        </span>
+                        </button>
                       {/if}
                       {#if repoSpecCount === 0 && repoTaskCount === 0 && repoAgentCount === 0 && repoMrCount === 0}
                         <span class="repo-stat-chip repo-stat-empty">No activity yet</span>
@@ -2551,6 +2551,19 @@
     padding: 1px 6px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--color-border);
+    font-family: var(--font-body);
+    cursor: default;
+  }
+
+  button.repo-stat-clickable {
+    cursor: pointer;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+
+  button.repo-stat-clickable:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    color: var(--color-text);
   }
 
   .repo-stat-empty {
