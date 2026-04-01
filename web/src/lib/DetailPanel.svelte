@@ -3853,7 +3853,7 @@
                             (item.decision === 'changes_requested' || item.status === 'changes_requested') ? 'danger' : 'info'
                           }
                         />
-                        {@const reviewer = item.reviewer ?? (item.reviewer_agent_id ? entityName('agent', item.reviewer_agent_id) : item.user_id ?? shortId(item.reviewer_id))}
+                        {@const reviewer = item.reviewer ?? (item.reviewer_agent_id ? entityName('agent', item.reviewer_agent_id) : item.user_id ?? item.reviewer_id ?? 'reviewer')}
                         {#if item.reviewer_agent_id}
                           <button class="entity-link mono conversation-author" onclick={() => navigateTo('agent', item.reviewer_agent_id)}>{reviewer}</button>
                         {:else}
@@ -3861,7 +3861,7 @@
                         {/if}
                         <span class="conversation-verb">reviewed</span>
                       {:else}
-                        {@const author = item.author ?? item.author_agent_id ?? item.user_id ?? shortId(item.author_id)}
+                        {@const author = item.author ?? (item.author_agent_id ? entityName('agent', item.author_agent_id) : item.user_id ?? item.author_id ?? 'author')}
                         {#if item.author_agent_id}
                           <button class="entity-link mono conversation-author" onclick={() => navigateTo('agent', item.author_agent_id)}>{entityName('agent', item.author_agent_id)}</button>
                         {:else}
