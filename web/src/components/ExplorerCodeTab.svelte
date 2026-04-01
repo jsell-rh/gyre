@@ -705,10 +705,10 @@
                 </div>
               {/if}
             {:else}
-              <p class="no-data">No file data available</p>
+              <p class="no-data">Blame data has no lines. The file may be empty or binary.</p>
             {/if}
           {:else}
-            <p class="no-data">File data not available. File may not have been committed by an agent.</p>
+            <p class="no-data">No blame data available for this file. The blame API requires agent commit attribution to display file content. Try viewing the file through a merge request diff instead.</p>
           {/if}
         </div>
       {:else}
