@@ -283,7 +283,7 @@
       api.repoGraphRisks(selectedRepoId).catch(() => []),
       api.repoGraphTypes(selectedRepoId).catch(() => ({ nodes: [] })),
       api.repoGraphModules(selectedRepoId).catch(() => ({ nodes: [] })),
-      api.graphTimeline(selectedRepoId).catch(() => []),
+      api.repoGraphTimeline(selectedRepoId).catch(() => []),
     ]).then(([deps, depts, risks, types, modules, timeline]) => {
       repoDeps = { dependencies: Array.isArray(deps) ? deps : [], dependents: Array.isArray(depts) ? depts : [] };
       repoRisks = Array.isArray(risks) ? risks : [];
