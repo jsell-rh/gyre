@@ -529,7 +529,7 @@ describe('Keyboard shortcuts', () => {
     await waitFor(() => { expect(document.querySelector('.shortcuts-overlay')).toBeNull(); });
   });
 
-  it('shortcut overlay shows new g-key sequences', async () => {
+  it('shortcut overlay shows new g-key sequences for all 8 tabs', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
@@ -543,10 +543,14 @@ describe('Keyboard shortcuts', () => {
       expect(overlay?.textContent).toContain('g 2');
       expect(overlay?.textContent).toContain('g 3');
       expect(overlay?.textContent).toContain('g 4');
+      expect(overlay?.textContent).toContain('g 5');
+      expect(overlay?.textContent).toContain('g 6');
+      expect(overlay?.textContent).toContain('g 7');
+      expect(overlay?.textContent).toContain('g 8');
     });
   });
 
-  it('shortcut overlay shows g 5 for settings tab', async () => {
+  it('shortcut overlay shows g 8 for settings tab', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
@@ -555,7 +559,7 @@ describe('Keyboard shortcuts', () => {
     await fireEvent.keyDown(window, { key: '?' });
     await waitFor(() => {
       const overlay = document.querySelector('.shortcuts-overlay');
-      expect(overlay?.textContent).toContain('g 5');
+      expect(overlay?.textContent).toContain('g 8');
       expect(overlay?.textContent).toContain('Settings tab');
     });
   });
