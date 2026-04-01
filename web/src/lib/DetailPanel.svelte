@@ -1661,7 +1661,8 @@
       const isNewFile = (hdrMatch && parseInt(hdrMatch[1], 10) === 0) || (fileStatus ?? '').toLowerCase() === 'added';
       // Detect deleted-file hunks: @@ -N,... +0,0 @@ means all lines are deletions
       const isDeletedFile = (hdrMatch && parseInt(hdrMatch[2], 10) === 0) || (fileStatus ?? '').toLowerCase() === 'deleted';
-      result.push({ type: 'hunk', header: hunk.header ?? '' });
+      const hunkHeader = hunk.header ?? (hunk.old_start != null ? `@@ -${hunk.old_start},${hunk.old_count ?? 0} +${hunk.new_start ?? 1},${hunk.new_count ?? (hunk.lines?.length ?? 0)} @@` : '');
+      if (hunkHeader) result.push({ type: 'hunk', header: hunkHeader });
       for (const line of (hunk.lines ?? [])) {
         // Fix misclassified lines: server may mark all lines as "context" for added/deleted files
         let lt = line.type === 'add' ? 'add' : line.type === 'delete' ? 'del' : 'ctx';
