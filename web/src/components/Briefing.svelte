@@ -24,6 +24,23 @@
   const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
+  // Human-friendly entity name resolution
+  let entityNameCache = $state({});
+  function resolveEntityName(type, id) {
+    if (!id) return '';
+    const key = `${type}:${id}`;
+    if (entityNameCache[key]) return entityNameCache[key];
+    if (entityNameCache[key] === null) return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    entityNameCache = { ...entityNameCache, [key]: null };
+    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                    Promise.resolve(null);
+    fetcher.then(name => {
+      if (name) entityNameCache = { ...entityNameCache, [key]: name };
+    }).catch(() => {});
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
+
   // --- Time range ---
   const TIME_RANGE_VALUES = ['last_visit', '24h', '7d', '30d', 'custom'];
   const TIME_RANGE_KEYS = {
@@ -360,7 +377,7 @@
                         data-testid="agent-ref-link"
                         aria-label={$t('briefing.view_agent_label', { values: { id: u.agent_id } })}
                       >
-                        {u.agent_id}
+                        {resolveEntityName('agent', u.agent_id)}
                       </button>
                       <span class="uncertainty-text">{$t('briefing.uncertain', { values: { text: u.text } })}</span>
                     </div>
@@ -375,7 +392,7 @@
                       onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
                       data-testid="respond-to-agent-btn"
                     >
-                      {$t('briefing.respond_to', { values: { agent: u.agent_id } })}
+                      {$t('briefing.respond_to', { values: { agent: resolveEntityName('agent', u.agent_id) } })}
                     </button>
                   {/each}
                 {/if}
@@ -465,7 +482,7 @@
                       data-testid="mr-ref-link"
                       aria-label={$t('briefing.view_mr_label', { values: { id: item.mr_id, repo: item.repo } })}
                     >
-                      {item.repo} MR #{item.mr_id}
+                      {item.repo} — {resolveEntityName('mr', item.mr_id)}
                     </button>
                   {:else}
                     {item.description}
