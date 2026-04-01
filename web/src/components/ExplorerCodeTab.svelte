@@ -182,10 +182,11 @@
         // Client-side filter: only show tasks explicitly linked to this repo
         tasks = (Array.isArray(all) ? all : []).filter(t => t.repo_id === repoId);
       } else if (tab === 'files') {
-        // Build file tree from hot-files + agent-commits data
-        const [hf, acList] = await Promise.all([
+        // Build file tree from hot-files + agent-commits + MR diffs + blame data
+        const [hf, acList, mrList] = await Promise.all([
           api.repoHotFiles(repoId, 100).catch(() => []),
           api.repoAgentCommits(repoId).catch(() => []),
+          api.mergeRequests({ repository_id: repoId }).catch(() => []),
         ]);
         const hotMap = new Map();
         for (const f of (Array.isArray(hf) ? hf : [])) {
@@ -197,6 +198,21 @@
         for (const ac of (Array.isArray(acList) ? acList : [])) {
           if (ac.files) ac.files.forEach(f => pathSet.add(f));
           if (ac.path) pathSet.add(ac.path);
+        }
+        // Also collect file paths from MR diffs (best-effort, covers human-pushed files)
+        const mrArr = Array.isArray(mrList) ? mrList : [];
+        if (pathSet.size === 0 && mrArr.length > 0) {
+          // Only fetch diffs if we have no files from other sources
+          const diffPromises = mrArr.slice(0, 5).map(mr =>
+            api.mrDiff(mr.id).then(d => d?.files ?? []).catch(() => [])
+          );
+          const diffResults = await Promise.all(diffPromises);
+          for (const files of diffResults) {
+            for (const f of files) {
+              const p = f.path ?? f.file;
+              if (p) pathSet.add(p);
+            }
+          }
         }
         // Build flat file list with hot-file metadata
         fileTree = [...pathSet].sort().map(p => {
