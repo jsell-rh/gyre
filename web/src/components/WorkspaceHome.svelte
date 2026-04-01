@@ -1248,11 +1248,14 @@
                 {@const repoSpecCount = specs.filter(s => s.repo_id === repo.id).length}
                 {@const repoPendingSpecs = specs.filter(s => s.repo_id === repo.id && (s.approval_status === 'pending' || s.status === 'pending')).length}
                 <li class="repo-row" data-testid="repo-row">
-                  <button
+                  <div
                     class="repo-btn"
                     onclick={() => onSelectRepo?.(repo)}
+                    role="button"
+                    tabindex="0"
                     aria-label={$t('workspace_home.open_repo', { values: { name: repo.name } })}
                     data-testid="repo-link"
+                    onkeydown={(e) => { if (e.key === 'Enter') onSelectRepo?.(repo); }}
                   >
                     <div class="repo-btn-top">
                       <span class="repo-name">{repo.name}</span>
@@ -1304,7 +1307,7 @@
                         <span class="repo-stat-chip repo-stat-empty">No activity yet</span>
                       {/if}
                     </div>
-                  </button>
+                  </div>
                 </li>
               {/each}
             </ul>
