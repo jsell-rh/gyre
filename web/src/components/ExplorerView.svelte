@@ -360,31 +360,36 @@
     <!-- Header -->
     <div class="explorer-header">
       <div class="header-left">
-        <h1 class="page-title">{$t('explorer_view.system_title')}</h1>
-        <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        <h1 class="page-title">{scopeType === 'repo' ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
+        {#if scopeType !== 'repo'}
+          <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        {/if}
       </div>
       <div class="header-right">
-        {#if reposLoading}
-          <div class="repo-selector-skeleton">
-            <Skeleton lines={1} />
-          </div>
-        {:else}
-          <div class="repo-select-wrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="repo-icon" aria-hidden="true">
-              <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
-            </svg>
-            <select
-              class="repo-select"
-              value={selectedRepoId}
-              onchange={onRepoChange}
-              aria-label={$t('explorer_view.select_repo')}
-            >
-              <option value="">{$t('explorer_view.select_repo')}</option>
-              {#each repos as repo}
-                <option value={repo.id}>{repo.name}</option>
-              {/each}
-            </select>
-          </div>
+        <!-- Repo selector — hidden in repo scope (auto-selected from parent) -->
+        {#if scopeType !== 'repo'}
+          {#if reposLoading}
+            <div class="repo-selector-skeleton">
+              <Skeleton lines={1} />
+            </div>
+          {:else}
+            <div class="repo-select-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="repo-icon" aria-hidden="true">
+                <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
+              </svg>
+              <select
+                class="repo-select"
+                value={selectedRepoId}
+                onchange={onRepoChange}
+                aria-label={$t('explorer_view.select_repo')}
+              >
+                <option value="">{$t('explorer_view.select_repo')}</option>
+                {#each repos as repo}
+                  <option value={repo.id}>{repo.name}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
         {/if}
 
         {#if graph && explorerTab === 'architecture'}
@@ -403,8 +408,8 @@
       </div>
     </div>
 
-    <!-- Architecture / Code tab switcher — only shown when a repo is selected -->
-    {#if selectedRepoId}
+    <!-- Architecture / Briefing / Code tab switcher — only shown in non-repo scope (in repo scope, these are separate top-level tabs) -->
+    {#if selectedRepoId && scopeType !== 'repo'}
       <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div class="explorer-tabs" role="tablist" aria-label={$t('explorer_view.system_title')}
         onkeydown={(e) => {
