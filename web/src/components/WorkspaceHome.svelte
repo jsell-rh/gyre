@@ -1562,6 +1562,7 @@
                   <th>Spec</th>
                   <th>Agent</th>
                   <th>Repo</th>
+                  <th>Created</th>
                   <th class="ws-th-action"></th>
                 </tr>
               </thead>
@@ -1575,6 +1576,7 @@
                     <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }} title="Go to repo">{repoMap[task.repo_id].name}</button>{:else}{repoMap[task.repo_id]?.name ?? ''}{/if}</td>
+                    <td class="ws-cell-time">{relTime(task.created_at)}</td>
                     <td class="ws-cell-action">
                       {#if WS_TASK_TRANSITIONS[task.status]?.length}
                         {#each WS_TASK_TRANSITIONS[task.status] as nextStatus}
@@ -1627,6 +1629,7 @@
                   <th>Changes</th>
                   <th>Spec</th>
                   <th>Repo</th>
+                  <th>Created</th>
                   <th class="ws-th-action"></th>
                 </tr>
               </thead>
@@ -1668,6 +1671,7 @@
                       {/if}
                     </td>
                     <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }} title="Go to repo">{repoMap[mr.repository_id].name}</button>{:else}{repoMap[mr.repository_id]?.name ?? ''}{/if}</td>
+                    <td class="ws-cell-time">{relTime(mr.created_at)}</td>
                     <td class="ws-cell-action">
                       {#if mr.status === 'open' && mr.queue_position == null}
                         <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id} title="Enqueue for merge">{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
