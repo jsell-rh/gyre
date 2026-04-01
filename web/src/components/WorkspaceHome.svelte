@@ -1224,6 +1224,31 @@
                           onclick={() => { const el = document.getElementById('section-budget'); if (el) el.scrollIntoView({ behavior: 'smooth' }); }}
                           title="View budget details"
                         >View Budget</button>
+                      {:else if (n.notification_type === 'agent_completed' || n.notification_type === 'mr_needs_review') && body.mr_id}
+                        <button
+                          class="inline-btn"
+                          onclick={() => nav('mr', body.mr_id, { repository_id: n.repo_id })}
+                          title="Review merge request"
+                        >Review MR</button>
+                        {#if body.agent_id}
+                          <button
+                            class="inline-btn secondary"
+                            onclick={() => nav('agent', body.agent_id, { repo_id: n.repo_id })}
+                            title="View agent details"
+                          >View Agent</button>
+                        {/if}
+                      {:else if n.notification_type === 'mr_merged' && body.mr_id}
+                        <button
+                          class="inline-btn secondary"
+                          onclick={() => nav('mr', body.mr_id, { repository_id: n.repo_id })}
+                          title="View merged MR"
+                        >View MR</button>
+                      {:else if n.notification_type === 'suggested_link' && body.mr_id}
+                        <button
+                          class="inline-btn secondary"
+                          onclick={() => nav('mr', body.mr_id, { repository_id: n.repo_id })}
+                          title="View merge request"
+                        >View MR</button>
                       {/if}
                       <button
                         class="inline-btn secondary"
