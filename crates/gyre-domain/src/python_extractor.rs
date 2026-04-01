@@ -299,13 +299,65 @@ impl ExtractionContext {
         let edge = self.make_edge(EdgeType::Contains, module_id.clone(), class_id.clone());
         self.edges.push(edge);
 
-        // Walk class body for methods.
+        // Track fields we've already seen to avoid duplicates.
+        let mut seen_fields: HashSet<String> = HashSet::new();
+
+        // Walk class body for methods and fields.
         if let Some(body) = class_node.child_by_field_name("body") {
             let mut cursor = body.walk();
             for child in body.named_children(&mut cursor) {
                 match child.kind() {
+                    // Class-level type annotations: `name: str`
+                    "expression_statement" => {
+                        // Look for assignment or type annotation inside
+                        let mut inner_cursor = child.walk();
+                        for inner in child.named_children(&mut inner_cursor) {
+                            if inner.kind() == "type" {
+                                // This is `name: Type` — the parent expression_statement
+                                // has a child that is an assignment with type
+                            }
+                        }
+                        // Try to find type annotation: expression_statement > type node
+                        // In tree-sitter-python, class-level `x: int` is parsed as
+                        // expression_statement > type > identifier (name) + type (annotation)
+                        if let Some(type_node) = find_child_by_kind(child, "type") {
+                            if let Some(name_text) =
+                                type_node.child(0).and_then(|n| n.utf8_text(source).ok())
+                            {
+                                let type_ann = type_node
+                                    .child(2)
+                                    .and_then(|n| n.utf8_text(source).ok())
+                                    .unwrap_or("?")
+                                    .to_string();
+                                let field_name = name_text.to_string();
+                                if !field_name.starts_with('_')
+                                    && seen_fields.insert(field_name.clone())
+                                {
+                                    self.emit_field_node(
+                                        &field_name,
+                                        &type_ann,
+                                        rel_path,
+                                        &class_qname,
+                                        &class_id,
+                                        child.start_position().row as u32 + 1,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     "function_definition" => {
                         if let Some(method_name) = get_identifier_name(child, source) {
+                            // Extract self.x assignments from __init__
+                            if method_name == "__init__" {
+                                self.extract_init_fields(
+                                    child,
+                                    source,
+                                    rel_path,
+                                    &class_qname,
+                                    &class_id,
+                                    &mut seen_fields,
+                                );
+                            }
                             self.extract_function_node(
                                 child,
                                 source,
@@ -329,6 +381,117 @@ impl ExtractionContext {
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Field node emission
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_field_node(
+        &mut self,
+        field_name: &str,
+        type_ann: &str,
+        rel_path: &str,
+        class_qname: &str,
+        class_id: &Id,
+        line: u32,
+    ) {
+        let field_qname = format!("{class_qname}.{field_name}");
+        let mut node = self.make_node(
+            NodeType::Field,
+            field_name,
+            &field_qname,
+            rel_path,
+            line,
+            line,
+            Visibility::Public,
+        );
+        node.doc_comment = Some(type_ann.to_string());
+        let field_id = node.id.clone();
+        self.name_to_id.insert(field_qname, field_id.clone());
+        self.nodes.push(node);
+
+        // FieldOf edge: field → parent class
+        let edge = self.make_edge(EdgeType::FieldOf, field_id.clone(), class_id.clone());
+        self.edges.push(edge);
+
+        // DependsOn edge if field type refers to a known type
+        if let Some(target_id) = self.name_to_id.get(type_ann).cloned() {
+            let dep_edge = self.make_edge(EdgeType::DependsOn, field_id, target_id);
+            self.edges.push(dep_edge);
+        }
+    }
+
+    /// Extract `self.x = ...` assignments from `__init__` method body.
+    fn extract_init_fields(
+        &mut self,
+        init_node: tree_sitter::Node,
+        source: &[u8],
+        rel_path: &str,
+        class_qname: &str,
+        class_id: &Id,
+        seen_fields: &mut HashSet<String>,
+    ) {
+        if let Some(body) = init_node.child_by_field_name("body") {
+            self.walk_for_self_assignments(
+                body,
+                source,
+                rel_path,
+                class_qname,
+                class_id,
+                seen_fields,
+            );
+        }
+    }
+
+    fn walk_for_self_assignments(
+        &mut self,
+        node: tree_sitter::Node,
+        source: &[u8],
+        rel_path: &str,
+        class_qname: &str,
+        class_id: &Id,
+        seen_fields: &mut HashSet<String>,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "expression_statement" => {
+                    // Look for assignment: self.x = ...
+                    if let Some(assign) = find_child_by_kind(child, "assignment") {
+                        if let Some(left) = assign.child_by_field_name("left") {
+                            if left.kind() == "attribute" {
+                                let obj_text = left
+                                    .child_by_field_name("object")
+                                    .and_then(|n| n.utf8_text(source).ok());
+                                let attr_text = left
+                                    .child_by_field_name("attribute")
+                                    .and_then(|n| n.utf8_text(source).ok());
+                                if obj_text == Some("self") {
+                                    if let Some(field_name) = attr_text {
+                                        let field_name = field_name.to_string();
+                                        if !field_name.starts_with('_')
+                                            && seen_fields.insert(field_name.clone())
+                                        {
+                                            self.emit_field_node(
+                                                &field_name,
+                                                "?",
+                                                rel_path,
+                                                class_qname,
+                                                class_id,
+                                                child.start_position().row as u32 + 1,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -746,6 +909,21 @@ fn extract_first_string_arg(call_node: tree_sitter::Node, source: &[u8]) -> Opti
     None
 }
 
+/// Find the first named child of a given kind.
+fn find_child_by_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kind: &str,
+) -> Option<tree_sitter::Node<'a>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
 /// Strip surrounding quotes from a Python string literal.
 fn strip_string_quotes(s: &str) -> String {
     let s = s.trim();
@@ -966,6 +1144,51 @@ def list_users():
         assert!(
             contains_count >= 2,
             "should have at least 2 Contains edges, got {contains_count}"
+        );
+    }
+
+    #[test]
+    fn extract_class_fields_as_field_of_edges() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = r#"class User:
+    name: str
+    age: int
+
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+        self.email = "default"
+"#;
+        fs::write(dir.path().join("models.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Field nodes.
+        let field_nodes: Vec<_> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Field)
+            .collect();
+        assert!(
+            !field_nodes.is_empty(),
+            "should extract at least one field node from class"
+        );
+
+        // Should have FieldOf edges.
+        let field_of_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::FieldOf)
+            .collect();
+        assert!(
+            !field_of_edges.is_empty(),
+            "should have FieldOf edges for class fields"
         );
     }
 

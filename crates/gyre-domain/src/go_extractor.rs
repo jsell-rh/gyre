@@ -292,15 +292,89 @@ impl GoExtractionContext {
                 Visibility::Private
             };
 
+            let is_struct = node_type == NodeType::Type && has_child_kind(&child, "struct_type");
             let type_node =
                 self.make_node(node_type, &type_name, &qname, rel_path, line, line, vis);
             let type_id = type_node.id.clone();
-            self.name_to_id.insert(qname, type_id.clone());
+            self.name_to_id.insert(qname.clone(), type_id.clone());
             self.nodes.push(type_node);
 
             // Contains: package → type
-            let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), type_id);
+            let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), type_id.clone());
             self.edges.push(edge);
+
+            // Extract fields from struct types.
+            if is_struct {
+                if let Some(struct_node) = find_child_by_kind(&child, "struct_type") {
+                    if let Some(field_list) =
+                        find_child_by_kind(&struct_node, "field_declaration_list")
+                    {
+                        let mut field_count = 0u32;
+                        for fi in 0..field_list.child_count() {
+                            let fc = field_list.child(fi).unwrap();
+                            if fc.kind() == "field_declaration" {
+                                field_count += 1;
+                            }
+                        }
+                        if field_count <= 50 {
+                            for fi in 0..field_list.child_count() {
+                                let fc = field_list.child(fi).unwrap();
+                                if fc.kind() != "field_declaration" {
+                                    continue;
+                                }
+                                let field_name_str =
+                                    find_child_text(&fc, "field_identifier", source);
+                                if field_name_str.is_empty() {
+                                    continue;
+                                }
+                                // Get the type text (everything after the field identifier)
+                                let type_text = extract_field_type_text(&fc, source);
+                                let field_qname = format!("{qname}.{field_name_str}");
+                                let field_line = fc.start_position().row as u32 + 1;
+                                let field_vis = if is_exported(&field_name_str) {
+                                    Visibility::Public
+                                } else {
+                                    Visibility::Private
+                                };
+
+                                let mut field_node = self.make_node(
+                                    NodeType::Field,
+                                    &field_name_str,
+                                    &field_qname,
+                                    rel_path,
+                                    field_line,
+                                    field_line,
+                                    field_vis,
+                                );
+                                field_node.doc_comment = Some(type_text.clone());
+                                let field_id = field_node.id.clone();
+                                self.name_to_id.insert(field_qname, field_id.clone());
+                                self.nodes.push(field_node);
+
+                                // FieldOf edge: field → parent struct
+                                let fo_edge = self.make_edge(
+                                    EdgeType::FieldOf,
+                                    field_id.clone(),
+                                    type_id.clone(),
+                                );
+                                self.edges.push(fo_edge);
+
+                                // DependsOn edge if field type refers to a known type
+                                let bare_type = type_text
+                                    .trim_start_matches('*')
+                                    .trim_start_matches("[]")
+                                    .to_string();
+                                let type_qname = format!("{pkg_qname}.{bare_type}");
+                                if let Some(target_id) = self.name_to_id.get(&type_qname).cloned() {
+                                    let dep_edge =
+                                        self.make_edge(EdgeType::DependsOn, field_id, target_id);
+                                    self.edges.push(dep_edge);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             let _ = pkg_name; // used via pkg_qname
         }
@@ -618,6 +692,37 @@ fn collect_import_paths(node: &tree_sitter::Node, source: &[u8], cb: &mut impl F
     }
 }
 
+/// Find the first child node with the given kind.
+fn find_child_by_kind<'a>(
+    node: &tree_sitter::Node<'a>,
+    kind: &str,
+) -> Option<tree_sitter::Node<'a>> {
+    for i in 0..node.child_count() {
+        let child = node.child(i).unwrap();
+        if child.kind() == kind {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Extract the type text from a field_declaration node.
+/// Looks for the type child (after the field_identifier).
+fn extract_field_type_text(field_decl: &tree_sitter::Node, source: &[u8]) -> String {
+    // In tree-sitter-go, field_declaration children are:
+    // field_identifier, then the type node (type_identifier, pointer_type, slice_type, etc.)
+    for i in 0..field_decl.child_count() {
+        let child = field_decl.child(i).unwrap();
+        match child.kind() {
+            "field_identifier" | "tag" | "comment" => continue,
+            _ => {
+                return child.utf8_text(source).unwrap_or("?").to_string();
+            }
+        }
+    }
+    "?".to_string()
+}
+
 /// Returns true if the identifier starts with an uppercase letter (Go exported).
 fn is_exported(name: &str) -> bool {
     name.chars()
@@ -853,6 +958,59 @@ func NewHandler() *Handler { return nil }
         assert!(
             contains_count >= 2,
             "should have Contains edges: package->Handler, package->NewHandler"
+        );
+    }
+
+    #[test]
+    fn extract_struct_fields_as_field_of_edges() {
+        let src = r#"package api
+
+type Config struct {
+    Host string
+    Port int
+    db   string
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("api/config.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Field nodes for Host and Port (exported) and db (unexported).
+        let field_nodes: Vec<_> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Field)
+            .collect();
+        assert!(
+            field_nodes.len() >= 2,
+            "should extract at least 2 field nodes, got {}",
+            field_nodes.len()
+        );
+
+        // doc_comment should contain the type annotation.
+        let host_field = field_nodes.iter().find(|n| n.name == "Host");
+        assert!(host_field.is_some(), "should have Host field");
+        assert_eq!(
+            host_field.unwrap().doc_comment.as_deref(),
+            Some("string"),
+            "Host field doc_comment should be the type"
+        );
+
+        // Should have FieldOf edges.
+        let field_of_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::FieldOf)
+            .collect();
+        assert!(
+            field_of_edges.len() >= 2,
+            "should have at least 2 FieldOf edges, got {}",
+            field_of_edges.len()
         );
     }
 
