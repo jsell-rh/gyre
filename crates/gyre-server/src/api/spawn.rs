@@ -1205,8 +1205,8 @@ pub async fn complete_agent(
             Id::new(spawned_by.clone()),
             gyre_common::NotificationType::AgentCompleted,
             format!(
-                "Agent '{}' completed — MR {} is ready for review",
-                agent.name, mr.id
+                "Agent '{}' completed — MR '{}' is ready for review",
+                agent.name, mr.title
             ),
             "default",
         )
