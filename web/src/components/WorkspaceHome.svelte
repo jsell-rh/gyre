@@ -1544,6 +1544,11 @@
           data-testid="arch-toggle"
         >
           <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
+          {#if archGraph}
+            <span class="arch-stats-inline">
+              {archGraph.nodes?.length ?? 0} nodes · {archGraph.edges?.length ?? 0} edges
+            </span>
+          {/if}
           <span class="arch-toggle-label" aria-hidden="true">
             {archExpanded ? '▾ ' + $t('workspace_home.hide_workspace_graph') : '▸ ' + $t('workspace_home.show_workspace_graph')}
           </span>
@@ -2908,6 +2913,12 @@
     border-bottom: none;
   }
 
+  .arch-stats-inline {
+    font-size: var(--text-xs);
+    color: var(--color-muted);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
   .arch-toggle-label {
     font-size: var(--text-xs);
     color: var(--color-primary);
