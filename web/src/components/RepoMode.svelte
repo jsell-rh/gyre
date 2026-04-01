@@ -117,7 +117,7 @@
             const details = arr.map(g => {
               const def = gateDefMap[g.gate_id] ?? {};
               return {
-                name: g.name ?? g.gate_name ?? def.name ?? (g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || `Gate ${shortId(g.gate_id ?? g.id)}`,
+                name: g.name ?? g.gate_name ?? def.name ?? ((g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || `Gate ${shortId(g.gate_id ?? g.id)}`),
                 status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
                 gate_type: g.gate_type ?? def.gate_type,
                 required: g.required ?? def.required,
