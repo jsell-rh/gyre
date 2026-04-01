@@ -5,10 +5,12 @@
    * Tabs: General | Gates | Policies | Budget | Audit | Danger Zone
    * Rendered inside RepoMode when the ⚙ tab is active.
    */
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
+
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
 
   let {
     workspace = null,
@@ -408,7 +410,6 @@
     if (detail.path) parts.push(detail.path);
     if (detail.branch) parts.push(`branch: ${detail.branch}`);
     if (detail.sha) parts.push(detail.sha.slice(0, 7));
-    if (detail.agent_id) parts.push(`agent: ${detail.agent_id.slice(0, 8)}`);
     if (detail.address || detail.remote_addr) parts.push(detail.address ?? detail.remote_addr);
     if (detail.reason) parts.push(detail.reason);
     if (detail.name) parts.push(detail.name);
@@ -417,6 +418,46 @@
     if (parts.length > 0) return parts.join(' · ');
     // Fallback: compact JSON
     return JSON.stringify(detail);
+  }
+
+  /** Extract clickable entity references from audit event */
+  function auditEntityRefs(evt) {
+    const refs = [];
+    const d = evt.details ?? {};
+    if (typeof d === 'object') {
+      if (d.agent_id) refs.push({ type: 'agent', id: d.agent_id });
+      if (d.mr_id) refs.push({ type: 'mr', id: d.mr_id });
+      if (d.task_id) refs.push({ type: 'task', id: d.task_id });
+      if (d.spec_path) refs.push({ type: 'spec', id: d.spec_path });
+    }
+    if (evt.entity_type && evt.entity_id) {
+      const existing = refs.find(r => r.id === evt.entity_id);
+      if (!existing) refs.push({ type: evt.entity_type, id: evt.entity_id });
+    }
+    return refs;
+  }
+
+  /** Entity name cache for audit */
+  let auditEntityCache = $state({});
+
+  function auditEntityName(type, id) {
+    if (!id) return id?.slice?.(0, 8) ?? '—';
+    const key = `${type}:${id}`;
+    if (auditEntityCache[key]) return auditEntityCache[key];
+    // Queue async resolution
+    queueMicrotask(() => {
+      if (auditEntityCache[key]) return;
+      auditEntityCache = { ...auditEntityCache, [key]: null };
+      const fetch = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                    type === 'task' ? api.task(id).then(t => t?.title) :
+                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                    type === 'spec' ? Promise.resolve(id.split('/').pop()) :
+                    Promise.resolve(null);
+      fetch.then(name => {
+        if (name) auditEntityCache = { ...auditEntityCache, [key]: name };
+      }).catch(() => {});
+    });
+    return type === 'spec' ? id.split('/').pop() : (id.length > 12 ? id.slice(0, 8) + '...' : id);
   }
 
   const repoBudgetPct = $derived.by(() => {
@@ -1010,10 +1051,22 @@
               <button class="audit-sort-btn" aria-label="{$t('repo_settings.audit.sort_by_time')} {auditSortCol === 'timestamp' ? (auditSortDir === 1 ? $t('repo_settings.audit.ascending') : $t('repo_settings.audit.descending')) : ''}" onclick={() => toggleAuditSort('timestamp')}>{$t('repo_settings.audit.col_time')}{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
             </div>
             {#each sortedAuditEvents as evt}
+              {@const refs = auditEntityRefs(evt)}
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
-                <span class="audit-detail">{fmtAuditDetail(evt.details ?? evt.message)}</span>
+                <span class="audit-detail">
+                  {fmtAuditDetail(evt.details ?? evt.message)}
+                  {#if refs.length > 0}
+                    <span class="audit-refs">
+                      {#each refs as ref}
+                        <button class="audit-ref-link" onclick={() => openDetailPanel?.({ type: ref.type, id: ref.id, data: ref.type === 'spec' ? { path: ref.id, repo_id: repo?.id } : {} })} title="View {ref.type}: {ref.id}">
+                          {auditEntityName(ref.type, ref.id)}
+                        </button>
+                      {/each}
+                    </span>
+                  {/if}
+                </span>
                 <span class="audit-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
               </div>
             {/each}
@@ -1621,6 +1674,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .audit-refs {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: 6px;
+  }
+
+  .audit-ref-link {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .audit-ref-link:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
   }
 
   .audit-time {
