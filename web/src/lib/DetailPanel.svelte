@@ -1483,7 +1483,7 @@
     if (!tk?.status) return '';
     switch (tk.status) {
       case 'backlog': return 'Waiting to be picked up by an agent';
-      case 'in_progress': return tk.assigned_to ? `Being worked on by agent ${tk.assigned_to.slice(0, 8)}` : 'An agent is actively implementing this';
+      case 'in_progress': return tk.assigned_to ? `Being worked on by ${entityName('agent', tk.assigned_to)}` : 'An agent is actively implementing this';
       case 'done': return 'Implementation complete — code has been submitted';
       case 'blocked': return tk.depends_on?.length ? `Blocked by ${tk.depends_on.length} dependency/ies` : 'Waiting for a dependency or human input';
       case 'cancelled': return 'Cancelled — the associated spec may have been rejected';
