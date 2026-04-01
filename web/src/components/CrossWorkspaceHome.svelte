@@ -15,8 +15,18 @@
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings') ?? null;
   const goToAgentRules = getContext('goToAgentRules') ?? null;
+
+  /** Navigate to full-page entity detail view (falls back to side panel) */
+  function nav(type, id, data) {
+    if (goToEntityDetail) {
+      goToEntityDetail(type, id, data ?? {});
+    } else if (openDetailPanel) {
+      openDetailPanel({ type, id, data: data ?? {} });
+    }
+  }
 
   let {
     onSelectWorkspace = undefined,
@@ -744,19 +754,19 @@
                 <span class="cwh-activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
               {/if}
               {#if event.entity_id && event.entity_type}
-                <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: event.entity_type, id: event.entity_id, data: event })} title="View {event.entity_type}: {event.entity_id}">{resolveEntityName(event.entity_type, event.entity_id)}</button>
+                <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav(event.entity_type, event.entity_id, event)} title="View {event.entity_type}: {event.entity_id}">{resolveEntityName(event.entity_type, event.entity_id)}</button>
               {:else}
                 {#if event.agent_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'agent', id: event.agent_id, data: {} })} title="View agent: {event.agent_id}">{resolveEntityName('agent', event.agent_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('agent', event.agent_id, {})} title="View agent: {event.agent_id}">{resolveEntityName('agent', event.agent_id)}</button>
                 {/if}
                 {#if event.mr_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'mr', id: event.mr_id, data: {} })} title="View MR: {event.mr_id}">{resolveEntityName('mr', event.mr_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('mr', event.mr_id, {})} title="View MR: {event.mr_id}">{resolveEntityName('mr', event.mr_id)}</button>
                 {/if}
                 {#if event.task_id && !event.agent_id && !event.mr_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'task', id: event.task_id, data: {} })} title="View task: {event.task_id}">{resolveEntityName('task', event.task_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('task', event.task_id, {})} title="View task: {event.task_id}">{resolveEntityName('task', event.task_id)}</button>
                 {/if}
                 {#if event.spec_path && !event.agent_id && !event.mr_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'spec', id: event.spec_path, data: { path: event.spec_path, repo_id: event.repo_id } })} title="View spec: {event.spec_path}">{event.spec_path.split('/').pop()}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id })} title="View spec: {event.spec_path}">{event.spec_path.split('/').pop()}</button>
                 {/if}
               {/if}
               {#if wsName}
@@ -815,13 +825,8 @@
         <tbody>
           {#each (specsShowAll ? sortedSpecs : sortedSpecs.slice(0, 10)) as spec (spec.path ?? spec.id)}
             <tr class="spec-row clickable" onclick={() => {
-              if (openDetailPanel) {
-                openDetailPanel({ type: 'spec', id: spec.path, data: { ...spec, path: spec.path, repo_id: spec.repo_id } });
-              } else if (spec.workspace_id) {
-                const ws = workspaces.find(w => w.id === spec.workspace_id);
-                if (ws && onSelectWorkspace) onSelectWorkspace(ws);
-              }
-            }} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') { if (openDetailPanel) { openDetailPanel({ type: 'spec', id: spec.path, data: { ...spec, path: spec.path, repo_id: spec.repo_id } }); } else if (spec.workspace_id) { const ws = workspaces.find(w => w.id === spec.workspace_id); if (ws && onSelectWorkspace) onSelectWorkspace(ws); } } }}>
+              nav('spec', spec.path, { ...spec, path: spec.path, repo_id: spec.repo_id });
+            }} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') nav('spec', spec.path, { ...spec, path: spec.path, repo_id: spec.repo_id }); }}>
               <td class="spec-path">{spec.path ?? spec.name ?? '—'}</td>
               <td class="spec-attribution">
                 {#if spec.workspace_name}
