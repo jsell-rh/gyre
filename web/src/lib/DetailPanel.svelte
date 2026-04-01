@@ -1375,9 +1375,11 @@
                 {#if mr.diff_stats}
                   <dt>Changes</dt>
                   <dd>
-                    <span class="diff-stat-inline">{mr.diff_stats.files_changed ?? 0} files</span>
-                    <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
-                    <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                    <button class="entity-link diff-stat-link" onclick={() => { activeTab = 'diff'; }} title="View diff">
+                      <span class="diff-stat-inline">{mr.diff_stats.files_changed ?? 0} files</span>
+                      <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                      <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                    </button>
                   </dd>
                 {/if}
                 {#if mr.spec_ref}
@@ -4352,6 +4354,22 @@
 
   .diff-stat { font-weight: 600; color: var(--color-text); }
   .diff-stat-inline { font-size: var(--text-xs); color: var(--color-text-secondary); margin-right: var(--space-1); }
+  .diff-stat-link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    padding: 2px var(--space-2);
+    cursor: pointer;
+    font: inherit;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  .diff-stat-link:hover {
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border-color: color-mix(in srgb, var(--color-primary) 25%, transparent);
+  }
   .diff-ins { color: var(--color-success); font-family: var(--font-mono); font-size: var(--text-xs); }
   .diff-del { color: var(--color-danger); font-family: var(--font-mono); font-size: var(--text-xs); }
 
