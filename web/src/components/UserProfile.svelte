@@ -11,6 +11,12 @@
   const navigate = getContext('navigate');
   const goToWorkspaceHome = getContext('goToWorkspaceHome');
   const openDetailPanel = getContext('openDetailPanel');
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+
+  function nav(type, id, data) {
+    if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
+    else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
+  }
 
   // ── State ──────────────────────────────────────────────────────────────────
   let me = $state(null);
@@ -285,7 +291,7 @@
         <div class="entity-list">
           {#each myAgents as agent}
             {@const statusColor = agent.status === 'active' ? 'success' : agent.status === 'idle' || agent.status === 'completed' ? 'info' : agent.status === 'failed' || agent.status === 'dead' ? 'danger' : 'muted'}
-            <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })}>
+            <button class="entity-list-item" onclick={() => nav('agent', agent.id, agent)}>
               <Badge value={agent.status ?? 'unknown'} variant={statusColor} />
               <div class="entity-list-main">
                 <span class="entity-list-title">{agent.name ?? (agent.id?.length > 12 ? agent.id.slice(0, 8) + '...' : agent.id)}</span>
@@ -306,7 +312,7 @@
         <div class="entity-list">
           {#each myTasks as task}
             {@const statusColor = task.status === 'completed' || task.status === 'done' ? 'success' : task.status === 'in_progress' || task.status === 'assigned' ? 'warning' : task.status === 'failed' ? 'danger' : 'muted'}
-            <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })}>
+            <button class="entity-list-item" onclick={() => nav('task', task.id, task)}>
               <Badge value={task.status ?? 'backlog'} variant={statusColor} />
               <div class="entity-list-main">
                 <span class="entity-list-title">{task.title ?? (task.id?.length > 12 ? task.id.slice(0, 8) + '...' : task.id)}</span>
@@ -330,7 +336,7 @@
         <div class="entity-list">
           {#each myMrs as mr}
             {@const statusColor = mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : mr.status === 'closed' ? 'danger' : 'muted'}
-            <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })}>
+            <button class="entity-list-item" onclick={() => nav('mr', mr.id, mr)}>
               <Badge value={mr.status ?? 'open'} variant={statusColor} />
               <div class="entity-list-main">
                 <span class="entity-list-title">{mr.title ?? (mr.id?.length > 12 ? mr.id.slice(0, 8) + '...' : mr.id)}</span>

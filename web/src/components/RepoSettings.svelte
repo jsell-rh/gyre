@@ -11,6 +11,11 @@
   import { toastError } from '../lib/toast.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  function nav(type, id, data) {
+    if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
+    else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
+  }
 
   let {
     workspace = null,
@@ -715,7 +720,7 @@
                 {#if result.required !== undefined}
                   <span class="gate-required" class:required={result.required}>{result.required ? 'required' : 'advisory'}</span>
                 {/if}
-                <button class="gate-result-mr" onclick={() => openDetailPanel?.({ type: 'mr', id: result.mr_id, data: { _openTab: 'gates' } })} title="View MR: {result.mr_title}">
+                <button class="gate-result-mr" onclick={() => nav('mr', result.mr_id, { _openTab: 'gates' })} title="View MR: {result.mr_title}">
                   {result.mr_title ?? 'MR'}
                   <span class="gate-result-mr-status status-badge status-{result.mr_status}">{result.mr_status}</span>
                 </button>
@@ -1132,7 +1137,7 @@
                   {#if refs.length > 0}
                     <span class="audit-refs">
                       {#each refs as ref}
-                        <button class="audit-ref-link" onclick={() => openDetailPanel?.({ type: ref.type, id: ref.id, data: ref.type === 'spec' ? { path: ref.id, repo_id: repo?.id } : {} })} title="View {ref.type}: {ref.id}">
+                        <button class="audit-ref-link" onclick={() => nav(ref.type, ref.id, ref.type === 'spec' ? { path: ref.id, repo_id: repo?.id } : {})} title="View {ref.type}: {ref.id}">
                           {auditEntityName(ref.type, ref.id)}
                         </button>
                       {/each}

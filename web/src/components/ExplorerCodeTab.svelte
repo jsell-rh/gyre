@@ -252,7 +252,7 @@
   }
 
   function onRowClick(row, type) {
-    if (goToEntityDetail && (type === 'mr' || type === 'task' || type === 'agent' || type === 'spec')) {
+    if (goToEntityDetail) {
       goToEntityDetail(type, row.id, row);
     } else {
       openDetailPanel?.({ type, id: row.id, data: row });
@@ -321,7 +321,8 @@
       const newAgentId = result?.agent?.id;
       if (newAgentId) {
         showToast('Investigation agent spawned', { type: 'success' });
-        openDetailPanel?.({ type: 'agent', id: newAgentId, data: result.agent });
+        if (goToEntityDetail) goToEntityDetail('agent', newAgentId, result.agent);
+        else openDetailPanel?.({ type: 'agent', id: newAgentId, data: result.agent });
       }
     } catch (e) {
       showToast(`Failed to spawn: ${e?.message ?? 'Unknown error'}`, { type: 'error' });
@@ -672,7 +673,7 @@
                           <td class="blame-spec">
                             {#if specRef}
                               {@const specName = specRef.split('@')[0]?.split('/').pop()}
-                              <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
+                              <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); if (goToEntityDetail) goToEntityDetail('spec', specRef.split('@')[0], { path: specRef.split('@')[0], repo_id: repoId }); else openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
                                 {specName}
                               </button>
                             {:else}
