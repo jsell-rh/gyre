@@ -241,8 +241,10 @@
   let statsLoading = $state(true);
   let totalRepos = $state(0);
   let totalSpecs = $state(0);
+  let pendingSpecs = $state(0);
   let activeAgents = $state(0);
   let openMrs = $state(0);
+  let mergedMrs = $state(0);
 
   // ── Recent Activity state ───────────────────────────────────────────────
   let activityLoading = $state(true);
@@ -393,8 +395,10 @@
       allMrs = mrsList;
       totalRepos = reposList.length;
       totalSpecs = specsList.length;
+      pendingSpecs = specsList.filter(s => (s.approval_status ?? s.status) === 'pending').length;
       activeAgents = agentsList.length;
-      openMrs = mrsList.length;
+      openMrs = mrsList.filter(m => m.status === 'open').length;
+      mergedMrs = mrsList.filter(m => m.status === 'merged').length;
     } catch {
       // leave at 0
     } finally {
@@ -512,11 +516,14 @@
   <div class="cwh-stat-cards" data-testid="stat-cards">
     <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : totalRepos}</span>
-      <span class="cwh-stat-label">Total Repos</span>
+      <span class="cwh-stat-label">Repos</span>
     </div>
     <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : totalSpecs}</span>
-      <span class="cwh-stat-label">Total Specs</span>
+      <span class="cwh-stat-label">Specs</span>
+      {#if !statsLoading && pendingSpecs > 0}
+        <span class="cwh-stat-sub cwh-stat-warn">{pendingSpecs} awaiting approval</span>
+      {/if}
     </div>
     <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : activeAgents}</span>
@@ -525,7 +532,16 @@
     <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : openMrs}</span>
       <span class="cwh-stat-label">Open MRs</span>
+      {#if !statsLoading && mergedMrs > 0}
+        <span class="cwh-stat-sub">{mergedMrs} merged</span>
+      {/if}
     </div>
+    {#if !statsLoading && notifications.length > 0}
+      <div class="cwh-stat-card cwh-stat-card-alert">
+        <span class="cwh-stat-value">{notifications.length}</span>
+        <span class="cwh-stat-label">Pending Decisions</span>
+      </div>
+    {/if}
   </div>
 
   <!-- ── Decisions ─────────────────────────────────────────────────────── -->
@@ -1849,6 +1865,21 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-top: var(--space-1);
+  }
+
+  .cwh-stat-sub {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin-top: var(--space-1);
+  }
+
+  .cwh-stat-sub.cwh-stat-warn {
+    color: var(--color-warning);
+  }
+
+  .cwh-stat-card-alert {
+    border-color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface));
   }
 
   @media (max-width: 768px) {
