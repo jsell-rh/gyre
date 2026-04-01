@@ -997,6 +997,19 @@
                   <span class="prov-flow-sub prov-sub-merged">{provenanceSummary.mergedMrs} merged</span>
                 {/if}
               </button>
+              {#if mergeQueueItems.length > 0}
+                <span class="prov-flow-arrow">→</span>
+                <button class="prov-flow-node prov-flow-clickable prov-flow-queue" onclick={() => document.getElementById('section-merge-queue')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Merge Queue">
+                  <span class="prov-flow-count">{mergeQueueItems.length}</span>
+                  <span class="prov-flow-label">Queue</span>
+                  <span class="prov-flow-sub prov-sub-active">processing</span>
+                </button>
+              {/if}
+              <span class="prov-flow-arrow">→</span>
+              <span class="prov-flow-node prov-flow-code">
+                <span class="prov-flow-count">{provenanceSummary.mergedMrs}</span>
+                <span class="prov-flow-label">Merged</span>
+              </span>
             </div>
           </div>
         </section>
@@ -3203,6 +3216,16 @@
   .prov-sub-pending { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
   .prov-sub-active { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
   .prov-sub-merged { color: var(--color-info); background: color-mix(in srgb, var(--color-info) 12%, transparent); }
+
+  .prov-flow-code {
+    border-color: var(--color-success);
+    opacity: 0.8;
+    cursor: default;
+  }
+
+  .prov-flow-queue {
+    border-color: var(--color-warning);
+  }
 
   .prov-flow-arrow {
     font-size: var(--text-lg);
