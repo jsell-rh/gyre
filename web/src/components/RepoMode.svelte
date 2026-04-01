@@ -40,11 +40,17 @@
   ];
 
   // ── Notification count for decisions tab badge ─────────────────────────
+  // Must match what Inbox actually shows: repo-scoped, non-dismissed notifications.
+  // The server count endpoint doesn't support repo_id filtering, so we fetch
+  // all notifications and filter client-side to match the Inbox view.
   let decisionsCount = $state(0);
   $effect(() => {
-    const wsId = workspace?.id;
-    if (wsId) {
-      api.notificationCount(wsId).then(c => { decisionsCount = c; }).catch(() => {});
+    const rId = repo?.id;
+    if (rId) {
+      api.myNotifications().then(data => {
+        const arr = Array.isArray(data) ? data : [];
+        decisionsCount = arr.filter(n => n.repo_id === rId && !n.dismissed_at).length;
+      }).catch(() => {});
     }
   });
 
