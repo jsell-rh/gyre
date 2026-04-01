@@ -142,55 +142,77 @@
   // /workspaces/:slug/agent-rules              → agent rules
   // /workspaces/:slug/r/:repo                  → repo mode, specs tab
   // /workspaces/:slug/r/:repo/specs            → specs tab
-  // /workspaces/:slug/r/:repo/architecture     → architecture tab
-  // /workspaces/:slug/r/:repo/decisions        → decisions tab
-  // /workspaces/:slug/r/:repo/code             → code tab
-  // /workspaces/:slug/r/:repo/settings         → settings tab
+  // /workspaces/:slug/r/:repo/mrs/:id          → MR detail page
+  // /workspaces/:slug/r/:repo/tasks/:id        → task detail page
+  // /workspaces/:slug/r/:repo/agents/:id       → agent detail page
+  // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
   // /profile                                   → user profile
 
   const REPO_TABS = ['specs', 'tasks', 'mrs', 'architecture', 'decisions', 'code', 'settings'];
+  const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
+
+  // ── Entity detail state ─────────────────────────────────────────────
+  // When set, shows a full-page entity detail view instead of the repo tab content.
+  // { type: 'mr'|'task'|'agent'|'spec', id: string }
+  let entityDetail = $state(null);
 
   export function parseUrl(pathname) {
     const raw = pathname.split('/').filter(Boolean).map(p => {
       try { return decodeURIComponent(p); } catch { return p; }
     });
 
-    if (raw.length === 0) return { mode: 'workspace_home', slug: null, repoName: null, tab: null };
+    if (raw.length === 0) return { mode: 'workspace_home', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
 
     // /profile
     if (raw.length === 1 && raw[0] === 'profile') {
-      return { mode: 'profile', slug: null, repoName: null, tab: null };
+      return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
     }
 
     // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
     if (raw[0] === 'all') {
       const tab = raw[1] ?? null;
-      return { mode: 'cross_workspace', slug: 'all', repoName: null, tab };
+      return { mode: 'cross_workspace', slug: 'all', repoName: null, tab, entityType: null, entityId: null };
     }
 
     // /workspaces/:slug[/...]
     if (raw[0] === 'workspaces' && raw.length >= 2) {
       const slug = raw[1];
 
-      // /workspaces/:slug/r/:repo[/tab]
+      // /workspaces/:slug/r/:repo[/tab[/entityId]]
       if (raw[2] === 'r' && raw.length >= 4) {
         const repoName = raw[3];
-        const tab = raw[4] && REPO_TABS.includes(raw[4]) ? raw[4] : 'specs';
-        return { mode: 'repo', slug, repoName, tab };
+        const tabOrType = raw[4];
+
+        // Entity detail routes: /workspaces/:slug/r/:repo/mrs/:id
+        if (raw.length >= 6 && ENTITY_TABS.includes(tabOrType)) {
+          const entityType = tabOrType === 'mrs' ? 'mr' : tabOrType === 'tasks' ? 'task' : tabOrType === 'agents' ? 'agent' : tabOrType;
+          const entityId = raw[5];
+          // Tab is the parent list tab (mrs, tasks, agents)
+          return { mode: 'repo', slug, repoName, tab: tabOrType, entityType, entityId };
+        }
+
+        // Spec detail route: /workspaces/:slug/r/:repo/specs/system/foo.md (spec paths can have multiple segments)
+        if (tabOrType === 'specs' && raw.length >= 6) {
+          const specPath = raw.slice(5).join('/');
+          return { mode: 'repo', slug, repoName, tab: 'specs', entityType: 'spec', entityId: specPath };
+        }
+
+        const tab = tabOrType && REPO_TABS.includes(tabOrType) ? tabOrType : 'specs';
+        return { mode: 'repo', slug, repoName, tab, entityType: null, entityId: null };
       }
 
       // /workspaces/:slug/settings
       if (raw[2] === 'settings') {
-        return { mode: 'workspace_settings', slug, repoName: null, tab: null };
+        return { mode: 'workspace_settings', slug, repoName: null, tab: null, entityType: null, entityId: null };
       }
 
       // /workspaces/:slug/agent-rules
       if (raw[2] === 'agent-rules') {
-        return { mode: 'agent_rules', slug, repoName: null, tab: null };
+        return { mode: 'agent_rules', slug, repoName: null, tab: null, entityType: null, entityId: null };
       }
 
       // /workspaces/:slug  or  /workspaces/:slug/...  etc.
-      return { mode: 'workspace_home', slug, repoName: null, tab: null };
+      return { mode: 'workspace_home', slug, repoName: null, tab: null, entityType: null, entityId: null };
     }
 
     return null;
@@ -198,7 +220,7 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId } = parsed;
     if (m === 'profile') return '/profile';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
@@ -209,6 +231,14 @@
     if (m === 'agent_rules') return `/workspaces/${encodeURIComponent(slug)}/agent-rules`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
+      // Entity detail routes
+      if (entityType && entityId) {
+        const tabSegment = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
+        if (entityType === 'spec') {
+          return `${base}/specs/${entityId}`;
+        }
+        return `${base}/${tabSegment}/${encodeURIComponent(entityId)}`;
+      }
       if (tab && tab !== 'specs') return `${base}/${tab}`;
       return base;
     }
@@ -221,6 +251,8 @@
       wsId: currentWorkspace?.id ?? null,
       repoName: parsed.repoName ?? null,
       repoTab: parsed.tab ?? 'specs',
+      entityType: parsed.entityType ?? null,
+      entityId: parsed.entityId ?? null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
   }
@@ -234,6 +266,7 @@
     mode = 'workspace_home';
     currentRepo = null;
     repoTab = 'specs';
+    entityDetail = null;
     fadeContent();
     pushState({ mode: 'workspace_home', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
     if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
@@ -258,6 +291,7 @@
     }
     mode = 'repo';
     repoTab = tab;
+    entityDetail = null;
     fadeContent();
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: repo.name, tab });
     // Load full repo details (clone URL, etc.) in the background
@@ -266,7 +300,34 @@
 
   function goToRepoTab(tab) {
     repoTab = tab;
+    entityDetail = null; // Clear entity detail when switching tabs
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
+  }
+
+  /** Navigate to a full-page entity detail view within repo mode. */
+  function goToEntityDetail(entityType, entityId, data) {
+    if (!currentRepo || !currentWorkspace) return;
+    const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
+    repoTab = parentTab;
+    entityDetail = { type: entityType, id: entityId, data: data ?? {} };
+    fadeContent();
+    const parsed = {
+      mode: 'repo',
+      slug: wsSlug(currentWorkspace),
+      repoName: currentRepo.name,
+      tab: parentTab,
+      entityType,
+      entityId,
+    };
+    const stateObj = {
+      mode: 'repo',
+      wsId: currentWorkspace.id,
+      repoName: currentRepo.name,
+      repoTab: parentTab,
+      entityType,
+      entityId,
+    };
+    window.history.pushState(stateObj, '', urlFor(parsed));
   }
 
   function goToWorkspaceSettings() {
@@ -357,6 +418,7 @@
   }));
   setContext('openDetailPanel', openDetailPanel);
   setContext('goBackDetailPanel', goBackDetailPanel);
+  setContext('goToEntityDetail', goToEntityDetail);
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
@@ -673,6 +735,10 @@
           mode = 'repo';
           repoTab = parsed.tab ?? 'specs';
           currentRepo = { id: null, name: parsed.repoName };
+          // Restore entity detail from URL
+          if (parsed.entityType && parsed.entityId) {
+            entityDetail = { type: parsed.entityType, id: parsed.entityId, data: {} };
+          }
           // Try to resolve repo ID and populate cache
           try {
             const repos = await api.workspaceRepos(ws.id);
@@ -680,6 +746,10 @@
             if (repo) {
               currentRepo = { id: repo.id, name: repo.name };
               repoIdCache.set(`${ws.id}:${repo.name}`, repo.id);
+              // Enrich entity detail with repo_id
+              if (entityDetail) {
+                entityDetail = { ...entityDetail, data: { ...entityDetail.data, repo_id: repo.id } };
+              }
             }
           } catch { /* keep name-only ref */ }
         } else if (parsed.mode === 'workspace_settings') {
@@ -734,9 +804,11 @@
       slug: wsSlug(currentWorkspace),
       repoName: currentRepo?.name ?? null,
       tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
+      entityType: entityDetail?.type ?? null,
+      entityId: entityDetail?.id ?? null,
     });
     window.history.replaceState(
-      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab },
+      { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
       '',
       canon
     );
@@ -770,11 +842,13 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt } = e.state;
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid } = e.state;
         mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
+        // Restore entity detail state from history
+        entityDetail = (et && eid) ? { type: et, id: eid, data: {} } : null;
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
         } else if (m !== 'cross_workspace' && m !== 'profile') {
@@ -840,6 +914,7 @@
             currentRepo = null;
           }
           repoTab = p.tab ?? 'specs';
+          entityDetail = (p.entityType && p.entityId) ? { type: p.entityType, id: p.entityId, data: {} } : null;
         }
         fadeContent();
       }
@@ -920,12 +995,19 @@
           </nav>
         </div>
       {:else if mode === 'repo'}
-        <!-- Repo mode: back arrow + WorkspaceName / RepoName -->
+        <!-- Repo mode: back arrow + WorkspaceName / RepoName [/ EntityType / EntityName] -->
         <div class="topbar-left repo-context">
           <button
             class="back-btn"
-            onclick={() => goToWorkspaceHome(currentWorkspace)}
-            aria-label={$t('topbar.back_to_workspace')}
+            onclick={() => {
+              if (entityDetail) {
+                entityDetail = null;
+                goToRepoTab(repoTab);
+              } else {
+                goToWorkspaceHome(currentWorkspace);
+              }
+            }}
+            aria-label={entityDetail ? 'Back to list' : $t('topbar.back_to_workspace')}
             data-testid="back-btn"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
@@ -941,7 +1023,28 @@
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
-            <span class="breadcrumb-repo" aria-current="page">{currentRepo?.name ?? ''}</span>
+            {#if entityDetail}
+              <button
+                class="breadcrumb-ws"
+                onclick={() => { entityDetail = null; goToRepoTab(repoTab); }}
+                aria-label="Back to {currentRepo?.name ?? 'repo'}"
+              >
+                {currentRepo?.name ?? ''}
+              </button>
+              <span class="breadcrumb-sep" aria-hidden="true">/</span>
+              <button
+                class="breadcrumb-ws"
+                onclick={() => { entityDetail = null; goToRepoTab(repoTab); }}
+              >
+                {repoTab === 'mrs' ? 'Merge Requests' : repoTab === 'tasks' ? 'Tasks' : repoTab === 'agents' ? 'Agents' : 'Specs'}
+              </button>
+              <span class="breadcrumb-sep" aria-hidden="true">/</span>
+              <span class="breadcrumb-repo" aria-current="page">
+                {entityDetail.type === 'spec' ? entityDetail.id.split('/').pop() : (entityDetail.id?.length > 12 ? entityDetail.id.slice(0, 8) + '...' : entityDetail.id)}
+              </span>
+            {:else}
+              <span class="breadcrumb-repo" aria-current="page">{currentRepo?.name ?? ''}</span>
+            {/if}
           </nav>
         </div>
       {:else}
@@ -1306,13 +1409,23 @@
             workspaceId={currentWorkspace?.id ?? null}
           />
         {:else if mode === 'repo'}
-          <RepoMode
-            workspace={currentWorkspace}
-            repo={currentRepo}
-            activeTab={repoTab}
-            onTabChange={(tab) => goToRepoTab(tab)}
-            workspaceBudget={workspaceBudget}
-          />
+          {#if entityDetail}
+            <!-- Full-page entity detail view -->
+            <DetailPanel
+              entity={entityDetail}
+              fullPage={true}
+              onclose={() => { entityDetail = null; goToRepoTab(repoTab); }}
+              onback={() => { entityDetail = null; goToRepoTab(repoTab); }}
+            />
+          {:else}
+            <RepoMode
+              workspace={currentWorkspace}
+              repo={currentRepo}
+              activeTab={repoTab}
+              onTabChange={(tab) => goToRepoTab(tab)}
+              workspaceBudget={workspaceBudget}
+            />
+          {/if}
         {:else if mode === 'cross_workspace'}
           {#if crossWorkspaceTab === 'settings'}
             <TenantSettings onBack={() => goToCrossWorkspace()} />

@@ -31,6 +31,7 @@
   let {
     entity = null,
     expanded = $bindable(false),
+    fullPage = false,
     onclose = undefined,
     onpopout = undefined,
     onback = undefined,
@@ -1652,13 +1653,13 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside
-  class="detail-panel"
-  class:expanded
+<div
+  class={fullPage ? 'detail-page' : 'detail-panel'}
+  class:expanded={!fullPage && expanded}
   class:open={!!entity}
-  role="dialog"
-  aria-label={$t('detail_panel.title')}
-  aria-modal={expanded ? 'true' : undefined}
+  role={fullPage ? undefined : 'dialog'}
+  aria-label={fullPage ? undefined : $t('detail_panel.title')}
+  aria-modal={!fullPage && expanded ? 'true' : undefined}
   tabindex="-1"
   onkeydown={handleKeydown}
   bind:this={panelEl}
@@ -1692,6 +1693,7 @@
         <span class="entity-id">{entity.data?.name ?? entity.data?.title ?? (entity.type === 'spec' ? (entity.id?.split('/').pop() ?? entity.id) : entity.type === 'commit' ? ((entity.data?.sha ?? entity.id ?? '').slice(0, 7)) : entityName(entity.type, entity.id))}</span>
       </div>
       <div class="panel-actions">
+        {#if !fullPage}
         <button
           class="panel-btn"
           onclick={popout}
@@ -1721,6 +1723,7 @@
             <path d="M18 6L6 18M6 6l12 12"/>
           </svg>
         </button>
+        {/if}
       </div>
     </div>
 
@@ -4004,9 +4007,38 @@
       {/if}
     </div>
   {/if}
-</aside>
+</div>
 
 <style>
+  /* Full-page entity detail mode — takes up the entire content area */
+  .detail-page {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    background: var(--color-surface);
+    min-height: 0;
+  }
+
+  .detail-page .panel-header {
+    padding: var(--space-4) var(--space-6);
+  }
+
+  .detail-page .panel-content {
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .detail-page .entity-id {
+    font-size: var(--text-xl);
+  }
+
+  .detail-page .entity-type {
+    font-size: var(--text-sm);
+  }
+
+  /* Side panel mode */
   .detail-panel {
     width: 0;
     min-width: 0;
