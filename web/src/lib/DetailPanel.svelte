@@ -975,7 +975,8 @@
   // Load data for the active spec tab
   $effect(() => {
     if (entity?.type !== 'spec') return;
-    const path = entity.id;
+    // Normalize: strip leading "specs/" prefix — the API route already includes /specs/
+    const path = (entity.id ?? '').replace(/^specs\//, '');
     const repoId = entity.data?.repo_id ?? null;
 
     if ((activeTab === 'content' || activeTab === 'edit') && !specDetail && !specDetailLoading) {
