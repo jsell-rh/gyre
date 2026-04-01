@@ -365,12 +365,16 @@
             data-type={n.notification_type}
           >
             <!-- Card header: always visible, click to expand/collapse -->
-            <button
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <div
               class="card-header"
               onclick={() => toggleExpand(n.id)}
+              role="button"
+              tabindex="0"
               aria-expanded={isExpanded}
               aria-controls="inbox-card-{n.id}"
               aria-label="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(n.id); } }}
             >
               <div class="card-header-left">
                 <span
@@ -423,7 +427,7 @@
                 <span class="card-age">{relativeTime(n.created_at)}</span>
                 <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
               </div>
-            </button>
+            </div>
 
             <!-- Expanded body (accordion — only one open at a time) -->
             {#if isExpanded}
