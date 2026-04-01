@@ -1279,7 +1279,7 @@
                         </button>
                       {/if}
                       {#if repoTaskCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoTaskCount} tasks{repoActiveTaskCount > 0 ? `, ${repoActiveTaskCount} in progress` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'code'); }}>
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoTaskCount} tasks{repoActiveTaskCount > 0 ? `, ${repoActiveTaskCount} in progress` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'tasks'); }}>
                           <span class="repo-stat-icon">☑</span>
                           <span class="repo-stat-num">{repoTaskCount}</span>
                           <span class="repo-stat-label">tasks</span>
@@ -1287,7 +1287,7 @@
                         </button>
                       {/if}
                       {#if repoAgentCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'code'); }}>
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'tasks'); }}>
                           <span class="repo-stat-icon">▶</span>
                           <span class="repo-stat-num">{repoAgentCount}</span>
                           <span class="repo-stat-label">agents</span>
