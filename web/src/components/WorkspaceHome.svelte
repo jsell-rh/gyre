@@ -1791,6 +1791,7 @@
                 <tr>
                   <th>Status</th>
                   <th>Name</th>
+                  <th>Spec</th>
                   <th>Task</th>
                   <th>Branch</th>
                   <th>Duration</th>
@@ -1805,6 +1806,7 @@
                   <tr class="ws-entity-row" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>
                     <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span></td>
                     <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: agent.spec_path, data: { path: agent.spec_path, repo_id: agent.repo_id } }); }} title={agent.spec_path}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: taskId, data: {} }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
                     <td class="ws-cell-time">{fmtDuration(spawnedAt, agent.completed_at)}</td>
