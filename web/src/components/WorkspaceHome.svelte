@@ -938,6 +938,10 @@
     'task_created': 'Task created',
     'task_completed': 'Task completed',
     'task_assigned': 'Task assigned',
+    'SuggestedSpecLink': 'Spec link suggested',
+    'merged': 'MR merged',
+    'budget_warning': 'Budget warning',
+    'agent_clarification': 'Agent needs input',
   };
 
   function activityLabel(event) {
