@@ -120,11 +120,13 @@
         try {
           const trace = await api.mrTrace(mr.id);
           if (trace?.spans?.length) {
+            // Normalize start_time to be relative (API returns epoch microseconds).
+            const minStart = Math.min(...trace.spans.map(s => s.start_time));
             flowSpans = trace.spans.map(s => ({
               id: s.span_id,
               parent_id: s.parent_span_id ?? null,
               node_id: s.graph_node_id ?? null,
-              start_time: s.start_time,
+              start_time: s.start_time - minStart,
               duration_us: s.duration_us,
               status: s.status,
               name: s.operation_name,
