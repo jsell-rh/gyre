@@ -571,13 +571,18 @@
       <div class="explorer-body-main">
         {#if !selectedRepoId}
           <div class="empty-state-wrap">
-            <EmptyState
-              title={$t('explorer_view.select_repo')}
-              description={$t('explorer_view.select_repo_desc')}
-            />
-            {#if repos.length === 0 && !reposLoading}
-              <p class="hint">{$t('explorer_view.no_repos_hint')}</p>
-              <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>{$t('explorer_view.go_to_settings')}</button>
+            {#if scopeType === 'repo'}
+              <!-- Repo scope: repo ID will be set by the auto-select effect -->
+              <Skeleton lines={6} />
+            {:else}
+              <EmptyState
+                title={$t('explorer_view.select_repo')}
+                description={$t('explorer_view.select_repo_desc')}
+              />
+              {#if repos.length === 0 && !reposLoading}
+                <p class="hint">{$t('explorer_view.no_repos_hint')}</p>
+                <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>{$t('explorer_view.go_to_settings')}</button>
+              {/if}
             {/if}
           </div>
 
