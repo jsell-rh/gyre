@@ -98,10 +98,8 @@
         { id: 'timeline',    label: 'Timeline' },
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
         { id: 'reviews',     label: 'Reviews' },
+        { id: 'attestation', label: $t('detail_panel.tabs.attestation') },
       );
-      if (data.status === 'merged') {
-        result.push({ id: 'attestation', label: $t('detail_panel.tabs.attestation') });
-      }
       // Always show ask-why for MRs — conversation_sha is loaded async from attestation
       result.push({
         id: 'ask-why',
@@ -3102,7 +3100,25 @@
               {/if}
             </div>
           {:else}
-            <p class="no-data">No attestation bundle available for this merge request</p>
+            {@const mrStatus = mrDetail?.status ?? entity.data?.status}
+            {#if mrStatus !== 'merged'}
+              <div class="attestation-pending">
+                <div class="att-pending-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                </div>
+                <p class="att-pending-title">Attestation will be created at merge</p>
+                <p class="att-pending-desc">When this MR passes all required gates and is merged, Gyre will create a signed attestation bundle containing:</p>
+                <ul class="att-pending-list">
+                  <li>Merge commit SHA with Ed25519 signature</li>
+                  <li>Gate results for each quality check</li>
+                  <li>Spec binding verification</li>
+                  <li>Agent identity and conversation provenance</li>
+                </ul>
+                <p class="att-pending-desc">This creates a tamper-evident audit trail from spec to code.</p>
+              </div>
+            {:else}
+              <p class="no-data">No attestation bundle available for this merge request</p>
+            {/if}
           {/if}
         </div>
 
@@ -5144,6 +5160,45 @@
     color: var(--color-text-secondary);
     word-break: break-all;
     line-height: 1.5;
+  }
+
+  .attestation-pending {
+    text-align: center;
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .att-pending-icon {
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-3);
+  }
+
+  .att-pending-title {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-3) 0;
+  }
+
+  .att-pending-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: var(--space-2) 0;
+    max-width: 400px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .att-pending-list {
+    text-align: left;
+    display: inline-block;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: var(--space-3) 0;
+    padding-left: var(--space-6);
+  }
+
+  .att-pending-list li {
+    margin-bottom: var(--space-1);
   }
 
   /* ── Agent Trace tab ─────────────────────────────────────────────────────── */
