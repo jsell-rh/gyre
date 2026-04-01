@@ -105,8 +105,8 @@
       result.push({
         id: 'ask-why',
         label: $t('detail_panel.tabs.ask_why'),
-        disabled: !data.conversation_sha,
-        title: data.conversation_sha ? undefined : $t('detail_panel.conversation_unavailable'),
+        disabled: !data.conversation_sha && !data.author_agent_id,
+        title: (data.conversation_sha || data.author_agent_id) ? undefined : $t('detail_panel.conversation_unavailable'),
       });
       return result;
     }
@@ -421,6 +421,16 @@
         // Pre-cache enriched gates for the gates tab
         if (!mrGates) {
           mrGates = enrichedGates;
+        }
+        // Fetch attestation for merged MRs to extract conversation_sha
+        if (d?.status === 'merged') {
+          api.mrAttestation(id).then(att => {
+            if (att) {
+              mrAttestation = att;
+              const convSha = att.attestation?.conversation_sha ?? att.conversation_sha;
+              if (convSha) mrDetail = { ...mrDetail, conversation_sha: convSha };
+            }
+          }).catch(() => {});
         }
         // Fetch commit signature for merged MRs
         const mergeSha = d?.merge_commit_sha;
