@@ -288,7 +288,7 @@
             <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })}>
               <Badge value={agent.status ?? 'unknown'} variant={statusColor} />
               <div class="entity-list-main">
-                <span class="entity-list-title">{agent.name ?? agent.id?.slice(0, 8)}</span>
+                <span class="entity-list-title">{agent.name ?? (agent.id?.length > 12 ? agent.id.slice(0, 8) + '...' : agent.id)}</span>
                 {#if agent.branch}
                   <span class="entity-list-sub mono">{agent.branch}</span>
                 {/if}
@@ -309,7 +309,7 @@
             <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })}>
               <Badge value={task.status ?? 'backlog'} variant={statusColor} />
               <div class="entity-list-main">
-                <span class="entity-list-title">{task.title ?? task.id?.slice(0, 8)}</span>
+                <span class="entity-list-title">{task.title ?? (task.id?.length > 12 ? task.id.slice(0, 8) + '...' : task.id)}</span>
                 {#if task.spec_path}
                   <span class="entity-list-sub mono">{task.spec_path.split('/').pop()}</span>
                 {/if}
@@ -333,7 +333,7 @@
             <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })}>
               <Badge value={mr.status ?? 'open'} variant={statusColor} />
               <div class="entity-list-main">
-                <span class="entity-list-title">{mr.title ?? mr.id?.slice(0, 8)}</span>
+                <span class="entity-list-title">{mr.title ?? (mr.id?.length > 12 ? mr.id.slice(0, 8) + '...' : mr.id)}</span>
                 {#if mr.source_branch}
                   <span class="entity-list-sub mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</span>
                 {/if}
