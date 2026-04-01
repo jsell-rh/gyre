@@ -260,8 +260,8 @@
     decisionsLoading = true;
     decisionsError = null;
     try {
-      let data = await api.myNotifications();
-      if (!Array.isArray(data)) data = [];
+      let raw = await api.myNotifications();
+      let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       data = data.filter(n => n.workspace_id === workspace.id);
       data = data.filter(n => !n.dismissed_at && !n.resolved_at);
       data = data.filter(n => !shouldExcludeByTrust(n));
