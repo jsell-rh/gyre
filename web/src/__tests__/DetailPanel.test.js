@@ -122,7 +122,7 @@ describe('DetailPanel', () => {
   describe('Info tab content', () => {
     it('shows entity type and ID', () => {
       render(DetailPanel, { props: { entity: agentEntity } });
-      expect(screen.getAllByText('agent').length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/^Agent$/i).length).toBeGreaterThan(0);
       expect(screen.getAllByText('worker-12').length).toBeGreaterThan(0);
     });
 
