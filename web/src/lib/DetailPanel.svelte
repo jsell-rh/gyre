@@ -266,6 +266,25 @@
     if (!entity) expanded = false;
   });
 
+  // ── Spec preview for MR info tab ─────────────────────────────────────────────
+  let mrSpecPreview = $state(null);
+  let mrSpecPreviewLoading = $state(false);
+
+  async function loadMrSpecPreview(specRef, repoId) {
+    if (mrSpecPreview || mrSpecPreviewLoading) return;
+    const specPath = specRef?.split('@')[0];
+    if (!specPath) return;
+    mrSpecPreviewLoading = true;
+    try {
+      const data = await api.specContent(specPath, repoId);
+      mrSpecPreview = data;
+    } catch {
+      mrSpecPreview = null;
+    } finally {
+      mrSpecPreviewLoading = false;
+    }
+  }
+
   // ── MR entity tab state ─────────────────────────────────────────────────────
   let mrDetail = $state(null);
   let mrDetailLoading = $state(false);
@@ -325,6 +344,7 @@
       mrReviews = null;
       mrComments = null;
       mrDeps = null;
+      mrSpecPreview = null;
     }
     if (entity?.type === 'agent') {
       agentDetail = null;
@@ -1622,6 +1642,25 @@
                     </div>
                   {/if}
                 </div>
+              {/if}
+
+              <!-- Spec Preview (collapsible) -->
+              {#if mr.spec_ref}
+                {@const previewSpecPath = mr.spec_ref.split('@')[0]}
+                <details class="spec-preview-section" ontoggle={(e) => { if (e.target.open) loadMrSpecPreview(mr.spec_ref, mr.repository_id ?? mr.repo_id); }}>
+                  <summary class="spec-preview-summary">
+                    <span class="progress-section-label">Spec: {previewSpecPath.split('/').pop()}</span>
+                  </summary>
+                  <div class="spec-preview-body">
+                    {#if mrSpecPreviewLoading}
+                      <Skeleton width="100%" height="60px" />
+                    {:else if mrSpecPreview?.content}
+                      <pre class="spec-preview-content">{mrSpecPreview.content}</pre>
+                    {:else}
+                      <p class="no-data no-data-sm">Spec content not available. <button class="entity-link" onclick={() => navigateTo('spec', previewSpecPath, { path: previewSpecPath, repo_id: mr.repository_id ?? mr.repo_id })}>Open spec →</button></p>
+                    {/if}
+                  </div>
+                </details>
               {/if}
 
               <!-- Dependencies -->
@@ -5160,6 +5199,39 @@
     color: var(--color-text-secondary);
     word-break: break-all;
     line-height: 1.5;
+  }
+
+  .spec-preview-section {
+    margin: var(--space-4) 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .spec-preview-summary {
+    padding: var(--space-3) var(--space-4);
+    cursor: pointer;
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius);
+  }
+
+  .spec-preview-summary:hover {
+    background: var(--color-surface-hover);
+  }
+
+  .spec-preview-body {
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .spec-preview-content {
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+    color: var(--color-text-secondary);
+    margin: 0;
   }
 
   .attestation-pending {
