@@ -1,4 +1,6 @@
 <script>
+  import { untrack } from 'svelte';
+
   let {
     tabs = [],
     active = $bindable(''),
@@ -8,7 +10,14 @@
   } = $props();
 
   $effect(() => {
-    if (!active && tabs.length > 0) active = tabs[0].id;
+    // Read tabs reactively so this re-runs when tabs change,
+    // but read active via untrack to avoid circular dependency
+    // that causes state_unsafe_mutation during derived recalculation.
+    const currentTabs = tabs;
+    const currentActive = untrack(() => active);
+    if ((!currentActive || !currentTabs.some(t => t.id === currentActive)) && currentTabs.length > 0) {
+      active = currentTabs[0].id;
+    }
   });
 
   function select(id) {
