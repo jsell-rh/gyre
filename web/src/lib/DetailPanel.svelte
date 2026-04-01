@@ -1543,7 +1543,29 @@
       if (detail.changed) parts.push(`~${detail.changed} changed`);
       return parts.join(', ') || null;
     }
-    return JSON.stringify(detail);
+    // Spec lifecycle events have {spec_path, task_id}
+    if (detail.spec_path) {
+      const specName = detail.spec_path.split('/').pop();
+      return specName + (detail.task_id ? ' — task created' : '');
+    }
+    // Agent events have {agent_id, commit_sha, files_changed}
+    if (detail.agent_id) {
+      const parts = [];
+      if (detail.commit_sha) parts.push(detail.commit_sha.slice(0, 7));
+      if (detail.files_changed) parts.push(`${detail.files_changed} files`);
+      return parts.length > 0 ? parts.join(', ') : null;
+    }
+    // Merged events with empty detail
+    if (Object.keys(detail).length === 0) return null;
+    // Generic fallback: format key-value pairs instead of raw JSON
+    const parts = [];
+    for (const [k, v] of Object.entries(detail)) {
+      if (v === null || v === undefined) continue;
+      // Truncate long UUIDs/SHAs
+      const display = typeof v === 'string' && v.length > 20 ? v.slice(0, 8) + '...' : v;
+      parts.push(`${k.replace(/_/g, ' ')}: ${display}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : null;
   }
 
   /** Format a log entry object into a human-readable string */
