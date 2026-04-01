@@ -1864,7 +1864,7 @@
                   <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {mr.repository_id ?? mr.repo_id}" onclick={() => copyId(mr.repository_id ?? mr.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.repository_id ?? mr.repo_id); }}>{entityName('repo', mr.repository_id ?? mr.repo_id)}</dd>
                 {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
-                  <dt>Author</dt><dd class="mono copyable" title="Click to copy: {mr.author_id}" onclick={() => copyId(mr.author_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.author_id); }}>{mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : shortId(mr.author_id)}</dd>
+                  <dt>Author</dt><dd class="mono copyable" title="Click to copy: {mr.author_id}" onclick={() => copyId(mr.author_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.author_id); }}>{mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : entityName('agent', mr.author_id)}</dd>
                 {/if}
                 {#if mr.task_id}
                   <dt>Task</dt><dd><button class="entity-link" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{entityName('task', mr.task_id)}</button></dd>
