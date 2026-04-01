@@ -1500,6 +1500,13 @@
                 </div>
               {/if}
 
+              <!-- Agent summary (from attestation) -->
+              {#if mrAttestation?.attestation?.completion_summary ?? mrAttestation?.completion_summary}
+                <div class="mr-agent-summary">
+                  <p class="mr-agent-summary-text">{mrAttestation.attestation?.completion_summary ?? mrAttestation.completion_summary}</p>
+                </div>
+              {/if}
+
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
                 <dt>Status</dt>
@@ -5199,6 +5206,22 @@
     color: var(--color-text-secondary);
     word-break: break-all;
     line-height: 1.5;
+  }
+
+  .mr-agent-summary {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+
+  .mr-agent-summary-text {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+    margin: 0;
+    white-space: pre-wrap;
   }
 
   .spec-preview-section {
