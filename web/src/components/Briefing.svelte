@@ -22,6 +22,7 @@
 
   // Shell context API (S4.1 App Shell) — falls back gracefully when not mounted in shell
   const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   // --- Time range ---
   const TIME_RANGE_VALUES = ['last_visit', '24h', '7d', '30d', 'custom'];
@@ -160,7 +161,8 @@
   }
 
   function openEntity(type, id, data = {}) {
-    openDetailPanel({ type, id, data });
+    if (goToEntityDetail) goToEntityDetail(type, id, data);
+    else openDetailPanel({ type, id, data });
   }
 
   function handleViewSpec(specRef) {
