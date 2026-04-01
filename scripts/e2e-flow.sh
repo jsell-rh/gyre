@@ -297,6 +297,20 @@ GATE2_RESPONSE=$(api_post "${API}/repos/${REPO_ID}/gates" "{
 GATE2_ID=$(echo "$GATE2_RESPONSE" | jq -r '.id')
 ok "Gate 'lint-check': ${GATE2_ID} (lint_command, advisory)"
 
+# Create a trace capture gate (observational — emits OTLP spans for flow visualization)
+TRACE_EMITTER="$(cd "$(dirname "$0")" && pwd)/e2e-trace-emitter.sh"
+GATE3_BODY=$(jq -n \
+  --arg cmd "$TRACE_EMITTER" \
+  '{
+    name: "integration-traces",
+    gate_type: "trace_capture",
+    command: ({otlp_port: 14318, test_command: $cmd, max_spans: 100} | tostring),
+    required: false
+  }')
+GATE3_RESPONSE=$(curl -sf -X POST -H "$AUTH" -H "$CT" -d "$GATE3_BODY" "${API}/repos/${REPO_ID}/gates")
+GATE3_ID=$(echo "$GATE3_RESPONSE" | jq -r '.id')
+ok "Gate 'integration-traces': ${GATE3_ID} (trace_capture, observational)"
+
 # Verify gates are listed
 GATES_LIST=$(api_get "${API}/repos/${REPO_ID}/gates")
 GATE_COUNT=$(echo "$GATES_LIST" | jq 'length')
@@ -672,6 +686,29 @@ if [ "$GATE_RESULT_COUNT" -gt 0 ]; then
   fi
 else
   warn "No gate results found — gates may not have triggered"
+fi
+
+# Verify trace capture (flow visualization data)
+info "Checking trace capture for MR..."
+TRACE_RESP=$(curl -s -H "$AUTH" "${API}/merge-requests/${MR_ID}/trace")
+TRACE_SPAN_COUNT=$(echo "$TRACE_RESP" | jq '.spans | length' 2>/dev/null || echo "0")
+if [ "$TRACE_SPAN_COUNT" -gt 0 ] 2>/dev/null; then
+  TRACE_ID=$(echo "$TRACE_RESP" | jq -r '.trace_id // .id // "unknown"')
+  ROOT_SPANS=$(echo "$TRACE_RESP" | jq '.root_spans // [] | length')
+  ok "Trace captured: ${TRACE_SPAN_COUNT} spans, ${ROOT_SPANS} root span(s)"
+  # Show span tree
+  echo "$TRACE_RESP" | jq -r '.spans[] | "    \(.operation_name) [\(.service_name)] \(.duration_us // 0)us"' 2>/dev/null | head -10 | while IFS= read -r line; do
+    echo -e "  ${DIM}${line}${NC}"
+  done || true
+  # Verify at least one span has graph node linkage
+  LINKED_SPANS=$(echo "$TRACE_RESP" | jq '[.spans[] | select(.graph_node_id != null)] | length' 2>/dev/null || echo "0")
+  if [ "$LINKED_SPANS" -gt 0 ] 2>/dev/null; then
+    ok "${LINKED_SPANS} span(s) linked to knowledge graph nodes"
+  else
+    info "No spans linked to graph nodes (graph may not have extracted yet)"
+  fi
+else
+  warn "No trace spans found (trace_capture gate may not have emitted spans)"
 fi
 
 # Push to main to trigger knowledge graph extraction.
