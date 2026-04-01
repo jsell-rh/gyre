@@ -251,14 +251,18 @@
     if (!id) return '';
     const key = `${type}:${id}`;
     if (nameCache[key] !== undefined) return nameCache[key] || shortName(id);
-    nameCache = { ...nameCache, [key]: null };
-    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                    type === 'task' ? api.task(id).then(t => t?.title) :
-                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                    Promise.resolve(null);
-    fetcher.then(name => {
-      if (name) nameCache = { ...nameCache, [key]: name };
-    }).catch(() => {});
+    // Defer state mutation to avoid state_unsafe_mutation inside $derived / template expressions
+    queueMicrotask(() => {
+      if (nameCache[key] !== undefined) return; // already queued
+      nameCache = { ...nameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'task' ? api.task(id).then(t => t?.title) :
+                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) nameCache = { ...nameCache, [key]: name };
+      }).catch(() => {});
+    });
     return shortName(id);
   }
 
