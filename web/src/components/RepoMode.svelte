@@ -236,6 +236,37 @@
     done: ['in_progress'],
   };
 
+  // ── Task creation ────────────────────────────────────────────────────
+  let createTaskOpen = $state(false);
+  let createTaskForm = $state({ title: '', description: '', priority: 'medium', task_type: 'implementation', spec_path: '' });
+  let createTaskSaving = $state(false);
+
+  async function handleCreateTask() {
+    const title = createTaskForm.title.trim();
+    if (!title || !repo?.id) return;
+    createTaskSaving = true;
+    try {
+      const data = {
+        title,
+        description: createTaskForm.description.trim() || undefined,
+        priority: createTaskForm.priority || undefined,
+        task_type: createTaskForm.task_type || undefined,
+        spec_path: createTaskForm.spec_path || undefined,
+        workspace_id: workspace?.id,
+        repo_id: repo.id,
+      };
+      const task = await api.createTask(data);
+      toastSuccess(`Task "${title}" created`);
+      repoTasks = [...repoTasks, task];
+      createTaskOpen = false;
+      createTaskForm = { title: '', description: '', priority: 'medium', task_type: 'implementation', spec_path: '' };
+    } catch (err) {
+      toastError('Failed to create task: ' + (err.message ?? err));
+    } finally {
+      createTaskSaving = false;
+    }
+  }
+
   // ── MR quick actions ──────────────────────────────────────────────────
   let enqueueingMr = $state(null);
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
@@ -386,12 +417,40 @@
       />
     {:else if activeTab === 'tasks'}
       <div class="list-tab">
+        <div class="list-tab-header">
+          <button class="create-entity-btn" onclick={() => { createTaskOpen = !createTaskOpen; }}>
+            {createTaskOpen ? 'Cancel' : '+ New Task'}
+          </button>
+        </div>
+        {#if createTaskOpen}
+          <form class="create-entity-form" onsubmit={(e) => { e.preventDefault(); handleCreateTask(); }}>
+            <input class="form-input" type="text" placeholder="Task title" bind:value={createTaskForm.title} required />
+            <textarea class="form-textarea" placeholder="Description (optional)" bind:value={createTaskForm.description} rows="2"></textarea>
+            <div class="form-row">
+              <select class="form-select" bind:value={createTaskForm.priority}>
+                <option value="low">Low priority</option>
+                <option value="medium">Medium priority</option>
+                <option value="high">High priority</option>
+                <option value="critical">Critical</option>
+              </select>
+              <select class="form-select" bind:value={createTaskForm.task_type}>
+                <option value="implementation">Implementation</option>
+                <option value="investigation">Investigation</option>
+                <option value="review">Review</option>
+                <option value="fix">Fix</option>
+              </select>
+              <button class="form-submit-btn" type="submit" disabled={createTaskSaving || !createTaskForm.title.trim()}>
+                {createTaskSaving ? 'Creating...' : 'Create Task'}
+              </button>
+            </div>
+          </form>
+        {/if}
         {#if tasksLoading}
           <p class="list-loading">Loading tasks...</p>
-        {:else if repoTasks.length === 0}
+        {:else if repoTasks.length === 0 && !createTaskOpen}
           <div class="list-empty">
             <p>No tasks for this repository yet.</p>
-            <p class="list-empty-hint">Tasks are created when specs are approved and work is decomposed.</p>
+            <p class="list-empty-hint">Tasks are created when specs are approved and work is decomposed, or create one manually above.</p>
           </div>
         {:else}
           <table class="entity-table">
@@ -1087,6 +1146,70 @@
     margin-top: var(--space-2);
     opacity: 0.7;
   }
+
+  .list-tab-header {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: var(--space-3);
+  }
+
+  .create-entity-btn {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-link);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+
+  .create-entity-btn:hover { border-color: var(--color-link); }
+
+  .create-entity-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-4);
+  }
+
+  .form-input, .form-textarea, .form-select {
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+  }
+
+  .form-textarea { resize: vertical; min-height: 40px; }
+
+  .form-row {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .form-select { flex: 1; }
+
+  .form-submit-btn {
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    color: var(--color-surface);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    white-space: nowrap;
+  }
+
+  .form-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .entity-table {
     width: 100%;
