@@ -10,12 +10,16 @@
 
   const navigate = getContext('navigate');
   const goToWorkspaceHome = getContext('goToWorkspaceHome');
+  const openDetailPanel = getContext('openDetailPanel');
 
   // ── State ──────────────────────────────────────────────────────────────────
   let me = $state(null);
   let notifications = $state([]);
   let judgments = $state([]);
   let workspaces = $state([]);
+  let myAgents = $state([]);
+  let myTasks = $state([]);
+  let myMrs = $state([]);
   let loading = $state(true);
   let editing = $state(false);
   let saving = $state(false);
@@ -71,6 +75,9 @@
 
   const tabs = $derived([
     { id: 'info',        label: $t('user_profile.tabs.info') },
+    { id: 'my-agents',   label: `Agents${myAgents.length > 0 ? ` (${myAgents.length})` : ''}` },
+    { id: 'my-tasks',    label: `Tasks${myTasks.length > 0 ? ` (${myTasks.length})` : ''}` },
+    { id: 'my-mrs',      label: `MRs${myMrs.length > 0 ? ` (${myMrs.length})` : ''}` },
     { id: 'memberships', label: $t('user_profile.tabs.memberships') },
     { id: 'ledger',      label: $t('user_profile.tabs.ledger') },
     { id: 'notif-prefs', label: $t('user_profile.tabs.notif_prefs') },
@@ -82,11 +89,14 @@
   async function loadAll() {
     loading = true;
     try {
-      const [meR, ntR, jdR, wsR] = await Promise.allSettled([
+      const [meR, ntR, jdR, wsR, agR, tkR, mrR] = await Promise.allSettled([
         api.me(),
         api.myNotifications(),
         api.myJudgments(),
         api.workspaces(),
+        api.myAgents(),
+        api.myTasks(),
+        api.myMrs(),
       ]);
       if (meR.status === 'fulfilled') {
         me = meR.value;
@@ -95,6 +105,15 @@
           timezone: me.timezone ?? '',
           locale: me.locale ?? '',
         };
+      }
+      if (agR.status === 'fulfilled') {
+        myAgents = Array.isArray(agR.value) ? agR.value : [];
+      }
+      if (tkR.status === 'fulfilled') {
+        myTasks = Array.isArray(tkR.value) ? tkR.value : [];
+      }
+      if (mrR.status === 'fulfilled') {
+        myMrs = Array.isArray(mrR.value) ? mrR.value : [];
       }
       if (ntR.status === 'fulfilled') {
         const raw = ntR.value;
@@ -257,6 +276,78 @@
         </div>
       {:else}
         <EmptyState title={$t('user_profile.no_profile')} description={$t('user_profile.no_profile_desc')} />
+      {/if}
+
+    {:else if activeTab === 'my-agents'}
+      {#if myAgents.length === 0}
+        <EmptyState title="No agents" description="You haven't spawned any agents yet." />
+      {:else}
+        <div class="entity-list">
+          {#each myAgents as agent}
+            {@const statusColor = agent.status === 'active' ? 'success' : agent.status === 'idle' || agent.status === 'completed' ? 'info' : agent.status === 'failed' || agent.status === 'dead' ? 'danger' : 'muted'}
+            <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'agent', id: agent.id, data: agent })}>
+              <Badge value={agent.status ?? 'unknown'} variant={statusColor} />
+              <div class="entity-list-main">
+                <span class="entity-list-title">{agent.name ?? agent.id?.slice(0, 8)}</span>
+                {#if agent.branch}
+                  <span class="entity-list-sub mono">{agent.branch}</span>
+                {/if}
+              </div>
+              <span class="entity-list-time muted">{rel(agent.created_at ?? agent.spawned_at)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'my-tasks'}
+      {#if myTasks.length === 0}
+        <EmptyState title="No tasks" description="No tasks assigned to you." />
+      {:else}
+        <div class="entity-list">
+          {#each myTasks as task}
+            {@const statusColor = task.status === 'completed' || task.status === 'done' ? 'success' : task.status === 'in_progress' || task.status === 'assigned' ? 'warning' : task.status === 'failed' ? 'danger' : 'muted'}
+            <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'task', id: task.id, data: task })}>
+              <Badge value={task.status ?? 'backlog'} variant={statusColor} />
+              <div class="entity-list-main">
+                <span class="entity-list-title">{task.title ?? task.id?.slice(0, 8)}</span>
+                {#if task.spec_path}
+                  <span class="entity-list-sub mono">{task.spec_path.split('/').pop()}</span>
+                {/if}
+              </div>
+              {#if task.priority}
+                <Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />
+              {/if}
+              <span class="entity-list-time muted">{rel(task.created_at)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'my-mrs'}
+      {#if myMrs.length === 0}
+        <EmptyState title="No merge requests" description="You haven't authored any merge requests." />
+      {:else}
+        <div class="entity-list">
+          {#each myMrs as mr}
+            {@const statusColor = mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : mr.status === 'closed' ? 'danger' : 'muted'}
+            <button class="entity-list-item" onclick={() => openDetailPanel?.({ type: 'mr', id: mr.id, data: mr })}>
+              <Badge value={mr.status ?? 'open'} variant={statusColor} />
+              <div class="entity-list-main">
+                <span class="entity-list-title">{mr.title ?? mr.id?.slice(0, 8)}</span>
+                {#if mr.source_branch}
+                  <span class="entity-list-sub mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</span>
+                {/if}
+              </div>
+              {#if mr.diff_stats}
+                <span class="entity-list-diff">
+                  <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                  <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                </span>
+              {/if}
+              <span class="entity-list-time muted">{rel(mr.created_at)}</span>
+            </button>
+          {/each}
+        </div>
       {/if}
 
     {:else if activeTab === 'memberships'}
@@ -550,6 +641,37 @@
   .ledger-meta { display: flex; align-items: center; gap: var(--space-3); }
   .ledger-ws { font-size: var(--text-xs); }
   .ledger-sha { font-size: var(--text-xs); }
+
+  /* Entity list (agents, tasks, MRs) */
+  .entity-list { display: flex; flex-direction: column; gap: var(--space-2); }
+  .entity-list-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    text-align: left;
+    width: 100%;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+  .entity-list-item:hover {
+    border-color: var(--color-border-strong);
+    background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-focus));
+  }
+  .entity-list-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .entity-list-main { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .entity-list-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entity-list-sub { font-size: var(--text-xs); color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entity-list-time { font-size: var(--text-xs); flex-shrink: 0; }
+  .entity-list-diff { display: flex; gap: var(--space-1); font-size: var(--text-xs); font-family: var(--font-mono); flex-shrink: 0; }
+  .diff-ins { color: var(--color-success); }
+  .diff-del { color: var(--color-danger); }
 
   /* Notification Preferences */
   .prefs-section { display: flex; flex-direction: column; gap: var(--space-4); max-width: 480px; }
