@@ -1608,6 +1608,42 @@ else
       else
         warn "No MR found from the real agent"
       fi
+
+      # Verify agent logs were captured
+      AGENT_LOGS=$(api_get "${API}/agents/${REAL_AGENT_ID}/logs")
+      AGENT_LOG_COUNT=$(echo "$AGENT_LOGS" | jq 'length')
+      if [ "$AGENT_LOG_COUNT" -gt 0 ] 2>/dev/null; then
+        ok "Agent logs: ${AGENT_LOG_COUNT} log lines captured"
+        # Show first and last log line
+        echo "$AGENT_LOGS" | jq -r '.[0]' | sed "s/^/  ${DIM}first: /" | sed "s/$/${NC}/"
+        echo "$AGENT_LOGS" | jq -r '.[-1]' | sed "s/^/  ${DIM}last:  /" | sed "s/$/${NC}/"
+      else
+        warn "No agent logs captured (agent-runner should POST to /agents/:id/logs)"
+      fi
+
+      # Verify conversation provenance (HSI §5)
+      # The conversation SHA should be stored in agent_provenance KV bucket.
+      # We can check it by looking at the MR attestation after merge, or by
+      # querying the conversation endpoint directly.
+      # First, try to find the conversation SHA from the agent's logs
+      CONV_SHA=""
+      if [ "$AGENT_LOG_COUNT" -gt 0 ] 2>/dev/null; then
+        CONV_SHA=$(echo "$AGENT_LOGS" | jq -r '.[] | select(contains("conversation_sha=")) | .' | grep -oP 'conversation_sha=\K[a-f0-9]+' | head -1 || true)
+      fi
+      if [ -n "$CONV_SHA" ]; then
+        ok "Conversation SHA from logs: ${CONV_SHA}"
+        # Verify the conversation is retrievable
+        CONV_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "${API}/conversations/${CONV_SHA}")
+        if [ "$CONV_STATUS" = "200" ]; then
+          CONV_BODY=$(curl -s -H "$AUTH" "${API}/conversations/${CONV_SHA}")
+          CONV_SIZE=${#CONV_BODY}
+          ok "Conversation retrieved: ${CONV_SIZE} bytes (SHA: ${CONV_SHA:0:16}...)"
+        else
+          warn "Conversation retrieval returned HTTP ${CONV_STATUS} (SHA: ${CONV_SHA})"
+        fi
+      else
+        info "Could not extract conversation SHA from logs (check agent-runner output)"
+      fi
     elif [ "$AGENT_DONE" = false ]; then
       warn "Agent did not complete within 240s (status: ${REAL_AGENT_STATUS})"
     fi
