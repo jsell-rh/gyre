@@ -1385,7 +1385,7 @@
                         </button>
                       {/if}
                       {#if repoAgentCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'tasks'); }}>
+                        <button class="repo-stat-chip repo-stat-clickable" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'agents'); }}>
                           <span class="repo-stat-icon">▶</span>
                           <span class="repo-stat-num">{repoAgentCount}</span>
                           <span class="repo-stat-label">agents</span>
