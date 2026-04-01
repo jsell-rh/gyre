@@ -416,7 +416,21 @@
     agentsLoading = true;
     try {
       const data = await api.agents({ workspaceId: workspace.id });
-      wsAgents = Array.isArray(data) ? data : [];
+      let agentList = Array.isArray(data) ? data : [];
+      // Enrich agents that lack spec_path by resolving from their task (best-effort)
+      const needsSpec = agentList.filter(a => !a.spec_path && (a.task_id ?? a.current_task_id));
+      if (needsSpec.length > 0) {
+        const taskPromises = needsSpec.map(a => {
+          const taskId = a.task_id ?? a.current_task_id;
+          return api.task(taskId).then(t => ({ agentId: a.id, spec_path: t?.spec_path })).catch(() => null);
+        });
+        const results = await Promise.all(taskPromises);
+        const specMap = Object.fromEntries(results.filter(r => r?.spec_path).map(r => [r.agentId, r.spec_path]));
+        if (Object.keys(specMap).length > 0) {
+          agentList = agentList.map(a => specMap[a.id] ? { ...a, spec_path: specMap[a.id] } : a);
+        }
+      }
+      wsAgents = agentList;
     } catch {
       wsAgents = [];
     } finally {
