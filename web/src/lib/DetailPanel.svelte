@@ -1719,7 +1719,7 @@
                         {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
                         <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
                           <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
-                          <span class="gate-detail-name">{gate.name && gate.name !== 'Gate' ? gate.name : gate.gate_name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : gate.gate_id ? `Gate ${shortId(gate.gate_id)}` : 'Gate')}</span>
+                          <span class="gate-detail-name">{gate.gate_name ?? gate.name ?? ((gate.gate_type ?? '').replace(/_/g, ' ') || 'Quality gate')}</span>
                           {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
                         </button>
