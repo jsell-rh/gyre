@@ -85,8 +85,33 @@
   let sortField = $state('name');
   let sortDir = $state('asc');
 
+  // Read initial sub-tab and file from URL params (set by goToRepoTab context)
+  let initialFileToSelect = null;
   $effect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const initialSubTab = params.get('subTab');
+    const initialFile = params.get('file');
+    if (initialSubTab && SUB_TABS.some(st => st.id === initialSubTab)) {
+      subTab = initialSubTab;
+      if (initialFile && initialSubTab === 'files') {
+        initialFileToSelect = initialFile;
+      }
+      // Clean up the URL params after reading
+      const url = new URL(window.location.href);
+      url.searchParams.delete('subTab');
+      url.searchParams.delete('file');
+      window.history.replaceState({}, '', url.toString());
+    }
     if (repoId) loadTab(subTab);
+  });
+
+  // After files tab loads, auto-select the requested file
+  $effect(() => {
+    if (initialFileToSelect && !loading && subTab === 'files' && fileTree.length > 0) {
+      const file = initialFileToSelect;
+      initialFileToSelect = null;
+      selectFile(file);
+    }
   });
 
   async function loadTab(tab) {
