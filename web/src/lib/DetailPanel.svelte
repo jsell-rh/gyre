@@ -1753,7 +1753,7 @@
       {/if}
       <div class="panel-entity">
         <span class="entity-type">{entity.type === 'mr' ? 'Merge Request' : entity.type === 'spec' ? 'Specification' : entity.type === 'agent' ? 'Agent' : entity.type === 'task' ? 'Task' : entity.type === 'node' ? 'Architecture Node' : entity.type === 'commit' ? 'Commit' : entity.type}</span>
-        <span class="entity-id">{entity.data?.name ?? entity.data?.title ?? (entity.type === 'spec' ? (entity.id?.split('/').pop() ?? entity.id) : entity.type === 'commit' ? ((entity.data?.sha ?? entity.id ?? '').slice(0, 7)) : entityName(entity.type, entity.id))}</span>
+        <span class="entity-id">{entity.data?.name ?? entity.data?.title ?? (entity.type === 'spec' ? (entity.id?.split('/').pop()?.replace(/\.md$/, '') ?? entity.id) : entity.type === 'commit' ? ((entity.data?.sha ?? entity.id ?? '').slice(0, 7)) : entityName(entity.type, entity.id))}</span>
       </div>
       <div class="panel-actions">
         {#if !fullPage}
