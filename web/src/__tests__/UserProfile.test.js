@@ -7,6 +7,9 @@ vi.mock('../lib/api.js', () => ({
     me: vi.fn(),
     myNotifications: vi.fn(),
     myJudgments: vi.fn(),
+    myAgents: vi.fn(),
+    myTasks: vi.fn(),
+    myMrs: vi.fn(),
     workspaces: vi.fn(),
     updateMe: vi.fn(),
     markNotificationRead: vi.fn(),
@@ -48,7 +51,7 @@ const JUDGMENTS = [
   { event_type: 'trust_override', spec_path: null, resource_id: 'ws-1', timestamp: new Date(Date.now() - 86400000).toISOString(), workspace_name: 'Platform' },
 ];
 
-const CTX = new Map([['navigate', vi.fn()], ['goToWorkspaceHome', vi.fn()]]);
+const CTX = new Map([['navigate', vi.fn()], ['goToWorkspaceHome', vi.fn()], ['openDetailPanel', vi.fn()]]);
 const r = (props = {}) => render(UserProfile, { props, context: CTX });
 
 beforeEach(() => {
@@ -57,6 +60,9 @@ beforeEach(() => {
   api.me.mockResolvedValue({ ...ME });
   api.myNotifications.mockResolvedValue([...NOTIFICATIONS]);
   api.myJudgments.mockResolvedValue([...JUDGMENTS]);
+  api.myAgents.mockResolvedValue([]);
+  api.myTasks.mockResolvedValue([]);
+  api.myMrs.mockResolvedValue([]);
   api.workspaces.mockResolvedValue([...WORKSPACES]);
   api.updateMe.mockResolvedValue({ ...ME, display_name: 'Updated Name' });
   api.markNotificationRead.mockResolvedValue({});
@@ -90,10 +96,13 @@ describe('UserProfile', () => {
     expect(adminEls.length).toBeGreaterThan(0);
   });
 
-  it('shows all five tabs', async () => {
+  it('shows all eight tabs', async () => {
     const { findByText, findAllByText } = r();
     await findAllByText('James Sell');
     expect(await findByText('Profile')).toBeTruthy();
+    expect(await findByText('Agents')).toBeTruthy();
+    expect(await findByText('Tasks')).toBeTruthy();
+    expect(await findByText('MRs')).toBeTruthy();
     expect(await findByText('Workspaces')).toBeTruthy();
     expect(await findByText('Judgment Ledger')).toBeTruthy();
     expect(await findByText('Notification Preferences')).toBeTruthy();
