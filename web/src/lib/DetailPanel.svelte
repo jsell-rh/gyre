@@ -3311,93 +3311,80 @@
               {#each Array(3) as _}<Skeleton width="100%" height="2rem" />{/each}
             </div>
           {:else}
-            {#if Array.isArray(mrReviews) && mrReviews.length > 0}
-              <span class="progress-section-label">Reviews</span>
-              <div class="reviews-list">
-                {#each mrReviews as review}
-                  <div class="review-item">
-                    <div class="review-header">
-                      <Badge
-                        value={review.decision ?? review.status ?? 'review'}
-                        variant={
-                          (review.decision === 'approved' || review.status === 'approved') ? 'success' :
-                          (review.decision === 'changes_requested' || review.status === 'changes_requested') ? 'danger' : 'info'
-                        }
-                      />
-                      <span class="review-author mono">{review.reviewer ?? (review.reviewer_agent_id ? entityName('agent', review.reviewer_agent_id) : review.user_id ?? shortId(review.reviewer_id))}</span>
-                      <span class="review-time">{fmtDate(review.created_at ?? review.timestamp)}</span>
+            <!-- Unified conversation: reviews + comments merged chronologically (like GitHub) -->
+            {@const conversation = [
+              ...(Array.isArray(mrReviews) ? mrReviews : []).map(r => ({ ...r, _kind: 'review', _time: r.created_at ?? r.timestamp ?? 0 })),
+              ...(Array.isArray(mrComments) ? mrComments : []).map(c => ({ ...c, _kind: 'comment', _time: c.created_at ?? c.timestamp ?? 0 })),
+            ].sort((a, b) => a._time - b._time)}
+
+            {#if conversation.length > 0}
+              <div class="conversation-list">
+                {#each conversation as item}
+                  <div class="conversation-item conversation-item-{item._kind}">
+                    <div class="conversation-header">
+                      {#if item._kind === 'review'}
+                        <Badge
+                          value={item.decision ?? item.status ?? 'review'}
+                          variant={
+                            (item.decision === 'approved' || item.status === 'approved') ? 'success' :
+                            (item.decision === 'changes_requested' || item.status === 'changes_requested') ? 'danger' : 'info'
+                          }
+                        />
+                        {@const reviewer = item.reviewer ?? (item.reviewer_agent_id ? entityName('agent', item.reviewer_agent_id) : item.user_id ?? shortId(item.reviewer_id))}
+                        {#if item.reviewer_agent_id}
+                          <button class="entity-link mono conversation-author" onclick={() => navigateTo('agent', item.reviewer_agent_id)}>{reviewer}</button>
+                        {:else}
+                          <span class="conversation-author mono">{reviewer}</span>
+                        {/if}
+                        <span class="conversation-verb">reviewed</span>
+                      {:else}
+                        {@const author = item.author ?? item.author_agent_id ?? item.user_id ?? shortId(item.author_id)}
+                        {#if item.author_agent_id}
+                          <button class="entity-link mono conversation-author" onclick={() => navigateTo('agent', item.author_agent_id)}>{entityName('agent', item.author_agent_id)}</button>
+                        {:else}
+                          <span class="conversation-author mono">{author}</span>
+                        {/if}
+                        <span class="conversation-verb">commented</span>
+                      {/if}
+                      <span class="conversation-time">{fmtDate(item._time)}</span>
                     </div>
-                    {#if review.body}
-                      <p class="review-body">{review.body}</p>
+                    {#if item.body}
+                      <p class="review-body">{item.body}</p>
                     {/if}
                   </div>
                 {/each}
               </div>
             {:else}
-              <p class="no-data no-data-sm">No reviews yet</p>
+              <p class="no-data no-data-sm">No conversation yet — be the first to comment or review</p>
             {/if}
 
-            {#if Array.isArray(mrComments) && mrComments.length > 0}
-              <span class="progress-section-label">Comments</span>
-              <div class="reviews-list">
-                {#each mrComments as comment}
-                  <div class="review-item comment-item">
-                    <div class="review-header">
-                      <span class="review-author mono">{comment.author ?? comment.author_agent_id ?? comment.user_id ?? shortId(comment.author_id)}</span>
-                      <span class="review-time">{fmtDate(comment.created_at ?? comment.timestamp)}</span>
-                    </div>
-                    {#if comment.body}
-                      <p class="review-body">{comment.body}</p>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {:else}
-              <p class="no-data no-data-sm">No comments yet</p>
-            {/if}
-
-            <!-- Comment submission form -->
-            <div class="comment-form">
-              <span class="progress-section-label">Add Comment</span>
+            <!-- Unified submission area -->
+            <div class="conversation-submit">
               <textarea
                 class="comment-textarea"
                 bind:value={newCommentText}
-                placeholder="Write a comment..."
-                rows="2"
-                disabled={submittingComment}
+                placeholder="Leave a comment..."
+                rows="3"
+                disabled={submittingComment || submittingReview}
               ></textarea>
-              <div class="comment-form-actions">
-                <Button variant="primary" size="sm" onclick={submitComment} disabled={!newCommentText.trim() || submittingComment}>
+              <div class="conversation-actions">
+                <Button variant="secondary" size="sm" onclick={submitComment} disabled={!newCommentText?.trim() || submittingComment}>
                   {submittingComment ? 'Posting...' : 'Comment'}
                 </Button>
-              </div>
-            </div>
-
-            <!-- Review submission form -->
-            <div class="comment-form">
-              <span class="progress-section-label">Submit Review</span>
-              <div class="review-form-row">
-                <select class="review-decision-select" bind:value={newReviewDecision}>
-                  <option value="approved">Approve</option>
-                  <option value="changes_requested">Request Changes</option>
-                </select>
-              </div>
-              <textarea
-                class="comment-textarea"
-                bind:value={newReviewBody}
-                placeholder="Review comment (optional)..."
-                rows="2"
-                disabled={submittingReview}
-              ></textarea>
-              <div class="comment-form-actions">
-                <Button
-                  variant={newReviewDecision === 'approved' ? 'primary' : 'secondary'}
-                  size="sm"
-                  onclick={submitReview}
-                  disabled={submittingReview}
-                >
-                  {submittingReview ? 'Submitting...' : newReviewDecision === 'approved' ? 'Approve' : 'Request Changes'}
-                </Button>
+                <div class="review-submit-group">
+                  <select class="review-decision-select" bind:value={newReviewDecision}>
+                    <option value="approved">Approve</option>
+                    <option value="changes_requested">Request Changes</option>
+                  </select>
+                  <Button
+                    variant={newReviewDecision === 'approved' ? 'primary' : 'secondary'}
+                    size="sm"
+                    onclick={() => { newReviewBody = newCommentText; submitReview(); }}
+                    disabled={submittingReview}
+                  >
+                    {submittingReview ? 'Submitting...' : newReviewDecision === 'approved' ? 'Approve' : 'Request Changes'}
+                  </Button>
+                </div>
               </div>
             </div>
           {/if}
@@ -5727,6 +5714,76 @@
 
   .comment-item {
     border-left: 3px solid var(--color-border-strong);
+  }
+
+  .conversation-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .conversation-item {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .conversation-item-review {
+    border-left: 3px solid var(--color-info);
+  }
+
+  .conversation-item-comment {
+    border-left: 3px solid var(--color-border-strong);
+  }
+
+  .conversation-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .conversation-author {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .conversation-verb {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .conversation-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .conversation-submit {
+    margin-top: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-4);
+  }
+
+  .conversation-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .review-submit-group {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   .no-data-sm {
