@@ -1191,6 +1191,33 @@
     return JSON.stringify(detail);
   }
 
+  /** Flatten structured hunk objects into a line array with computed line numbers */
+  function computeHunkLines(hunks) {
+    const result = [];
+    for (const hunk of hunks) {
+      // Parse hunk header for starting line numbers: @@ -old,count +new,count @@
+      const hdrMatch = (hunk.header ?? '').match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      let oldLine = hdrMatch ? parseInt(hdrMatch[1], 10) : 1;
+      let newLine = hdrMatch ? parseInt(hdrMatch[2], 10) : 1;
+      result.push({ type: 'hunk', header: hunk.header ?? '' });
+      for (const line of (hunk.lines ?? [])) {
+        const lt = line.type === 'add' ? 'add' : line.type === 'delete' ? 'del' : 'ctx';
+        if (lt === 'add') {
+          result.push({ type: 'line', lineType: lt, oldNum: '', newNum: newLine, content: line.content });
+          newLine++;
+        } else if (lt === 'del') {
+          result.push({ type: 'line', lineType: lt, oldNum: oldLine, newNum: '', content: line.content });
+          oldLine++;
+        } else {
+          result.push({ type: 'line', lineType: lt, oldNum: oldLine, newNum: newLine, content: line.content });
+          oldLine++;
+          newLine++;
+        }
+      }
+    }
+    return result;
+  }
+
   /** Parse unified diff patch into line objects with line numbers */
   function parsePatchLines(patch) {
     if (!patch) return [];
@@ -2613,23 +2640,25 @@
                       </table>
                     {:else if file.hunks?.length > 0}
                       {@const lang = detectLang(file.path ?? '')}
+                      {@const hunkLines = computeHunkLines(file.hunks)}
                       <table class="diff-table">
                         <tbody>
-                          {#each file.hunks as hunk}
-                            <tr class="diff-tr diff-tr-hunk">
-                              <td class="diff-gutter diff-gutter-old"></td>
-                              <td class="diff-gutter diff-gutter-new"></td>
-                              <td class="diff-code"><span class="diff-hunk-text">{hunk.header}</span></td>
-                            </tr>
-                            {#each hunk.lines as line}
-                              {@const lineType = line.type === 'add' ? 'add' : line.type === 'delete' ? 'del' : 'ctx'}
+                          {#each hunkLines as hline}
+                            {#if hline.type === 'hunk'}
+                              <tr class="diff-tr diff-tr-hunk">
+                                <td class="diff-gutter diff-gutter-old"></td>
+                                <td class="diff-gutter diff-gutter-new"></td>
+                                <td class="diff-code"><span class="diff-hunk-text">{hline.header}</span></td>
+                              </tr>
+                            {:else}
+                              {@const lineType = hline.lineType}
                               {@const prefix = lineType === 'add' ? '+' : lineType === 'del' ? '-' : ' '}
                               <tr class="diff-tr diff-tr-{lineType}">
-                                <td class="diff-gutter diff-gutter-old">{lineType !== 'add' ? '' : ''}</td>
-                                <td class="diff-gutter diff-gutter-new">{lineType !== 'del' ? '' : ''}</td>
-                                <td class="diff-code"><span class="diff-prefix">{prefix}</span>{@html highlightLine(line.content, lang)}</td>
+                                <td class="diff-gutter diff-gutter-old">{hline.oldNum}</td>
+                                <td class="diff-gutter diff-gutter-new">{hline.newNum}</td>
+                                <td class="diff-code"><span class="diff-prefix">{prefix}</span>{@html highlightLine(hline.content, lang)}</td>
                               </tr>
-                            {/each}
+                            {/if}
                           {/each}
                         </tbody>
                       </table>
