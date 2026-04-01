@@ -1457,6 +1457,7 @@
                   <th scope="col" aria-sort={specsSortCol === 'progress' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>{$t('workspace_home.col_progress')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('progress')}</span></button>
                   </th>
+                  <th scope="col">Owner</th>
                   <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
                   </th>
@@ -1495,6 +1496,7 @@
                         <span class="secondary">—</span>
                       {/if}
                     </td>
+                    <td class="spec-owner ws-cell-mono">{spec.owner ?? ''}</td>
                     <td class="spec-activity">{relTime(spec.updated_at)}</td>
                     <td class="ws-cell-action">
                       {#if (spec.approval_status ?? spec.status) === 'pending'}
