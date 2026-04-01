@@ -11,11 +11,11 @@
 
   const openDetailPanel = getContext('openDetailPanel');
 
-  let subTab = $state('branches');
+  let subTab = $state('files');
   const SUB_TABS = [
-    { id: 'branches', labelKey: 'code_tab.branches' },
-    { id: 'commits', labelKey: 'code_tab.commits' },
     { id: 'files', label: 'Files' },
+    { id: 'commits', labelKey: 'code_tab.commits' },
+    { id: 'branches', labelKey: 'code_tab.branches' },
     { id: 'merge-requests', labelKey: 'code_tab.merge_requests' },
     { id: 'merge-queue', labelKey: 'code_tab.merge_queue' },
     { id: 'hot-files', label: 'Hot Files' },
