@@ -31,6 +31,13 @@ vi.mock('../lib/api.js', () => ({
     adminJobs: vi.fn().mockResolvedValue([]),
     adminRunJob: vi.fn().mockResolvedValue({}),
     version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234' }),
+    auditStreamUrl: vi.fn().mockReturnValue('http://localhost/api/v1/audit/stream'),
+    bcpTargets: vi.fn().mockResolvedValue(null),
+    bcpDrill: vi.fn().mockResolvedValue({}),
+    adminCreateSnapshot: vi.fn().mockResolvedValue({}),
+    adminListSnapshots: vi.fn().mockResolvedValue([]),
+    adminDeleteSnapshot: vi.fn().mockResolvedValue({}),
+    adminRetention: vi.fn().mockResolvedValue(null),
   },
 }));
 
@@ -465,7 +472,7 @@ describe('TenantSettings', () => {
     usersTab.focus();
     fireEvent.keyDown(tabBar, { key: 'End' });
     await waitFor(() => {
-      expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-jobs');
+      expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-bcp');
     }, { timeout: 3000 });
   });
 });

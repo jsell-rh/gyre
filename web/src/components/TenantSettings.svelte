@@ -523,6 +523,7 @@
   // ── Live Audit Stream ────────────────────────────────────────────────
   function startAuditStream() {
     if (auditStreaming || auditStreamSource) return;
+    if (typeof EventSource === 'undefined') return;
     const token = localStorage.getItem('gyre_token') ?? '';
     const url = api.auditStreamUrl();
     const es = new EventSource(`${url}?token=${encodeURIComponent(token)}`);
