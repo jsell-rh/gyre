@@ -658,7 +658,7 @@
                     <span class="arch-dep-label">Depends on ({repoDeps.dependencies.length})</span>
                     <ul class="arch-dep-list">
                       {#each repoDeps.dependencies as dep}
-                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? dep.repo_id ?? dep}</li>
+                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? (typeof dep === 'string' && dep.length > 12 ? dep.slice(0, 8) + '...' : dep.repo_id ?? dep)}</li>
                       {/each}
                     </ul>
                   </div>
@@ -668,7 +668,7 @@
                     <span class="arch-dep-label">Depended on by ({repoDeps.dependents.length})</span>
                     <ul class="arch-dep-list">
                       {#each repoDeps.dependents as dep}
-                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? dep.repo_id ?? dep}</li>
+                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? (typeof dep === 'string' && dep.length > 12 ? dep.slice(0, 8) + '...' : dep.repo_id ?? dep)}</li>
                       {/each}
                     </ul>
                   </div>
