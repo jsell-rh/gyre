@@ -25,6 +25,33 @@
   let actionStates = $state({});
   let workspaceMap = $state({});
 
+  // Entity name resolution cache
+  let entityNameCache = $state({});
+  function queueNameResolution(type, id) {
+    if (!id) return;
+    const key = `${type}:${id}`;
+    if (entityNameCache[key] !== undefined) return;
+    queueMicrotask(() => {
+      if (entityNameCache[key] !== undefined) return;
+      entityNameCache = { ...entityNameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'task' ? api.task(id).then(t => t?.title) :
+                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) entityNameCache = { ...entityNameCache, [key]: name };
+      }).catch(() => {});
+    });
+  }
+  function resolveEntityName(type, id) {
+    if (!id) return '';
+    const key = `${type}:${id}`;
+    const cached = entityNameCache[key];
+    if (cached) return cached;
+    queueNameResolution(type, id);
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
+
   // Badge variant per notification type
   const TYPE_VARIANTS = {
     agent_clarification: 'danger',
@@ -354,7 +381,7 @@
                   {#if body.agent_id || body.mr_title || body.agent_name}
                     <span class="card-subtitle">
                       {#if body.agent_name}{body.agent_name}
-                      {:else if body.agent_id}{body.agent_id.length > 12 ? body.agent_id.slice(0, 8) + '...' : body.agent_id}{/if}
+                      {:else if body.agent_id}{resolveEntityName('agent', body.agent_id)}{/if}
                       {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
                       {#if body.spec_path}
                         ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})

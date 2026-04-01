@@ -2192,7 +2192,7 @@
                       <span class="task-priority priority-{task.priority}">{task.priority}</span>
                     {/if}
                     {#if task.agent_id}
-                      <span class="task-agent mono" title={task.agent_id}>{task.agent_id.slice(0, 8)}</span>
+                      <button class="entity-link mono" title={task.agent_id} onclick={(e) => { e.stopPropagation(); navigateTo('agent', task.agent_id); }}>{entityName('agent', task.agent_id)}</button>
                     {/if}
                   </li>
                 {/each}
