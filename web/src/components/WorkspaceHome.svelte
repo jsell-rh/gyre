@@ -1759,10 +1759,16 @@
                     {#if item._deps.length > 0 || item._blocks.length > 0}
                       <div class="mq-deps">
                         {#if item._deps.length > 0}
-                          <span class="mq-dep-label">waits for {item._deps.length}</span>
+                          <span class="mq-dep-label">waits for</span>
+                          {#each item._deps as depId}
+                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: depId, data: {} }); }} title="View dependency">{entityName('mr', depId)}</button>
+                          {/each}
                         {/if}
                         {#if item._blocks.length > 0}
-                          <span class="mq-dep-label">blocks {item._blocks.length}</span>
+                          <span class="mq-dep-label">blocks</span>
+                          {#each item._blocks as blockId}
+                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: blockId, data: {} }); }} title="View dependent">{entityName('mr', blockId)}</button>
+                          {/each}
                         {/if}
                       </div>
                     {/if}
@@ -3718,9 +3724,22 @@
   .mq-dep-label {
     font-size: 10px;
     color: var(--color-text-muted);
+  }
+
+  .mq-dep-link {
+    font-size: 10px;
+    color: var(--color-primary);
     background: var(--color-surface-alt, rgba(255,255,255,0.04));
-    padding: 1px var(--space-1);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
+    padding: 1px var(--space-1);
+    cursor: pointer;
+    font-family: var(--font-mono);
+  }
+
+  .mq-dep-link:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
   }
 
   .mq-item-status {
