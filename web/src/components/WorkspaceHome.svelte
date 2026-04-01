@@ -1213,7 +1213,7 @@
                 {/if}
               </button>
               <span class="prov-flow-arrow">→</span>
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => document.getElementById('section-agents')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Agents section">
+              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('agents') : document.getElementById('section-agents')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open Agents tab' : 'Jump to Agents section'}>
                 <span class="prov-flow-count">{wsAgents.length}</span>
                 <span class="prov-flow-label">Agents</span>
                 {#if provenanceSummary.activeAgentCount > 0}
