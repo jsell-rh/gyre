@@ -306,6 +306,14 @@
     try {
       const data = await api.mergeRequests({ workspace_id: workspace.id });
       const mrList = Array.isArray(data) ? data : [];
+      // Collect unique repo IDs to fetch gate definitions
+      const repoIds = [...new Set(mrList.map(m => m.repository_id ?? m.repo_id).filter(Boolean))];
+      const allGateDefs = {};
+      await Promise.all(repoIds.slice(0, 5).map(rid =>
+        api.repoGates(rid).then(defs => {
+          for (const d of (Array.isArray(defs) ? defs : [])) allGateDefs[d.id] = d;
+        }).catch(() => {})
+      ));
       // Enrich first 10 MRs with gate results (best-effort)
       const toEnrich = mrList.slice(0, 10);
       const gatePromises = toEnrich.map(mr =>
@@ -313,12 +321,15 @@
           const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
           const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-          const details = arr.map(g => ({
-            name: g.name ?? g.gate_name ?? 'Gate',
-            status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
-            gate_type: g.gate_type,
-            required: g.required,
-          }));
+          const details = arr.map(g => {
+            const def = allGateDefs[g.gate_id] ?? {};
+            return {
+              name: g.name ?? g.gate_name ?? def.name ?? (g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || 'Gate',
+              status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
+              gate_type: g.gate_type ?? def.gate_type,
+              required: g.required ?? def.required,
+            };
+          });
           return { id: mr.id, passed, failed, total: arr.length, details };
         }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0, details: [] }))
       );
