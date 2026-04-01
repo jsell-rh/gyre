@@ -1795,10 +1795,18 @@
                         {@const filePath = typeof p === 'string' ? p : (p.path ?? p.file ?? JSON.stringify(p))}
                         {@const fileStatus = typeof p === 'object' ? (p.status ?? p.change_type ?? 'modified') : 'modified'}
                         {@const statusLower = fileStatus.toLowerCase()}
-                        <span class="touched-path mono">
-                          <span class="touched-path-status touched-path-status-{statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? 'added' : statusLower === 'deleted' || statusLower === 'removed' ? 'deleted' : 'modified'}">{statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? '+' : statusLower === 'deleted' || statusLower === 'removed' ? '-' : '~'}</span>
-                          {filePath}
-                        </span>
+                        {@const isDeleted = statusLower === 'deleted' || statusLower === 'removed'}
+                        {#if goToRepoTab && !isDeleted}
+                          <button class="touched-path touched-path-link mono" onclick={() => { goToRepoTab('code', { subTab: 'files', file: filePath }); close(); }} title="View blame for {filePath}">
+                            <span class="touched-path-status touched-path-status-{statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? 'added' : 'modified'}">{statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? '+' : '~'}</span>
+                            {filePath}
+                          </button>
+                        {:else}
+                          <span class="touched-path mono">
+                            <span class="touched-path-status touched-path-status-{isDeleted ? 'deleted' : statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? 'added' : 'modified'}">{isDeleted ? '-' : statusLower === 'added' || statusLower === 'created' || statusLower === 'new' ? '+' : '~'}</span>
+                            {filePath}
+                          </span>
+                        {/if}
                       {/each}
                       {#if paths.length > 10}
                         <span class="touched-path-more">+{paths.length - 10} more files</span>
@@ -5669,6 +5677,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .touched-path-link {
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .touched-path-link:hover {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    color: var(--color-primary);
   }
 
   .touched-path-more {
