@@ -304,10 +304,22 @@
   let cloneCopied = $state(false);
   let cloneCopyTimer = null;
 
-  const cloneUrl = $derived(
-    repo?.clone_url
-    ?? (repo?.name ? `${window.location.origin}/git/${repo.name}.git` : null)
-  );
+  // Use repo.clone_url from the API which includes the correct server origin.
+  // Fallback constructs URL using workspace slug. When running via Vite dev
+  // proxy (port 5173), rewrite to the API server port (3000) since git
+  // smart HTTP isn't proxied by Vite.
+  function deriveCloneUrl() {
+    if (repo?.clone_url) return repo.clone_url;
+    if (!repo?.name) return null;
+    const wsSlug = workspace?.slug ?? '';
+    let origin = window.location.origin;
+    // Vite dev server runs on 5173 but the git server is on 3000
+    if (origin.includes(':5173')) {
+      origin = origin.replace(':5173', ':3000');
+    }
+    return `${origin}/git/${wsSlug}/${repo.name}.git`;
+  }
+  const cloneUrl = $derived(deriveCloneUrl());
 
   async function copyCloneUrl() {
     if (!cloneUrl) return;

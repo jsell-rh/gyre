@@ -3116,8 +3116,8 @@
                         value={ev.event}
                         variant={ev.event === 'approved' ? 'success' : ev.event === 'rejected' || ev.event === 'invalidated' || ev.event === 'revoked' ? 'danger' : 'muted'}
                       />
-                      {@const reviewerId = ev.user_id || ev.approver_id}
-                      {#if reviewerId}
+                      {#if ev.user_id || ev.approver_id}
+                        {@const reviewerId = ev.user_id || ev.approver_id}
                         <span class="history-user mono" title={reviewerId}>{reviewerId === 'human-reviewer' || reviewerId === 'system' ? reviewerId : entityName('agent', reviewerId)}</span>
                       {:else}
                         <span class="history-user mono">—</span>
