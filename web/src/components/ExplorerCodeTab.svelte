@@ -647,7 +647,7 @@
                       {#each lines as line, i}
                         {@const agentId = line.agent_id ?? line.agent}
                         {@const specRef = line.spec_ref ?? line.spec_path}
-                        {@const lineContent = line.content ?? line.text ?? ''}
+                        {@const lineContent = line.content ?? line.text ?? line.line ?? ''}
                         <tr class="blame-row" class:blame-agent-row={!!agentId}>
                           <td class="blame-marker" style="border-left: 3px solid {agentColor(agentId)}" title={agentId ? `Agent: ${resolveEntityName('agent', agentId)}` : ''}></td>
                           <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
@@ -698,7 +698,7 @@
                               </button>
                             {/if}
                           </td>
-                          <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang)}</pre></td>
+                          <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang) || '&nbsp;'}</pre></td>
                         </tr>
                       {/each}
                     </tbody>

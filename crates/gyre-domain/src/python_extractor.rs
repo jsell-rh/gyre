@@ -14,7 +14,7 @@ use gyre_common::{
     Id,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -283,7 +283,120 @@ impl ExtractionContext {
             }
         }
 
+        // --- Pass 2: walk for call expressions and emit Calls edges ---
+        self.extract_calls(root, source, &module_qname);
+
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Call-site extraction (second pass)
+    // -----------------------------------------------------------------------
+
+    fn extract_calls(&mut self, root: tree_sitter::Node, source: &[u8], module_qname: &str) {
+        let mut fn_calls: Vec<(Id, String)> = Vec::new();
+        self.collect_calls_from_node(root, source, module_qname, None, &mut fn_calls);
+
+        let mut seen = HashSet::new();
+        for (from_id, callee_name) in fn_calls {
+            if let Some(to_id) = self.resolve_py_callee(&callee_name, module_qname) {
+                if from_id != to_id {
+                    let key = (from_id.to_string(), to_id.to_string());
+                    if seen.insert(key) {
+                        let edge = self.make_edge(EdgeType::Calls, from_id, to_id);
+                        self.edges.push(edge);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_calls_from_node(
+        &self,
+        node: tree_sitter::Node,
+        source: &[u8],
+        module_qname: &str,
+        current_fn_id: Option<&Id>,
+        results: &mut Vec<(Id, String)>,
+    ) {
+        let mut new_fn_id = current_fn_id;
+        let owned_id: Option<Id> = if node.kind() == "function_definition" {
+            self.resolve_fn_node_id(node, source, module_qname)
+        } else {
+            None
+        };
+        if owned_id.is_some() {
+            new_fn_id = owned_id.as_ref();
+        }
+
+        if node.kind() == "call" {
+            if let Some(from_id) = new_fn_id {
+                if let Some(callee) = self.extract_call_name(node, source) {
+                    results.push((from_id.clone(), callee));
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.collect_calls_from_node(child, source, module_qname, new_fn_id, results);
+        }
+    }
+
+    fn resolve_fn_node_id(
+        &self,
+        node: tree_sitter::Node,
+        source: &[u8],
+        module_qname: &str,
+    ) -> Option<Id> {
+        let name = get_identifier_name(node, source)?;
+        let qname = format!("{module_qname}.{name}");
+        if let Some(id) = self.name_to_id.get(&qname) {
+            return Some(id.clone());
+        }
+        let parent = node.parent()?;
+        if parent.kind() == "block" {
+            if let Some(gp) = parent.parent() {
+                if gp.kind() == "class_definition" {
+                    if let Some(class_name) = get_identifier_name(gp, source) {
+                        let method_qname = format!("{module_qname}.{class_name}.{name}");
+                        if let Some(id) = self.name_to_id.get(&method_qname) {
+                            return Some(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn extract_call_name(&self, call_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+        let func = call_node.child_by_field_name("function")?;
+        match func.kind() {
+            "identifier" => func.utf8_text(source).ok().map(|s| s.to_string()),
+            "attribute" => func
+                .child_by_field_name("attribute")
+                .and_then(|a| a.utf8_text(source).ok())
+                .map(|s| s.to_string()),
+            _ => None,
+        }
+    }
+
+    fn resolve_py_callee(&self, callee: &str, module_qname: &str) -> Option<Id> {
+        let qname = format!("{module_qname}.{callee}");
+        if let Some(id) = self.name_to_id.get(&qname) {
+            return Some(id.clone());
+        }
+        if let Some(id) = self.name_to_id.get(callee) {
+            return Some(id.clone());
+        }
+        let suffix = format!(".{callee}");
+        for (qn, id) in &self.name_to_id {
+            if qn.ends_with(&suffix) {
+                return Some(id.clone());
+            }
+        }
+        None
     }
 
     // -----------------------------------------------------------------------
@@ -829,6 +942,27 @@ def list_users():
             .iter()
             .find(|n| n.node_type == NodeType::Module && n.qualified_name == "src.api.handlers");
         assert!(module.is_some(), "should have module node src.api.handlers");
+    }
+
+    #[test]
+    fn extract_calls_edges() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = "def caller():\n    callee()\n\ndef callee():\n    return 42\n";
+        fs::write(dir.path().join("app.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert!(!calls_edges.is_empty(), "should have Calls edges");
     }
 
     #[test]

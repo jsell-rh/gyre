@@ -16,7 +16,7 @@ use gyre_common::{
     Id,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -277,7 +277,107 @@ impl ExtractionContext {
             self.edges.push(edge);
         }
 
+        // --- Pass 3: general function-to-function Calls edges ---
+        self.extract_fn_calls(&content, root, &module_qname);
+
         Ok(())
+    }
+
+    fn extract_fn_calls(&mut self, content: &str, root: tree_sitter::Node, module_qname: &str) {
+        let mut fn_calls: Vec<(Id, String)> = Vec::new();
+        self.collect_fn_calls(content, root, module_qname, None, &mut fn_calls);
+
+        let mut seen = HashSet::new();
+        for (from_id, callee_name) in fn_calls {
+            if let Some(to_id) = self.resolve_ts_callee(&callee_name, module_qname) {
+                if from_id != to_id {
+                    let key = (from_id.to_string(), to_id.to_string());
+                    if seen.insert(key) {
+                        let edge = self.make_edge(EdgeType::Calls, from_id, to_id);
+                        self.edges.push(edge);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_fn_calls(
+        &self,
+        content: &str,
+        node: tree_sitter::Node,
+        module_qname: &str,
+        current_fn_id: Option<&Id>,
+        results: &mut Vec<(Id, String)>,
+    ) {
+        let mut new_fn_id = current_fn_id;
+        let owned_id: Option<Id> = match node.kind() {
+            "function_declaration" => node.child_by_field_name("name").and_then(|name_node| {
+                let name = &content[name_node.byte_range()];
+                let qname = format!("{module_qname}.{name}");
+                self.name_to_id.get(&qname).cloned()
+            }),
+            "variable_declarator" => {
+                let is_fn = node
+                    .child_by_field_name("value")
+                    .map(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
+                    .unwrap_or(false);
+                if is_fn {
+                    node.child_by_field_name("name").and_then(|name_node| {
+                        let name = &content[name_node.byte_range()];
+                        let qname = format!("{module_qname}.{name}");
+                        self.name_to_id.get(&qname).cloned()
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if owned_id.is_some() {
+            new_fn_id = owned_id.as_ref();
+        }
+
+        if node.kind() == "call_expression" {
+            if let Some(from_id) = new_fn_id {
+                if let Some(func) = node.child_by_field_name("function") {
+                    let callee = match func.kind() {
+                        "identifier" => Some(content[func.byte_range()].to_string()),
+                        "member_expression" => func
+                            .child_by_field_name("property")
+                            .map(|p| content[p.byte_range()].to_string()),
+                        _ => None,
+                    };
+                    if let Some(callee_name) = callee {
+                        if callee_name != "fetch" && !callee_name.starts_with("axios") {
+                            results.push((from_id.clone(), callee_name));
+                        }
+                    }
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.collect_fn_calls(content, child, module_qname, new_fn_id, results);
+            }
+        }
+    }
+
+    fn resolve_ts_callee(&self, callee: &str, module_qname: &str) -> Option<Id> {
+        let qname = format!("{module_qname}.{callee}");
+        if let Some(id) = self.name_to_id.get(&qname) {
+            return Some(id.clone());
+        }
+        if let Some(id) = self.name_to_id.get(callee) {
+            return Some(id.clone());
+        }
+        let suffix = format!(".{callee}");
+        for (qn, id) in &self.name_to_id {
+            if qn.ends_with(&suffix) {
+                return Some(id.clone());
+            }
+        }
+        None
     }
 
     // -----------------------------------------------------------------------
@@ -696,6 +796,24 @@ mod tests {
             main_fn.is_some(),
             "main.ts exports should still be extracted"
         );
+    }
+
+    #[test]
+    fn extract_calls_edges_between_exported_functions() {
+        let dir = make_tempdir();
+        let code = "export function caller() {\n  return callee();\n}\n\nexport function callee() {\n  return 42;\n}\n";
+        let result = extract_ts(&dir, "app.ts", code);
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert!(!calls_edges.is_empty(), "should have Calls edges");
     }
 
     #[test]
