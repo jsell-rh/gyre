@@ -2861,6 +2861,16 @@
               {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
           {:else if Array.isArray(mrTimeline) && mrTimeline.length > 0}
+            {@const firstTime = mrTimeline[0]?.timestamp ?? mrTimeline[0]?.created_at}
+            {@const lastTime = mrTimeline[mrTimeline.length - 1]?.timestamp ?? mrTimeline[mrTimeline.length - 1]?.created_at}
+            {@const totalDuration = (firstTime && lastTime) ? Math.round(lastTime - firstTime) : null}
+            <div class="timeline-summary">
+              <span class="timeline-summary-count">{mrTimeline.length} events</span>
+              {#if totalDuration != null && totalDuration > 0}
+                <span class="timeline-summary-duration">Total: {totalDuration < 60 ? totalDuration + 's' : totalDuration < 3600 ? Math.round(totalDuration / 60) + 'm' : (totalDuration / 3600).toFixed(1) + 'h'}</span>
+              {/if}
+              <span class="timeline-summary-range">{fmtDate(firstTime)} — {fmtDate(lastTime)}</span>
+            </div>
             <div class="timeline-list">
               {#each mrTimeline as evt, i}
                 {@const evtType = evt.event_type ?? evt.type ?? evt.event}
@@ -4967,6 +4977,34 @@
   }
 
   /* ── Timeline tab ───────────────────────────────────────────────────────── */
+  .timeline-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .timeline-summary-count {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .timeline-summary-duration {
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+  }
+
+  .timeline-summary-range {
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
   .timeline-list {
     display: flex;
     flex-direction: column;
