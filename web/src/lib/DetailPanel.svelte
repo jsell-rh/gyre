@@ -1630,6 +1630,11 @@
                       signed
                     </span>
                   {/if}
+                  {#if goToRepoTab}
+                    <button class="mr-explore-btn" onclick={() => { goToRepoTab('code', { subTab: 'provenance' }); close(); }} title="View agent provenance for this code">
+                      View Provenance
+                    </button>
+                  {/if}
                 </div>
               {/if}
             {/if}
@@ -5590,6 +5595,25 @@
     gap: var(--space-2);
     margin-top: var(--space-2);
     font-size: var(--text-sm);
+    flex-wrap: wrap;
+  }
+
+  .mr-explore-btn {
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-body);
+    padding: var(--space-1) var(--space-3);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .mr-explore-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+    border-color: var(--color-primary);
   }
 
   .sig-badge {
