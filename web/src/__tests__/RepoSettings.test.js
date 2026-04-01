@@ -21,6 +21,7 @@ vi.mock('../lib/api.js', () => ({
     repoGates: vi.fn().mockResolvedValue([]),
     repoSpecPolicy: vi.fn().mockResolvedValue(null),
     repoBudget: vi.fn().mockResolvedValue(null),
+    workspaceBudget: vi.fn().mockResolvedValue(null),
     auditEvents: vi.fn().mockResolvedValue([]),
     updateRepo: vi.fn().mockResolvedValue({}),
     setRepoSpecPolicy: vi.fn().mockResolvedValue({}),
@@ -243,14 +244,14 @@ describe('RepoSettings', () => {
       expect(container.querySelector('[data-testid="repo-budget-tab"]')).toBeTruthy();
     });
 
-    it('calls api.repoBudget when tab opens', async () => {
+    it('calls api.workspaceBudget when tab opens', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openBudgetTab(container);
-      expect(api.repoBudget).toHaveBeenCalledWith('repo-1');
+      expect(api.workspaceBudget).toHaveBeenCalledWith('ws-1');
     });
 
     it('shows budget card when data exists', async () => {
-      api.repoBudget.mockResolvedValue({ total_credits: 500, used_credits: 200 });
+      api.workspaceBudget.mockResolvedValue({ total_credits: 500, used_credits: 200 });
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openBudgetTab(container);
       await new Promise(r => setTimeout(r, 0));
@@ -399,6 +400,7 @@ describe('RepoSettings', () => {
     it('delete confirm button is disabled until correct name is typed (archived repo)', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: archivedMockRepo } });
       await openDangerTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       const confirmBtn = container.querySelector('[data-testid="delete-confirm-btn"]');
       expect(confirmBtn.disabled).toBe(true);
     });
@@ -406,6 +408,7 @@ describe('RepoSettings', () => {
     it('delete confirm button enabled when correct name is typed (archived repo)', async () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: archivedMockRepo } });
       await openDangerTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="delete-btn"]'));
       const input = container.querySelector('[data-testid="delete-confirm-input"]');
       await fireEvent.input(input, { target: { value: 'payment-api' } });
       const confirmBtn = container.querySelector('[data-testid="delete-confirm-btn"]');

@@ -1,5 +1,6 @@
 <script>
   import { getContext } from 'svelte';
+  import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Card from '../lib/Card.svelte';
   import Badge from '../lib/Badge.svelte';
@@ -12,6 +13,7 @@
   let { onSelectWorkspace = null } = $props();
 
   const navigate = getContext('navigate');
+  const goToWorkspaceHome = getContext('goToWorkspaceHome');
 
   let workspaces = $state([]);
   let wsFilter = $state('');
@@ -115,15 +117,15 @@
       onSelectWorkspace(ws);
     } else {
       // New shell: navigate directly via context
-      navigate?.('inbox', { type: 'workspace', workspaceId: ws.id });
+      goToWorkspaceHome?.(ws);
     }
   }
 </script>
 
 <div class="workspace-cards">
   <div class="cards-header">
-    <h2>Workspaces</h2>
-    <p class="subtitle">Choose a workspace to view its agents, specs, and architecture</p>
+    <h2>{$t('workspace_cards.title')}</h2>
+    <p class="subtitle">{$t('workspace_cards.subtitle')}</p>
   </div>
 
   {#if loading}
@@ -135,19 +137,19 @@
 
   {:else if error}
     <div class="error-banner" role="alert">
-      <p>Failed to load workspaces: {error}</p>
-      <button class="retry-btn" onclick={load}>Retry</button>
+      <p>{$t('workspace_cards.load_failed', { values: { error } })}</p>
+      <button class="retry-btn" onclick={load}>{$t('common.retry')}</button>
     </div>
 
   {:else if workspaces.length === 0}
     <div class="empty-wrap">
       <EmptyState
-        title="No workspaces found."
-        description="Create a workspace in Admin to get started."
+        title={$t('workspace_cards.empty_title')}
+        description={$t('workspace_cards.empty_desc')}
       >
         {#snippet action()}
-          <button class="btn-secondary" onclick={() => navigate?.('admin')}>
-            Go to Admin
+          <button class="btn-secondary" onclick={() => navigate?.('home')}>
+            {$t('workspace_cards.go_to_admin')}
           </button>
         {/snippet}
       </EmptyState>
@@ -155,14 +157,14 @@
 
   {:else}
     <div class="ws-filter-wrap">
-      <input type="text" bind:value={wsFilter} placeholder="Filter workspaces…" class="ws-filter" aria-label="Filter workspaces" />
-      <span class="sr-only" aria-live="polite" role="status">{visibleWs.length} workspace{visibleWs.length === 1 ? '' : 's'} shown</span>
+      <input type="text" bind:value={wsFilter} placeholder={$t('workspace_cards.filter_workspaces')} class="ws-filter" aria-label={$t('workspace_cards.filter_workspaces')} />
+      <span class="sr-only" aria-live="polite" role="status">{$t('workspace_cards.workspaces_shown', { values: { count: visibleWs.length } })}</span>
     </div>
     {#if visibleWs.length === 0}
       <div class="empty-wrap">
-        <EmptyState title="No results" description="No workspaces match your filter.">
+        <EmptyState title={$t('workspace_cards.no_results')} description={$t('workspace_cards.no_results_desc')}>
           {#snippet action()}
-            <button class="btn-secondary" onclick={() => { wsFilter = ''; }}>Clear filter</button>
+            <button class="btn-secondary" onclick={() => { wsFilter = ''; }}>{$t('workspace_cards.clear_filter')}</button>
           {/snippet}
         </EmptyState>
       </div>
@@ -177,7 +179,7 @@
                 {#if ws.trust_level}
                   <Badge value={ws.trust_level} variant={trustVariant(ws.trust_level)} />
                 {:else}
-                  <Badge value="Standard" variant="muted" />
+                  <Badge value={$t('workspace_cards.trust_default')} variant="muted" />
                 {/if}
               {/snippet}
 
@@ -200,7 +202,7 @@
                     {:else}
                       <span class="stat-dash">…</span>
                     {/if}
-                    <span class="stat-label">repos</span>
+                    <span class="stat-label">{$t('workspace_cards.repos')}</span>
                   </div>
 
                   <div class="stat-row">
@@ -218,14 +220,14 @@
                     {:else}
                       <span class="stat-dash">…</span>
                     {/if}
-                    <span class="stat-label">active agents</span>
+                    <span class="stat-label">{$t('workspace_cards.active_agents')}</span>
                   </div>
                 </div>
 
                 <!-- Budget bar -->
                 <div class="budget-section">
                   <div class="budget-label-row">
-                    <span class="budget-label">Budget</span>
+                    <span class="budget-label">{$t('workspace_cards.budget')}</span>
                     {#if info?.budgetPct != null}
                       <span
                         class="budget-pct"
@@ -251,7 +253,7 @@
                   onclick={() => handleEnter(ws)}
                   aria-label="Enter workspace {ws.name}"
                 >
-                  Enter Workspace
+                  {$t('workspace_cards.enter_workspace')}
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
                     <path d="M9 18l6-6-6-6"/>
                   </svg>

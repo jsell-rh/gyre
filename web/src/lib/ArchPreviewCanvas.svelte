@@ -1,5 +1,6 @@
 <script>
   import { columnLayout } from './layout-engines.js';
+  import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
 
   /**
@@ -157,20 +158,20 @@
 
 <div class="arch-canvas-wrap" class:mini={size === 'mini'} class:full={size === 'full'}>
   {#if !nodes.length}
-    <EmptyState title="No architecture data" description="No graph nodes available for this selection." />
+    <EmptyState title={$t('explorer_canvas.no_graph')} description={$t('explorer_canvas.no_graph_desc')} />
   {:else}
     {#if size === 'full'}
       <div class="arch-toolbar">
-        <button class="arch-tool-btn" onclick={resetView} aria-label="Reset view">
+        <button class="arch-tool-btn" onclick={resetView} aria-label={$t('explorer_canvas.reset')}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><path d="M3 12a9 9 0 109-9M3 12V7m0 5H8"/></svg>
-          Reset
+          {$t('explorer_canvas.reset')}
         </button>
-        <span class="arch-node-count">{nodes.length} {nodes.length === 1 ? 'node' : 'nodes'} · {edges.length} {edges.length === 1 ? 'edge' : 'edges'}</span>
+        <span class="arch-node-count">{nodes.length} {nodes.length === 1 ? $t('explorer_canvas.node') : $t('explorer_canvas.nodes')} · {edges.length} {edges.length === 1 ? $t('explorer_canvas.edge') : $t('explorer_canvas.edges')}</span>
         {#if ghostOverlays.length}
           <span class="arch-ghost-legend">
-            <span class="ghost-chip new">+ new</span>
-            <span class="ghost-chip modified">~ modified</span>
-            <span class="ghost-chip removed">− removed</span>
+            <span class="ghost-chip new">{$t('explorer_canvas.ghost_new')}</span>
+            <span class="ghost-chip modified">{$t('explorer_canvas.ghost_modified')}</span>
+            <span class="ghost-chip removed">{$t('explorer_canvas.ghost_removed')}</span>
           </span>
         {/if}
       </div>
@@ -183,7 +184,7 @@
       class:panning={isPanning}
       viewBox="{viewBox.x} {viewBox.y} {viewBox.w} {viewBox.h}"
       role="application"
-      aria-label="Architecture preview canvas"
+      aria-label={$t('explorer_canvas.arch_preview')}
       onmousedown={onMouseDown}
       onmousemove={onMouseMove}
       onmouseup={onMouseUp}

@@ -67,7 +67,7 @@ use compute::{
     close_tunnel, create_compute_target, delete_compute_target, get_compute_target,
     list_compute_targets, list_tunnels, open_tunnel,
 };
-use discover::{discover_agents, update_agent_card};
+use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
 use users::{
@@ -203,7 +203,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/agents/:id/usage", post(spawn::record_agent_usage))
         .route("/api/v1/agents/:id/fail", post(spawn::fail_agent))
         .route("/api/v1/agents/:id/stop", post(spawn::stop_agent))
-        .route("/api/v1/agents/:id/card", put(update_agent_card))
+        .route(
+            "/api/v1/agents/:id/card",
+            get(get_agent_card).put(update_agent_card),
+        )
         .route("/api/v1/agents/:id/messages", get(messages::poll_messages))
         .route(
             "/api/v1/agents/:id/messages/:message_id/ack",

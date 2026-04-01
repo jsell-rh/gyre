@@ -27,4 +27,10 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
   },
+ server: {
+    proxy: {
+      '/api': 'http://localhost:3000',
+      '/mcp': 'http://localhost:3000',
+    }
+  }
 });

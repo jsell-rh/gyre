@@ -485,7 +485,7 @@
   {height}
   class="flow-canvas"
   data-testid="flow-canvas"
-  role="img"
+  role="application"
   onclick={onCanvasClick}
   onmousemove={onCanvasMouseMove}
   onmouseleave={onCanvasMouseLeave}

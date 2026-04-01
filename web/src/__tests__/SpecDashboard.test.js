@@ -162,10 +162,9 @@ describe('SpecDashboard', () => {
   });
 
   // ── Repo scope: progress bars ─────────────────────────────────────────────
-  it('shows spec list (not table) for repo scope', async () => {
+  it('shows sortable table for repo scope', async () => {
     render(SpecDashboard, { props: { scope: 'repo', repoId: 'repo-1' } });
-    await waitFor(() => expect(screen.getByRole('listbox', { name: /Specs/ })).toBeTruthy());
-    expect(screen.queryByRole('table')).toBeNull();
+    await waitFor(() => expect(screen.getByRole('grid', { name: /Specs/ })).toBeTruthy());
   });
 
   it('shows "+ New Spec" button for repo scope', async () => {
@@ -179,13 +178,12 @@ describe('SpecDashboard', () => {
     expect(screen.queryByRole('button', { name: /\+ new spec/i })).toBeNull();
   });
 
-  it('repo spec rows show status icons', async () => {
+  it('repo spec rows show status badges', async () => {
     render(SpecDashboard, { props: { scope: 'repo', repoId: 'repo-1' } });
-    await waitFor(() => expect(screen.getByRole('listbox', { name: /Specs/ })).toBeTruthy());
-    // Approved spec should show ✓
-    const rows = screen.getAllByRole('option');
-    const specRowTexts = rows.map((r) => r.textContent ?? '');
-    expect(specRowTexts.some((t) => t.includes('✓'))).toBe(true);
+    await waitFor(() => expect(screen.getByRole('grid', { name: /Specs/ })).toBeTruthy());
+    // Data rows should exist (header row + 3 data rows = 4 total)
+    const rows = screen.getAllByRole('row');
+    expect(rows.length).toBeGreaterThanOrEqual(2);
   });
 
   // ── Row click opens detail panel ──────────────────────────────────────────

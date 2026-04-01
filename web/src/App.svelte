@@ -1,10 +1,11 @@
 <script>
   import './lib/design-system.css';
-  import { isLoading } from 'svelte-i18n';
+  import { isLoading, t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
+  import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
@@ -12,6 +13,7 @@
   import SearchBar from './lib/SearchBar.svelte';
   import Modal from './lib/Modal.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
+  import DetailPanel from './lib/DetailPanel.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
   import { toast as showToast } from './lib/toast.svelte.js';
@@ -30,6 +32,7 @@
 
   // ── Global detail panel ──────────────────────────────────────────────
   let detailPanel = $state({ open: false, entity: null });
+  let detailExpanded = $state(false);
 
   // ── WebSocket ────────────────────────────────────────────────────────
   let wsStore = $state(null);
@@ -56,6 +59,9 @@
   let wsDropdownEl = $state(null);
 
   let mobileDrawerOpen = $state(false);
+  let createWsModalOpen = $state(false);
+  let createWsForm = $state({ name: '', description: '' });
+  let createWsSaving = $state(false);
   let tokenModalOpen = $state(false);
   let tokenInput = $state(localStorage.getItem('gyre_auth_token') || 'gyre-dev-token');
   let hasToken = $state(true);
@@ -178,7 +184,12 @@
         return { mode: 'workspace_settings', slug, repoName: null, tab: null };
       }
 
-      // /workspaces/:slug  or  /workspaces/:slug/agent-rules  etc.
+      // /workspaces/:slug/agent-rules
+      if (raw[2] === 'agent-rules') {
+        return { mode: 'agent_rules', slug, repoName: null, tab: null };
+      }
+
+      // /workspaces/:slug  or  /workspaces/:slug/...  etc.
       return { mode: 'workspace_home', slug, repoName: null, tab: null };
     }
 
@@ -195,6 +206,7 @@
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
     if (m === 'workspace_settings') return `/workspaces/${encodeURIComponent(slug)}/settings`;
+    if (m === 'agent_rules') return `/workspaces/${encodeURIComponent(slug)}/agent-rules`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
       if (tab && tab !== 'specs') return `${base}/${tab}`;
@@ -266,6 +278,15 @@
     pushState({ mode: 'workspace_settings', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
   }
 
+  function goToAgentRules() {
+    if (!currentWorkspace) return;
+    mode = 'agent_rules';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'agent_rules', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
+  }
+
   function goToProfile() {
     mode = 'profile';
     fadeContent();
@@ -298,6 +319,19 @@
     );
   }
 
+  function goToTenantAgentRules() {
+    mode = 'cross_workspace';
+    crossWorkspaceTab = 'agent-rules';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    window.history.pushState(
+      { mode: 'cross_workspace', crossWorkspaceTab: 'agent-rules', wsId: null, repoName: null, repoTab: null },
+      '',
+      '/all/agent-rules'
+    );
+  }
+
   function selectWorkspace(ws) {
     wsDropdownOpen = false;
     if (ws === 'all') {
@@ -322,6 +356,9 @@
     repoId: currentRepo?.id,
   }));
   setContext('openDetailPanel', openDetailPanel);
+  setContext('goToAgentRules', () => goToAgentRules());
+  setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
+  setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
     if (params) {
@@ -339,6 +376,7 @@
 
   function closeDetailPanel() {
     detailPanel = { open: false, entity: null };
+    detailExpanded = false;
   }
 
   // ── Workspace dropdown keyboard navigation ────────────────────────────
@@ -437,13 +475,7 @@
             return;
           case 'a': // g a → agent rules
             e.preventDefault();
-            if (currentWorkspace) {
-              window.history.pushState(
-                { mode: 'workspace_home', wsId: currentWorkspace.id, repoName: null, repoTab: 'specs' },
-                '',
-                `/workspaces/${encodeURIComponent(wsSlug(currentWorkspace))}/agent-rules`
-              );
-            }
+            goToAgentRules();
             return;
           case '1': // g 1 → Specs tab (repo mode only)
             e.preventDefault();
@@ -491,6 +523,27 @@
     try { tokenInfo = await api.tokenInfo(); } catch { /* ignore */ }
   }
 
+  async function handleCreateWorkspaceFromDropdown() {
+    const name = createWsForm.name.trim();
+    if (!name) return;
+    createWsSaving = true;
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const newWs = await api.createWorkspace({ ...createWsForm, name, tenant_id: 'default', slug });
+      showToast(`Workspace "${name}" created.`, { type: 'success' });
+      createWsModalOpen = false;
+      createWsForm = { name: '', description: '' };
+      // Refresh workspace list and navigate
+      try { workspaces = await api.workspaces() ?? []; } catch { /* keep existing */ }
+      const ws = workspaces.find(w => w.id === newWs?.id) ?? newWs;
+      if (ws) goToWorkspaceHome(ws);
+    } catch (e) {
+      showToast('Failed to create workspace: ' + (e.message || e), { type: 'error' });
+    } finally {
+      createWsSaving = false;
+    }
+  }
+
   function saveToken() {
     const t = tokenInput.trim() || 'gyre-dev-token';
     setAuthToken(t);
@@ -519,6 +572,8 @@
       document.title = 'Profile | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
+    } else if (mode === 'agent_rules') {
+      document.title = wsName ? `Agent Rules — ${wsName} | Gyre` : 'Agent Rules | Gyre';
     } else if (mode === 'repo' && repoName) {
       document.title = wsName ? `${repoName} — ${wsName} | Gyre` : `${repoName} | Gyre`;
     } else if (mode === 'workspace_home' && wsName) {
@@ -572,7 +627,7 @@
       mode = 'profile';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
-      crossWorkspaceTab = parsed.tab === 'settings' ? 'settings' : null;
+      crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
     } else if (parsed?.slug) {
       // URL-driven workspace navigation
       const ws = findWorkspaceBySlug(parsed.slug);
@@ -596,6 +651,8 @@
           } catch { /* keep name-only ref */ }
         } else if (parsed.mode === 'workspace_settings') {
           mode = 'workspace_settings';
+        } else if (parsed.mode === 'agent_rules') {
+          mode = 'agent_rules';
         } else {
           mode = 'workspace_home';
         }
@@ -663,7 +720,7 @@
     function handlePopstate(e) {
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace')
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
@@ -692,11 +749,11 @@
           mode = 'profile';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
-          crossWorkspaceTab = p.tab === 'settings' ? 'settings' : null;
+          crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -732,7 +789,7 @@
   });
 </script>
 
-<a href="#main-content" class="skip-to-content">Skip to main content</a>
+<a href="#main-content" class="skip-to-content">{$t('common.skip_to_content')}</a>
 
 {#if !$isLoading}
 <div class="app">
@@ -761,24 +818,49 @@
       </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
-      {#if mode === 'repo'}
-        <!-- Repo mode: back arrow + WorkspaceName / RepoName -->
+      {#if mode === 'agent_rules'}
+        <!-- Agent rules mode: back arrow + WorkspaceName / Agent Rules -->
         <div class="topbar-left repo-context">
           <button
             class="back-btn"
             onclick={() => goToWorkspaceHome(currentWorkspace)}
-            aria-label="Back to workspace home"
+            aria-label={$t('topbar.back_to_workspace')}
             data-testid="back-btn"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
               <path d="M19 12H5M12 5l-7 7 7 7"/>
             </svg>
           </button>
-          <nav class="breadcrumb" aria-label="Location" data-testid="repo-breadcrumb">
+          <nav class="breadcrumb" aria-label={$t('topbar.location')}>
             <button
               class="breadcrumb-ws"
               onclick={() => goToWorkspaceHome(currentWorkspace)}
-              aria-label="Go to {currentWorkspace?.name ?? 'workspace'} home"
+              aria-label={$t('topbar.go_to_workspace_home', { values: { name: currentWorkspace?.name ?? 'workspace' } })}
+            >
+              {currentWorkspace?.name ?? 'Workspace'}
+            </button>
+            <span class="breadcrumb-sep" aria-hidden="true">/</span>
+            <span class="breadcrumb-repo" aria-current="page">{$t('topbar.agent_rules_label')}</span>
+          </nav>
+        </div>
+      {:else if mode === 'repo'}
+        <!-- Repo mode: back arrow + WorkspaceName / RepoName -->
+        <div class="topbar-left repo-context">
+          <button
+            class="back-btn"
+            onclick={() => goToWorkspaceHome(currentWorkspace)}
+            aria-label={$t('topbar.back_to_workspace')}
+            data-testid="back-btn"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+              <path d="M19 12H5M12 5l-7 7 7 7"/>
+            </svg>
+          </button>
+          <nav class="breadcrumb" aria-label={$t('topbar.location')} data-testid="repo-breadcrumb">
+            <button
+              class="breadcrumb-ws"
+              onclick={() => goToWorkspaceHome(currentWorkspace)}
+              aria-label={$t('topbar.go_to_workspace_home', { values: { name: currentWorkspace?.name ?? 'workspace' } })}
             >
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
@@ -801,7 +883,7 @@
               <button
                 class="ws-name-btn"
                 onclick={() => goToWorkspaceHome(currentWorkspace)}
-                aria-label="Go to {currentWorkspace.name} workspace home"
+                aria-label={$t('topbar.go_to_workspace_home', { values: { name: currentWorkspace.name } })}
                 data-testid="ws-name-btn"
               >
                 {currentWorkspace.name}
@@ -811,7 +893,7 @@
                 onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
                 aria-haspopup="menu"
                 aria-expanded={wsDropdownOpen}
-                aria-label="Switch workspace"
+                aria-label={$t('topbar.switch_workspace')}
                 data-testid="ws-dropdown-toggle"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
@@ -821,8 +903,8 @@
               <button
                 class="ws-gear-btn"
                 onclick={() => goToWorkspaceSettings()}
-                aria-label="Workspace settings"
-                title="Workspace settings (g s)"
+                aria-label={$t('topbar.workspace_settings')}
+                title={$t('topbar.workspace_settings') + ' (g s)'}
                 data-testid="ws-gear-btn"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
@@ -838,10 +920,10 @@
                 onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
                 aria-haspopup="menu"
                 aria-expanded={wsDropdownOpen}
-                aria-label="All Workspaces — switch workspace"
+                aria-label="{$t('topbar.all_workspaces')} — {$t('topbar.switch_workspace')}"
                 data-testid="ws-all-workspaces-btn"
               >
-                All Workspaces
+                {$t('topbar.all_workspaces')}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
                   <path d="M6 9l6 6 6-6"/>
                 </svg>
@@ -850,8 +932,8 @@
                 <button
                   class="ws-gear-btn"
                   onclick={() => goToTenantSettings()}
-                  aria-label="Tenant settings"
-                  title="Tenant settings"
+                  aria-label={$t('topbar.tenant_settings')}
+                  title={$t('topbar.tenant_settings')}
                   data-testid="all-settings-gear-btn"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
@@ -867,10 +949,10 @@
               onclick={() => (wsDropdownOpen = !wsDropdownOpen)}
               aria-haspopup="menu"
               aria-expanded={wsDropdownOpen}
-              aria-label="Select workspace"
+              aria-label="{$t('topbar.select_workspace')}"
               data-testid="ws-select-prompt"
             >
-              Select workspace
+              {$t('topbar.select_workspace')}
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
                 <path d="M6 9l6 6 6-6"/>
               </svg>
@@ -883,7 +965,7 @@
               class="ws-dropdown"
               role="menu"
               tabindex="-1"
-              aria-label="Workspaces"
+              aria-label={$t('topbar.all_workspaces')}
               bind:this={wsDropdownEl}
               onkeydown={onWsDropdownKeydown}
               onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) wsDropdownOpen = false; }}
@@ -899,14 +981,14 @@
                 data-testid="ws-all-workspaces"
               >
                 <span class="ws-all-icon" aria-hidden="true">◎</span>
-                All Workspaces
+                {$t('topbar.all_workspaces')}
                 {#if mode === 'cross_workspace'}
                   <span class="ws-check" aria-hidden="true">✓</span>
                 {/if}
               </button>
               <div class="ws-dropdown-divider" role="separator"></div>
               {#if workspaces.length === 0}
-                <div class="ws-dropdown-empty">No workspaces found</div>
+                <div class="ws-dropdown-empty">{$t('workspace_home.select_workspace_desc')}</div>
               {:else}
                 {#each workspaces as ws}
                   <button
@@ -923,6 +1005,16 @@
                   </button>
                 {/each}
               {/if}
+              <div class="ws-dropdown-divider" role="separator"></div>
+              <button
+                class="ws-dropdown-item ws-dropdown-create"
+                role="menuitem"
+                tabindex="-1"
+                onclick={() => { wsDropdownOpen = false; createWsForm = { name: '', description: '' }; createWsModalOpen = true; }}
+                data-testid="ws-dropdown-create"
+              >
+                {$t('workspace_home.new_workspace')}
+              </button>
             </div>
           {/if}
         </div>
@@ -933,13 +1025,13 @@
         <button
           class="search-trigger"
           onclick={() => (searchOpen = true)}
-          aria-label="Open search (Ctrl+K)"
+          aria-label={$t('topbar.open_search')}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
             <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
           </svg>
-          <span>Search</span>
-          <kbd aria-hidden="true">⌘K</kbd>
+          <span>{$t('topbar.search')}</span>
+          <kbd aria-hidden="true">{$t('topbar.search_shortcut')}</kbd>
         </button>
       </div>
 
@@ -960,8 +1052,8 @@
               document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
           }}
-          aria-label={decisionsCount > 0 ? `${decisionsCount} decisions pending` : 'No decisions pending'}
-          title="Decisions"
+          aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
+          title={$t('workspace_home.sections.decisions')}
           data-testid="decisions-badge"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -973,7 +1065,7 @@
           {/if}
         </button>
         <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {decisionsCount > 0 ? `${decisionsCount} decisions pending` : ''}
+          {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
         </span>
 
         <!-- User avatar dropdown -->
@@ -984,7 +1076,7 @@
             onclick={() => (userMenuOpen = !userMenuOpen)}
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            aria-label="User menu ({hasToken ? 'authenticated' : 'not authenticated'})"
+            aria-label={$t('topbar.user_menu')}
           >
             <div class="user-avatar" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -1000,20 +1092,20 @@
               class="user-dropdown"
               role="menu"
               tabindex="-1"
-              aria-label="User menu"
+              aria-label={$t('topbar.user_menu')}
               bind:this={userMenuEl}
               onkeydown={onUserMenuKeydown}
               onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) userMenuOpen = false; }}
             >
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
-                Profile
+                {$t('topbar.profile')}
               </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
-                API Token
+                {$t('topbar.api_token')}
               </button>
               <div class="user-dropdown-divider" role="separator"></div>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { localStorage.removeItem('gyre_auth_token'); hasToken = false; userMenuOpen = false; }}>
-                Sign out
+                {$t('topbar.sign_out')}
               </button>
             </div>
           {/if}
@@ -1032,7 +1124,7 @@
       <nav
         id="mobile-drawer"
         class="mobile-drawer"
-        aria-label="Navigation drawer"
+        aria-label={$t('topbar.navigation_drawer')}
         data-testid="mobile-drawer"
       >
         <div class="drawer-header">
@@ -1040,7 +1132,7 @@
           <button
             class="drawer-close"
             onclick={() => (mobileDrawerOpen = false)}
-            aria-label="Close navigation drawer"
+            aria-label={$t('topbar.close_drawer')}
           >✕</button>
         </div>
         <ul class="drawer-links" role="list">
@@ -1053,7 +1145,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Decisions</a>
+            >{$t('workspace_home.sections.decisions')}</a>
           </li>
           <li>
             <a
@@ -1064,7 +1156,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Specs</a>
+            >{$t('workspace_home.sections.specs')}</a>
           </li>
           <li>
             <a
@@ -1075,7 +1167,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-repos"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Repos</a>
+            >{$t('workspace_home.sections.repos')}</a>
           </li>
           <li>
             <a
@@ -1086,7 +1178,7 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Briefing</a>
+            >{$t('workspace_home.sections.briefing')}</a>
           </li>
           <li>
             <a
@@ -1097,25 +1189,45 @@
                 mobileDrawerOpen = false;
                 document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth' });
               }}
-            >Agent Rules</a>
+            >{$t('topbar.agent_rules_label')}</a>
           </li>
         </ul>
       </nav>
     {/if}
 
-    <!-- ── Content area ──────────────────────────────────────────────── -->
+    <!-- ── Content area + detail panel ──────────────────────────────── -->
+    <div class="content-split">
     <main class="content" id="main-content" tabindex="-1">
       <div class="content-inner" class:faded={!contentVisible}>
         {#if mode === 'workspace_home'}
           <WorkspaceHome
             workspace={currentWorkspace}
             {decisionsCount}
-            onSelectRepo={(repo, tab) => goToRepo(repo, tab ?? 'specs')}
+            onSelectRepo={(repo, tab, specPath) => {
+              goToRepo(repo, tab);
+              if (specPath) {
+                // Open the spec's detail panel after navigation
+                tick().then(() => {
+                  openDetailPanel({ type: 'spec', id: specPath, data: { repo_id: repo.id } });
+                });
+              }
+            }}
+            onWorkspaceCreated={async (newWs) => {
+              // Refresh workspace list and navigate to the new workspace
+              try { workspaces = await api.workspaces() ?? []; } catch { /* keep existing */ }
+              const ws = workspaces.find(w => w.id === newWs?.id) ?? newWs;
+              if (ws) goToWorkspaceHome(ws);
+            }}
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings
             workspace={currentWorkspace}
             onBack={() => goToWorkspaceHome(currentWorkspace)}
+          />
+        {:else if mode === 'agent_rules'}
+          <MetaSpecs
+            scope={currentWorkspace ? 'workspace' : 'tenant'}
+            workspaceId={currentWorkspace?.id ?? null}
           />
         {:else if mode === 'repo'}
           <RepoMode
@@ -1128,10 +1240,13 @@
         {:else if mode === 'cross_workspace'}
           {#if crossWorkspaceTab === 'settings'}
             <TenantSettings onBack={() => goToCrossWorkspace()} />
+          {:else if crossWorkspaceTab === 'agent-rules'}
+            <MetaSpecs scope="tenant" workspaceId={null} />
           {:else}
             <CrossWorkspaceHome
               onSelectWorkspace={(ws) => goToWorkspaceHome(ws)}
               onSettings={userIsAdmin ? () => goToTenantSettings() : undefined}
+              onManageAgentRules={userIsAdmin ? () => goToTenantAgentRules() : undefined}
             />
           {/if}
         {:else if mode === 'profile'}
@@ -1140,30 +1255,37 @@
       </div>
     </main>
 
+    <DetailPanel
+      entity={detailPanel.open ? detailPanel.entity : null}
+      bind:expanded={detailExpanded}
+      onclose={closeDetailPanel}
+    />
+    </div>
+
     <!-- ── Status bar (24px) ─────────────────────────────────────────── -->
-    <footer class="status-bar" aria-label="Status bar">
+    <footer class="status-bar" aria-label={$t('status_bar.label')}>
       {#if trustLevel}
-        <span class="status-item status-trust" title="Workspace trust level">
+        <span class="status-item status-trust" title={$t('status_bar.trust')}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
-          Trust: {trustLevel}
+          {$t('status_bar.trust')}: {trustLevel}
         </span>
       {/if}
 
       {#if budgetPct !== null}
-        <span class="status-item status-budget" title="Budget usage">
+        <span class="status-item status-budget" title={$t('status_bar.budget')}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
             <rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
           </svg>
-          Budget: {budgetPct}%
+          {$t('status_bar.budget')}: {budgetPct}%
           <span
             class="budget-bar-track"
             role="progressbar"
             aria-valuenow={budgetPct}
             aria-valuemin="0"
             aria-valuemax="100"
-            aria-label="Budget {budgetPct}%"
+            aria-label="{$t('status_bar.budget')} {budgetPct}%"
           >
             <span
               class="budget-bar-fill"
@@ -1189,11 +1311,11 @@
         class:connected={wsStatus === 'connected'}
         class:error={wsStatus === 'error' || wsStatus === 'auth-failed'}
         role="status"
-        aria-label={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
-        title={wsStatus === 'connected' ? 'Live — real-time updates active' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline — connection error' : 'Connecting…'}
+        aria-label={wsStatus === 'connected' ? $t('status_bar.live_tooltip') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline_tooltip') : $t('status_bar.connecting_tooltip')}
+        title={wsStatus === 'connected' ? $t('status_bar.live_tooltip') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline_tooltip') : $t('status_bar.connecting_tooltip')}
       >
         <span class="ws-dot" aria-hidden="true"></span>
-        {wsStatus === 'connected' ? 'Live' : wsStatus === 'error' || wsStatus === 'auth-failed' ? 'Offline' : 'Connecting'}
+        {wsStatus === 'connected' ? $t('status_bar.live') : wsStatus === 'error' || wsStatus === 'auth-failed' ? $t('status_bar.offline') : $t('status_bar.connecting')}
       </span>
     </footer>
   </div>
@@ -1201,7 +1323,22 @@
 {/if}
 
 <!-- ── Global overlays ────────────────────────────────────────────────── -->
-<SearchBar bind:open={searchOpen} onnavigate={(v) => { if (v === 'profile') goToProfile(); else goToWorkspaceHome(currentWorkspace); }} />
+<SearchBar bind:open={searchOpen} onnavigate={(v, opts) => {
+  if (v === 'profile') { goToProfile(); return; }
+  if (v === 'meta-specs') { goToAgentRules(); return; }
+  // Entity search results: open detail panel for the matched entity
+  if (opts?.entityType && opts?.entityId) {
+    if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
+    tick().then(() => openDetailPanel({ type: opts.entityType, id: opts.entityId }));
+    return;
+  }
+  // For section-based views, navigate to workspace home and scroll to the section
+  if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
+  if (v === 'inbox') tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  else if (v === 'briefing') tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  else if (v === 'specs') tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  else goToWorkspaceHome(currentWorkspace);
+}} />
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
@@ -1221,56 +1358,86 @@
     }
   }}>
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1">
+    <div class="shortcuts-modal" bind:this={shortcutsModalEl} onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={$t('shortcuts.title')} tabindex="-1">
       <div class="shortcuts-header">
-        <h2>Keyboard Shortcuts</h2>
-        <button onclick={() => (shortcutsOpen = false)} aria-label="Close">✕</button>
+        <h2>{$t('shortcuts.title')}</h2>
+        <button onclick={() => (shortcutsOpen = false)} aria-label={$t('common.close')}>✕</button>
       </div>
       <div class="shortcuts-body">
         <dl class="shortcuts-list">
-          <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>Global search</dd></div>
-          <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>Go to workspace home</dd></div>
-          <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>Workspace settings</dd></div>
-          <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>Agent rules</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>Specs tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>Architecture tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>Decisions tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>Code tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>Settings tab (repo mode)</dd></div>
-          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close panel / return to workspace home</dd></div>
-          <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>Focus search</dd></div>
-          <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>{$t('shortcuts.global_search')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>{$t('shortcuts.workspace_home')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>{$t('shortcuts.workspace_settings')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>{$t('shortcuts.agent_rules')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>{$t('shortcuts.specs_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>{$t('shortcuts.architecture_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>{$t('shortcuts.decisions_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>{$t('shortcuts.code_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>{$t('shortcuts.settings_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>{$t('shortcuts.close_panel')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>{$t('shortcuts.focus_search')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>{$t('shortcuts.toggle_shortcuts')}</dd></div>
         </dl>
       </div>
     </div>
   </div>
 {/if}
 
-<!-- Token configuration modal -->
-<Modal bind:open={tokenModalOpen} title="API Token" size="sm">
+<!-- Create Workspace modal (from dropdown) -->
+<Modal bind:open={createWsModalOpen} title={$t('workspace_home.create_ws_title')} size="sm">
   <div class="token-modal">
-    <p class="token-desc">Set the Bearer token for all API and WebSocket requests.</p>
+    <label class="token-label" for="ws-name-input">{$t('workspace_home.create_ws_name_label')}</label>
+    <input
+      id="ws-name-input"
+      class="token-input"
+      type="text"
+      bind:value={createWsForm.name}
+      placeholder={$t('workspace_home.create_ws_name_placeholder')}
+      onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
+    />
+    <label class="token-label" for="ws-desc-input">{$t('workspace_home.create_ws_desc_label')}</label>
+    <input
+      id="ws-desc-input"
+      class="token-input"
+      type="text"
+      bind:value={createWsForm.description}
+      placeholder={$t('workspace_home.create_ws_desc_placeholder')}
+      onkeydown={(e) => e.key === 'Enter' && handleCreateWorkspaceFromDropdown()}
+    />
+    <div class="token-actions">
+      <button class="btn-secondary" onclick={() => (createWsModalOpen = false)}>{$t('common.cancel')}</button>
+      <button class="btn-primary" onclick={handleCreateWorkspaceFromDropdown} disabled={createWsSaving || !createWsForm.name?.trim()}>
+        {createWsSaving ? $t('workspace_home.create_ws_creating') : $t('workspace_home.create_ws_submit')}
+      </button>
+    </div>
+  </div>
+</Modal>
+
+<!-- Token configuration modal -->
+<Modal bind:open={tokenModalOpen} title={$t('settings.token.title')} size="sm">
+  <div class="token-modal">
+    <p class="token-desc">{$t('common.token_desc')}</p>
     {#if tokenInfo}
       <div class="token-info-box">
         <div class="token-info-row">
-          <span class="token-info-label">Kind</span>
+          <span class="token-info-label">{$t('common.token_kind')}</span>
           <span class="token-info-val">{TOKEN_KIND_LABELS[tokenInfo.kind] ?? tokenInfo.kind ?? '—'}</span>
         </div>
         {#if tokenInfo.agent_id}
           <div class="token-info-row">
-            <span class="token-info-label">Agent ID</span>
+            <span class="token-info-label">{$t('common.token_agent_id')}</span>
             <span class="token-info-val mono">{tokenInfo.agent_id}</span>
           </div>
         {/if}
         {#if tokenInfo.exp}
           <div class="token-info-row">
-            <span class="token-info-label">Expires</span>
+            <span class="token-info-label">{$t('common.token_expires')}</span>
             <span class="token-info-val">{new Date(tokenInfo.exp * 1000).toLocaleString()}</span>
           </div>
         {/if}
       </div>
     {/if}
-    <label class="token-label" for="token-input">Token</label>
+    <label class="token-label" for="token-input">{$t('settings.token.label')}</label>
     <div class="token-input-wrap">
       <input
         id="token-input"
@@ -1285,7 +1452,7 @@
         class="token-toggle"
         type="button"
         onclick={() => tokenVisible = !tokenVisible}
-        aria-label={tokenVisible ? 'Hide token' : 'Show token'}
+        aria-label={tokenVisible ? $t('settings.token.hide') : $t('settings.token.show')}
       >
         {#if tokenVisible}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
@@ -1301,8 +1468,8 @@
       </button>
     </div>
     <div class="token-actions">
-      <button class="btn-secondary" onclick={() => (tokenModalOpen = false)}>Cancel</button>
-      <button class="btn-primary" onclick={saveToken}>Save</button>
+      <button class="btn-secondary" onclick={() => (tokenModalOpen = false)}>{$t('common.cancel')}</button>
+      <button class="btn-primary" onclick={saveToken}>{$t('common.save')}</button>
     </div>
   </div>
 </Modal>
@@ -1754,13 +1921,21 @@
     margin: var(--space-1) 0;
   }
 
-  /* ── Content area ───────────────────────────────────────────────────── */
+  /* ── Content area + detail panel split ────────────────────────────── */
+  .content-split {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+  }
+
   .content {
     flex: 1;
     overflow: hidden;
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
   }
 
   main:focus { outline: none; }
@@ -2234,6 +2409,11 @@
   .ws-all-icon {
     margin-right: var(--space-2);
     font-size: var(--text-base);
+  }
+
+  .ws-dropdown-create {
+    color: var(--color-primary);
+    font-weight: 500;
   }
 
   .ws-dropdown-divider {
