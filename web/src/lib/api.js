@@ -521,6 +521,10 @@ export const api = {
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   // Tenant-level ABAC policies
   policies: () => request('/policies'),
+  createPolicy: (data) =>
+    request('/policies', { method: 'POST', body: JSON.stringify(data) }),
+  deletePolicy: (id) =>
+    request(`/policies/${id}`, { method: 'DELETE' }),
   policyDecisions: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/policies/decisions${qs ? '?' + qs : ''}`);
