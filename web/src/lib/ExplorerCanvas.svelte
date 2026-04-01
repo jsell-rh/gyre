@@ -40,6 +40,7 @@
   const navigate = getContext('navigate');
   const goToRepoTab = getContext('goToRepoTab');
   const openDetailPanel = getContext('openDetailPanel');
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   // ── Layout engine ──────────────────────────────────────────────────────────
   let layoutEngine = $state('column');
@@ -1091,7 +1092,7 @@
             {/if}
             {#if selectedNode.spec_path}
               <div class="panel-row"><span class="panel-label">{$t('detail_panel.spec')}</span>
-                <button class="spec-link-btn" onclick={() => openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path })} title={$t('explorer_canvas.navigate_to_spec')}>{selectedNode.spec_path}</button>
+                <button class="spec-link-btn" onclick={() => { if (goToEntityDetail) goToEntityDetail('spec', selectedNode.spec_path, { path: selectedNode.spec_path }); else openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path }); }} title={$t('explorer_canvas.navigate_to_spec')}>{selectedNode.spec_path}</button>
               </div>
             {/if}
             {#if selectedNode.spec_confidence}
