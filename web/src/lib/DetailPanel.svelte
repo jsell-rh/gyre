@@ -706,7 +706,7 @@
     const agentStatus = agentDetail?.status ?? entity?.data?.status;
     const isLive = agentStatus === 'active' || agentStatus === 'running' || agentStatus === 'spawning';
 
-    if (isActive && isLive && entity?.id) {
+    if (isActive && isLive && entity?.id && typeof EventSource !== 'undefined') {
       const token = localStorage.getItem('gyre_token') ?? '';
       const url = api.agentLogStreamUrl(entity.id);
       const es = new EventSource(`${url}?token=${encodeURIComponent(token)}`);
