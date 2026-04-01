@@ -500,7 +500,7 @@
         if (rawTimeline.length > 0) {
           const events = rawTimeline.slice(-4).map(evt => {
             const evtType = evt.event_type ?? evt.type ?? evt.event;
-            return { label: timelineEventLabel(evtType), variant: timelineEventVariant(evtType), time: evt.timestamp ?? evt.created_at };
+            return { label: timelineEventLabel(evtType), variant: timelineEventVariant(evtType, evt), time: evt.timestamp ?? evt.created_at };
           });
           mrDetail = { ...mrDetail, _statusStory: events };
         } else {
@@ -1538,7 +1538,7 @@
       'gate_started': 'Gate started',
       'gate_passed': 'Gate passed',
       'gate_failed': 'Gate failed',
-      'GateResult': 'Gate completed',
+      'GateResult': 'Gate check',
       'enqueued': 'Enqueued for merge',
       'MergeQueueEnqueued': 'Enqueued for merge',
       'merged': 'Merged',
@@ -1559,10 +1559,16 @@
     return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
   }
 
-  function timelineEventVariant(evt) {
+  function timelineEventVariant(evt, evtObj) {
     if (evt === 'merged' || evt === 'Merged' || evt === 'gate_passed' || evt === 'AgentCompleted') return 'success';
     if (evt === 'gate_failed' || evt === 'closed') return 'danger';
-    if (evt?.startsWith('gate_') || evt === 'GateResult') return 'warning';
+    if (evt === 'GateResult') {
+      const status = evtObj?.detail?.status;
+      if (status === 'pass' || status === 'passed') return 'success';
+      if (status === 'fail' || status === 'failed') return 'danger';
+      return 'warning';
+    }
+    if (evt?.startsWith('gate_')) return 'warning';
     if (evt === 'GraphDelta' || evt === 'graph_extracted' || evt === 'GraphExtraction') return 'info';
     if (evt === 'AgentSpawned' || evt === 'SpecLifecycleTrigger') return 'info';
     if (evt === 'MergeQueueEnqueued' || evt === 'enqueued') return 'warning';
@@ -3725,12 +3731,12 @@
                 {@const elapsed = (prevTime && thisTime) ? Math.round(thisTime - prevTime) : null}
                 <div class="timeline-item">
                   <div class="timeline-connector">
-                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType)}"></div>
+                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType, evt)}"></div>
                     {#if i < mrTimeline.length - 1}<div class="timeline-line"></div>{/if}
                   </div>
                   <div class="timeline-content">
                     <div class="timeline-header">
-                      <Badge value={timelineEventLabel(evtType)} variant={timelineEventVariant(evtType)} />
+                      <Badge value={timelineEventLabel(evtType)} variant={timelineEventVariant(evtType, evt)} />
                       <span class="timeline-time">{fmtDate(thisTime)}</span>
                       {#if elapsed && elapsed > 0}
                         <span class="timeline-elapsed">+{elapsed < 60 ? elapsed + 's' : elapsed < 3600 ? Math.round(elapsed / 60) + 'm' : Math.round(elapsed / 3600) + 'h'}</span>
@@ -3753,6 +3759,19 @@
                     {/if}
                     {#if evt.mr_id}
                       <button class="entity-link mono" onclick={() => navigateTo('mr', evt.mr_id)} title={evt.mr_id}>{entityName('mr', evt.mr_id)}</button>
+                    {/if}
+                    {#if evt.detail?.spec_path}
+                      {@const tlSpecPath = evt.detail.spec_path.replace(/^specs\//, '')}
+                      <button class="entity-link timeline-spec-ref mono" onclick={() => navigateTo('spec', tlSpecPath, { path: tlSpecPath, repo_id: mrDetail?.repository_id ?? mrDetail?.repo_id })} title={evt.detail.spec_path}>{tlSpecPath.split('/').pop()}</button>
+                    {/if}
+                    {#if evt.detail?.task_id}
+                      <button class="entity-link mono" onclick={() => navigateTo('task', evt.detail.task_id)} title={evt.detail.task_id}>{entityName('task', evt.detail.task_id)}</button>
+                    {/if}
+                    {#if evt.detail?.agent_id && !(evt.actor_id ?? evt.agent_id)}
+                      <button class="entity-link mono" onclick={() => navigateTo('agent', evt.detail.agent_id)} title={evt.detail.agent_id}>{entityName('agent', evt.detail.agent_id)}</button>
+                    {/if}
+                    {#if evt.detail?.commit_sha && !(evt.sha || evt.commit_sha)}
+                      <code class="sha-badge mono copyable" title="Click to copy: {evt.detail.commit_sha}" onclick={() => copyId(evt.detail.commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(evt.detail.commit_sha); }}>{evt.detail.commit_sha.slice(0, 7)}</code>
                     {/if}
                   </div>
                 </div>
