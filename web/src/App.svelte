@@ -377,6 +377,13 @@
     // Push current entity to history stack before navigating
     if (detailPanel.open && detailPanel.entity) {
       detailHistory = [...detailHistory, detailPanel.entity];
+    } else {
+      // First panel open — push a browser history entry so back button closes panel
+      window.history.pushState(
+        { ...window.history.state, detailOpen: true },
+        '',
+        window.location.href,
+      );
     }
     detailPanel = { open: true, entity };
   }
@@ -745,26 +752,21 @@
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
       // Close detail panel on back navigation so back button always takes user
-      // one step back in their journey
+      // one step back in their journey. Since we push a history entry when the
+      // panel opens, going back naturally pops it — no need to re-push.
       if (detailPanel.open) {
         if (detailHistory.length > 0) {
+          // Navigate back within the detail panel history stack.
+          // Push a new state so the next back press continues working.
           goBackDetailPanel();
+          window.history.pushState(
+            { ...e.state, detailOpen: true },
+            '',
+            window.location.href,
+          );
         } else {
           closeDetailPanel();
         }
-        // Don't process the popstate further — the panel close IS the back step.
-        // Re-push the current state so the next back button press navigates pages.
-        const canon = urlFor({
-          mode,
-          slug: wsSlug(currentWorkspace),
-          repoName: currentRepo?.name ?? null,
-          tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
-        });
-        window.history.pushState(
-          { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab },
-          '',
-          canon
-        );
         return;
       }
       if (e.state?.mode) {
