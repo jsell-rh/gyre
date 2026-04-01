@@ -542,6 +542,7 @@
       if (userMenuOpen) { userMenuOpen = false; gKeyPending = false; return; }
       if (wsDropdownOpen) { wsDropdownOpen = false; gKeyPending = false; return; }
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
+      if (mode === 'repo' && entityDetail) { entityDetail = null; goToRepoTab(repoTab); gKeyPending = false; return; }
       if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
       gKeyPending = false;
       return;
