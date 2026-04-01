@@ -1003,6 +1003,12 @@
               specHistory = Array.isArray(h) ? h : [];
             }).catch(() => {});
           }
+          // Preload spec progress for journey visualization
+          if (!specProgress && !specProgressLoading) {
+            api.specProgress(path, repoId).then(p => {
+              specProgress = p;
+            }).catch(() => {});
+          }
         })
         .catch(() => { specDetail = null; })
         .finally(() => { specDetailLoading = false; });
@@ -2541,6 +2547,50 @@
                   {#if rejectEvent?.user_id ?? rejectEvent?.approver_id ?? rejectEvent?.revoked_by}
                     <span class="rejected-banner-by">by {rejectEvent.user_id ?? rejectEvent.approver_id ?? rejectEvent.revoked_by} {rejectEvent.timestamp ? '· ' + fmtDate(rejectEvent.timestamp ?? rejectEvent.approved_at) : ''}</span>
                   {/if}
+                </div>
+              </div>
+            {/if}
+            <!-- Spec status journey -->
+            {@const specStatus = entity.data?.approval_status ?? 'draft'}
+            {@const specJourney = (() => {
+              const steps = [{ label: 'Synced', variant: 'info', done: true }];
+              if (specStatus === 'pending' || specStatus === 'approved' || specStatus === 'rejected' || specStatus === 'implemented') {
+                steps.push({ label: 'Pending', variant: specStatus === 'pending' ? 'warning' : 'info', done: specStatus !== 'pending' || specStatus === 'pending' });
+              }
+              if (specStatus === 'approved' || specStatus === 'implemented') {
+                steps.push({ label: 'Approved', variant: 'success', done: true });
+              } else if (specStatus === 'rejected') {
+                steps.push({ label: 'Rejected', variant: 'danger', done: true });
+              }
+              if (specStatus === 'approved' || specStatus === 'implemented') {
+                const tasksDone = specProgress?.tasks_done ?? 0;
+                const tasksTotal = specProgress?.tasks_total ?? 0;
+                const mrs = specProgress?.mrs ?? [];
+                const mergedMrs = mrs.filter(m => m.status === 'merged').length;
+                if (tasksTotal > 0) {
+                  steps.push({ label: `${tasksDone}/${tasksTotal} tasks`, variant: tasksDone === tasksTotal ? 'success' : 'warning', done: tasksDone > 0 });
+                }
+                if (mrs.length > 0) {
+                  steps.push({ label: `${mergedMrs}/${mrs.length} MRs merged`, variant: mergedMrs === mrs.length ? 'success' : 'warning', done: mergedMrs > 0 });
+                }
+                if (specStatus === 'implemented') {
+                  steps.push({ label: 'Implemented', variant: 'success', done: true });
+                }
+              }
+              return steps;
+            })()}
+            {#if specJourney.length > 1}
+              <div class="mr-status-journey">
+                <div class="status-journey-track">
+                  {#each specJourney as step, i}
+                    <div class="status-journey-node status-journey-node-{step.variant}">
+                      <span class="status-journey-dot"></span>
+                      <span class="status-journey-label">{step.label}</span>
+                    </div>
+                    {#if i < specJourney.length - 1}
+                      <span class="status-journey-connector"></span>
+                    {/if}
+                  {/each}
                 </div>
               </div>
             {/if}
