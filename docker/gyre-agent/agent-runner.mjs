@@ -65,6 +65,24 @@ if (process.env.CLAUDE_CODE_USE_VERTEX === '1') {
 
 const model = process.env.GYRE_AGENT_MODEL || 'claude-sonnet-4-6';
 
+// ── Log posting ─────────────────────────────────────────────────────────────
+
+/** Post a log line to the server so it appears in the agent UI. */
+async function postLog(message) {
+  try {
+    await fetch(`${serverUrl}/api/v1/agents/${agentId}/logs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ message }),
+    });
+  } catch {
+    // Non-fatal — logs are best-effort
+  }
+}
+
 // ── Conversation provenance state ───────────────────────────────────────────
 
 /** @type {Array<{role: string, type: string, content?: string, name?: string, timestamp: number}>} */
@@ -271,6 +289,7 @@ Begin by reading your task description, then implement it completely.`;
 console.log(`=== Gyre Agent Runner starting ===`);
 console.log(`Agent: ${agentId} | Task: ${taskId} | Branch: ${branch}`);
 console.log(`Model: ${model} | Server: ${serverUrl}`);
+postLog(`Agent runner starting: model=${model}, branch=${branch}`);
 
 // Set up provenance hooks
 const { turnFile } = createHooksSettingsFile();
@@ -294,12 +313,14 @@ try {
     if (message.type === 'text') {
       logEntry.content = message.content;
       process.stdout.write(message.content);
+      postLog(`[assistant] ${message.content.slice(0, 500)}`);
     } else if (message.type === 'tool_use') {
       logEntry.name = message.name;
       logEntry.content = typeof message.input === 'string'
         ? message.input
         : JSON.stringify(message.input);
       console.log(`[tool] ${message.name}`);
+      postLog(`[tool_use] ${message.name}`);
     } else if (message.type === 'tool_result') {
       // Truncate large tool results in provenance log (keep first 2KB)
       const resultText = typeof message.content === 'string'
@@ -310,6 +331,7 @@ try {
         : resultText;
       if (messageCount % 10 === 0) {
         console.log(`[progress] ${messageCount} messages processed`);
+        postLog(`[progress] ${messageCount} messages processed`);
       }
     }
 
@@ -362,6 +384,7 @@ try {
         branch,
         title: `feat: implement task via autonomous agent`,
         target_branch: 'main',
+        conversation_sha: conversationSha,
       }),
     });
     if (completeResp.ok) {
@@ -375,6 +398,7 @@ try {
   }
 
   console.log(`=== Agent runner complete (${messageCount} messages, ${turnCounter} turns) ===`);
+  postLog(`Agent complete: ${messageCount} messages, ${turnCounter} turns, conversation_sha=${conversationSha || 'none'}`);
 } catch (err) {
   // Best-effort: upload whatever conversation we have even on error
   console.log(`[provenance] Uploading partial conversation after error...`);
