@@ -104,24 +104,21 @@
       .then(async (list) => {
         if (aborted) return;
         const mrList = Array.isArray(list) ? list : [];
-        // Fetch gate definitions for this repo to resolve names
-        let gateDefs = [];
-        try { gateDefs = await api.repoGates(repoId); } catch { /* best effort */ }
-        const gateDefMap = Object.fromEntries((Array.isArray(gateDefs) ? gateDefs : []).map(g => [g.id, g]));
         // Enrich MRs with gate results summary (best-effort, parallel)
+        // The API already enriches gate_name, gate_type, required, command from definitions
         const gatePromises = mrList.map(mr =>
           api.mrGates(mr.id).then(gates => {
             const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
             const details = arr.map(g => {
-              const def = gateDefMap[g.gate_id] ?? {};
+              const gateType = (g.gate_type ?? '').replace(/_/g, ' ');
               return {
-                name: g.name ?? g.gate_name ?? def.name ?? ((g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || `Gate ${shortId(g.gate_id ?? g.id)}`),
+                name: g.gate_name ?? g.name ?? gateType || 'Quality gate',
                 status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
-                gate_type: g.gate_type ?? def.gate_type,
-                required: g.required ?? def.required,
-                command: g.command ?? def.command,
+                gate_type: g.gate_type,
+                required: g.required,
+                command: g.command,
                 output: g.output,
                 error: g.error,
                 duration_ms: g.duration_ms ?? ((g.started_at && g.finished_at) ? Math.round((g.finished_at - g.started_at) * 1000) : null),
