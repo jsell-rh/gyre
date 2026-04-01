@@ -1136,6 +1136,26 @@
     }
   }
 
+  /** Explain agent status in human terms — the "why" behind the status badge */
+  function agentStatusExplain(ag) {
+    if (!ag?.status) return '';
+    switch (ag.status) {
+      case 'active': return ag.branch ? `Working on branch ${ag.branch}` : 'Actively executing its task';
+      case 'idle': return ag.mr_id ? 'Finished — MR created for review' : 'Finished its work successfully';
+      case 'completed': return ag.mr_id ? 'Task complete — MR submitted' : 'Task completed';
+      case 'failed': {
+        const exit = ag._container?.exit_code;
+        if (exit === 137) return 'Killed — out of memory or resource limit exceeded';
+        if (exit === 143) return 'Terminated by the system (SIGTERM)';
+        if (exit === 1) return 'Exited with error — check logs for details';
+        return 'Encountered an error during execution';
+      }
+      case 'dead': return 'Process is no longer running — may have crashed or been killed';
+      case 'stopped': return 'Gracefully stopped by an operator or budget limit';
+      default: return '';
+    }
+  }
+
   /** Map timeline event types to human-readable labels and icons */
   function timelineEventLabel(evt) {
     const map = {
@@ -1600,6 +1620,7 @@
                 <dt>Status</dt>
                 <dd>
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
+                  <span class="status-explain">{agentStatusExplain(ag)}</span>
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if ag.agent_type}
@@ -5623,6 +5644,14 @@
   .cost-total-row td {
     color: var(--color-text);
     padding-top: var(--space-2);
+  }
+
+  .status-explain {
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-top: 2px;
+    font-style: italic;
   }
 
   .exit-code-explain {
