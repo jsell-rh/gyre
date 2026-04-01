@@ -73,6 +73,33 @@
     trust_suggestion: '🔒',
     spec_assertion_failure: '✗',
     suggested_link: '🔗',
+    agent_completed: '✓',
+    agent_failed: '✗',
+    mr_merged: '🔀',
+    mr_created: '📝',
+    mr_needs_review: '👀',
+    spec_approved: '✅',
+    spec_rejected: '❌',
+    spec_changed: '📝',
+    task_created: '☑',
+  };
+
+  // Normalize PascalCase notification types from the server
+  const NOTIF_TYPE_NORM = {
+    AgentCompleted: 'agent_completed',
+    AgentFailed: 'agent_failed',
+    SpecPendingApproval: 'spec_approval',
+    SpecApproved: 'spec_approved',
+    SpecRejected: 'spec_rejected',
+    MrMerged: 'mr_merged',
+    MrCreated: 'mr_created',
+    MrNeedsReview: 'mr_needs_review',
+    GateFailure: 'gate_failure',
+    SuggestedSpecLink: 'suggested_link',
+    TaskCreated: 'task_created',
+    BudgetWarning: 'budget_warning',
+    SpecChanged: 'spec_changed',
+    MetaSpecDrift: 'meta_spec_drift',
   };
 
   function typeLabel(type) {
@@ -262,6 +289,7 @@
     try {
       let raw = await api.myNotifications();
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
+      data = data.map(n => ({ ...n, notification_type: NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type }));
       data = data.filter(n => n.workspace_id === workspace.id);
       data = data.filter(n => !n.dismissed_at && !n.resolved_at);
       data = data.filter(n => !shouldExcludeByTrust(n));
