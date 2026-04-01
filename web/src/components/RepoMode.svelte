@@ -565,28 +565,50 @@
           <p class="agent-panel-empty">{$t('repo_mode.no_active_agents')}</p>
         {:else}
           {#each activeAgents as agent}
-            <button
-              class="agent-row"
-              class:agent-row-selected={selectedAgentId === agent.id}
-              data-testid="agent-row"
-              onclick={() => { selectedAgentId = selectedAgentId === agent.id ? null : agent.id; }}
-              aria-expanded={selectedAgentId === agent.id}
-              aria-label={$t('repo_mode.agent_label', { values: { name: agent.name ?? agent.id } })}
-            >
-              <div class="agent-row-info">
-                <span class="agent-row-name">{agent.name ?? agent.id}</span>
-                <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
-              </div>
-              {#if agent.task_id ?? agent.current_task_id}
-                {@const tId = agent.task_id ?? agent.current_task_id}
-                <span class="agent-row-task" title={tId}>{$t('repo_mode.task_label', { values: { id: entityName('task', tId) } })}</span>
-              {/if}
-              {#if agent.branch}
-                <span class="agent-row-branch">{agent.branch}</span>
-              {/if}
-            </button>
+            {@const tId = agent.task_id ?? agent.current_task_id}
+            {@const spawnedAt = agent.created_at ?? agent.spawned_at}
+            <div class="agent-row-wrap">
+              <button
+                class="agent-row"
+                class:agent-row-selected={selectedAgentId === agent.id}
+                data-testid="agent-row"
+                onclick={() => { selectedAgentId = selectedAgentId === agent.id ? null : agent.id; }}
+                aria-expanded={selectedAgentId === agent.id}
+                aria-label={$t('repo_mode.agent_label', { values: { name: agent.name ?? agent.id } })}
+              >
+                <div class="agent-row-info">
+                  <span class="agent-row-name">{agent.name ?? agent.id}</span>
+                  <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
+                </div>
+                {#if tId}
+                  <span class="agent-row-task" title={tId}>{$t('repo_mode.task_label', { values: { id: entityName('task', tId) } })}</span>
+                {/if}
+                {#if agent.branch}
+                  <span class="agent-row-branch">{agent.branch}</span>
+                {/if}
+                {#if spawnedAt}
+                  <span class="agent-row-duration">{fmtRelTime(spawnedAt)}</span>
+                {/if}
+              </button>
+              <button
+                class="agent-row-detail-btn"
+                onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}
+                title="Open full agent detail"
+              >→</button>
+            </div>
             {#if selectedAgentId === agent.id}
-              <AgentCardPanel agentId={agent.id} />
+              <div class="agent-row-expanded">
+                <AgentCardPanel agentId={agent.id} />
+                <div class="agent-row-actions">
+                  {#if tId}
+                    <button class="agent-action-link" onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'task', id: tId, data: {} }); }}>View Task</button>
+                  {/if}
+                  {#if agent.mr_id}
+                    <button class="agent-action-link" onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'mr', id: agent.mr_id, data: {} }); }}>View MR</button>
+                  {/if}
+                  <button class="agent-action-link agent-action-primary" onclick={() => { agentPanelOpen = false; openDetailPanel?.({ type: 'agent', id: agent.id, data: agent }); }}>Full Detail →</button>
+                </div>
+              </div>
             {/if}
           {/each}
         {/if}
@@ -953,6 +975,78 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-family: var(--font-mono);
+  }
+
+  .agent-row-duration {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .agent-row-wrap {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+  }
+
+  .agent-row-wrap .agent-row {
+    flex: 1;
+    border-radius: var(--radius) 0 0 var(--radius);
+  }
+
+  .agent-row-detail-btn {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: none;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 0 var(--space-3);
+    cursor: pointer;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .agent-row-detail-btn:hover {
+    background: var(--color-surface-elevated);
+    color: var(--color-primary);
+  }
+
+  .agent-row-expanded {
+    border: 1px solid var(--color-border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    margin-top: -1px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+  }
+
+  .agent-row-actions {
+    display: flex;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    margin-top: var(--space-2);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .agent-action-link {
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .agent-action-link:hover {
+    background: var(--color-surface-elevated);
+    text-decoration: underline;
+  }
+
+  .agent-action-primary {
+    font-weight: 600;
+    color: var(--color-primary);
+    margin-left: auto;
   }
 
   /* ── Entity list tabs (Tasks, MRs) ──────────────────────────────────── */
