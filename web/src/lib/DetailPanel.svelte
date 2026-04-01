@@ -286,6 +286,24 @@
     }
   }
 
+  // ── Spec preview for task info tab ────────────────────────────────────────────
+  let taskSpecPreview = $state(null);
+  let taskSpecPreviewLoading = $state(false);
+
+  async function loadTaskSpecPreview(specPath, repoId) {
+    if (taskSpecPreview || taskSpecPreviewLoading) return;
+    if (!specPath) return;
+    taskSpecPreviewLoading = true;
+    try {
+      const data = await api.specContent(specPath, repoId);
+      taskSpecPreview = data;
+    } catch {
+      taskSpecPreview = null;
+    } finally {
+      taskSpecPreviewLoading = false;
+    }
+  }
+
   // ── MR entity tab state ─────────────────────────────────────────────────────
   let mrDetail = $state(null);
   let mrDetailLoading = $state(false);
@@ -361,6 +379,7 @@
       taskDetail = null;
       taskAgents = null;
       taskMrs = null;
+      taskSpecPreview = null;
     }
     conversationData = null;
     interrogationAgentId = null;
@@ -2150,6 +2169,24 @@
                   <dt>Updated</dt><dd>{fmtDate(tk.updated_at)}</dd>
                 {/if}
               </dl>
+
+              <!-- Spec preview (collapsible) -->
+              {#if tk.spec_path}
+                <details class="spec-preview-section" ontoggle={(e) => { if (e.target.open) loadTaskSpecPreview(tk.spec_path, tk.repo_id); }}>
+                  <summary class="spec-preview-summary">
+                    <span class="progress-section-label">Spec: {tk.spec_path.split('/').pop()}</span>
+                  </summary>
+                  <div class="spec-preview-body">
+                    {#if taskSpecPreviewLoading}
+                      <Skeleton width="100%" height="60px" />
+                    {:else if taskSpecPreview?.content}
+                      <pre class="spec-preview-content">{taskSpecPreview.content}</pre>
+                    {:else}
+                      <p class="no-data no-data-sm">Spec content not available. <button class="entity-link" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })}>Open spec →</button></p>
+                    {/if}
+                  </div>
+                </details>
+              {/if}
 
               <!-- Provenance chain for task -->
               {#if tk.spec_path || tk.assigned_to}
