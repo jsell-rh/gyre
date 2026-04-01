@@ -63,12 +63,7 @@ pub async fn get_blame(
     for ac in &agent_commits {
         sha_to_agent
             .entry(ac.commit_sha.clone())
-            .or_insert_with(|| {
-                (
-                    ac.agent_id.to_string(),
-                    ac.task_id.clone(),
-                )
-            });
+            .or_insert_with(|| (ac.agent_id.to_string(), ac.task_id.clone()));
     }
 
     // Try `git blame --porcelain` on the bare repo to get per-line attribution
