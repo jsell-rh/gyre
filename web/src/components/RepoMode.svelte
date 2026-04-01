@@ -271,6 +271,32 @@
     }
   }
 
+  // ── Merge queue ──────────────────────────────────────────────────────
+  let mergeQueue = $state([]);
+  let mergeQueueLoading = $state(false);
+  let mergeQueueLoaded = $state(false);
+
+  $effect(() => {
+    if (activeTab !== 'mrs') return;
+    const repoId = repo?.id;
+    if (!repoId || mergeQueueLoaded) return;
+    let aborted = false;
+    mergeQueueLoading = true;
+    api.mergeQueue()
+      .then(list => {
+        if (aborted) return;
+        const all = Array.isArray(list) ? list : [];
+        mergeQueue = all.filter(e => e.repository_id === repoId || e.repo_id === repoId);
+        mergeQueueLoading = false;
+        mergeQueueLoaded = true;
+      })
+      .catch(() => { if (!aborted) { mergeQueue = []; mergeQueueLoading = false; mergeQueueLoaded = true; } });
+    return () => { aborted = true; };
+  });
+
+  // Reset merge queue when repo changes
+  $effect(() => { if (repo?.id) mergeQueueLoaded = false; });
+
   // ── MR quick actions ──────────────────────────────────────────────────
   let enqueueingMr = $state(null);
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
@@ -489,8 +515,8 @@
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
-                  <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id ?? repo?.id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
-                  <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
+                  <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id ?? repo?.id }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
+                  <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', task.assigned_to, {}); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                   <td class="cell-time">{fmtRelTime(task.updated_at ?? task.created_at)}</td>
                   <td class="cell-action">
                     {#if TASK_STATUS_TRANSITIONS[task.status]?.length}
@@ -514,6 +540,26 @@
       </div>
     {:else if activeTab === 'mrs'}
       <div class="list-tab">
+        <!-- Merge Queue section -->
+        {#if mergeQueue.length > 0}
+          <div class="merge-queue-section">
+            <h3 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+              Merge Queue ({mergeQueue.length})
+            </h3>
+            <div class="queue-entries">
+              {#each mergeQueue as entry, i}
+                {@const mrTitle = repoMrs.find(m => m.id === (entry.merge_request_id ?? entry.mr_id))?.title}
+                <button class="queue-entry" onclick={() => goToEntityDetail?.('mr', entry.merge_request_id ?? entry.mr_id, {})} tabindex="0">
+                  <span class="queue-position">#{i + 1}</span>
+                  <span class="queue-mr-title">{mrTitle ?? entityName('mr', entry.merge_request_id ?? entry.mr_id)}</span>
+                  <span class="queue-priority">{entry.priority != null ? `priority ${entry.priority}` : ''}</span>
+                  <Badge value={entry.status ?? 'queued'} variant={entry.status === 'processing' ? 'warning' : 'info'} />
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
         {#if mrsLoading}
           <p class="list-loading">Loading merge requests...</p>
         {:else if repoMrs.length === 0}
@@ -542,8 +588,8 @@
                   <td title={mr.queue_position != null ? `Position ${mr.queue_position + 1} in merge queue — gates will run before merge` : mr.status === 'merged' ? `Merged${mr.merge_commit_sha ? ' at ' + mr.merge_commit_sha.slice(0, 7) : ''}` : mr.status === 'open' ? 'Open — ready to enqueue for merge' : mr.status === 'closed' ? 'Closed without merging' : ''}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
-                  <td class="cell-mono">{#if mr.author_agent_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: mr.author_agent_id, data: {} }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{:else}{''}{/if}</td>
-                  <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? repo?.id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
+                  <td class="cell-mono">{#if mr.author_agent_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', mr.author_agent_id, {}); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{:else}{''}{/if}</td>
+                  <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? repo?.id }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
                       <button class="gate-cell-repo gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}${g.duration_ms ? ' · ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
@@ -1146,6 +1192,73 @@
     flex: 1;
     overflow-y: auto;
     padding: var(--space-4) var(--space-6);
+  }
+
+  /* ── Merge Queue section ─────────────────────────────────────────────── */
+  .merge-queue-section {
+    margin-bottom: var(--space-5);
+    background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-3) 0;
+  }
+
+  .queue-entries {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .queue-entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    width: 100%;
+    transition: border-color var(--transition-fast);
+  }
+
+  .queue-entry:hover {
+    border-color: var(--color-primary);
+  }
+
+  .queue-position {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 700;
+    color: var(--color-warning);
+    min-width: 28px;
+  }
+
+  .queue-mr-title {
+    flex: 1;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-priority {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
   }
 
   .list-loading {
