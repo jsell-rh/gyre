@@ -950,6 +950,23 @@
                           data-testid="btn-retry"
                           aria-label={$t('common.retry')}
                         >{$t('common.retry')}</button>
+                        <button
+                          class="inline-btn secondary"
+                          onclick={() => openDetailPanel?.({ type: 'mr', id: body.mr_id, data: { _openTab: 'gates' } })}
+                          title="View gate details"
+                        >View Gates</button>
+                      {:else if n.notification_type === 'agent_clarification' && body.agent_id}
+                        <button
+                          class="inline-btn"
+                          onclick={() => openDetailPanel?.({ type: 'agent', id: body.agent_id, data: { _openTab: 'chat' } })}
+                          title="View agent messages"
+                        >Respond</button>
+                      {:else if n.notification_type === 'budget_warning'}
+                        <button
+                          class="inline-btn secondary"
+                          onclick={() => { const el = document.getElementById('section-budget'); if (el) el.scrollIntoView({ behavior: 'smooth' }); }}
+                          title="View budget details"
+                        >View Budget</button>
                       {/if}
                       <button
                         class="inline-btn secondary"
