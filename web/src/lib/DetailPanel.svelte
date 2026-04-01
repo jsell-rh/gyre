@@ -490,13 +490,39 @@
             if (sig) mrDetail = { ...mrDetail, _commitSig: sig };
           }).catch(() => {});
         }
-        // Build mini status story from timeline
-        if (mrTimeline.length > 0) {
-          const events = mrTimeline.slice(-4).map(evt => {
+        // Build status story from timeline events, or fall back to MR fields
+        if (rawTimeline.length > 0) {
+          const events = rawTimeline.slice(-4).map(evt => {
             const evtType = evt.event_type ?? evt.type ?? evt.event;
             return { label: timelineEventLabel(evtType), variant: timelineEventVariant(evtType), time: evt.timestamp ?? evt.created_at };
           });
           mrDetail = { ...mrDetail, _statusStory: events };
+        } else {
+          // Fallback: synthesize journey from MR fields so it's always visible
+          const story = [{ label: 'Created', variant: 'info', time: d?.created_at }];
+          if (enrichedGates.length > 0) {
+            const failed = enrichedGates.filter(g => g.status === 'Failed' || g.status === 'failed').length;
+            const passed = enrichedGates.filter(g => g.status === 'Passed' || g.status === 'passed').length;
+            const total = enrichedGates.length;
+            if (failed > 0) {
+              story.push({ label: `${failed}/${total} gates failed`, variant: 'danger', time: null });
+            } else if (passed === total && total > 0) {
+              story.push({ label: `${total} gates passed`, variant: 'success', time: null });
+            } else {
+              story.push({ label: `Gates: ${passed}/${total}`, variant: 'warning', time: null });
+            }
+          }
+          if (d?.queue_position != null) {
+            story.push({ label: `Queued (#${d.queue_position + 1})`, variant: 'warning', time: null });
+          }
+          if (d?.status === 'merged') {
+            story.push({ label: 'Merged', variant: 'success', time: d?.merged_at });
+          } else if (d?.status === 'closed') {
+            story.push({ label: 'Closed', variant: 'danger', time: d?.updated_at });
+          } else {
+            story.push({ label: 'Open', variant: 'info', time: null });
+          }
+          mrDetail = { ...mrDetail, _statusStory: story };
         }
       }).catch(() => { mrDetail = null; })
         .finally(() => { mrDetailLoading = false; mrDepsLoading = false; });
