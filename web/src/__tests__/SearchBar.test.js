@@ -304,7 +304,7 @@ describe('SearchBar', () => {
     // Press Enter to navigate to first result
     await fireEvent.keyDown(input, { key: 'Enter' });
 
-    expect(navigateSpy).toHaveBeenCalledWith('agents', { entityType: 'agent', entityId: 'a-1' });
+    expect(navigateSpy).toHaveBeenCalledWith('agents', { entityType: 'agent', entityId: 'a-1', repo_id: null, workspace_id: null });
   });
 
   it('unknown entity types map to "dashboard" view and "?" icon', async () => {
@@ -332,6 +332,6 @@ describe('SearchBar', () => {
 
     // Now navigate and verify the view mapping
     await fireEvent.keyDown(input, { key: 'Enter' });
-    expect(navigateSpy).toHaveBeenCalledWith('dashboard', { entityType: 'widget', entityId: 'w-1' });
+    expect(navigateSpy).toHaveBeenCalledWith('dashboard', { entityType: 'widget', entityId: 'w-1', repo_id: null, workspace_id: null });
   });
 });
