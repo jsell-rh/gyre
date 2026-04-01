@@ -161,7 +161,7 @@
 
   function resolveEntityName(type, id) {
     if (!id) return '';
-    if (type === 'spec') return id.split('/').pop();
+    if (type === 'spec') return id.split('/').pop().replace(/\.md$/, '');
     const key = `${type}:${id}`;
     if (breadcrumbNameCache[key]) return breadcrumbNameCache[key];
     // Start async resolution
