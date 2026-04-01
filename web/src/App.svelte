@@ -575,7 +575,7 @@
       if (userMenuOpen) { userMenuOpen = false; gKeyPending = false; return; }
       if (wsDropdownOpen) { wsDropdownOpen = false; gKeyPending = false; return; }
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
-      if (mode === 'repo' && entityDetail) { entityDetail = null; goToRepoTab(repoTab); gKeyPending = false; return; }
+      if (mode === 'repo' && entityDetail) { window.history.back(); gKeyPending = false; return; }
       if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
       gKeyPending = false;
       return;
@@ -1064,8 +1064,11 @@
             class="back-btn"
             onclick={() => {
               if (entityDetail) {
-                entityDetail = null;
-                goToRepoTab(repoTab);
+                // Use browser history.back() so the back button acts as a true
+                // "go back one step" rather than pushing a new state forward.
+                // goToEntityDetail already pushed a history entry, so going back
+                // naturally pops it and the popstate handler restores list view.
+                window.history.back();
               } else {
                 goToWorkspaceHome(currentWorkspace);
               }
@@ -1089,7 +1092,7 @@
             {#if entityDetail}
               <button
                 class="breadcrumb-ws"
-                onclick={() => { entityDetail = null; goToRepoTab(repoTab); }}
+                onclick={() => window.history.back()}
                 aria-label="Back to {currentRepo?.name ?? 'repo'}"
               >
                 {currentRepo?.name ?? ''}
@@ -1097,7 +1100,7 @@
               <span class="breadcrumb-sep" aria-hidden="true">/</span>
               <button
                 class="breadcrumb-ws"
-                onclick={() => { entityDetail = null; goToRepoTab(repoTab); }}
+                onclick={() => window.history.back()}
               >
                 {repoTab === 'mrs' ? 'Merge Requests' : repoTab === 'tasks' ? 'Tasks' : repoTab === 'agents' ? 'Agents' : 'Specs'}
               </button>
@@ -1477,8 +1480,8 @@
             <DetailPanel
               entity={entityDetail}
               fullPage={true}
-              onclose={() => { entityDetail = null; goToRepoTab(repoTab); }}
-              onback={() => { entityDetail = null; goToRepoTab(repoTab); }}
+              onclose={() => window.history.back()}
+              onback={() => window.history.back()}
             />
           {:else}
             <RepoMode
