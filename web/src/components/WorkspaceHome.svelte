@@ -742,6 +742,8 @@
       const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
                       type === 'task' ? api.task(id).then(t => t?.title) :
                       type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
+                      type === 'repo' ? api.repo(id).then(r => r?.name) :
+                      type === 'workspace' ? api.workspace(id).then(w => w?.name) :
                       Promise.resolve(null);
       fetcher.then(name => {
         if (name) entityNameCache = { ...entityNameCache, [key]: name };
@@ -751,8 +753,8 @@
 
   function entityName(type, id) {
     if (!id) return '';
-    // Check repo map first
-    if (type === 'repo') return repoMap[id]?.name ?? shortId(id);
+    // Check repo map first for repos
+    if (type === 'repo' && repoMap[id]?.name) return repoMap[id].name;
     const cached = entityNameCache[`${type}:${id}`];
     if (cached) return cached;
     queueNameResolution(type, id);
@@ -1591,7 +1593,7 @@
                     data-testid="spec-row"
                     aria-label={$t('workspace_home.open_spec', { values: { path: spec.path } })}
                   >
-                    <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }} title="Go to repo">{repoMap[spec.repo_id].name}</button>{:else}{spec.repo_id ?? '—'}{/if}</td>
+                    <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }} title="Go to repo">{repoMap[spec.repo_id].name}</button>{:else if spec.repo_id}<span class="mono" title={spec.repo_id}>{entityName('repo', spec.repo_id)}</span>{:else}—{/if}</td>
                     <td class="spec-path">{spec.path}</td>
                     <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
                       <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
