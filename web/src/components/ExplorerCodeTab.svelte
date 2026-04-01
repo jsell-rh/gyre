@@ -139,6 +139,10 @@
         const mrList = await api.mergeRequests({ repository_id: repoId });
         // Enrich MRs with gate results summary
         mrs = Array.isArray(mrList) ? mrList : [];
+        // Fetch gate definitions for this repo to resolve names
+        let codeDefs = [];
+        try { codeDefs = await api.repoGates(repoId); } catch { /* best effort */ }
+        const codeDefMap = Object.fromEntries((Array.isArray(codeDefs) ? codeDefs : []).map(g => [g.id, g]));
         // Load gate results for each MR in parallel (best-effort)
         const gatePromises = mrs.map(mr =>
           api.mrGates(mr.id).then(gates => {
@@ -146,12 +150,15 @@
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
             const total = arr.length;
-            const details = arr.map(g => ({
-              name: g.name ?? g.gate_name ?? 'Gate',
-              status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
-              gate_type: g.gate_type,
-              required: g.required,
-            }));
+            const details = arr.map(g => {
+              const def = codeDefMap[g.gate_id] ?? {};
+              return {
+                name: g.name ?? g.gate_name ?? def.name ?? (g.gate_type ?? def.gate_type ?? '').replace(/_/g, ' ') || `Gate ${shortName(g.gate_id ?? g.id)}`,
+                status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
+                gate_type: g.gate_type ?? def.gate_type,
+                required: g.required ?? def.required,
+              };
+            });
             return { id: mr.id, passed, failed, total, details };
           }).catch(() => ({ id: mr.id, passed: 0, failed: 0, total: 0, details: [] }))
         );
