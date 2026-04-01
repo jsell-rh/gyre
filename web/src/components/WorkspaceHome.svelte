@@ -799,13 +799,27 @@
                   <div class="decision-content">
                     <span class="decision-type">{typeLabel(n.notification_type)}</span>
                     <span class="decision-desc">{n.message ?? n.description ?? body.description ?? ''}</span>
-                    {#if n.repo_id && repoMap[n.repo_id]}
-                      <button
-                        class="decision-repo-link"
-                        onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[n.repo_id], 'decisions'); }}
-                        aria-label={$t('workspace_home.go_to_repo_decisions', { values: { name: repoMap[n.repo_id].name } })}
-                      >{repoMap[n.repo_id].name}</button>
-                    {/if}
+                    <div class="decision-refs">
+                      {#if body.spec_path}
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()}</button>
+                      {/if}
+                      {#if body.mr_id}
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: body.mr_id, data: {} }); }} title="View merge request">🔀 {entityName('mr', body.mr_id)}</button>
+                      {/if}
+                      {#if body.agent_id}
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: body.agent_id, data: {} }); }} title="View agent">▶ {entityName('agent', body.agent_id)}</button>
+                      {/if}
+                      {#if body.task_id}
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'task', id: body.task_id, data: {} }); }} title="View task">☑ {entityName('task', body.task_id)}</button>
+                      {/if}
+                      {#if n.repo_id && repoMap[n.repo_id]}
+                        <button
+                          class="decision-repo-link"
+                          onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[n.repo_id], 'decisions'); }}
+                          aria-label={$t('workspace_home.go_to_repo_decisions', { values: { name: repoMap[n.repo_id].name } })}
+                        >{repoMap[n.repo_id].name}</button>
+                      {/if}
+                    </div>
                   </div>
                   <div class="decision-actions">
                     {#if state.success}
@@ -971,6 +985,15 @@
             <ul class="repo-list" role="list">
               {#each repos as repo (repo.id)}
                 {@const health = repoHealth(repo)}
+                {@const repoTaskCount = wsTasks.filter(t => t.repo_id === repo.id).length}
+                {@const repoActiveTaskCount = wsTasks.filter(t => t.repo_id === repo.id && t.status === 'in_progress').length}
+                {@const repoMrCount = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id).length}
+                {@const repoOpenMrCount = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m.status === 'open').length}
+                {@const repoMergedMrCount = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m.status === 'merged').length}
+                {@const repoAgentCount = wsAgents.filter(a => a.repo_id === repo.id).length}
+                {@const repoActiveAgentCount = wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active').length}
+                {@const repoSpecCount = specs.filter(s => s.repo_id === repo.id).length}
+                {@const repoPendingSpecs = specs.filter(s => s.repo_id === repo.id && (s.approval_status === 'pending' || s.status === 'pending')).length}
                 <li class="repo-row" data-testid="repo-row">
                   <button
                     class="repo-btn"
@@ -978,21 +1001,56 @@
                     aria-label={$t('workspace_home.open_repo', { values: { name: repo.name } })}
                     data-testid="repo-link"
                   >
-                    <span class="repo-name">{repo.name}</span>
-                    <span class="repo-meta">
-                      {#if (repo.active_spec_count ?? 0) > 0}
-                        <span class="repo-stat">{$t('workspace_home.repo_specs_active', { values: { count: repo.active_spec_count } })}</span>
+                    <div class="repo-btn-top">
+                      <span class="repo-name">{repo.name}</span>
+                      <span class="repo-health health-{health}" aria-label={$t('workspace_home.repo_status', { values: { status: health } })} data-testid="repo-health">
+                        {#if health === 'healthy'}● {$t('workspace_home.repo_health_healthy')}
+                        {:else if health === 'gate'}⚠ {$t('workspace_home.repo_health_gate')}
+                        {:else}○ {$t('workspace_home.repo_health_idle')}
+                        {/if}
+                      </span>
+                    </div>
+                    {#if repo.description}
+                      <span class="repo-description">{repo.description}</span>
+                    {/if}
+                    <div class="repo-stats-row">
+                      {#if repoSpecCount > 0}
+                        <span class="repo-stat-chip" title="{repoSpecCount} specs{repoPendingSpecs > 0 ? `, ${repoPendingSpecs} pending approval` : ''}">
+                          <span class="repo-stat-icon">📋</span>
+                          <span class="repo-stat-num">{repoSpecCount}</span>
+                          <span class="repo-stat-label">specs</span>
+                          {#if repoPendingSpecs > 0}<span class="repo-stat-alert">{repoPendingSpecs} pending</span>{/if}
+                        </span>
                       {/if}
-                      {#if (repo.active_agents ?? 0) > 0}
-                        <span class="repo-stat">{$t('workspace_home.repo_agents_count', { values: { count: repo.active_agents } })}</span>
+                      {#if repoTaskCount > 0}
+                        <span class="repo-stat-chip" title="{repoTaskCount} tasks{repoActiveTaskCount > 0 ? `, ${repoActiveTaskCount} in progress` : ''}">
+                          <span class="repo-stat-icon">☑</span>
+                          <span class="repo-stat-num">{repoTaskCount}</span>
+                          <span class="repo-stat-label">tasks</span>
+                          {#if repoActiveTaskCount > 0}<span class="repo-stat-active">{repoActiveTaskCount} active</span>{/if}
+                        </span>
                       {/if}
-                    </span>
-                    <span class="repo-health health-{health}" aria-label={$t('workspace_home.repo_status', { values: { status: health } })} data-testid="repo-health">
-                      {#if health === 'healthy'}● {$t('workspace_home.repo_health_healthy')}
-                      {:else if health === 'gate'}⚠ {$t('workspace_home.repo_health_gate')}
-                      {:else}○ {$t('workspace_home.repo_health_idle')}
+                      {#if repoAgentCount > 0}
+                        <span class="repo-stat-chip" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''}">
+                          <span class="repo-stat-icon">▶</span>
+                          <span class="repo-stat-num">{repoAgentCount}</span>
+                          <span class="repo-stat-label">agents</span>
+                          {#if repoActiveAgentCount > 0}<span class="repo-stat-active">{repoActiveAgentCount} running</span>{/if}
+                        </span>
                       {/if}
-                    </span>
+                      {#if repoMrCount > 0}
+                        <span class="repo-stat-chip" title="{repoMrCount} MRs: {repoMergedMrCount} merged, {repoOpenMrCount} open">
+                          <span class="repo-stat-icon">🔀</span>
+                          <span class="repo-stat-num">{repoMrCount}</span>
+                          <span class="repo-stat-label">MRs</span>
+                          {#if repoOpenMrCount > 0}<span class="repo-stat-alert">{repoOpenMrCount} open</span>{/if}
+                          {#if repoMergedMrCount > 0}<span class="repo-stat-merged">{repoMergedMrCount} merged</span>{/if}
+                        </span>
+                      {/if}
+                      {#if repoSpecCount === 0 && repoTaskCount === 0 && repoAgentCount === 0 && repoMrCount === 0}
+                        <span class="repo-stat-chip repo-stat-empty">No activity yet</span>
+                      {/if}
+                    </div>
                   </button>
                 </li>
               {/each}
@@ -1947,6 +2005,36 @@
     text-overflow: ellipsis;
   }
 
+  .decision-refs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: 2px;
+  }
+
+  .decision-entity-link {
+    font-size: var(--text-xs);
+    color: var(--color-link, var(--color-primary));
+    font-family: var(--font-mono);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .decision-entity-link:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+  }
+
+  .decision-entity-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
   .decision-repo-link {
     font-size: var(--text-xs);
     color: var(--color-link, var(--color-primary));
@@ -2001,11 +2089,11 @@
   .repo-btn {
     width: 100%;
     display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-2);
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-3);
     background: none;
-    border: 1px solid transparent;
+    border: 1px solid var(--color-border);
     border-radius: var(--radius);
     cursor: pointer;
     font-family: var(--font-body);
@@ -2015,12 +2103,19 @@
 
   .repo-btn:hover {
     background: var(--color-surface-elevated);
-    border-color: var(--color-border);
+    border-color: var(--color-primary);
   }
 
   .repo-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  .repo-btn-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
   }
 
   .repo-name {
@@ -2033,6 +2128,70 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .repo-description {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .repo-stats-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .repo-stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+
+  .repo-stat-empty {
+    color: var(--color-text-muted);
+    border: none;
+    background: none;
+    font-style: italic;
+  }
+
+  .repo-stat-icon {
+    font-size: 10px;
+  }
+
+  .repo-stat-num {
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+
+  .repo-stat-label {
+    color: var(--color-text-muted);
+  }
+
+  .repo-stat-alert {
+    color: var(--color-warning);
+    font-weight: 500;
+    margin-left: 2px;
+  }
+
+  .repo-stat-active {
+    color: var(--color-success);
+    font-weight: 500;
+    margin-left: 2px;
+  }
+
+  .repo-stat-merged {
+    color: var(--color-primary);
+    font-weight: 500;
+    margin-left: 2px;
   }
 
   .repo-meta {
