@@ -487,6 +487,13 @@
   let detailHistory = $state([]);
 
   function openDetailPanel(entity) {
+    // Primary entity types get full-page views instead of the side panel.
+    // The side panel is reserved for lightweight previews (graph nodes, commits).
+    const primaryTypes = ['spec', 'task', 'mr', 'agent'];
+    if (entity?.type && primaryTypes.includes(entity.type)) {
+      goToEntityDetail(entity.type, entity.id, entity.data ?? {});
+      return;
+    }
     // Push current entity to history stack before navigating
     if (detailPanel.open && detailPanel.entity) {
       detailHistory = [...detailHistory, detailPanel.entity];
