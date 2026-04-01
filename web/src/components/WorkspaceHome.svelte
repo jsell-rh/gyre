@@ -1463,7 +1463,7 @@
                     data-testid="spec-row"
                     aria-label={$t('workspace_home.open_spec', { values: { path: spec.path } })}
                   >
-                    <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
+                    <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }} title="Go to repo">{repoMap[spec.repo_id].name}</button>{:else}{spec.repo_id ?? '—'}{/if}</td>
                     <td class="spec-path">{spec.path}</td>
                     <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
                       <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
@@ -1581,7 +1581,7 @@
                     <td class="ws-cell-type">{task.task_type ?? ''}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: task.spec_path, data: { path: task.spec_path, repo_id: task.repo_id } }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'agent', id: task.assigned_to, data: {} }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
-                    <td class="ws-cell-mono">{repoMap[task.repo_id]?.name ?? ''}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }} title="Go to repo">{repoMap[task.repo_id].name}</button>{:else}{repoMap[task.repo_id]?.name ?? ''}{/if}</td>
                     <td class="ws-cell-action">
                       {#if WS_TASK_TRANSITIONS[task.status]?.length}
                         {#each WS_TASK_TRANSITIONS[task.status] as nextStatus}
@@ -1674,7 +1674,7 @@
                         <button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specPath, data: { path: specPath, repo_id: mr.repository_id ?? mr.repo_id } }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>
                       {/if}
                     </td>
-                    <td class="ws-cell-mono">{repoMap[mr.repository_id]?.name ?? ''}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }} title="Go to repo">{repoMap[mr.repository_id].name}</button>{:else}{repoMap[mr.repository_id]?.name ?? ''}{/if}</td>
                     <td class="ws-cell-action">
                       {#if mr.status === 'open' && mr.queue_position == null}
                         <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id} title="Enqueue for merge">{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
@@ -1792,7 +1792,7 @@
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
                     <td class="ws-cell-time">{fmtDuration(spawnedAt, agent.completed_at)}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'mr', id: agent.mr_id, data: {} }); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
-                    <td class="ws-cell-mono">{repoMap[agent.repo_id]?.name ?? ''}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }} title="Go to repo">{repoMap[agent.repo_id].name}</button>{:else}{repoMap[agent.repo_id]?.name ?? ''}{/if}</td>
                   </tr>
                 {/each}
               </tbody>
