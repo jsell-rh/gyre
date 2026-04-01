@@ -219,14 +219,21 @@
   // ── Progress bar helpers ────────────────────────────────────────────────────
   function progressFraction(path) {
     const p = progressMap[path];
-    if (!p || !p.total_tasks) return 0;
-    return p.completed_tasks / p.total_tasks;
+    if (!p) return 0;
+    // Handle both pre-computed {completed_tasks, total_tasks} and raw {tasks: [...]} shapes
+    const total = p.total_tasks ?? (Array.isArray(p.tasks) ? p.tasks.length : 0);
+    if (!total) return 0;
+    const done = p.completed_tasks ?? (Array.isArray(p.tasks) ? p.tasks.filter(t => t.status === 'done' || t.status === 'completed').length : 0);
+    return done / total;
   }
 
   function progressLabel(path) {
     const p = progressMap[path];
     if (!p) return null;
-    return $t('spec_dashboard.progress_tasks', { values: { done: p.completed_tasks, total: p.total_tasks } });
+    const total = p.total_tasks ?? (Array.isArray(p.tasks) ? p.tasks.length : 0);
+    const done = p.completed_tasks ?? (Array.isArray(p.tasks) ? p.tasks.filter(t => t.status === 'done' || t.status === 'completed').length : 0);
+    if (!total && !done) return null;
+    return $t('spec_dashboard.progress_tasks', { values: { done, total } });
   }
 
   // ── New spec ────────────────────────────────────────────────────────────────
