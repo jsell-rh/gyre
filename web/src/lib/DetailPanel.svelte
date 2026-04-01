@@ -3635,7 +3635,7 @@
                       <li class="gate-item gate-item-{gStatus}">
                         <div class="gate-row">
                           <span class="gate-status-icon">{gStatus === 'passed' ? '✓' : gStatus === 'failed' ? '✗' : '○'}</span>
-                          <span class="gate-name">{gate.gate_name ?? gate.name ?? shortId(gate.gate_id)}</span>
+                          <span class="gate-name">{gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : 'Quality gate')}</span>
                           {#if gate.gate_type}
                             <span class="gate-type-badge">{gate.gate_type.replace(/_/g, ' ')}</span>
                           {/if}
