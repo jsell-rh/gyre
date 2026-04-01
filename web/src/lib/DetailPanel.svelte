@@ -1411,16 +1411,23 @@
   }
 
   /** Flatten structured hunk objects into a line array with computed line numbers */
-  function computeHunkLines(hunks) {
+  function computeHunkLines(hunks, fileStatus) {
     const result = [];
     for (const hunk of hunks) {
       // Parse hunk header for starting line numbers: @@ -old,count +new,count @@
       const hdrMatch = (hunk.header ?? '').match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
       let oldLine = hdrMatch ? parseInt(hdrMatch[1], 10) : 1;
       let newLine = hdrMatch ? parseInt(hdrMatch[2], 10) : 1;
+      // Detect new-file hunks: @@ -0,0 +N,... @@ means all lines are additions
+      const isNewFile = (hdrMatch && parseInt(hdrMatch[1], 10) === 0) || (fileStatus ?? '').toLowerCase() === 'added';
+      // Detect deleted-file hunks: @@ -N,... +0,0 @@ means all lines are deletions
+      const isDeletedFile = (hdrMatch && parseInt(hdrMatch[2], 10) === 0) || (fileStatus ?? '').toLowerCase() === 'deleted';
       result.push({ type: 'hunk', header: hunk.header ?? '' });
       for (const line of (hunk.lines ?? [])) {
-        const lt = line.type === 'add' ? 'add' : line.type === 'delete' ? 'del' : 'ctx';
+        // Fix misclassified lines: server may mark all lines as "context" for added/deleted files
+        let lt = line.type === 'add' ? 'add' : line.type === 'delete' ? 'del' : 'ctx';
+        if (lt === 'ctx' && isNewFile) lt = 'add';
+        if (lt === 'ctx' && isDeletedFile) lt = 'del';
         if (lt === 'add') {
           result.push({ type: 'line', lineType: lt, oldNum: '', newNum: newLine, content: line.content });
           newLine++;
@@ -3060,7 +3067,7 @@
                       </table>
                     {:else if file.hunks?.length > 0}
                       {@const lang = detectLang(file.path ?? '')}
-                      {@const hunkLines = computeHunkLines(file.hunks)}
+                      {@const hunkLines = computeHunkLines(file.hunks, file.status)}
                       <table class="diff-table">
                         <tbody>
                           {#each hunkLines as hline}
