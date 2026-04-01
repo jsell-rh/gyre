@@ -989,6 +989,77 @@
   {:else}
     <div class="sections">
 
+      <!-- ── Provenance Pipeline Summary ──────────────────────────────── -->
+      {#if specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0}
+      {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending').length}
+      {@const approvedSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'approved').length}
+      {@const activeTasks = wsTasks.filter(t => t.status === 'in_progress').length}
+      {@const doneTasks = wsTasks.filter(t => t.status === 'done').length}
+      {@const activeAgentCount = wsAgents.filter(a => a.status === 'active').length}
+      {@const idleAgentCount = wsAgents.filter(a => a.status === 'idle' || a.status === 'completed').length}
+      {@const openMrs = wsMrs.filter(m => m.status === 'open').length}
+      {@const mergedMrs = wsMrs.filter(m => m.status === 'merged').length}
+        <div class="provenance-pipeline" data-testid="provenance-pipeline">
+          <div class="pipeline-stage" class:pipeline-has-pending={pendingSpecs > 0}>
+            <div class="pipeline-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div class="pipeline-count">{specs.length}</div>
+            <div class="pipeline-label">Specs</div>
+            {#if pendingSpecs > 0}
+              <div class="pipeline-detail pipeline-detail-warn">{pendingSpecs} pending</div>
+            {:else if approvedSpecs > 0}
+              <div class="pipeline-detail pipeline-detail-ok">{approvedSpecs} approved</div>
+            {/if}
+          </div>
+          <div class="pipeline-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </div>
+          <div class="pipeline-stage">
+            <div class="pipeline-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            </div>
+            <div class="pipeline-count">{wsTasks.length}</div>
+            <div class="pipeline-label">Tasks</div>
+            {#if activeTasks > 0}
+              <div class="pipeline-detail pipeline-detail-active">{activeTasks} active</div>
+            {:else if doneTasks > 0}
+              <div class="pipeline-detail pipeline-detail-ok">{doneTasks} done</div>
+            {/if}
+          </div>
+          <div class="pipeline-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </div>
+          <div class="pipeline-stage" class:pipeline-has-active={activeAgentCount > 0}>
+            <div class="pipeline-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            </div>
+            <div class="pipeline-count">{wsAgents.length}</div>
+            <div class="pipeline-label">Agents</div>
+            {#if activeAgentCount > 0}
+              <div class="pipeline-detail pipeline-detail-active">{activeAgentCount} running</div>
+            {:else if idleAgentCount > 0}
+              <div class="pipeline-detail pipeline-detail-ok">{idleAgentCount} completed</div>
+            {/if}
+          </div>
+          <div class="pipeline-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </div>
+          <div class="pipeline-stage">
+            <div class="pipeline-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 012 2v7"/><path d="M6 9v12"/></svg>
+            </div>
+            <div class="pipeline-count">{wsMrs.length}</div>
+            <div class="pipeline-label">Merge Requests</div>
+            {#if openMrs > 0}
+              <div class="pipeline-detail pipeline-detail-warn">{openMrs} open</div>
+            {:else if mergedMrs > 0}
+              <div class="pipeline-detail pipeline-detail-ok">{mergedMrs} merged</div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       <!-- ── Decisions ─────────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
         <div class="section-header">
@@ -2228,6 +2299,91 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-6);
+  }
+
+  /* ── Provenance Pipeline ─────────────────────────────────────────────── */
+  .provenance-pipeline {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-6);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    flex-wrap: wrap;
+  }
+
+  .pipeline-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius);
+    min-width: 90px;
+    transition: background var(--transition-fast);
+  }
+
+  .pipeline-stage:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .pipeline-has-pending {
+    background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  }
+
+  .pipeline-has-active {
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+  }
+
+  .pipeline-icon {
+    color: var(--color-text-muted);
+  }
+
+  .pipeline-count {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text);
+    line-height: 1;
+  }
+
+  .pipeline-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+
+  .pipeline-detail {
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    white-space: nowrap;
+  }
+
+  .pipeline-detail-warn {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
+  }
+
+  .pipeline-detail-ok {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    color: var(--color-success);
+  }
+
+  .pipeline-detail-active {
+    background: color-mix(in srgb, var(--color-info) 15%, transparent);
+    color: var(--color-info);
+  }
+
+  .pipeline-arrow {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
   }
 
   .home-section {
