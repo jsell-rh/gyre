@@ -3161,7 +3161,7 @@
             <ul class="gates-list">
               {#each mrGates as gate}
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
-                {@const gateName = gate.name ?? gate.gate_name ?? (gate.gate_id ? `Gate ${shortId(gate.gate_id)}` : 'Gate')}
+                {@const gateName = gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : '') || 'Quality gate'}
                 {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
                 <li class="gate-item gate-item-{gateStatus}">
                   <div class="gate-row">
