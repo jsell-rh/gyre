@@ -2020,6 +2020,9 @@
                       signed
                     </span>
                   {/if}
+                  <button class="mr-explore-btn" onclick={() => { activeTab = 'diff'; }} title="View code changes in this merge request">
+                    View Diff
+                  </button>
                   {#if goToRepoTab}
                     <button class="mr-explore-btn" onclick={() => { goToRepoTab('code', { subTab: 'provenance' }); close(); }} title="View agent provenance for this code">
                       View Provenance
