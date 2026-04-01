@@ -24,6 +24,7 @@ pub struct CreateAgentRequest {
 pub struct ListAgentsQuery {
     pub status: Option<String>,
     pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +178,10 @@ pub async fn list_agents(
                 }
             }
         }
+    }
+    // Apply repo_id filter after enrichment (agents are indexed by workspace, not repo).
+    if let Some(ref filter_repo) = params.repo_id {
+        results.retain(|r| r.repo_id.as_deref() == Some(filter_repo.as_str()));
     }
     Ok(Json(results))
 }
