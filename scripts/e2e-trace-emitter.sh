@@ -7,16 +7,24 @@
 #   OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 #   OTEL_SERVICE_NAME=gyre-gate-test
 #
-# Emits a realistic integration test trace tree:
+# Emits a realistic integration test trace tree that exercises the greeting
+# service code in the e2e repo. Span attributes are chosen to match graph
+# nodes extracted from the Rust code:
+#   - lib::health_check (function)
+#   - greeting::GreetingService (type)
+#   - greeting::GreetingConfig (type)
+#   - lib::AppConfig (type)
+#
+# Trace tree:
 #   test_suite (root)
 #     ├── test_greeting_endpoint
-#     │     ├── POST /api/greet (server)
-#     │     │     └── db.query: SELECT greeting (db)
-#     │     └── assert_response (internal)
+#     │     ├── GreetingService.greet [code.function → greeting::GreetingService]
+#     │     │     └── db.query: SELECT greeting [db.system=sqlite]
+#     │     └── assert_response
 #     ├── test_health_check
-#     │     └── GET /api/health (server)
+#     │     └── health_check [code.function → lib::health_check]
 #     └── test_config_validation
-#           └── validate_config (internal)
+#           └── AppConfig.validate [code.function → lib::AppConfig]
 # =============================================================================
 
 set -euo pipefail
@@ -92,12 +100,12 @@ emit_span "aaa0000000000001" "" \
 emit_span "aaa0000000000002" "aaa0000000000001" \
   "test_greeting_endpoint" 5 10 200 1
 
-# POST /api/greet (server span)
+# GreetingService.greet — matches graph node "GreetingService" (type)
 emit_span "aaa0000000000003" "aaa0000000000002" \
-  "POST /api/greet" 2 20 150 1 \
-  '[{"key":"http.method","value":{"stringValue":"POST"}},{"key":"http.route","value":{"stringValue":"/api/greet"}},{"key":"http.status_code","value":{"intValue":"200"}}]'
+  "GreetingService.greet" 5 20 150 1 \
+  '[{"key":"code.function","value":{"stringValue":"greeting::GreetingService"}}]'
 
-# db.query (client/db span)
+# db.query — matches nothing specific but exercises Database span kind
 emit_span "aaa0000000000004" "aaa0000000000003" \
   "db.query: SELECT greeting" 1 30 50 1 \
   '[{"key":"db.system","value":{"stringValue":"sqlite"}},{"key":"db.statement","value":{"stringValue":"SELECT greeting FROM greetings WHERE lang = ?"}}]'
@@ -110,18 +118,18 @@ emit_span "aaa0000000000005" "aaa0000000000002" \
 emit_span "aaa0000000000006" "aaa0000000000001" \
   "test_health_check" 5 220 80 1
 
-# GET /api/health (server span)
+# health_check — matches graph node "health_check" (function)
 emit_span "aaa0000000000007" "aaa0000000000006" \
-  "GET /api/health" 2 225 50 1 \
-  '[{"key":"http.method","value":{"stringValue":"GET"}},{"key":"http.route","value":{"stringValue":"/api/health"}},{"key":"http.status_code","value":{"intValue":"200"}}]'
+  "health_check" 5 225 50 1 \
+  '[{"key":"code.function","value":{"stringValue":"lib::health_check"}}]'
 
 # Test 3: test_config_validation
 emit_span "aaa0000000000008" "aaa0000000000001" \
   "test_config_validation" 5 310 80 1
 
-# validate_config (internal)
+# AppConfig.validate — matches graph node "AppConfig" (type)
 emit_span "aaa0000000000009" "aaa0000000000008" \
-  "validate_config" 5 315 60 1 \
-  '[{"key":"code.function","value":{"stringValue":"greeting_service::config::validate"}}]'
+  "AppConfig.validate" 5 315 60 1 \
+  '[{"key":"code.function","value":{"stringValue":"lib::AppConfig"}}]'
 
 echo "Emitted 9 spans (trace_id=${TRACE_ID})"
