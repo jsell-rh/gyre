@@ -854,9 +854,15 @@
     if (!entity || rejecting) return;
     const path = entity.id;
     if (!path) return;
+    const reason = prompt('Rejection reason (required):', '');
+    if (reason === null) return;
+    if (!reason.trim()) {
+      toastError('A rejection reason is required');
+      return;
+    }
     rejecting = true;
     try {
-      await api.rejectSpec(path, 'Rejected from detail panel');
+      await api.rejectSpec(path, reason.trim());
       toastSuccess('Spec rejected');
       if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'rejected' } };
     } catch (e) {
@@ -913,6 +919,13 @@
                 editContent = withContent.content;
               }
             } catch { /* best effort */ }
+          }
+          // Preload spec history for rejected specs to show rejection reason banner
+          const status = entity?.data?.approval_status;
+          if ((status === 'rejected' || status === 'revoked') && !specHistory && !specHistoryLoading) {
+            api.specHistoryRepo(path, repoId).then(h => {
+              specHistory = Array.isArray(h) ? h : [];
+            }).catch(() => {});
           }
         })
         .catch(() => { specDetail = null; })
@@ -2440,6 +2453,21 @@
               {#each Array(5) as _}<Skeleton width="100%" height="1.2rem" />{/each}
             </div>
           {:else if specDetail?.content}
+            {#if entity.data?.approval_status === 'rejected'}
+              {@const rejectEvent = (specHistory ?? []).find(ev => ev.event === 'rejected' || ev.event === 'revoked')}
+              <div class="spec-rejected-banner" role="alert">
+                <span class="rejected-banner-icon">&#x26D4;</span>
+                <div class="rejected-banner-content">
+                  <span class="rejected-banner-title">This spec has been rejected</span>
+                  {#if rejectEvent?.reason ?? rejectEvent?.revocation_reason}
+                    <span class="rejected-banner-reason">{rejectEvent.reason ?? rejectEvent.revocation_reason}</span>
+                  {/if}
+                  {#if rejectEvent?.user_id ?? rejectEvent?.approver_id ?? rejectEvent?.revoked_by}
+                    <span class="rejected-banner-by">by {rejectEvent.user_id ?? rejectEvent.approver_id ?? rejectEvent.revoked_by} {rejectEvent.timestamp ? '· ' + fmtDate(rejectEvent.timestamp ?? rejectEvent.approved_at) : ''}</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
             <dl class="spec-meta-list">
               {#if entity.data?.approval_status}
                 <dt>{$t('detail_panel.status')}</dt>
@@ -4146,6 +4174,46 @@
   /* Content tab */
   .spec-content-tab {
     gap: var(--space-4);
+  }
+
+  .spec-rejected-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+    border-left: 3px solid var(--color-danger);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-3);
+  }
+
+  .rejected-banner-icon {
+    font-size: 18px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .rejected-banner-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .rejected-banner-title {
+    font-weight: 600;
+    font-size: var(--text-sm);
+    color: var(--color-danger);
+  }
+
+  .rejected-banner-reason {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .rejected-banner-by {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
   }
 
   .spec-meta-list {
