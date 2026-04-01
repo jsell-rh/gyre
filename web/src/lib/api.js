@@ -245,6 +245,9 @@ export const api = {
   // Agent logs
   agentLogs: (id, limit = 100, offset = 0) =>
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
+  // Agent log SSE stream URL (for live tailing active agents)
+  agentLogStreamUrl: (id) =>
+    `${BASE}/agents/${id}/logs/stream`,
   appendAgentLog: (id, message) =>
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
   // Agent messages (distinct from logs — typed messages: TaskAssignment, ReviewRequest, etc.)
