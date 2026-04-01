@@ -33,54 +33,31 @@
   let canvasWidth = $state(800);
   let canvasHeight = $state(600);
 
-  // Node positions scaled to fill available canvas space.
-  // Groups nodes by type into columns, then distributes them to use the viewport.
+  // Positions and viewBox from ExplorerCanvas (synced via bind:)
+  let explorerPositions = $state({});
+  let explorerViewBox = $state({ x: 0, y: 0, w: 900, h: 600 });
+
+  // Convert ExplorerCanvas world-space positions to screen-space for the canvas overlay.
+  // ExplorerCanvas uses SVG viewBox for pan/zoom — we apply the same transform so
+  // particles align exactly with the SVG nodes and follow pan/zoom.
   let positionedNodes = $derived.by(() => {
-    if (!nodes.length) return [];
-    const byType = {};
-    for (const n of nodes) {
-      const t = n.node_type ?? 'Unknown';
-      (byType[t] = byType[t] ?? []).push(n);
-    }
-    const typeOrder = ['package', 'module', 'type', 'interface', 'function', 'endpoint', 'component', 'table', 'constant'];
-    const cols = Object.keys(byType).sort((a, b) => {
-      const ai = typeOrder.indexOf(a);
-      const bi = typeOrder.indexOf(b);
-      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    const pos = explorerPositions;
+    if (!pos || !Object.keys(pos).length) return [];
+
+    const vb = explorerViewBox;
+    const scaleX = canvasWidth / vb.w;
+    const scaleY = canvasHeight / vb.h;
+
+    return nodes.filter(n => pos[n.id]).map(n => {
+      const p = pos[n.id];
+      return {
+        ...n,
+        x: (p.x - vb.x) * scaleX,
+        y: (p.y - vb.y) * scaleY,
+        width: 64 * scaleX,
+        height: 28 * scaleY,
+      };
     });
-
-    const w = canvasWidth || 800;
-    const h = canvasHeight || 600;
-    const padX = 80;
-    const padY = 60;
-    const usableW = w - padX * 2;
-    const usableH = h - padY * 2;
-    const numCols = cols.length || 1;
-    const maxRows = Math.max(1, ...cols.map(c => byType[c].length));
-
-    // Scale column/row spacing to fill the canvas
-    const colW = numCols > 1 ? usableW / (numCols - 1) : 0;
-    const rowH = maxRows > 1 ? Math.min(80, usableH / (maxRows - 1)) : 0;
-
-    // Node size: scale up when few nodes, cap at reasonable size
-    const nodeW = Math.min(140, Math.max(80, usableW / (numCols * 2)));
-    const nodeH = Math.min(48, Math.max(32, nodeW * 0.4));
-
-    const result = [];
-    cols.forEach((col, ci) => {
-      const x = numCols > 1 ? padX + ci * colW : w / 2;
-      byType[col].forEach((n, ri) => {
-        const y = maxRows > 1 ? padY + ri * rowH : h / 2;
-        result.push({
-          ...n,
-          x: x - nodeW / 2,
-          y: y - nodeH / 2,
-          width: nodeW,
-          height: nodeH,
-        });
-      });
-    });
-    return result;
   });
 
   // Compute per-node metrics from spans
@@ -207,6 +184,8 @@
       {nodes}
       {edges}
       {repoId}
+      bind:nodePositions={explorerPositions}
+      bind:currentViewBox={explorerViewBox}
     />
 
     <!-- Canvas 2D particle overlay -->
