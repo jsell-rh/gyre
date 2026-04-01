@@ -25,14 +25,15 @@ describe('RepoMode', () => {
     expect(() => render(RepoMode, { props: { workspace: ws, repo } })).not.toThrow();
   });
 
-  it('renders tab bar with all seven tabs', () => {
+  it('renders tab bar with all eight tabs', () => {
     const { container } = render(RepoMode, { props: { workspace: ws, repo } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(7);
+    expect(tabs.length).toBe(8);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('Specs');
     expect(labels).toContain('Tasks');
     expect(labels).toContain('MRs');
+    expect(labels).toContain('Agents');
     expect(labels).toContain('Architecture');
     expect(labels).toContain('Decisions');
     expect(labels).toContain('Code');
