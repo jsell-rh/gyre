@@ -1051,9 +1051,13 @@
                     <ul class="release-entry-list">
                       {#each (section.entries ?? []) as entry}
                         <li class="release-entry">
-                          <span class="release-entry-msg">{entry.message ?? entry.summary ?? entry}</span>
+                          <span class="release-entry-msg">{entry.description ?? entry.message ?? entry.summary ?? entry}</span>
                           {#if entry.sha}<code class="mono release-entry-sha">{entry.sha.slice(0, 7)}</code>{/if}
                           {#if entry.scope}<span class="release-entry-scope">({entry.scope})</span>{/if}
+                          {#if entry.is_breaking}<span class="release-breaking-badge">BREAKING</span>{/if}
+                          {#if entry.agent_name}
+                            <span class="release-entry-agent" title={entry.agent_id ?? ''}>by {entry.agent_name}</span>
+                          {/if}
                         </li>
                       {/each}
                     </ul>
@@ -1891,6 +1895,39 @@
     font-size: var(--text-sm);
     font-weight: 600;
     margin: 0 0 var(--space-2);
+  }
+
+  .release-entry {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .release-entry-sha {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .release-entry-scope {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .release-breaking-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 0 4px;
+  }
+
+  .release-entry-agent {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
   }
 
   .release-changelog-pre {
