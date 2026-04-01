@@ -10,9 +10,11 @@
    *   "Tenant administration is accessed via a gear icon on the cross-workspace view header.
    *    Only visible to tenant Admin role users. Tabs: Users, Compute Targets, Budget, Audit, Health, Jobs."
    */
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
   import { toast as showToast } from '../lib/toast.svelte.js';
 
   let {
@@ -782,7 +784,21 @@
                           {#if ev.event_type}<dt>Event</dt><dd>{ev.event_type}</dd>{/if}
                           {#if ev.actor}<dt>Actor</dt><dd>{ev.actor}</dd>{/if}
                           {#if ev.ip_address}<dt>IP</dt><dd class="mono">{ev.ip_address}</dd>{/if}
-                          {#if ev.resource_type}<dt>Resource</dt><dd>{ev.resource_type}{ev.resource_id ? ': ' + resolveEntityName(ev.resource_type === 'agent' ? 'agent' : ev.resource_type === 'repo' || ev.resource_type === 'repository' ? 'repo' : ev.resource_type, ev.resource_id) : ''}</dd>{/if}
+                          {#if ev.resource_type}
+                            {@const refType = ev.resource_type === 'repository' ? 'repo' : ev.resource_type}
+                            {@const clickable = refType === 'agent' || refType === 'mr' || refType === 'task' || refType === 'spec'}
+                            <dt>Resource</dt>
+                            <dd>
+                              {ev.resource_type}
+                              {#if ev.resource_id}
+                                {#if clickable}
+                                  : <button class="audit-entity-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: refType, id: ev.resource_id, data: refType === 'spec' ? { path: ev.resource_id } : {} }); }} title="View {refType}">{resolveEntityName(refType, ev.resource_id)}</button>
+                                {:else}
+                                  : {resolveEntityName(refType, ev.resource_id)}
+                                {/if}
+                              {/if}
+                            </dd>
+                          {/if}
                           {#if ev.workspace_id}<dt>Workspace</dt><dd class="mono" title={ev.workspace_id}>{resolveWorkspaceName(ev.workspace_id)}</dd>{/if}
                           {#if ev.detail ?? ev.message}<dt>Detail</dt><dd class="audit-full-detail">{ev.detail ?? ev.message}</dd>{/if}
                           {#if ev.metadata}
@@ -1829,6 +1845,22 @@
   }
 
   .audit-full-detail { white-space: pre-wrap; }
+
+  .audit-entity-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+    font-size: inherit;
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+    cursor: pointer;
+  }
+
+  .audit-entity-btn:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+  }
 
   .audit-meta-pre {
     font-family: var(--font-mono);
