@@ -15,6 +15,11 @@
   import { api } from '../lib/api.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  function nav(type, id, data) {
+    if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
+    else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
+  }
   import { toast as showToast } from '../lib/toast.svelte.js';
 
   let {
@@ -934,7 +939,7 @@
                               {ev.resource_type}
                               {#if ev.resource_id}
                                 {#if clickable}
-                                  : <button class="audit-entity-btn" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: refType, id: ev.resource_id, data: refType === 'spec' ? { path: ev.resource_id } : {} }); }} title="View {refType}">{resolveEntityName(refType, ev.resource_id)}</button>
+                                  : <button class="audit-entity-btn" onclick={(e) => { e.stopPropagation(); nav(refType, ev.resource_id, refType === 'spec' ? { path: ev.resource_id } : {}); }} title="View {refType}">{resolveEntityName(refType, ev.resource_id)}</button>
                                 {:else}
                                   : {resolveEntityName(refType, ev.resource_id)}
                                 {/if}
