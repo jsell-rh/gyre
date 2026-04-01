@@ -176,7 +176,9 @@
   }
 
   // Reset active tab when entity changes, defaulting to a sensible tab.
-  // MRs default to 'diff' (like GitHub), everything else defaults to first tab.
+  // MRs default to 'info' (overview with provenance chain, status journey,
+  // gates summary — more useful than raw diff for an autonomous platform).
+  // Specs default to 'content'. Everything else defaults to first tab.
   $effect(() => {
     if (entity) {
       const freshTabs = computeTabs(entity);
@@ -184,8 +186,8 @@
       const requestedTab = entity.data?._openTab;
       if (requestedTab && freshTabs.some(t => t.id === requestedTab)) {
         activeTab = requestedTab;
-      } else if (entity.type === 'mr' && freshTabs.some(t => t.id === 'diff')) {
-        activeTab = 'diff';
+      } else if (entity.type === 'mr' && freshTabs.some(t => t.id === 'info')) {
+        activeTab = 'info';
       } else if (entity.type === 'spec' && freshTabs.some(t => t.id === 'content')) {
         activeTab = 'content';
       } else if (freshTabs.length > 0) {
