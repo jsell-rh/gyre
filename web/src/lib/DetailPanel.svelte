@@ -1305,18 +1305,36 @@
               </div>
             {:else}
               {@const mr = mrDetail ?? entity.data ?? {}}
+              <!-- Prominent status journey block -->
+              {#if mr._statusStory?.length > 0}
+                <div class="mr-status-journey">
+                  <div class="status-journey-track">
+                    {#each mr._statusStory as step, i}
+                      <div class="status-journey-node status-journey-node-{step.variant}" title={step.time ? fmtDate(step.time) : ''}>
+                        <span class="status-journey-dot"></span>
+                        <span class="status-journey-label">{step.label}</span>
+                        {#if step.time}
+                          <span class="status-journey-time">{fmtDate(step.time)}</span>
+                        {/if}
+                      </div>
+                      {#if i < mr._statusStory.length - 1}
+                        <span class="status-journey-connector"></span>
+                      {/if}
+                    {/each}
+                  </div>
+                  {#if mr.merge_commit_sha}
+                    <div class="status-journey-sha">
+                      <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 10)}</code>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
                 <dt>Status</dt>
                 <dd>
                   <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
-                  {#if mr._statusStory?.length > 0}
-                    <span class="status-story">
-                      {#each mr._statusStory as step, i}
-                        <span class="status-step status-step-{step.variant}">{step.label}</span>{#if i < mr._statusStory.length - 1}<span class="status-step-arrow">→</span>{/if}
-                      {/each}
-                    </span>
-                  {/if}
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if mr.description}
@@ -1443,7 +1461,7 @@
                         {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
                         <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
                           <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
-                          <span class="gate-detail-name">{gate.name}</span>
+                          <span class="gate-detail-name">{gate.name ?? gate.gate_name ?? (gate.gate_id ? `Gate ${shortId(gate.gate_id)}` : 'Gate')}</span>
                           {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
                         </button>
@@ -1497,7 +1515,7 @@
                 <div class="mr-merged-info">
                   <Badge value="merged" variant="success" />
                   {#if mr.merge_commit_sha}
-                    <span class="mono copyable" title="Click to copy merge SHA: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</span>
+                    <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 10)}</code>
                   {/if}
                   {#if mr._commitSig}
                     <span class="sig-badge" title="Commit signed with {mr._commitSig.algorithm ?? 'unknown'}">
@@ -2569,15 +2587,42 @@
               {#each Array(3) as _}<Skeleton width="100%" height="2rem" />{/each}
             </div>
           {:else if Array.isArray(mrGates) && mrGates.length > 0}
+            {@const totalGates = mrGates.length}
+            {@const passedGates = mrGates.filter(g => g.status === 'Passed' || g.status === 'passed').length}
+            {@const failedGates = mrGates.filter(g => g.status === 'Failed' || g.status === 'failed').length}
+            {@const pendingGates = totalGates - passedGates - failedGates}
+            <div class="gates-tab-header" class:gates-all-passed={failedGates === 0 && pendingGates === 0} class:gates-has-failures={failedGates > 0}>
+              <span class="gates-tab-summary-icon">{failedGates > 0 ? '✗' : pendingGates > 0 ? '○' : '✓'}</span>
+              <span class="gates-tab-summary-text">
+                {#if failedGates > 0}
+                  {failedGates} of {totalGates} gate{totalGates !== 1 ? 's' : ''} failed — merge blocked
+                {:else if pendingGates > 0}
+                  {passedGates} of {totalGates} gate{totalGates !== 1 ? 's' : ''} passed — {pendingGates} pending
+                {:else}
+                  {passedGates} of {totalGates} gate{totalGates !== 1 ? 's' : ''} passed — all checks complete
+                {/if}
+              </span>
+            </div>
             <ul class="gates-list">
               {#each mrGates as gate}
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
-                {@const gateName = gate.name ?? gate.gate_name ?? (gate.gate_id ? shortId(gate.gate_id) : 'Gate')}
+                {@const gateName = gate.name ?? gate.gate_name ?? (gate.gate_id ? `Gate ${shortId(gate.gate_id)}` : 'Gate')}
                 {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
                 <li class="gate-item gate-item-{gateStatus}">
                   <div class="gate-row">
                     <span class="gate-status-icon">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
                     <span class="gate-name" title={gate.gate_id ?? ''}>{gateName}</span>
+                    <span class="gate-status-badge gate-status-badge-{gateStatus}">
+                      {#if gateStatus === 'passed'}
+                        Passed
+                      {:else if gateStatus === 'failed'}
+                        Failed
+                      {:else if gateStatus === 'running'}
+                        Running
+                      {:else}
+                        <span class="gate-pending-pulse"></span>Waiting...
+                      {/if}
+                    </span>
                     {#if gate.gate_type}
                       <span class="gate-type-badge">{gate.gate_type.replace(/_/g, ' ')}</span>
                     {/if}
@@ -2599,13 +2644,13 @@
                   {#if gate.output}
                     <details class="gate-output-details" open={gateStatus === 'failed'}>
                       <summary class="gate-output-label">Output</summary>
-                      <pre class="gate-output">{gate.output}</pre>
+                      <pre class="gate-output gate-terminal">{gate.output}</pre>
                     </details>
                   {/if}
                   {#if gate.error}
                     <details class="gate-output-details" open>
                       <summary class="gate-output-label gate-error-label">Error</summary>
-                      <pre class="gate-output gate-error">{gate.error}</pre>
+                      <pre class="gate-output gate-terminal gate-error">{gate.error}</pre>
                     </details>
                   {/if}
                   {#if gate.started_at}
@@ -2636,7 +2681,10 @@
               </div>
               <dl class="entity-meta">
                 {#if att.merge_commit_sha}
-                  <dt>Merge commit</dt><dd class="mono copyable" title="Click to copy: {att.merge_commit_sha}" onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 12)}...</dd>
+                  <dt>Merge commit</dt>
+                  <dd>
+                    <code class="sha-badge mono copyable" title="Click to copy: {att.merge_commit_sha}" onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 10)}</code>
+                  </dd>
                 {/if}
                 {#if att.merged_at}
                   <dt>Merged at</dt><dd>{fmtDate(att.merged_at)}</dd>
@@ -2664,8 +2712,9 @@
                   {@const passed = att.gate_results.filter(g => g.status === 'Passed' || g.status === 'passed').length}
                   {@const total = att.gate_results.length}
                   <dt>Gates</dt>
-                  <dd>
+                  <dd class="att-gate-summary">
                     <Badge value="{passed}/{total} passed" variant={passed === total ? 'success' : 'warning'} />
+                    <span class="att-gate-names">{att.gate_results.map(g => g.gate_name ?? g.name ?? 'gate').join(', ')}</span>
                   </dd>
                 {/if}
               </dl>
@@ -2699,8 +2748,8 @@
               {/if}
               {#if mrAttestation.signature}
                 <div class="att-sig-block">
-                  <span class="att-sig-label">Ed25519 Signature</span>
-                  <code class="att-sig-value mono copyable" title="Click to copy full signature" onclick={() => copyId(mrAttestation.signature)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mrAttestation.signature); }}>{mrAttestation.signature.slice(0, 24)}...</code>
+                  <span class="att-sig-label">Signature</span>
+                  <code class="att-sig-value mono copyable" title="Click to copy full signature" onclick={() => copyId(mrAttestation.signature)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mrAttestation.signature); }}>Ed25519 · {mrAttestation.signature.slice(0, 16)}...</code>
                 </div>
               {/if}
             </div>
@@ -4488,6 +4537,110 @@
     font-family: var(--font-mono);
   }
 
+  .gates-tab-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    margin-bottom: var(--space-3);
+    background: var(--color-surface-elevated);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+
+  .gates-tab-header.gates-all-passed {
+    border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+    background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface-elevated));
+  }
+
+  .gates-tab-header.gates-all-passed .gates-tab-summary-icon {
+    color: var(--color-success, #22c55e);
+  }
+
+  .gates-tab-header.gates-has-failures {
+    border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 8%, var(--color-surface-elevated));
+  }
+
+  .gates-tab-header.gates-has-failures .gates-tab-summary-icon {
+    color: var(--color-danger, #ef4444);
+  }
+
+  .gates-tab-summary-icon {
+    font-size: var(--text-base);
+    font-weight: 700;
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+  }
+
+  .gates-tab-summary-text {
+    color: var(--color-text);
+  }
+
+  .gate-status-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .gate-status-badge-passed {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    color: var(--color-success, #22c55e);
+  }
+
+  .gate-status-badge-failed {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    color: var(--color-danger, #ef4444);
+  }
+
+  .gate-status-badge-running {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning, #f59e0b);
+  }
+
+  .gate-status-badge-pending {
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    color: var(--color-text-muted);
+  }
+
+  .gate-pending-pulse {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: gatePulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes gatePulse {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+
+  .gate-terminal {
+    background: #1a1a2e;
+    color: #d4d4d8;
+    border-color: #2a2a3e;
+    max-height: 250px;
+    scrollbar-width: thin;
+    scrollbar-color: #3a3a4e #1a1a2e;
+  }
+
+  .gate-terminal.gate-error {
+    color: #fca5a5;
+    background: #1a1017;
+    border-color: #3d1f2e;
+  }
+
   /* ── MR Attestation tab ──────────────────────────────────────────────────── */
   .attestation-block {
     display: flex;
@@ -4901,6 +5054,100 @@
     font-size: 9px;
     color: var(--color-text-muted);
     margin: 0 1px;
+  }
+
+  /* ── MR status journey (prominent block at top of info tab) ────────── */
+  .mr-status-journey {
+    background: var(--color-surface-raised, var(--color-bg-alt));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+
+  .status-journey-track {
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+    flex-wrap: wrap;
+  }
+
+  .status-journey-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 60px;
+  }
+
+  .status-journey-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+  }
+
+  .status-journey-node-success .status-journey-dot { background: var(--color-success); }
+  .status-journey-node-danger .status-journey-dot  { background: var(--color-danger); }
+  .status-journey-node-warning .status-journey-dot { background: var(--color-warning); }
+  .status-journey-node-info .status-journey-dot    { background: var(--color-info); }
+
+  .status-journey-label {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text);
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .status-journey-time {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+
+  .status-journey-connector {
+    width: 20px;
+    height: 2px;
+    background: var(--color-border);
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+
+  .status-journey-sha {
+    margin-top: var(--space-2);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  /* ── SHA badge (code-like copyable badge) ──────────────────────────── */
+  .sha-badge {
+    display: inline-block;
+    background: color-mix(in srgb, var(--color-info) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 25%, transparent);
+    color: var(--color-info);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .sha-badge:hover {
+    background: color-mix(in srgb, var(--color-info) 20%, transparent);
+  }
+
+  /* ── Attestation gate name list ────────────────────────────────────── */
+  .att-gate-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .att-gate-names {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
   }
 
   /* ── Agent container info ──────────────────────────────────────────────── */
