@@ -2673,14 +2673,14 @@
               <span class="diff-del">-{mrDiff.deletions ?? 0}</span>
             </div>
             {#if mrDiff.files?.length > 0}
-              <!-- File tree summary (like GitHub) -->
+              <!-- File tree summary (like GitHub — click to jump) -->
               <div class="diff-file-tree">
-                {#each mrDiff.files as file}
+                {#each mrDiff.files as file, idx}
                   {@const statusLower = (file.status ?? 'modified').toLowerCase()}
-                  <span class="diff-tree-item">
+                  <button class="diff-tree-item diff-tree-clickable" onclick={() => { const el = document.getElementById(`diff-file-${idx}`); if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }} title="Jump to {file.path}">
                     <span class="diff-tree-status diff-tree-status-{statusLower}">{statusLower === 'added' ? '+' : statusLower === 'deleted' ? '-' : '~'}</span>
                     <span class="diff-tree-path mono">{file.path}</span>
-                  </span>
+                  </button>
                 {/each}
               </div>
               <div class="diff-file-list">
@@ -2688,7 +2688,7 @@
                   {@const fileStatusLower = (file.status ?? 'modified').toLowerCase()}
                   {@const fileAdds = file.insertions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'add').length, 0) : null)}
                   {@const fileDels = file.deletions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'delete').length, 0) : null)}
-                  <details class="diff-file" open={mrDiff.files.length <= 5}>
+                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 5}>
                     <summary class="diff-file-header">
                       <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
@@ -4465,6 +4465,21 @@
     align-items: center;
     gap: 2px;
     font-size: 10px;
+  }
+
+  .diff-tree-clickable {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 1px 2px;
+    border-radius: var(--radius-sm);
+    color: inherit;
+    font: inherit;
+    transition: background var(--transition-fast);
+  }
+
+  .diff-tree-clickable:hover {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
   }
 
   .diff-tree-status {
