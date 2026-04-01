@@ -16,12 +16,8 @@
     { id: 'files', label: 'Files' },
     { id: 'commits', labelKey: 'code_tab.commits' },
     { id: 'branches', labelKey: 'code_tab.branches' },
-    { id: 'merge-requests', labelKey: 'code_tab.merge_requests' },
-    { id: 'merge-queue', labelKey: 'code_tab.merge_queue' },
     { id: 'hot-files', label: 'Hot Files' },
     { id: 'provenance', label: 'Provenance' },
-    { id: 'tasks', labelKey: 'code_tab.tasks' },
-    { id: 'agents', labelKey: 'code_tab.agents' },
   ];
 
   // Clone URL copy state
@@ -727,168 +723,6 @@
         </table>
       {/if}
 
-    {:else if subTab === 'merge-requests'}
-      {#if filteredMrs.length === 0}
-        <EmptyState title={$t('code_tab.no_mrs')} message={filterQuery ? $t('code_tab.no_mrs_filter') : $t('code_tab.no_mrs_empty')} />
-      {:else}
-        <table class="code-table">
-          <thead>
-            <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>{$t('code_tab.col_title')} {sortIcon('title')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('source_branch')}>Branch {sortIcon('source_branch')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
-              <th scope="col">Gates</th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('updated_at')}>{$t('code_tab.col_updated')} {sortIcon('updated_at')}</button></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each filteredMrs as mr}
-              <tr class="table-row" onclick={() => onRowClick(mr, 'mr')} tabindex="0" role="button" aria-label="View MR {mr.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(mr, 'mr'); } }}>
-                <td>
-                  <div class="mr-title-cell">
-                    <span title={mr.title}>{mr.title}</span>
-                    <div class="mr-meta-line">
-                      {#if mr.author_agent_id || mr.agent_id}
-                        {@const agentId = mr.author_agent_id ?? mr.agent_id}
-                        <button class="agent-link" title={agentId} onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }}>
-                          <span class="agent-icon" aria-hidden="true">&#x2699;</span>{resolveEntityName('agent', agentId)}
-                        </button>
-                      {/if}
-                      {#if mr.spec_ref}
-                        <span class="mr-spec-ref" title={mr.spec_ref}>{mr.spec_ref.split('@')[0]?.split('/').pop()}</span>
-                      {/if}
-                    </div>
-                  </div>
-                </td>
-                <td class="mono secondary">{mr.source_branch ?? '—'}</td>
-                <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
-                <td>
-                  {#if mr._gates?.total > 0}
-                    <div class="gate-cell" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''}>
-                      <span class="gate-summary" class:gate-all-pass={mr._gates.failed === 0 && mr._gates.passed === mr._gates.total} class:gate-has-fail={mr._gates.failed > 0}>
-                        {mr._gates.passed}/{mr._gates.total}
-                      </span>
-                      {#if mr._gates.details?.length > 0}
-                        <span class="gate-names">
-                          {#each mr._gates.details as g}
-                            <span class="gate-name-tag gate-name-{g.status}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
-                          {/each}
-                        </span>
-                      {/if}
-                    </div>
-                  {:else}
-                    <span class="secondary">—</span>
-                  {/if}
-                </td>
-                <td class="secondary">
-                  <div class="mr-updated-cell">
-                    <span>{relativeTime(mr.updated_at)}</span>
-                    {#if mr.diff_stats}
-                      <span class="mr-diff-stats">
-                        <span class="mr-diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
-                        <span class="mr-diff-del">-{mr.diff_stats.deletions ?? 0}</span>
-                      </span>
-                    {/if}
-                  </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-
-    {:else if subTab === 'merge-queue'}
-      {#if filteredQueue.length === 0}
-        <EmptyState title={$t('code_tab.queue_empty')} message={filterQuery ? $t('code_tab.no_queue_filter') : $t('code_tab.no_queue_empty')} />
-      {:else}
-        <table class="code-table">
-          <thead>
-            <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>Merge Request {sortIcon('mr')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>{$t('code_tab.col_priority')} {sortIcon('priority')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
-              <th scope="col">Dependencies</th>
-              <th scope="col">Speculative Merge</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each filteredQueue as entry}
-              {@const mrId = entry.merge_request_id ?? entry.mr_id}
-              <tr class="table-row" onclick={() => onRowClick({ id: mrId, ...entry }, 'mr')} tabindex="0" role="button" aria-label={entry._mr_title ? `View MR: ${entry._mr_title}` : $t('code_tab.view_queue_entry')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick({ id: mrId, ...entry }, 'mr'); } }}>
-                <td>
-                  <div class="queue-mr-cell">
-                    <span>{entry._mr_title ?? (mrId ? mrId.slice(0, 8) + '...' : '—')}</span>
-                    {#if entry._mr_branch}
-                      <span class="queue-branch mono">{entry._mr_branch}</span>
-                    {/if}
-                  </div>
-                </td>
-                <td><span class="priority-pill priority-{entry.priority <= 25 ? 'high' : entry.priority <= 75 ? 'normal' : 'low'}">P{entry.priority ?? '—'}</span></td>
-                <td><span class="status-badge status-{entry._mr_status ?? ''}">{entry.status ?? 'queued'}</span></td>
-                <td>
-                  {#if entry.depends_on?.length > 0}
-                    <span class="dep-indicator dep-blocked" title="Blocked by {entry.depends_on.length} MR(s)">blocked ({entry.depends_on.length})</span>
-                  {:else if entry.atomic_group}
-                    <span class="dep-indicator dep-group" title="Atomic group: {entry.atomic_group}">{entry.atomic_group}</span>
-                  {:else}
-                    <span class="secondary">—</span>
-                  {/if}
-                </td>
-                <td>
-                  {#if entry._speculative}
-                    {@const sm = entry._speculative}
-                    <span class="spec-merge-badge" class:spec-merge-clean={sm.mergeable || sm.status === 'clean'} class:spec-merge-conflict={sm.has_conflicts || sm.status === 'conflict'} title={sm.has_conflicts ? 'This branch has merge conflicts with main' : sm.mergeable ? 'Clean merge — no conflicts detected' : 'Speculative merge status: ' + (sm.status ?? 'unknown')}>
-                      {sm.has_conflicts ? 'Conflicts' : sm.mergeable ? 'Clean' : sm.status ?? '—'}
-                    </span>
-                  {:else}
-                    <span class="secondary">—</span>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-
-    {:else if subTab === 'tasks'}
-      {#if filteredTasks.length === 0}
-        <EmptyState title="No tasks" message={filterQuery ? 'No tasks match your filter' : 'No tasks for this repository yet'} />
-      {:else}
-        <table class="code-table">
-          <thead>
-            <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>Title {sortIcon('title')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>Priority {sortIcon('priority')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('task_type')}>Type {sortIcon('task_type')}</button></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each filteredTasks as task}
-              <tr class="table-row" onclick={() => onRowClick(task, 'task')} tabindex="0" role="button" aria-label="View task: {task.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(task, 'task'); } }}>
-                <td>
-                  <div class="task-title-cell">
-                    <span title={task.title}>{task.title}</span>
-                    {#if task.spec_path}
-                      <span class="mr-spec-ref" title={task.spec_path}>{task.spec_path.split('/').pop()}</span>
-                    {/if}
-                  </div>
-                </td>
-                <td><span class="status-badge status-{task.status}">{task.status ?? 'backlog'}</span></td>
-                <td>
-                  {#if task.priority}
-                    <span class="priority-pill priority-{task.priority === 'critical' || task.priority === 'high' ? 'high' : task.priority === 'low' ? 'low' : 'normal'}">{task.priority}</span>
-                  {:else}
-                    <span class="secondary">—</span>
-                  {/if}
-                </td>
-                <td class="secondary">{task.task_type ?? '—'}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-
     {:else if subTab === 'hot-files'}
       {#if hotFiles.length === 0}
         <EmptyState title="No hot files" message="No files have been frequently modified yet. Hot files appear after multiple commits touch the same paths." />
@@ -1001,38 +835,6 @@
         {/if}
       </div>
 
-    {:else if subTab === 'agents'}
-      {#if filteredAgents.length === 0}
-        <EmptyState title="No agents" message={filterQuery ? 'No agents match your filter' : 'No agents have been spawned for this repository yet'} />
-      {:else}
-        <table class="code-table">
-          <thead>
-            <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('name')}>Name {sortIcon('name')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>Status {sortIcon('status')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('branch')}>Branch {sortIcon('branch')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('created_at')}>Created {sortIcon('created_at')}</button></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each filteredAgents as agent}
-              <tr class="table-row" onclick={() => onRowClick(agent, 'agent')} tabindex="0" role="button" aria-label="View agent: {agent.name}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(agent, 'agent'); } }}>
-                <td>
-                  <div class="agent-name-cell">
-                    <span>{agent.name ?? resolveEntityName('agent', agent.id)}</span>
-                    {#if agent.agent_type}
-                      <span class="agent-type-tag">{agent.agent_type}</span>
-                    {/if}
-                  </div>
-                </td>
-                <td title={agent.status === 'active' ? 'Agent is actively running' : agent.status === 'idle' || agent.status === 'completed' ? 'Agent finished its work successfully' : agent.status === 'failed' ? 'Agent encountered an error' : agent.status === 'dead' ? 'Agent process was terminated' : agent.status === 'stopped' ? 'Agent was gracefully stopped' : ''}><span class="status-badge status-{agent.status}">{agent.status ?? 'unknown'}</span></td>
-                <td class="mono secondary">{agent.branch ?? '—'}</td>
-                <td class="secondary">{relativeTime(agent.created_at)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
     {/if}
   </div>
 </div>

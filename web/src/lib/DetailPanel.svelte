@@ -466,7 +466,7 @@
         // Fetch attestation for merged MRs to extract conversation_sha
         if (d?.status === 'merged') {
           api.mrAttestation(id).then(att => {
-            if (att) {
+            if (att && !att.error) {
               // Enrich attestation gate results with names from repo gate definitions
               const attData = att.attestation ?? att;
               if (attData.gate_results?.length > 0 && gateDefMap) {
@@ -568,7 +568,8 @@
         api.mrAttestation(id),
         repoId ? api.repoGates(repoId).catch(() => []) : Promise.resolve([]),
       ]).then(([d, defs]) => {
-        if (d) {
+        // Ignore error responses like {error: "no attestation found..."}
+        if (d && !d.error) {
           // Enrich attestation gate results with names from repo gate definitions
           const defMap = Object.fromEntries((Array.isArray(defs) ? defs : []).map(g => [g.id, g]));
           const att = d.attestation ?? d;
@@ -584,8 +585,10 @@
               };
             });
           }
+          mrAttestation = d;
+        } else {
+          mrAttestation = null;
         }
-        mrAttestation = d;
       })
         .catch(() => { mrAttestation = null; })
         .finally(() => { mrAttestationLoading = false; });
@@ -829,7 +832,7 @@
           // For MRs: try attestation first
           if (entity?.type === 'mr') {
             const att = mrAttestation ?? await api.mrAttestation(entity.id).catch(() => null);
-            if (!mrAttestation && att) mrAttestation = att;
+            if (!mrAttestation && att && !att.error) mrAttestation = att;
             const attConvSha = att?.attestation?.conversation_sha ?? att?.conversation_sha;
             if (attConvSha) {
               if (mrDetail) mrDetail = { ...mrDetail, conversation_sha: attConvSha };
