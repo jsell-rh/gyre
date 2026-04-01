@@ -101,6 +101,7 @@
       hovered: hoveredParticleId === rootSpan.id,
       status: isError ? 'error' : 'ok',
       color,
+      label: active.name ?? active.id,
       trail: pos.trail ?? [],
       testIndex,
       span: active,
@@ -257,6 +258,8 @@
   }
 
   function drawParticle(ctx, particle) {
+    const radius = particle.hovered ? 10 : 7;
+
     // Trail
     if (particle.trail.length > 1) {
       for (let i = 1; i < particle.trail.length; i++) {
@@ -264,7 +267,7 @@
         ctx.beginPath();
         ctx.strokeStyle = particle.color;
         ctx.globalAlpha = alpha;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 3;
         ctx.moveTo(particle.trail[i - 1].x, particle.trail[i - 1].y);
         ctx.lineTo(particle.trail[i].x, particle.trail[i].y);
         ctx.stroke();
@@ -272,19 +275,35 @@
     }
     ctx.globalAlpha = 1;
 
+    // Outer glow
+    ctx.beginPath();
+    ctx.arc(particle.x, particle.y, radius + 4, 0, Math.PI * 2);
+    ctx.fillStyle = particle.color;
+    ctx.globalAlpha = 0.15;
+    ctx.fill();
+
     // Particle dot
     ctx.beginPath();
-    ctx.arc(particle.x, particle.y, particle.hovered ? 6 : 4, 0, Math.PI * 2);
+    ctx.arc(particle.x, particle.y, radius, 0, Math.PI * 2);
     ctx.fillStyle = particle.color;
     ctx.globalAlpha = 1;
     ctx.fill();
 
-    // Glow for error particles
+    // Label (span name)
+    if (particle.label) {
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.fillStyle = '#e0e0e0';
+      ctx.globalAlpha = 0.9;
+      ctx.textAlign = 'left';
+      ctx.fillText(particle.label, particle.x + radius + 6, particle.y + 4);
+    }
+
+    // Error ring
     if (particle.status === 'error') {
       ctx.beginPath();
-      ctx.arc(particle.x, particle.y, 8, 0, Math.PI * 2);
+      ctx.arc(particle.x, particle.y, radius + 6, 0, Math.PI * 2);
       ctx.strokeStyle = particle.color;
-      ctx.globalAlpha = 0.3;
+      ctx.globalAlpha = 0.4;
       ctx.lineWidth = 2;
       ctx.stroke();
     }
