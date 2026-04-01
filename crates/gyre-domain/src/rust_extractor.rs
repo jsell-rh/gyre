@@ -962,14 +962,76 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let name = s.ident.to_string();
                 let vis = syn_vis_to_visibility(&s.vis);
                 let doc = extract_doc_comment(&s.attrs);
-                let node = self.make_node(NodeType::Type, &name, 0, vis, doc);
+                let node = self.make_node(NodeType::Type, &name, 0, vis.clone(), doc);
                 let node_id = node.id.clone();
+                let struct_qname = self.qualified(&name);
                 self.ctx
                     .name_to_id
-                    .insert(self.qualified(&name), node_id.clone());
-                let edge = self.add_contains_edge(node_id);
+                    .insert(struct_qname.clone(), node_id.clone());
+                let edge = self.add_contains_edge(node_id.clone());
                 self.new_nodes.push(node);
                 self.new_edges.push(edge);
+
+                // Extract fields from public structs with named fields (skip >50 fields).
+                if matches!(vis, Visibility::Public) {
+                    if let syn::Fields::Named(fields) = &s.fields {
+                        if fields.named.len() <= 50 {
+                            for field in &fields.named {
+                                if let Some(ident) = &field.ident {
+                                    let field_name = ident.to_string();
+                                    let field_qname = format!("{struct_qname}::{field_name}");
+                                    let type_str = type_to_string(&field.ty);
+                                    let field_node = self.ctx.make_node(
+                                        NodeType::Field,
+                                        &field_name,
+                                        &field_qname,
+                                        self.rel_path,
+                                        0,
+                                        0,
+                                        Visibility::Public,
+                                        Some(type_str.clone()),
+                                        None,
+                                        SpecConfidence::None,
+                                    );
+                                    let field_id = field_node.id.clone();
+                                    self.ctx.name_to_id.insert(field_qname, field_id.clone());
+                                    self.new_nodes.push(field_node);
+
+                                    // FieldOf edge: field → parent struct
+                                    let field_edge = self.ctx.make_edge(
+                                        EdgeType::FieldOf,
+                                        field_id.clone(),
+                                        node_id.clone(),
+                                    );
+                                    self.new_edges.push(field_edge);
+
+                                    // DependsOn edge if field type refers to a known type
+                                    let bare_type = type_str
+                                        .trim_start_matches('&')
+                                        .trim_start_matches("mut ")
+                                        .to_string();
+                                    // Try the type as-is and also qualified in current module
+                                    let candidates = [
+                                        self.ctx.name_to_id.get(&bare_type).cloned(),
+                                        self.ctx
+                                            .name_to_id
+                                            .get(&self.qualified(&bare_type))
+                                            .cloned(),
+                                    ];
+                                    for candidate in candidates.iter().flatten() {
+                                        let dep_edge = self.ctx.make_edge(
+                                            EdgeType::DependsOn,
+                                            field_id.clone(),
+                                            candidate.clone(),
+                                        );
+                                        self.new_edges.push(dep_edge);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Item::Enum(e) => {
                 let name = e.ident.to_string();
@@ -1761,6 +1823,65 @@ pub fn caller() -> u32 {
         assert!(
             has_call,
             "should have Calls edge from main_fn to utility via crate:: import"
+        );
+    }
+
+    #[test]
+    fn extract_struct_fields_as_field_of_edges() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "field123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Field nodes for host and port.
+        let host_field = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Field && n.name == "host");
+        let port_field = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Field && n.name == "port");
+        assert!(host_field.is_some(), "should extract host field");
+        assert!(port_field.is_some(), "should extract port field");
+
+        // doc_comment should contain the type annotation.
+        assert_eq!(
+            host_field.unwrap().doc_comment.as_deref(),
+            Some("String"),
+            "host field doc_comment should be the type"
+        );
+
+        // Should have FieldOf edges.
+        let field_of_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::FieldOf)
+            .collect();
+        assert_eq!(
+            field_of_edges.len(),
+            2,
+            "should have 2 FieldOf edges, got {}",
+            field_of_edges.len()
         );
     }
 

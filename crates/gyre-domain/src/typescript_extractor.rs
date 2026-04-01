@@ -433,10 +433,15 @@ impl ExtractionContext {
             Visibility::Public,
         );
         let node_id = graph_node.id.clone();
-        self.name_to_id.insert(qname, node_id.clone());
-        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
+        self.name_to_id.insert(qname.clone(), node_id.clone());
+        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
         self.nodes.push(graph_node);
         self.edges.push(edge);
+
+        // Extract fields from class body (public_field_definition / property_declaration).
+        if let Some(body) = node.child_by_field_name("body") {
+            self.extract_fields_from_body(content, body, rel_path, &qname, &node_id);
+        }
     }
 
     fn emit_interface(
@@ -465,10 +470,82 @@ impl ExtractionContext {
             Visibility::Public,
         );
         let node_id = graph_node.id.clone();
-        self.name_to_id.insert(qname, node_id.clone());
-        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
+        self.name_to_id.insert(qname.clone(), node_id.clone());
+        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
         self.nodes.push(graph_node);
         self.edges.push(edge);
+
+        // Extract fields from interface body (property_signature).
+        if let Some(body) = node.child_by_field_name("body") {
+            self.extract_fields_from_body(content, body, rel_path, &qname, &node_id);
+        }
+    }
+
+    /// Extract fields from a class body or interface body node.
+    ///
+    /// Looks for `public_field_definition`, `property_declaration`, and
+    /// `property_signature` children.
+    fn extract_fields_from_body(
+        &mut self,
+        content: &str,
+        body: tree_sitter::Node,
+        rel_path: &str,
+        parent_qname: &str,
+        parent_id: &Id,
+    ) {
+        for i in 0..body.child_count() {
+            let Some(child) = body.child(i) else {
+                continue;
+            };
+            let is_field = matches!(
+                child.kind(),
+                "public_field_definition" | "property_declaration" | "property_signature"
+            );
+            if !is_field {
+                continue;
+            }
+            let Some(name_node) = child.child_by_field_name("name") else {
+                continue;
+            };
+            let field_name = &content[name_node.byte_range()];
+            let field_qname = format!("{parent_qname}.{field_name}");
+            let field_line = child.start_position().row as u32 + 1;
+
+            // Extract type annotation if present
+            let type_ann = child
+                .child_by_field_name("type")
+                .map(|t| {
+                    // type node may be a type_annotation containing the actual type
+                    let text = &content[t.byte_range()];
+                    // Strip leading ": " if present
+                    text.trim_start_matches(':').trim().to_string()
+                })
+                .unwrap_or_else(|| "?".to_string());
+
+            let mut field_node = self.make_node(
+                NodeType::Field,
+                field_name,
+                &field_qname,
+                rel_path,
+                field_line,
+                field_line,
+                Visibility::Public,
+            );
+            field_node.doc_comment = Some(type_ann.clone());
+            let field_id = field_node.id.clone();
+            self.name_to_id.insert(field_qname, field_id.clone());
+            self.nodes.push(field_node);
+
+            // FieldOf edge: field → parent type
+            let fo_edge = self.make_edge(EdgeType::FieldOf, field_id.clone(), parent_id.clone());
+            self.edges.push(fo_edge);
+
+            // DependsOn edge if type refers to a known type
+            if let Some(target_id) = self.name_to_id.get(&type_ann).cloned() {
+                let dep_edge = self.make_edge(EdgeType::DependsOn, field_id, target_id);
+                self.edges.push(dep_edge);
+            }
+        }
     }
 
     fn emit_export(
@@ -814,6 +891,51 @@ mod tests {
             .iter()
             .find(|n| n.node_type == NodeType::Function && n.name == "fetchUser");
         assert!(func.is_some(), "should extract exported fetchUser function");
+    }
+
+    #[test]
+    fn extract_class_and_interface_fields_as_field_of_edges() {
+        let dir = make_tempdir();
+        let code = r#"interface UserProfile {
+  name: string;
+  age: number;
+}
+
+class UserService {
+  host: string;
+  port: number;
+}
+"#;
+        let result = extract_ts(&dir, "models.ts", code);
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Field nodes.
+        let field_nodes: Vec<_> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Field)
+            .collect();
+        assert!(
+            field_nodes.len() >= 2,
+            "should extract at least 2 field nodes, got {}",
+            field_nodes.len()
+        );
+
+        // Should have FieldOf edges.
+        let field_of_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::FieldOf)
+            .collect();
+        assert!(
+            field_of_edges.len() >= 2,
+            "should have at least 2 FieldOf edges, got {}",
+            field_of_edges.len()
+        );
     }
 
     #[test]
