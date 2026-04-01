@@ -18,6 +18,7 @@ use gyre_common::{
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -57,7 +58,11 @@ impl LanguageExtractor for TypeScriptExtractor {
             name_to_id: HashMap::new(),
         };
 
+        // Pass 1: tree-sitter based extraction (declarations + API call sites)
         ctx.extract_ts_files();
+
+        // Pass 2: TypeScript compiler API call-graph extraction (type-resolved)
+        ctx.extract_lsp_call_edges();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -144,6 +149,124 @@ impl ExtractionContext {
             last_seen_at: 0,
             deleted_at: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass 2: LSP-powered call graph via ts-callgraph.mjs
+    // -----------------------------------------------------------------------
+
+    /// Shell out to `scripts/ts-callgraph.mjs` to extract type-resolved call
+    /// edges using the TypeScript compiler API.  Falls back gracefully if
+    /// `node` is not available or the script is missing.
+    fn extract_lsp_call_edges(&mut self) {
+        let script_path = find_callgraph_script();
+        let script_path = match script_path {
+            Some(p) => p,
+            None => return, // script not found — degrade gracefully
+        };
+
+        let output = match Command::new("node")
+            .arg(&script_path)
+            .arg(&self.repo_root)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return, // node not available
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() {
+                self.errors.push(ExtractionError {
+                    file_path: script_path.display().to_string(),
+                    message: format!("ts-callgraph.mjs failed: {stderr}"),
+                    line: None,
+                });
+            }
+            return;
+        }
+
+        let stdout = match std::str::from_utf8(&output.stdout) {
+            Ok(s) => s.trim(),
+            Err(_) => return,
+        };
+
+        let call_edges: Vec<CallGraphEdge> = match serde_json::from_str(stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                self.errors.push(ExtractionError {
+                    file_path: script_path.display().to_string(),
+                    message: format!("ts-callgraph.mjs JSON parse error: {e}"),
+                    line: None,
+                });
+                return;
+            }
+        };
+
+        // Build a set of existing Calls edges for deduplication.
+        let existing_calls: HashSet<(String, String)> = self
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .filter_map(|e| {
+                let src = self.id_to_qname(&e.source_id)?;
+                let tgt = self.id_to_qname(&e.target_id)?;
+                Some((src, tgt))
+            })
+            .collect();
+
+        for ce in call_edges {
+            // Skip if already covered by Pass 1
+            if existing_calls.contains(&(ce.from.clone(), ce.to.clone())) {
+                continue;
+            }
+
+            let source_id = self.ensure_node_for_qname(&ce.from);
+            let target_id = self.ensure_node_for_qname(&ce.to);
+
+            let edge = self.make_edge(EdgeType::Calls, source_id, target_id);
+            self.edges.push(edge);
+        }
+    }
+
+    /// Reverse-lookup: given an Id, find the qualified_name.
+    fn id_to_qname(&self, id: &Id) -> Option<String> {
+        self.name_to_id
+            .iter()
+            .find(|(_, v)| *v == id)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Get or create a graph node for a qualified name.  If the name already
+    /// exists in `name_to_id`, return the existing Id.  Otherwise create a
+    /// minimal Function node so that the Calls edge has valid endpoints.
+    fn ensure_node_for_qname(&mut self, qname: &str) -> Id {
+        if let Some(id) = self.name_to_id.get(qname) {
+            return id.clone();
+        }
+
+        // Derive a short name and file path from the qualified name.
+        let short_name = qname.rsplit('.').next().unwrap_or(qname);
+        // The module part is everything before the last dot, with `/` separators.
+        let file_hint = if let Some(dot_pos) = qname.rfind('.') {
+            &qname[..dot_pos]
+        } else {
+            qname
+        };
+
+        let node = self.make_node(
+            NodeType::Function,
+            short_name,
+            qname,
+            file_hint,
+            0,
+            0,
+            Visibility::Public,
+        );
+        let id = node.id.clone();
+        self.name_to_id.insert(qname.to_string(), id.clone());
+        self.nodes.push(node);
+        id
     }
 
     // -----------------------------------------------------------------------
@@ -277,107 +400,7 @@ impl ExtractionContext {
             self.edges.push(edge);
         }
 
-        // --- Pass 3: general function-to-function Calls edges ---
-        self.extract_fn_calls(&content, root, &module_qname);
-
         Ok(())
-    }
-
-    fn extract_fn_calls(&mut self, content: &str, root: tree_sitter::Node, module_qname: &str) {
-        let mut fn_calls: Vec<(Id, String)> = Vec::new();
-        self.collect_fn_calls(content, root, module_qname, None, &mut fn_calls);
-
-        let mut seen = HashSet::new();
-        for (from_id, callee_name) in fn_calls {
-            if let Some(to_id) = self.resolve_ts_callee(&callee_name, module_qname) {
-                if from_id != to_id {
-                    let key = (from_id.to_string(), to_id.to_string());
-                    if seen.insert(key) {
-                        let edge = self.make_edge(EdgeType::Calls, from_id, to_id);
-                        self.edges.push(edge);
-                    }
-                }
-            }
-        }
-    }
-
-    fn collect_fn_calls(
-        &self,
-        content: &str,
-        node: tree_sitter::Node,
-        module_qname: &str,
-        current_fn_id: Option<&Id>,
-        results: &mut Vec<(Id, String)>,
-    ) {
-        let mut new_fn_id = current_fn_id;
-        let owned_id: Option<Id> = match node.kind() {
-            "function_declaration" => node.child_by_field_name("name").and_then(|name_node| {
-                let name = &content[name_node.byte_range()];
-                let qname = format!("{module_qname}.{name}");
-                self.name_to_id.get(&qname).cloned()
-            }),
-            "variable_declarator" => {
-                let is_fn = node
-                    .child_by_field_name("value")
-                    .map(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
-                    .unwrap_or(false);
-                if is_fn {
-                    node.child_by_field_name("name").and_then(|name_node| {
-                        let name = &content[name_node.byte_range()];
-                        let qname = format!("{module_qname}.{name}");
-                        self.name_to_id.get(&qname).cloned()
-                    })
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if owned_id.is_some() {
-            new_fn_id = owned_id.as_ref();
-        }
-
-        if node.kind() == "call_expression" {
-            if let Some(from_id) = new_fn_id {
-                if let Some(func) = node.child_by_field_name("function") {
-                    let callee = match func.kind() {
-                        "identifier" => Some(content[func.byte_range()].to_string()),
-                        "member_expression" => func
-                            .child_by_field_name("property")
-                            .map(|p| content[p.byte_range()].to_string()),
-                        _ => None,
-                    };
-                    if let Some(callee_name) = callee {
-                        if callee_name != "fetch" && !callee_name.starts_with("axios") {
-                            results.push((from_id.clone(), callee_name));
-                        }
-                    }
-                }
-            }
-        }
-
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                self.collect_fn_calls(content, child, module_qname, new_fn_id, results);
-            }
-        }
-    }
-
-    fn resolve_ts_callee(&self, callee: &str, module_qname: &str) -> Option<Id> {
-        let qname = format!("{module_qname}.{callee}");
-        if let Some(id) = self.name_to_id.get(&qname) {
-            return Some(id.clone());
-        }
-        if let Some(id) = self.name_to_id.get(callee) {
-            return Some(id.clone());
-        }
-        let suffix = format!(".{callee}");
-        for (qn, id) in &self.name_to_id {
-            if qn.ends_with(&suffix) {
-                return Some(id.clone());
-            }
-        }
-        None
     }
 
     // -----------------------------------------------------------------------
@@ -411,82 +434,9 @@ impl ExtractionContext {
         );
         let node_id = graph_node.id.clone();
         self.name_to_id.insert(qname, node_id.clone());
-        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
+        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
         self.nodes.push(graph_node);
         self.edges.push(edge);
-
-        // Implements edges from implements/extends clauses.
-        for i in 0..node.child_count() {
-            let Some(child) = node.child(i) else {
-                continue;
-            };
-            let is_heritage = child.kind() == "class_heritage"
-                || child.kind() == "implements_clause"
-                || child.kind() == "extends_clause";
-            if !is_heritage {
-                continue;
-            }
-            self.extract_heritage_types(content, child, module_qname, &node_id);
-        }
-    }
-
-    fn extract_heritage_types(
-        &mut self,
-        content: &str,
-        node: tree_sitter::Node,
-        module_qname: &str,
-        class_id: &Id,
-    ) {
-        for i in 0..node.child_count() {
-            let Some(child) = node.child(i) else {
-                continue;
-            };
-            match child.kind() {
-                "implements_clause" | "extends_clause" => {
-                    self.extract_heritage_types(content, child, module_qname, class_id);
-                }
-                "type_identifier" | "identifier" => {
-                    let type_name = content[child.byte_range()].to_string();
-                    self.try_emit_implements(module_qname, class_id, &type_name);
-                }
-                "generic_type" => {
-                    if let Some(first) = child.child(0) {
-                        if first.kind() == "type_identifier" || first.kind() == "identifier" {
-                            let type_name = content[first.byte_range()].to_string();
-                            self.try_emit_implements(module_qname, class_id, &type_name);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn try_emit_implements(&mut self, module_qname: &str, class_id: &Id, type_name: &str) {
-        if type_name.is_empty() {
-            return;
-        }
-        let target_id =
-            if let Some(id) = self.name_to_id.get(&format!("{module_qname}.{type_name}")) {
-                id.clone()
-            } else if let Some(id) = self.name_to_id.get(type_name) {
-                id.clone()
-            } else {
-                let suffix = format!(".{type_name}");
-                match self
-                    .name_to_id
-                    .iter()
-                    .find(|(qn, _)| qn.ends_with(&suffix))
-                    .map(|(_, id)| id.clone())
-                {
-                    Some(id) => id,
-                    None => return,
-                }
-            };
-        if *class_id != target_id {
-            let edge = self.make_edge(EdgeType::Implements, class_id.clone(), target_id);
-            self.edges.push(edge);
-        }
     }
 
     fn emit_interface(
@@ -699,6 +649,70 @@ fn module_qname_from_path(rel_path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// LSP call-graph helpers
+// ---------------------------------------------------------------------------
+
+/// A single caller→callee edge from the ts-callgraph.mjs script.
+#[derive(serde::Deserialize)]
+struct CallGraphEdge {
+    from: String,
+    to: String,
+    #[allow(dead_code)]
+    line: u32,
+}
+
+/// Locate `scripts/ts-callgraph.mjs` relative to the crate/workspace root.
+/// Tries several strategies:
+/// 1. GYRE_ROOT env var
+/// 2. Walking up from the current executable
+/// 3. Walking up from the current working directory
+fn find_callgraph_script() -> Option<PathBuf> {
+    let script_name = "scripts/ts-callgraph.mjs";
+
+    // Strategy 1: explicit env var
+    if let Ok(root) = std::env::var("GYRE_ROOT") {
+        let candidate = PathBuf::from(root).join(script_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Strategy 2: walk up from current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(path) = walk_up_for_script(&exe, script_name) {
+            return Some(path);
+        }
+    }
+
+    // Strategy 3: walk up from cwd
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(path) = walk_up_for_script(&cwd, script_name) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn walk_up_for_script(start: &Path, script_name: &str) -> Option<PathBuf> {
+    let mut dir = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+    loop {
+        let candidate = dir.join(script_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -872,24 +886,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_calls_edges_between_exported_functions() {
-        let dir = make_tempdir();
-        let code = "export function caller() {\n  return callee();\n}\n\nexport function callee() {\n  return 42;\n}\n";
-        let result = extract_ts(&dir, "app.ts", code);
-        assert!(
-            result.errors.is_empty(),
-            "unexpected errors: {:?}",
-            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-        let calls_edges: Vec<_> = result
-            .edges
-            .iter()
-            .filter(|e| e.edge_type == EdgeType::Calls)
-            .collect();
-        assert!(!calls_edges.is_empty(), "should have Calls edges");
-    }
-
-    #[test]
     fn extract_exported_arrow_function() {
         let dir = make_tempdir();
         let result = extract_ts(
@@ -912,45 +908,120 @@ mod tests {
         );
     }
 
+    /// Multi-file test: Pass 2 (LSP) should produce cross-file Calls edges
+    /// when one module imports and calls a function from another.
     #[test]
-    fn extract_implements_clause() {
+    fn lsp_cross_file_call_edges() {
+        // Skip if node is not available
+        if Command::new("node").arg("--version").output().is_err() {
+            eprintln!("skipping lsp_cross_file_call_edges: node not found");
+            return;
+        }
+
+        // Skip if the call-graph script can't be found
+        if find_callgraph_script().is_none() {
+            eprintln!("skipping lsp_cross_file_call_edges: ts-callgraph.mjs not found");
+            return;
+        }
+
         let dir = make_tempdir();
-        let code = "interface Repository {\n  find(id: string): void;\n}\n\nclass SqlRepository implements Repository {\n  find(id: string) {}\n}\n";
-        let result = extract_ts(&dir, "repo.ts", code);
-        assert!(
-            result.errors.is_empty(),
-            "errors: {:?}",
-            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-        let impl_edges: Vec<_> = result
-            .edges
+        fs::write(dir.path().join("package.json"), r#"{"name":"test"}"#).unwrap();
+
+        // Module A: exports a helper
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("math.ts"),
+            "export function add(a: number, b: number): number {\n  return a + b;\n}\n\nexport function multiply(a: number, b: number): number {\n  return a * b;\n}\n",
+        )
+        .unwrap();
+
+        // Module B: imports and calls the helper
+        fs::write(
+            src.join("calc.ts"),
+            "import { add, multiply } from './math';\n\nexport function calculate(x: number): number {\n  return add(x, multiply(x, 2));\n}\n",
+        )
+        .unwrap();
+
+        let result = TypeScriptExtractor.extract(dir.path(), "abc123");
+
+        // Filter errors (ignore non-fatal ones from ts-callgraph)
+        let fatal_errors: Vec<_> = result
+            .errors
             .iter()
-            .filter(|e| e.edge_type == EdgeType::Implements)
+            .filter(|e| !e.message.contains("ts-callgraph"))
             .collect();
         assert!(
-            !impl_edges.is_empty(),
-            "should have Implements edge from SqlRepository to Repository"
+            fatal_errors.is_empty(),
+            "unexpected errors: {:?}",
+            fatal_errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // There should be Calls edges from calc → math.add and calc → math.multiply
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+
+        // Look up node names by ID for readable assertions
+        let node_name = |id: &Id| -> String {
+            result
+                .nodes
+                .iter()
+                .find(|n| n.id == *id)
+                .map(|n| n.qualified_name.clone())
+                .unwrap_or_else(|| format!("unknown({id})"))
+        };
+
+        let cross_file_calls: Vec<_> = calls_edges
+            .iter()
+            .filter(|e| {
+                let src = node_name(&e.source_id);
+                let tgt = node_name(&e.target_id);
+                // Cross-file: source contains "calc", target contains "math"
+                src.contains("calc") && tgt.contains("math")
+            })
+            .collect();
+
+        assert!(
+            cross_file_calls.len() >= 2,
+            "expected at least 2 cross-file call edges (calc->math.add, calc->math.multiply), \
+             found {}. All calls edges: {:?}",
+            cross_file_calls.len(),
+            calls_edges
+                .iter()
+                .map(|e| format!("{} -> {}", node_name(&e.source_id), node_name(&e.target_id)))
+                .collect::<Vec<_>>()
         );
     }
 
+    /// Verify that Pass 2 degrades gracefully when node is not available
+    /// (e.g. by setting GYRE_ROOT to a nonexistent path so the script isn't found).
     #[test]
-    fn extract_extends_clause() {
+    fn lsp_graceful_degradation_without_script() {
         let dir = make_tempdir();
-        let code = "class Base {\n  greet() {}\n}\n\nclass Child extends Base {\n  greet() {}\n}\n";
-        let result = extract_ts(&dir, "inherit.ts", code);
-        assert!(
-            result.errors.is_empty(),
-            "errors: {:?}",
-            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-        let impl_edges: Vec<_> = result
-            .edges
+        fs::write(dir.path().join("package.json"), r#"{"name":"test"}"#).unwrap();
+        fs::write(
+            dir.path().join("app.ts"),
+            "export function hello() { return 'hi'; }\n",
+        )
+        .unwrap();
+
+        // Set GYRE_ROOT to a temp dir that won't have the script
+        let fake_root = make_tempdir();
+        std::env::set_var("GYRE_ROOT", fake_root.path());
+        let result = TypeScriptExtractor.extract(dir.path(), "abc123");
+        std::env::remove_var("GYRE_ROOT");
+
+        // Should still produce Pass 1 results without errors
+        let func = result
+            .nodes
             .iter()
-            .filter(|e| e.edge_type == EdgeType::Implements)
-            .collect();
+            .find(|n| n.node_type == NodeType::Function && n.name == "hello");
         assert!(
-            !impl_edges.is_empty(),
-            "should have Implements edge from Child to Base via extends"
+            func.is_some(),
+            "Pass 1 extraction should still work when script is missing"
         );
     }
 }

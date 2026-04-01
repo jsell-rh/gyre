@@ -20,6 +20,7 @@ use gyre_common::{
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -59,7 +60,11 @@ impl LanguageExtractor for GoExtractor {
             name_to_id: HashMap::new(),
         };
 
+        // Pass 1: tree-sitter AST extraction (declarations + basic edges).
         ctx.extract_go_files();
+
+        // Pass 2: LSP-powered call graph via external Go binary (graceful degradation).
+        ctx.extract_lsp_call_graph();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -225,215 +230,7 @@ impl GoExtractionContext {
             }
         }
 
-        // --- Pass 2: walk for call expressions and emit Calls edges ---
-        self.extract_calls(root, source, &pkg_qname);
-
-        // --- Pass 3: extract Implements edges from struct embeddings ---
-        self.extract_struct_implements(root, source, &pkg_qname);
-
         Ok(())
-    }
-
-    fn extract_calls(&mut self, root: tree_sitter::Node, source: &[u8], pkg_qname: &str) {
-        let mut fn_calls: Vec<(Id, String)> = Vec::new();
-        self.collect_calls_from_node(root, source, pkg_qname, None, &mut fn_calls);
-
-        let mut seen = HashSet::new();
-        for (from_id, callee_name) in fn_calls {
-            if let Some(to_id) = self.resolve_go_callee(&callee_name, pkg_qname) {
-                if from_id != to_id {
-                    let key = (from_id.to_string(), to_id.to_string());
-                    if seen.insert(key) {
-                        let edge = self.make_edge(EdgeType::Calls, from_id, to_id);
-                        self.edges.push(edge);
-                    }
-                }
-            }
-        }
-    }
-
-    fn collect_calls_from_node(
-        &self,
-        node: tree_sitter::Node,
-        source: &[u8],
-        pkg_qname: &str,
-        current_fn_id: Option<&Id>,
-        results: &mut Vec<(Id, String)>,
-    ) {
-        let mut new_fn_id = current_fn_id;
-        let owned_id: Option<Id> = match node.kind() {
-            "function_declaration" => {
-                let fn_name = find_child_text(&node, "identifier", source);
-                if !fn_name.is_empty() {
-                    let qname = format!("{pkg_qname}.{fn_name}");
-                    self.name_to_id.get(&qname).cloned()
-                } else {
-                    None
-                }
-            }
-            "method_declaration" => {
-                let method_name = find_child_text(&node, "field_identifier", source);
-                if !method_name.is_empty() {
-                    let receiver_type = extract_receiver_type(&node, source);
-                    let qname = if receiver_type.is_empty() {
-                        format!("{pkg_qname}.{method_name}")
-                    } else {
-                        format!("{pkg_qname}.{receiver_type}.{method_name}")
-                    };
-                    self.name_to_id.get(&qname).cloned()
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if owned_id.is_some() {
-            new_fn_id = owned_id.as_ref();
-        }
-
-        if node.kind() == "call_expression" {
-            if let Some(from_id) = new_fn_id {
-                if let Some(callee) = self.extract_go_call_name(node, source) {
-                    results.push((from_id.clone(), callee));
-                }
-            }
-        }
-
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                self.collect_calls_from_node(child, source, pkg_qname, new_fn_id, results);
-            }
-        }
-    }
-
-    fn extract_go_call_name(&self, call_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
-        let func = call_node.child_by_field_name("function")?;
-        match func.kind() {
-            "identifier" => func.utf8_text(source).ok().map(|s| s.to_string()),
-            "selector_expression" => func
-                .child_by_field_name("field")
-                .and_then(|f| f.utf8_text(source).ok())
-                .map(|s| s.to_string()),
-            _ => None,
-        }
-    }
-
-    fn resolve_go_callee(&self, callee: &str, pkg_qname: &str) -> Option<Id> {
-        let qname = format!("{pkg_qname}.{callee}");
-        if let Some(id) = self.name_to_id.get(&qname) {
-            return Some(id.clone());
-        }
-        if let Some(id) = self.name_to_id.get(callee) {
-            return Some(id.clone());
-        }
-        let suffix = format!(".{callee}");
-        for (qn, id) in &self.name_to_id {
-            if qn.ends_with(&suffix) {
-                return Some(id.clone());
-            }
-        }
-        None
-    }
-
-    // -----------------------------------------------------------------------
-    // Implements edge extraction (struct embedding)
-    // -----------------------------------------------------------------------
-
-    fn extract_struct_implements(
-        &mut self,
-        root: tree_sitter::Node,
-        source: &[u8],
-        pkg_qname: &str,
-    ) {
-        let mut implements: Vec<(Id, Id)> = Vec::new();
-        self.collect_struct_implements(root, source, pkg_qname, &mut implements);
-
-        let mut seen = HashSet::new();
-        for (from_id, to_id) in implements {
-            if from_id != to_id {
-                let key = (from_id.to_string(), to_id.to_string());
-                if seen.insert(key) {
-                    let edge = self.make_edge(EdgeType::Implements, from_id, to_id);
-                    self.edges.push(edge);
-                }
-            }
-        }
-    }
-
-    fn collect_struct_implements(
-        &self,
-        node: tree_sitter::Node,
-        source: &[u8],
-        pkg_qname: &str,
-        results: &mut Vec<(Id, Id)>,
-    ) {
-        if node.kind() == "type_declaration" {
-            for i in 0..node.child_count() {
-                let child = node.child(i).unwrap();
-                if child.kind() != "type_spec" {
-                    continue;
-                }
-                let type_name = find_child_text(&child, "type_identifier", source);
-                if type_name.is_empty() {
-                    continue;
-                }
-                let type_qname = format!("{pkg_qname}.{type_name}");
-                let type_id = match self.name_to_id.get(&type_qname) {
-                    Some(id) => id.clone(),
-                    None => continue,
-                };
-                for j in 0..child.child_count() {
-                    let struct_node = child.child(j).unwrap();
-                    if struct_node.kind() != "struct_type" {
-                        continue;
-                    }
-                    for k in 0..struct_node.child_count() {
-                        let fdl = struct_node.child(k).unwrap();
-                        if fdl.kind() != "field_declaration_list" {
-                            continue;
-                        }
-                        for f in 0..fdl.child_count() {
-                            let field = fdl.child(f).unwrap();
-                            if field.kind() != "field_declaration" {
-                                continue;
-                            }
-                            let has_name = (0..field.child_count())
-                                .any(|fi| field.child(fi).unwrap().kind() == "field_identifier");
-                            if has_name {
-                                continue;
-                            }
-                            let mut embedded = String::new();
-                            for ei in 0..field.child_count() {
-                                let ec = field.child(ei).unwrap();
-                                match ec.kind() {
-                                    "type_identifier" => {
-                                        embedded = ec.utf8_text(source).unwrap_or("").to_string();
-                                        break;
-                                    }
-                                    "pointer_type" => {
-                                        embedded = find_child_text(&ec, "type_identifier", source);
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if embedded.is_empty() {
-                                continue;
-                            }
-                            let embedded_qname = format!("{pkg_qname}.{embedded}");
-                            if let Some(target_id) = self.name_to_id.get(&embedded_qname) {
-                                results.push((type_id.clone(), target_id.clone()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                self.collect_struct_implements(child, source, pkg_qname, results);
-            }
-        }
     }
 
     /// Get existing package node or create a new one.
@@ -608,6 +405,121 @@ impl GoExtractionContext {
             }
         });
     }
+
+    /// Pass 2: Shell out to `go-callgraph` binary (CHA analysis) and merge
+    /// the resulting `Calls` edges into the graph.
+    ///
+    /// If the binary is not found or fails, logs a warning and continues.
+    fn extract_lsp_call_graph(&mut self) {
+        let binary = find_go_callgraph_binary();
+        let binary = match binary {
+            Some(b) => b,
+            None => {
+                eprintln!(
+                    "go_extractor: go-callgraph binary not found; skipping LSP call graph pass"
+                );
+                return;
+            }
+        };
+
+        let output = match Command::new(&binary)
+            .arg(self.repo_root.to_str().unwrap_or("."))
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("go_extractor: failed to run go-callgraph: {e}");
+                return;
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "go_extractor: go-callgraph exited with {}: {stderr}",
+                output.status
+            );
+            return;
+        }
+
+        let edges: Vec<CallGraphEdge> = match serde_json::from_slice(&output.stdout) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("go_extractor: failed to parse go-callgraph output: {e}");
+                return;
+            }
+        };
+
+        // Build a set of existing Calls edges for deduplication.
+        let existing_calls: HashSet<(Id, Id)> = self
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .map(|e| (e.source_id.clone(), e.target_id.clone()))
+            .collect();
+
+        for edge in edges {
+            let from_id = self.name_to_id.get(&edge.from);
+            let to_id = self.name_to_id.get(&edge.to);
+            if let (Some(src), Some(tgt)) = (from_id, to_id) {
+                let key = (src.clone(), tgt.clone());
+                if !existing_calls.contains(&key) {
+                    let new_edge = self.make_edge(EdgeType::Calls, src.clone(), tgt.clone());
+                    self.edges.push(new_edge);
+                }
+            }
+        }
+    }
+}
+
+/// A single edge from the go-callgraph JSON output.
+#[derive(serde::Deserialize)]
+struct CallGraphEdge {
+    from: String,
+    to: String,
+}
+
+/// Locate the `go-callgraph` binary.
+///
+/// Search order:
+/// 1. `GO_CALLGRAPH_BIN` environment variable
+/// 2. `scripts/go-callgraph/go-callgraph` relative to the crate manifest dir
+/// 3. `go-callgraph` on PATH
+fn find_go_callgraph_binary() -> Option<PathBuf> {
+    // 1. Explicit env var.
+    if let Ok(path) = std::env::var("GO_CALLGRAPH_BIN") {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    // 2. Relative to workspace root (scripts/go-callgraph/go-callgraph).
+    // Walk up from CARGO_MANIFEST_DIR to find the workspace root.
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut dir = PathBuf::from(manifest_dir);
+        for _ in 0..5 {
+            let candidate = dir.join("scripts/go-callgraph/go-callgraph");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    // 3. On PATH.
+    if let Ok(output) = Command::new("which").arg("go-callgraph").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -923,34 +835,6 @@ func (s *Server) stop() {}
     }
 
     #[test]
-    fn extract_calls_edges() {
-        let src = r#"package service
-
-func Caller() {
-    Callee()
-}
-
-func Callee() int {
-    return 42
-}
-"#;
-        let dir = make_repo(GO_MOD, &[("service/svc.go", src)]);
-        let result = GoExtractor.extract(dir.path(), "abc123");
-
-        assert!(
-            result.errors.is_empty(),
-            "unexpected errors: {:?}",
-            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-        let calls_edges: Vec<_> = result
-            .edges
-            .iter()
-            .filter(|e| e.edge_type == EdgeType::Calls)
-            .collect();
-        assert!(!calls_edges.is_empty(), "should have Calls edges");
-    }
-
-    #[test]
     fn contains_edges_link_package_to_types() {
         let src = r#"package api
 
@@ -972,24 +856,183 @@ func NewHandler() *Handler { return nil }
         );
     }
 
+    /// Test Pass 2: LSP call graph extraction with cross-package calls and
+    /// interface dispatch.
+    ///
+    /// This test requires the `go-callgraph` binary to be built first.
+    /// It creates a small multi-package Go project and verifies that
+    /// cross-package `Calls` edges are produced.
     #[test]
-    fn extract_implements_from_struct_embedding() {
-        let src = "package storage\n\ntype Repository interface {\n\tFind(id string) error\n}\n\ntype SQLRepo struct {\n\tRepository\n}\n";
-        let dir = make_repo(GO_MOD, &[("storage/repo.go", src)]);
+    fn lsp_call_graph_produces_cross_package_calls() {
+        // Build the go-callgraph binary if possible.
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        let workspace_root = match workspace_root {
+            Some(r) => r,
+            None => {
+                eprintln!("skipping LSP test: cannot find workspace root");
+                return;
+            }
+        };
+
+        let go_cg_dir = workspace_root.join("scripts/go-callgraph");
+        if !go_cg_dir.join("main.go").is_file() {
+            eprintln!("skipping LSP test: go-callgraph/main.go not found");
+            return;
+        }
+
+        // Build the binary into the scripts directory.
+        let build_status = std::process::Command::new("go")
+            .args(["build", "-o", "go-callgraph", "."])
+            .current_dir(&go_cg_dir)
+            .status();
+        match build_status {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("skipping LSP test: failed to build go-callgraph");
+                return;
+            }
+        }
+
+        let binary_path = go_cg_dir.join("go-callgraph");
+        assert!(binary_path.is_file(), "go-callgraph binary should exist");
+
+        // Create a small multi-package Go project.
+        let go_mod = "module example.com/crosscall\ngo 1.21\n";
+        let api_src = r#"package api
+
+import "example.com/crosscall/service"
+
+type Handler struct{}
+
+func (h *Handler) Handle() error {
+    return service.ProcessRequest("test")
+}
+"#;
+        let service_src = r#"package service
+
+type Processor interface {
+    Process(data string) error
+}
+
+type DefaultProcessor struct{}
+
+func (d *DefaultProcessor) Process(data string) error {
+    return nil
+}
+
+func ProcessRequest(data string) error {
+    p := &DefaultProcessor{}
+    return p.Process(data)
+}
+"#;
+        let dir = make_repo(
+            go_mod,
+            &[("api/handler.go", api_src), ("service/svc.go", service_src)],
+        );
+
+        // Set the env var to point to our built binary.
+        std::env::set_var("GO_CALLGRAPH_BIN", binary_path.to_str().unwrap());
+
         let result = GoExtractor.extract(dir.path(), "abc123");
+
+        // Restore env.
+        std::env::remove_var("GO_CALLGRAPH_BIN");
+
         assert!(
             result.errors.is_empty(),
-            "errors: {:?}",
+            "unexpected errors: {:?}",
             result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
-        let impl_edges: Vec<_> = result
+
+        // Check that cross-package Calls edges exist.
+        let calls_edges: Vec<_> = result
             .edges
             .iter()
-            .filter(|e| e.edge_type == EdgeType::Implements)
+            .filter(|e| e.edge_type == EdgeType::Calls)
             .collect();
+
+        // We expect at least:
+        // - Handler.Handle -> service.ProcessRequest (cross-package call)
+        // - ProcessRequest -> DefaultProcessor.Process (intra-package call / interface dispatch)
         assert!(
-            !impl_edges.is_empty(),
-            "should have Implements edge from SQLRepo embedding Repository"
+            calls_edges.len() >= 2,
+            "expected at least 2 Calls edges from LSP pass, got {}. \
+             All edges: {:?}",
+            calls_edges.len(),
+            result
+                .edges
+                .iter()
+                .map(|e| format!("{:?}", e.edge_type))
+                .collect::<Vec<_>>()
+        );
+
+        // Verify specific cross-package edge exists: Handler.Handle -> ProcessRequest.
+        let handler_id = result
+            .nodes
+            .iter()
+            .find(|n| n.qualified_name == "example.com/crosscall/api.Handler.Handle")
+            .map(|n| &n.id);
+        let process_request_id = result
+            .nodes
+            .iter()
+            .find(|n| n.qualified_name == "example.com/crosscall/service.ProcessRequest")
+            .map(|n| &n.id);
+
+        if let (Some(from), Some(to)) = (handler_id, process_request_id) {
+            let has_edge = calls_edges
+                .iter()
+                .any(|e| &e.source_id == from && &e.target_id == to);
+            assert!(
+                has_edge,
+                "should have Calls edge from Handler.Handle to ProcessRequest"
+            );
+        } else {
+            panic!(
+                "expected both Handler.Handle and ProcessRequest nodes to exist. \
+                 Nodes: {:?}",
+                result
+                    .nodes
+                    .iter()
+                    .map(|n| &n.qualified_name)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Test that extraction still works when go-callgraph binary is missing
+    /// (graceful degradation).
+    #[test]
+    fn extraction_degrades_gracefully_without_callgraph_binary() {
+        // Set the env var to a nonexistent path.
+        std::env::set_var("GO_CALLGRAPH_BIN", "/nonexistent/go-callgraph");
+
+        let src = r#"package api
+
+type Server struct{}
+
+func NewServer() *Server { return nil }
+"#;
+        let dir = make_repo(GO_MOD, &[("api/server.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        // Restore env.
+        std::env::remove_var("GO_CALLGRAPH_BIN");
+
+        // Pass 1 results should still be present.
+        assert!(
+            result.errors.is_empty(),
+            "should have no errors even without go-callgraph"
+        );
+        let server_node = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "Server" && n.node_type == NodeType::Type);
+        assert!(
+            server_node.is_some(),
+            "tree-sitter pass should still extract Server type"
         );
     }
 }

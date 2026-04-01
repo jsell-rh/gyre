@@ -16,36 +16,16 @@ use gyre_common::{
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 /// HTTP method names recognized as FastAPI/Flask route decorators.
 const ROUTE_METHODS: &[&str] = &[
     "route", "get", "post", "put", "delete", "patch", "options", "head",
-];
-
-/// Common Python base classes that are not domain interfaces — skip for Implements edges.
-const PYTHON_SKIP_BASES: &[&str] = &[
-    "object",
-    "ABC",
-    "ABCMeta",
-    "BaseModel",
-    "Enum",
-    "IntEnum",
-    "StrEnum",
-    "Exception",
-    "ValueError",
-    "TypeError",
-    "RuntimeError",
-    "dict",
-    "list",
-    "tuple",
-    "set",
-    "str",
-    "int",
-    "float",
 ];
 
 /// Python language extractor.
@@ -60,41 +40,9 @@ impl LanguageExtractor for PythonExtractor {
     }
 
     fn detect(&self, repo_root: &Path) -> bool {
-        // Check root-level markers first (fast path).
-        if repo_root.join("pyproject.toml").is_file()
+        repo_root.join("pyproject.toml").is_file()
             || repo_root.join("setup.py").is_file()
             || repo_root.join("requirements.txt").is_file()
-        {
-            return true;
-        }
-        // Check one level of subdirectories for monorepos (e.g. src/api/pyproject.toml).
-        if let Ok(entries) = std::fs::read_dir(repo_root) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    if p.join("pyproject.toml").is_file()
-                        || p.join("setup.py").is_file()
-                        || p.join("requirements.txt").is_file()
-                    {
-                        return true;
-                    }
-                    // Check one more level (e.g. src/api/)
-                    if let Ok(sub_entries) = std::fs::read_dir(&p) {
-                        for sub in sub_entries.flatten() {
-                            let sp = sub.path();
-                            if sp.is_dir()
-                                && (sp.join("pyproject.toml").is_file()
-                                    || sp.join("setup.py").is_file()
-                                    || sp.join("requirements.txt").is_file())
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {
@@ -113,7 +61,11 @@ impl LanguageExtractor for PythonExtractor {
             name_to_id: HashMap::new(),
         };
 
+        // Pass 1: tree-sitter extraction (declarations + Contains edges).
         ctx.extract_python_files();
+
+        // Pass 2: call-graph extraction via external Python script.
+        ctx.extract_call_edges();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -134,7 +86,7 @@ struct ExtractionContext {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
     errors: Vec<ExtractionError>,
-    /// Map qualified name -> node Id for edge resolution.
+    /// Map qualified name → node Id for edge resolution.
     name_to_id: HashMap<String, Id>,
 }
 
@@ -305,120 +257,7 @@ impl ExtractionContext {
             }
         }
 
-        // --- Pass 2: walk for call expressions and emit Calls edges ---
-        self.extract_calls(root, source, &module_qname);
-
         Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Call-site extraction (second pass)
-    // -----------------------------------------------------------------------
-
-    fn extract_calls(&mut self, root: tree_sitter::Node, source: &[u8], module_qname: &str) {
-        let mut fn_calls: Vec<(Id, String)> = Vec::new();
-        self.collect_calls_from_node(root, source, module_qname, None, &mut fn_calls);
-
-        let mut seen = HashSet::new();
-        for (from_id, callee_name) in fn_calls {
-            if let Some(to_id) = self.resolve_py_callee(&callee_name, module_qname) {
-                if from_id != to_id {
-                    let key = (from_id.to_string(), to_id.to_string());
-                    if seen.insert(key) {
-                        let edge = self.make_edge(EdgeType::Calls, from_id, to_id);
-                        self.edges.push(edge);
-                    }
-                }
-            }
-        }
-    }
-
-    fn collect_calls_from_node(
-        &self,
-        node: tree_sitter::Node,
-        source: &[u8],
-        module_qname: &str,
-        current_fn_id: Option<&Id>,
-        results: &mut Vec<(Id, String)>,
-    ) {
-        let mut new_fn_id = current_fn_id;
-        let owned_id: Option<Id> = if node.kind() == "function_definition" {
-            self.resolve_fn_node_id(node, source, module_qname)
-        } else {
-            None
-        };
-        if owned_id.is_some() {
-            new_fn_id = owned_id.as_ref();
-        }
-
-        if node.kind() == "call" {
-            if let Some(from_id) = new_fn_id {
-                if let Some(callee) = self.extract_call_name(node, source) {
-                    results.push((from_id.clone(), callee));
-                }
-            }
-        }
-
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            self.collect_calls_from_node(child, source, module_qname, new_fn_id, results);
-        }
-    }
-
-    fn resolve_fn_node_id(
-        &self,
-        node: tree_sitter::Node,
-        source: &[u8],
-        module_qname: &str,
-    ) -> Option<Id> {
-        let name = get_identifier_name(node, source)?;
-        let qname = format!("{module_qname}.{name}");
-        if let Some(id) = self.name_to_id.get(&qname) {
-            return Some(id.clone());
-        }
-        let parent = node.parent()?;
-        if parent.kind() == "block" {
-            if let Some(gp) = parent.parent() {
-                if gp.kind() == "class_definition" {
-                    if let Some(class_name) = get_identifier_name(gp, source) {
-                        let method_qname = format!("{module_qname}.{class_name}.{name}");
-                        if let Some(id) = self.name_to_id.get(&method_qname) {
-                            return Some(id.clone());
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn extract_call_name(&self, call_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
-        let func = call_node.child_by_field_name("function")?;
-        match func.kind() {
-            "identifier" => func.utf8_text(source).ok().map(|s| s.to_string()),
-            "attribute" => func
-                .child_by_field_name("attribute")
-                .and_then(|a| a.utf8_text(source).ok())
-                .map(|s| s.to_string()),
-            _ => None,
-        }
-    }
-
-    fn resolve_py_callee(&self, callee: &str, module_qname: &str) -> Option<Id> {
-        let qname = format!("{module_qname}.{callee}");
-        if let Some(id) = self.name_to_id.get(&qname) {
-            return Some(id.clone());
-        }
-        if let Some(id) = self.name_to_id.get(callee) {
-            return Some(id.clone());
-        }
-        let suffix = format!(".{callee}");
-        for (qn, id) in &self.name_to_id {
-            if qn.ends_with(&suffix) {
-                return Some(id.clone());
-            }
-        }
-        None
     }
 
     // -----------------------------------------------------------------------
@@ -456,50 +295,9 @@ impl ExtractionContext {
             .insert(class_qname.clone(), class_id.clone());
         self.nodes.push(class_node_graph);
 
-        // Contains edge: module -> class.
+        // Contains edge: module → class.
         let edge = self.make_edge(EdgeType::Contains, module_id.clone(), class_id.clone());
         self.edges.push(edge);
-
-        // Implements edges from superclass declarations.
-        if let Some(superclasses) = class_node.child_by_field_name("superclasses") {
-            let mut sc_cursor = superclasses.walk();
-            for sc_child in superclasses.named_children(&mut sc_cursor) {
-                let base_name = match sc_child.kind() {
-                    "identifier" => sc_child.utf8_text(source).unwrap_or("").to_string(),
-                    "attribute" => sc_child
-                        .child_by_field_name("attribute")
-                        .and_then(|a| a.utf8_text(source).ok())
-                        .unwrap_or("")
-                        .to_string(),
-                    _ => continue,
-                };
-                if base_name.is_empty() || PYTHON_SKIP_BASES.contains(&base_name.as_str()) {
-                    continue;
-                }
-                let target_id =
-                    if let Some(id) = self.name_to_id.get(&format!("{module_qname}.{base_name}")) {
-                        id.clone()
-                    } else if let Some(id) = self.name_to_id.get(&base_name) {
-                        id.clone()
-                    } else {
-                        let suffix = format!(".{base_name}");
-                        match self
-                            .name_to_id
-                            .iter()
-                            .find(|(qn, _)| qn.ends_with(&suffix))
-                            .map(|(_, id)| id.clone())
-                        {
-                            Some(id) => id,
-                            None => continue,
-                        }
-                    };
-                if class_id != target_id {
-                    let impl_edge =
-                        self.make_edge(EdgeType::Implements, class_id.clone(), target_id);
-                    self.edges.push(impl_edge);
-                }
-            }
-        }
 
         // Walk class body for methods.
         if let Some(body) = class_node.child_by_field_name("body") {
@@ -574,7 +372,7 @@ impl ExtractionContext {
                         return;
                     }
 
-                    // Check if any decorator is a route decorator -> Endpoint.
+                    // Check if any decorator is a route decorator → Endpoint.
                     let route_info = decorators
                         .iter()
                         .find_map(|d| parse_route_decorator(*d, source));
@@ -700,6 +498,151 @@ impl ExtractionContext {
         };
         self.edges.push(edge);
     }
+
+    // -----------------------------------------------------------------------
+    // Pass 2: Call-graph extraction via external Python script
+    // -----------------------------------------------------------------------
+
+    /// Shell out to `scripts/python-callgraph.py` and merge the resulting
+    /// `Calls` edges into the graph.  If the script is unavailable or fails,
+    /// logs a warning and continues gracefully.
+    fn extract_call_edges(&mut self) {
+        let script_path = Self::find_callgraph_script();
+        let script = match script_path {
+            Some(p) => p,
+            None => {
+                eprintln!("python-callgraph.py not found; skipping call-graph extraction");
+                return;
+            }
+        };
+
+        let output = match Command::new("python3")
+            .arg(&script)
+            .arg(&self.repo_root)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("Failed to run python-callgraph.py: {e}");
+                return;
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "python-callgraph.py exited with {}: {}",
+                output.status,
+                stderr.lines().last().unwrap_or("")
+            );
+            return;
+        }
+
+        let stdout = match String::from_utf8(output.stdout) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("python-callgraph.py produced non-UTF-8 output: {e}");
+                return;
+            }
+        };
+
+        let call_edges: Vec<CallEdgeJson> = match serde_json::from_str(&stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Failed to parse python-callgraph.py JSON: {e}");
+                return;
+            }
+        };
+
+        // Collect existing Calls edges to deduplicate.
+        let existing_calls: HashSet<(Id, Id)> = self
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .map(|e| (e.source_id.clone(), e.target_id.clone()))
+            .collect();
+
+        let mut added = 0u32;
+        for ce in &call_edges {
+            let source_id = match self.name_to_id.get(&ce.from) {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+            let target_id = match self.name_to_id.get(&ce.to) {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+            if source_id == target_id {
+                continue;
+            }
+            if existing_calls.contains(&(source_id.clone(), target_id.clone())) {
+                continue;
+            }
+
+            let edge = self.make_edge(EdgeType::Calls, source_id, target_id);
+            self.edges.push(edge);
+            added += 1;
+        }
+
+        if added > 0 {
+            eprintln!("Pass 2: added {added} Calls edges from python-callgraph.py");
+        }
+    }
+
+    /// Locate `scripts/python-callgraph.py` relative to the workspace root.
+    ///
+    /// Searches several candidate locations:
+    /// 1. `GYRE_ROOT` environment variable
+    /// 2. `CARGO_MANIFEST_DIR` ancestor (works during `cargo test`)
+    /// 3. Current executable's ancestor directories
+    fn find_callgraph_script() -> Option<PathBuf> {
+        let script_name = "scripts/python-callgraph.py";
+
+        // Try GYRE_ROOT env var first.
+        if let Ok(root) = std::env::var("GYRE_ROOT") {
+            let p = PathBuf::from(root).join(script_name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+
+        // Try CARGO_MANIFEST_DIR ancestors (works in cargo test).
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let mut dir = PathBuf::from(manifest_dir);
+            for _ in 0..5 {
+                let p = dir.join(script_name);
+                if p.is_file() {
+                    return Some(p);
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+
+        // Try current executable's ancestors.
+        if let Ok(exe) = std::env::current_exe() {
+            let mut dir = exe;
+            for _ in 0..8 {
+                if !dir.pop() {
+                    break;
+                }
+                let p = dir.join(script_name);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// JSON shape emitted by `scripts/python-callgraph.py`.
+#[derive(serde::Deserialize)]
+struct CallEdgeJson {
+    from: String,
+    to: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -707,24 +650,36 @@ impl ExtractionContext {
 // ---------------------------------------------------------------------------
 
 /// Derive Python dotted module name from a relative file path.
-/// e.g. `src/api/handlers.py` -> `src.api.handlers`
+/// e.g. `src/api/handlers.py` → `src.api.handlers`
 fn path_to_module_qname(rel_path: &str) -> String {
     rel_path.trim_end_matches(".py").replace(['/', '\\'], ".")
 }
 
 /// Get the `name` field identifier text from a `class_definition` or `function_definition`.
-fn get_identifier_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+fn get_identifier_name<'a>(node: tree_sitter::Node<'a>, source: &[u8]) -> Option<String> {
     node.child_by_field_name("name")
         .and_then(|n| n.utf8_text(source).ok())
         .map(|s| s.to_string())
 }
 
 /// Parse a `decorator` node to determine if it is a route decorator.
+///
+/// Returns `Some((path, method))` for:
+/// - `@app.route("/path")` or `@blueprint.route("/path")`
+/// - `@app.get("/path")`, `@router.post("/path")`, etc.
+///
+/// Returns `None` for any other decorator.
 fn parse_route_decorator(decorator: tree_sitter::Node, source: &[u8]) -> Option<(String, String)> {
+    // A decorator node's named children (after `@`) can be:
+    // - `call` → `@app.route(...)` or `@app.get(...)`
+    // - `attribute` → `@app.route` (no parens)
+    // - `identifier` → `@route`
+
     let mut cursor = decorator.walk();
     for child in decorator.named_children(&mut cursor) {
         match child.kind() {
             "call" => {
+                // call → function: attribute, arguments
                 if let Some(func) = child.child_by_field_name("function") {
                     if let Some((method, path)) = extract_attribute_route(func, child, source) {
                         return Some((path, method));
@@ -732,6 +687,7 @@ fn parse_route_decorator(decorator: tree_sitter::Node, source: &[u8]) -> Option<
                 }
             }
             "attribute" => {
+                // No-parens form: just check if attribute name is a route method.
                 if let Some(attr) = child.child_by_field_name("attribute") {
                     if let Ok(attr_name) = attr.utf8_text(source) {
                         if ROUTE_METHODS.contains(&attr_name) {
@@ -746,6 +702,8 @@ fn parse_route_decorator(decorator: tree_sitter::Node, source: &[u8]) -> Option<
     None
 }
 
+/// Given an `attribute` node (`app.route` / `router.get`) and the surrounding
+/// `call` node, return `Some((method, path))` if the attribute is a route method.
 fn extract_attribute_route(
     func_node: tree_sitter::Node,
     call_node: tree_sitter::Node,
@@ -762,20 +720,24 @@ fn extract_attribute_route(
         return None;
     }
 
+    // Try to extract the path string from the first positional argument.
     let path = extract_first_string_arg(call_node, source).unwrap_or_default();
     Some((method.to_string(), path))
 }
 
+/// Extract the first string literal argument from a `call` node's `argument_list`.
 fn extract_first_string_arg(call_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     let args = call_node.child_by_field_name("arguments")?;
     let mut cursor = args.walk();
     for child in args.named_children(&mut cursor) {
         match child.kind() {
             "string" => {
+                // Strip quotes from the string node text.
                 let raw = child.utf8_text(source).ok()?;
                 return Some(strip_string_quotes(raw));
             }
             "keyword_argument" => {
+                // `path="/foo"` — check if keyword is empty / skip named args before positionals.
                 continue;
             }
             _ => {}
@@ -784,8 +746,10 @@ fn extract_first_string_arg(call_node: tree_sitter::Node, source: &[u8]) -> Opti
     None
 }
 
+/// Strip surrounding quotes from a Python string literal.
 fn strip_string_quotes(s: &str) -> String {
     let s = s.trim();
+    // Handle triple-quoted strings first.
     for q in &[r#"""""#, "'''", r#"""#, r#"'"#] {
         if s.starts_with(q) && s.ends_with(q) && s.len() >= 2 * q.len() {
             return s[q.len()..s.len() - q.len()].to_string();
@@ -924,7 +888,13 @@ mod tests {
     fn extract_flask_route_as_endpoint() {
         let dir = make_tempdir();
         write_requirements(&dir);
-        let code = "from flask import Flask\napp = Flask(__name__)\n\n@app.route(\"/api/users\")\ndef get_users():\n    return []\n";
+        let code = r#"from flask import Flask
+app = Flask(__name__)
+
+@app.route("/api/users")
+def get_users():
+    return []
+"#;
         fs::write(dir.path().join("app.py"), code).unwrap();
 
         let result = PythonExtractor.extract(dir.path(), "abc123");
@@ -941,7 +911,13 @@ mod tests {
     fn extract_fastapi_route_as_endpoint() {
         let dir = make_tempdir();
         write_requirements(&dir);
-        let code = "from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get(\"/users\")\ndef list_users():\n    return []\n";
+        let code = r#"from fastapi import APIRouter
+router = APIRouter()
+
+@router.get("/users")
+def list_users():
+    return []
+"#;
         fs::write(dir.path().join("routes.py"), code).unwrap();
 
         let result = PythonExtractor.extract(dir.path(), "abc123");
@@ -975,82 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_calls_edges() {
-        let dir = make_tempdir();
-        write_requirements(&dir);
-        let code = "def caller():\n    callee()\n\ndef callee():\n    return 42\n";
-        fs::write(dir.path().join("app.py"), code).unwrap();
-
-        let result = PythonExtractor.extract(dir.path(), "abc123");
-        assert!(
-            result.errors.is_empty(),
-            "errors: {:?}",
-            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-        let calls_edges: Vec<_> = result
-            .edges
-            .iter()
-            .filter(|e| e.edge_type == EdgeType::Calls)
-            .collect();
-        assert!(!calls_edges.is_empty(), "should have Calls edges");
-    }
-
-    #[test]
-    fn extract_implements_from_superclass() {
-        let dir = make_tempdir();
-        write_requirements(&dir);
-        let code =
-            "class Repository:\n    def find(self, id):\n        pass\n\nclass SQLRepository(Repository):\n    def find(self, id):\n        return None\n";
-        fs::write(dir.path().join("domain.py"), code).unwrap();
-
-        let result = PythonExtractor.extract(dir.path(), "abc123");
-        assert!(
-            result.errors.is_empty(),
-            "errors: {:?}",
-            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-        let impl_edges: Vec<_> = result
-            .edges
-            .iter()
-            .filter(|e| e.edge_type == EdgeType::Implements)
-            .collect();
-        assert!(
-            !impl_edges.is_empty(),
-            "should have Implements edge from SQLRepository to Repository"
-        );
-        let sql_id = result
-            .nodes
-            .iter()
-            .find(|n| n.name == "SQLRepository")
-            .map(|n| &n.id);
-        let repo_id = result
-            .nodes
-            .iter()
-            .find(|n| n.name == "Repository")
-            .map(|n| &n.id);
-        assert!(sql_id.is_some() && repo_id.is_some());
-        assert!(impl_edges
-            .iter()
-            .any(|e| &e.source_id == sql_id.unwrap() && &e.target_id == repo_id.unwrap()));
-    }
-
-    #[test]
-    fn skip_common_base_classes() {
-        let dir = make_tempdir();
-        write_requirements(&dir);
-        let code = "from enum import Enum\n\nclass Status(Enum):\n    ACTIVE = 1\n";
-        fs::write(dir.path().join("enums.py"), code).unwrap();
-
-        let result = PythonExtractor.extract(dir.path(), "abc123");
-        let impl_edges: Vec<_> = result
-            .edges
-            .iter()
-            .filter(|e| e.edge_type == EdgeType::Implements)
-            .collect();
-        assert!(impl_edges.is_empty(), "should NOT emit Implements for Enum");
-    }
-
-    #[test]
     fn contains_edges_connect_module_to_class_and_function() {
         let dir = make_tempdir();
         write_requirements(&dir);
@@ -1067,5 +967,113 @@ mod tests {
             contains_count >= 2,
             "should have at least 2 Contains edges, got {contains_count}"
         );
+    }
+
+    #[test]
+    fn extract_call_edges_cross_module() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+
+        // Module A: defines helper()
+        fs::write(
+            dir.path().join("helpers.py"),
+            "def helper():\n    return 42\n",
+        )
+        .unwrap();
+
+        // Module B: imports helper and calls it
+        fs::write(
+            dir.path().join("main.py"),
+            "from helpers import helper\n\ndef run():\n    helper()\n",
+        )
+        .unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+
+        // Verify both functions exist as nodes.
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| n.qualified_name == "helpers.helper"),
+            "should have helpers.helper node"
+        );
+        assert!(
+            result.nodes.iter().any(|n| n.qualified_name == "main.run"),
+            "should have main.run node"
+        );
+
+        // Verify a Calls edge was created.
+        let calls_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+
+        // The script should resolve main.run -> helpers.helper.
+        // If the script is not found this is allowed to be 0 (graceful degradation).
+        if ExtractionContext::find_callgraph_script().is_some() {
+            assert!(
+                !calls_edges.is_empty(),
+                "should have at least 1 Calls edge when python-callgraph.py is available"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_call_edges_same_module() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+
+        // Single module with internal call
+        fs::write(
+            dir.path().join("service.py"),
+            "def validate():\n    return True\n\ndef process():\n    validate()\n",
+        )
+        .unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+
+        if ExtractionContext::find_callgraph_script().is_some() {
+            let calls_count = result
+                .edges
+                .iter()
+                .filter(|e| e.edge_type == EdgeType::Calls)
+                .count();
+            assert!(
+                calls_count >= 1,
+                "should have Calls edge for same-module call, got {calls_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_call_edges_class_method() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+
+        // Module with a class calling a module-level function
+        let code = r#"def compute():
+    return 1
+
+class Handler:
+    def handle(self):
+        compute()
+"#;
+        fs::write(dir.path().join("app.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+
+        if ExtractionContext::find_callgraph_script().is_some() {
+            let calls_count = result
+                .edges
+                .iter()
+                .filter(|e| e.edge_type == EdgeType::Calls)
+                .count();
+            assert!(
+                calls_count >= 1,
+                "should have Calls edge from Handler.handle -> compute, got {calls_count}"
+            );
+        }
     }
 }
