@@ -1839,7 +1839,7 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{entityName('agent', mr.agent_id)}</button></dd>
                 {/if}
                 {#if mr.repository_id ?? mr.repo_id}
-                  <dt>Repo</dt><dd class="mono" title={mr.repository_id ?? mr.repo_id}>{entityName('repo', mr.repository_id ?? mr.repo_id)}</dd>
+                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {mr.repository_id ?? mr.repo_id}" onclick={() => copyId(mr.repository_id ?? mr.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.repository_id ?? mr.repo_id); }}>{entityName('repo', mr.repository_id ?? mr.repo_id)}</dd>
                 {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
                   <dt>Author</dt><dd class="mono copyable" title="Click to copy: {mr.author_id}" onclick={() => copyId(mr.author_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.author_id); }}>{mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : shortId(mr.author_id)}</dd>
@@ -2109,13 +2109,13 @@
                   <dt>Spec</dt><dd><button class="entity-link mono" title={ag.spec_path} onclick={() => navigateTo('spec', ag.spec_path, { path: ag.spec_path, repo_id: ag.repo_id })}>{ag.spec_path.split('/').pop()}</button></dd>
                 {/if}
                 {#if ag.repo_id}
-                  <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{entityName('repo', ag.repo_id)}</dd>
+                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {ag.repo_id}" onclick={() => copyId(ag.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.repo_id); }}>{entityName('repo', ag.repo_id)}</dd>
                 {/if}
                 {#if ag.mr_id}
                   <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
                 {#if ag.workspace_id}
-                  <dt>Workspace</dt><dd class="mono" title={ag.workspace_id}>{entityName('workspace', ag.workspace_id)}</dd>
+                  <dt>Workspace</dt><dd class="mono copyable" title="Click to copy: {ag.workspace_id}" onclick={() => copyId(ag.workspace_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.workspace_id); }}>{entityName('workspace', ag.workspace_id)}</dd>
                 {/if}
                 {#if ag.created_at}
                   <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
@@ -2392,7 +2392,7 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{entityName('agent', tk.assigned_to)}</button></dd>
                 {/if}
                 {#if tk.repo_id}
-                  <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{entityName('repo', tk.repo_id)}</dd>
+                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {tk.repo_id}" onclick={() => copyId(tk.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(tk.repo_id); }}>{entityName('repo', tk.repo_id)}</dd>
                 {/if}
                 {#if tk.labels?.length > 0}
                   <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
@@ -3591,7 +3591,7 @@
                   <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
                 {/if}
                 {#if att.repo_id}
-                  <dt>Repo</dt><dd class="mono" title={att.repo_id}>{entityName('repo', att.repo_id)}</dd>
+                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {att.repo_id}" onclick={() => copyId(att.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.repo_id); }}>{entityName('repo', att.repo_id)}</dd>
                 {/if}
                 {#if att.gate_results?.length > 0}
                   {@const passed = att.gate_results.filter(g => g.status === 'Passed' || g.status === 'passed').length}
