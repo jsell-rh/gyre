@@ -95,6 +95,7 @@
     if (type === 'mr') {
       result.push(
         { id: 'diff',        label: $t('detail_panel.tabs.diff') },
+        { id: 'commits',     label: 'Commits' },
         { id: 'timeline',    label: 'Timeline' },
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
         { id: 'reviews',     label: 'Reviews' },
@@ -302,6 +303,8 @@
   let mrCommentsLoading = $state(false);
   let mrDeps = $state(null);
   let mrDepsLoading = $state(false);
+  let mrCommits = $state(null);
+  let mrCommitsLoading = $state(false);
   let newCommentText = $state('');
   let submittingComment = $state(false);
   let newReviewDecision = $state('approved');
@@ -344,6 +347,7 @@
       mrReviews = null;
       mrComments = null;
       mrDeps = null;
+      mrCommits = null;
       mrSpecPreview = null;
     }
     if (entity?.type === 'agent') {
@@ -526,6 +530,29 @@
         mrReviews = Array.isArray(revs) ? revs : [];
         mrComments = Array.isArray(cmts) ? cmts : [];
       }).finally(() => { mrReviewsLoading = false; mrCommentsLoading = false; });
+    }
+    if (activeTab === 'commits' && !mrCommits && !mrCommitsLoading) {
+      mrCommitsLoading = true;
+      const mr = mrDetail ?? entity.data ?? {};
+      const repoId = mr.repository_id ?? mr.repo_id ?? entity.data?.repository_id ?? entity.data?.repo_id;
+      const branch = mr.source_branch ?? entity.data?.source_branch;
+      const agentId = mr.author_agent_id ?? entity.data?.author_agent_id;
+      Promise.all([
+        repoId && branch ? api.repoCommits(repoId, branch, 50).catch(() => []) : Promise.resolve([]),
+        repoId ? api.repoAgentCommits(repoId).catch(() => []) : Promise.resolve([]),
+      ]).then(([branchCommits, agentCommitRecords]) => {
+        const commits = Array.isArray(branchCommits) ? branchCommits : [];
+        const agentMap = {};
+        (Array.isArray(agentCommitRecords) ? agentCommitRecords : []).forEach(ac => {
+          if (ac.sha) agentMap[ac.sha] = ac;
+          if (ac.commit_sha) agentMap[ac.commit_sha] = ac;
+        });
+        mrCommits = commits.map(c => ({
+          ...c,
+          _agentRecord: agentMap[c.sha] ?? agentMap[c.id] ?? null,
+        }));
+      }).catch(() => { mrCommits = []; })
+        .finally(() => { mrCommitsLoading = false; });
     }
   });
 
@@ -3025,6 +3052,49 @@
             {/if}
           {:else}
             <p class="no-data">No diff data available</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'commits'}
+        <div class="tab-pane">
+          {#if mrCommitsLoading}
+            <div class="spec-skeleton">
+              {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else if Array.isArray(mrCommits) && mrCommits.length > 0}
+            <div class="commits-list">
+              {#each mrCommits as commit}
+                {@const sha = commit.sha ?? commit.id ?? ''}
+                {@const agentId = commit._agentRecord?.agent_id ?? commit.agent_id}
+                {@const specRef = commit._agentRecord?.spec_ref ?? commit.spec_ref}
+                <div class="commit-item">
+                  <div class="commit-header">
+                    <code class="sha-badge mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 7)}</code>
+                    <span class="commit-message">{commit.message ?? commit.summary ?? '—'}</span>
+                  </div>
+                  <div class="commit-meta">
+                    {#if agentId}
+                      <button class="entity-link mono" onclick={() => navigateTo('agent', agentId)} title={agentId}>
+                        <span class="commit-author-icon">&#x2699;</span> {entityName('agent', agentId)}
+                      </button>
+                    {:else if commit.author}
+                      <span class="commit-author mono">{commit.author}</span>
+                    {/if}
+                    {#if specRef}
+                      {@const specPath = specRef.split('@')[0]}
+                      <button class="entity-link mono" onclick={() => navigateTo('spec', specPath, { path: specPath })} title={specRef}>
+                        📋 {specPath.split('/').pop()}
+                      </button>
+                    {/if}
+                    {#if commit.timestamp ?? commit.created_at}
+                      <span class="commit-time">{fmtDate(commit.timestamp ?? commit.created_at)}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="no-data">No commits found on this branch</p>
           {/if}
         </div>
 
@@ -5784,6 +5854,57 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  .commits-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .commit-item {
+    padding: var(--space-2) var(--space-3);
+    border-left: 2px solid var(--color-border);
+    transition: border-color var(--transition-fast);
+  }
+
+  .commit-item:hover {
+    border-left-color: var(--color-primary);
+  }
+
+  .commit-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .commit-message {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .commit-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .commit-author {
+    color: var(--color-text-secondary);
+  }
+
+  .commit-author-icon {
+    font-size: var(--text-xs);
+  }
+
+  .commit-time {
+    margin-left: auto;
   }
 
   .no-data-sm {
