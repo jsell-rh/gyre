@@ -63,13 +63,14 @@ describe('DetailPanel', () => {
   });
 
   describe('Tab routing by entity type', () => {
-    it('MR entity: shows Info, Diff, Gates, Ask Why tabs (no Attestation for open MR)', () => {
+    it('MR entity: shows Info, Diff, Gates, Attestation, Ask Why tabs', () => {
       render(DetailPanel, { props: { entity: mrEntity } });
       expect(screen.getByRole('tab', { name: /info/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /diff/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /gates/i })).toBeTruthy();
       expect(screen.getByRole('tab', { name: /ask why/i })).toBeTruthy();
-      expect(screen.queryByRole('tab', { name: /attestation/i })).toBeNull();
+      // Attestation tab always shown — shows pending explanation for open MRs
+      expect(screen.getByRole('tab', { name: /attestation/i })).toBeTruthy();
     });
 
     it('merged MR: includes Attestation tab', () => {
@@ -77,10 +78,11 @@ describe('DetailPanel', () => {
       expect(screen.getByRole('tab', { name: /attestation/i })).toBeTruthy();
     });
 
-    it('Ask Why disabled when conversation_sha is null', () => {
+    it('Ask Why always enabled for MRs (conversation_sha loaded async)', () => {
       render(DetailPanel, { props: { entity: mrEntity } });
       const askWhy = screen.getByRole('tab', { name: /ask why/i });
-      expect(askWhy.disabled).toBe(true);
+      // Ask Why is always enabled — conversation_sha is resolved async from attestation
+      expect(askWhy.disabled).toBe(false);
     });
 
     it('Ask Why enabled when conversation_sha is set', () => {
