@@ -2,7 +2,6 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use gyre_common::ActivityEventData;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -15,49 +14,70 @@ pub struct ActivityQueryParams {
     pub limit: Option<usize>,
 }
 
-/// GET /api/v1/activity — legacy global activity endpoint backed by TelemetryBuffer.
+/// GET /api/v1/activity — unified activity feed.
 ///
-/// Scoped to workspaces belonging to the caller's tenant. Admin callers
-/// (global token) see all workspaces.
+/// Synthesizes activity events from notifications (which are populated for all
+/// key lifecycle events: agent completions, gate failures, spec approvals, MR
+/// merges, etc.). Returns a generic JSON array consumed by the dashboard.
 pub async fn activity_handler(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedAgent,
+    _auth: AuthenticatedAgent,
     Query(params): Query<ActivityQueryParams>,
-) -> Json<Vec<ActivityEventData>> {
-    let since_ms = params.since.unwrap_or(0);
-    let lim = params.limit.unwrap_or(100);
+) -> Json<Vec<serde_json::Value>> {
+    let lim = params.limit.unwrap_or(30);
 
-    let msgs = if auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        // Admin: query all workspaces (backward compat for global token).
-        state.telemetry_buffer.list_all_since(since_ms, lim)
-    } else {
-        // Scoped: only workspaces belonging to caller's tenant.
-        let workspaces = state
-            .workspaces
-            .list_by_tenant(&gyre_common::Id::new(&auth.tenant_id))
-            .await
-            .unwrap_or_default();
-        let mut msgs = vec![];
-        for ws in &workspaces {
-            let ws_msgs =
-                state
-                    .telemetry_buffer
-                    .list_since(&ws.id, since_ms, lim.saturating_sub(msgs.len()));
-            msgs.extend(ws_msgs);
-            if msgs.len() >= lim {
-                break;
-            }
-        }
-        msgs
-    };
+    let notifs = state
+        .notifications
+        .list_recent(lim)
+        .await
+        .unwrap_or_default();
 
-    let events: Vec<ActivityEventData> = msgs
+    let events: Vec<serde_json::Value> = notifs
         .into_iter()
-        .filter_map(|m| {
-            m.payload
+        .map(|n| {
+            let body: serde_json::Value = n
+                .body
                 .as_ref()
-                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .and_then(|b| serde_json::from_str(b).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let event_type = match n.notification_type.as_str() {
+                "AgentCompleted" => "agent_completed",
+                "AgentFailed" => "agent_failed",
+                "MrMerged" => "merged",
+                "MrCreated" => "mr_created",
+                "SpecApproved" => "spec_approved",
+                "SpecRejected" => "spec_rejected",
+                "GateFailure" => "gate_failed",
+                "TaskCreated" => "task_created",
+                other => other,
+            };
+            serde_json::json!({
+                "event_type": event_type,
+                "title": n.title,
+                "description": n.body,
+                "entity_type": if body.get("mr_id").is_some() { Some("mr") }
+                    else if body.get("agent_id").is_some() { Some("agent") }
+                    else if body.get("spec_path").is_some() { Some("spec") }
+                    else if body.get("task_id").is_some() { Some("task") }
+                    else { None },
+                "entity_id": body.get("mr_id")
+                    .or_else(|| body.get("agent_id"))
+                    .or_else(|| body.get("spec_path"))
+                    .or_else(|| body.get("task_id"))
+                    .and_then(|v| v.as_str())
+                    .or(n.entity_ref.as_deref()),
+                "entity_name": body.get("mr_title")
+                    .or_else(|| body.get("agent_name"))
+                    .and_then(|v| v.as_str()),
+                "timestamp": n.created_at,
+                "agent_id": body.get("agent_id").and_then(|v| v.as_str()),
+                "mr_id": body.get("mr_id").and_then(|v| v.as_str()),
+                "task_id": body.get("task_id").and_then(|v| v.as_str()),
+                "spec_path": body.get("spec_path").and_then(|v| v.as_str()),
+                "repo_id": n.repo_id,
+            })
         })
         .collect();
+
     Json(events)
 }
