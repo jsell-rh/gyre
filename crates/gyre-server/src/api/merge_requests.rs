@@ -78,6 +78,10 @@ pub struct MrResponse {
     pub atomic_group: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<u64>,
 }
 
 impl From<MergeRequest> for MrResponse {
@@ -101,6 +105,8 @@ impl From<MergeRequest> for MrResponse {
             atomic_group: mr.atomic_group,
             created_at: mr.created_at,
             updated_at: mr.updated_at,
+            merge_commit_sha: None,
+            merged_at: None,
         }
     }
 }
@@ -457,12 +463,21 @@ pub async fn get_mr(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<MrResponse>, ApiError> {
+    let mr_id = Id::new(&id);
     let mr = state
         .merge_requests
-        .find_by_id(&Id::new(&id))
+        .find_by_id(&mr_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
-    Ok(Json(MrResponse::from(mr)))
+    let mut resp = MrResponse::from(mr);
+    // Enrich merged MRs with merge_commit_sha and merged_at from attestation.
+    if resp.status == "merged" {
+        if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&id).await {
+            resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
+            resp.merged_at = Some(att.attestation.merged_at);
+        }
+    }
+    Ok(Json(resp))
 }
 
 #[instrument(skip(state, req), fields(mr_id = %id, new_status = %req.status))]
