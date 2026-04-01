@@ -54,6 +54,9 @@ pub struct AgentResponse {
     /// Spec path resolved from the agent's task (enriched at query time).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_path: Option<String>,
+    /// MR ID created by this agent (enriched at query time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mr_id: Option<String>,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -80,6 +83,7 @@ impl From<Agent> for AgentResponse {
             task_id: None,
             completed_at: None,
             spec_path: None,
+            mr_id: None,
         }
     }
 }
@@ -239,6 +243,20 @@ pub async fn get_agent(
     if let Some(ref tid) = task_id_str {
         if let Ok(Some(task)) = state.tasks.find_by_id(&Id::new(tid)).await {
             resp.spec_path = task.spec_path;
+        }
+    }
+    // Resolve mr_id from MRs authored by this agent
+    if let Some(ref repo_id) = resp.repo_id {
+        if let Ok(mrs) = state.merge_requests.list_by_repo(&Id::new(repo_id)).await {
+            if let Some(mr) = mrs.iter().find(|m| {
+                m.author_agent_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .as_deref()
+                    == Some(&id)
+            }) {
+                resp.mr_id = Some(mr.id.to_string());
+            }
         }
     }
     Ok(Json(resp))
