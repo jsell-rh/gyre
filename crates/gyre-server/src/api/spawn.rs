@@ -1199,7 +1199,16 @@ pub async fn complete_agent(
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify(
+        let body_json = serde_json::json!({
+            "agent_id": agent.id.as_str(),
+            "agent_name": &agent.name,
+            "mr_id": mr.id.as_str(),
+            "mr_title": &mr.title,
+            "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
+        })
+        .to_string();
+
+        crate::notifications::notify_rich(
             state.as_ref(),
             mr.workspace_id.clone(),
             Id::new(spawned_by.clone()),
@@ -1209,6 +1218,9 @@ pub async fn complete_agent(
                 agent.name, mr.title
             ),
             "default",
+            Some(body_json),
+            Some(mr.id.to_string()),
+            Some(mr.repository_id.to_string()),
         )
         .await;
     }
