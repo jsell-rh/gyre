@@ -757,13 +757,13 @@
                 <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav(event.entity_type, event.entity_id, event)} title="View {event.entity_type}: {event.entity_id}">{resolveEntityName(event.entity_type, event.entity_id)}</button>
               {:else}
                 {#if event.agent_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('agent', event.agent_id, {})} title="View agent: {event.agent_id}">{resolveEntityName('agent', event.agent_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('agent', event.agent_id, { repo_id: event.repo_id })} title="View agent: {event.agent_id}">{resolveEntityName('agent', event.agent_id)}</button>
                 {/if}
                 {#if event.mr_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('mr', event.mr_id, {})} title="View MR: {event.mr_id}">{resolveEntityName('mr', event.mr_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('mr', event.mr_id, { repository_id: event.repo_id })} title="View MR: {event.mr_id}">{resolveEntityName('mr', event.mr_id)}</button>
                 {/if}
                 {#if event.task_id && !event.agent_id && !event.mr_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('task', event.task_id, {})} title="View task: {event.task_id}">{resolveEntityName('task', event.task_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('task', event.task_id, { repo_id: event.repo_id })} title="View task: {event.task_id}">{resolveEntityName('task', event.task_id)}</button>
                 {/if}
                 {#if event.spec_path && !event.agent_id && !event.mr_id}
                   <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id })} title="View spec: {event.spec_path}">{event.spec_path.split('/').pop()}</button>
