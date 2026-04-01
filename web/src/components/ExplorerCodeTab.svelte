@@ -2,6 +2,7 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { detectLang, highlightLine } from '../lib/syntaxHighlight.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
@@ -65,6 +66,20 @@
   let error = $state(null);
   let filterQuery = $state('');
   let investigateLoading = $state(null); // commit SHA being investigated
+  let fileLang = $derived(selectedFile ? detectLang(selectedFile) : 'text');
+
+  // Agent color assignment for attribution markers
+  const AGENT_COLORS = ['#c678dd','#61afef','#e5c07b','#56b6c2','#e06c75','#98c379','#d19a66','#be5046'];
+  let agentColorMap = $state({});
+  let agentColorIdx = 0;
+  function agentColor(agentId) {
+    if (!agentId) return 'transparent';
+    if (agentColorMap[agentId]) return agentColorMap[agentId];
+    const color = AGENT_COLORS[agentColorIdx % AGENT_COLORS.length];
+    agentColorIdx++;
+    agentColorMap = { ...agentColorMap, [agentId]: color };
+    return color;
+  }
 
   // Sort state
   let sortField = $state('name');
@@ -365,6 +380,8 @@
     blameData = null;
     blameLoading = true;
     reviewRouting = [];
+    agentColorMap = {};
+    agentColorIdx = 0;
     try {
       const [blame, routing] = await Promise.all([
         api.repoBlame(repoId, path).catch(() => null),
@@ -542,74 +559,80 @@
           {:else if blameData}
             {@const lines = Array.isArray(blameData) ? blameData : (blameData.lines ?? blameData.blame ?? [])}
             {#if lines.length > 0}
-              <table class="blame-table">
-                <thead>
-                  <tr>
-                    <th scope="col" class="blame-col-line">#</th>
-                    <th scope="col" class="blame-col-agent">Agent</th>
-                    <th scope="col" class="blame-col-sha">Commit</th>
-                    <th scope="col" class="blame-col-spec">Spec</th>
-                    <th scope="col" class="blame-col-action"></th>
-                    <th scope="col" class="blame-col-content">Content</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each lines as line, i}
-                    {@const agentId = line.agent_id ?? line.agent}
-                    {@const specRef = line.spec_ref ?? line.spec_path}
-                    <tr class="blame-row" class:blame-agent-row={!!agentId}>
-                      <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
-                      <td class="blame-agent">
-                        {#if agentId}
-                          <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title="View agent: {agentId}">
-                            <span class="agent-icon" aria-hidden="true">&#x2699;</span>
-                            {resolveEntityName('agent', agentId)}
-                          </button>
-                        {:else}
-                          <span class="secondary">{line.author ?? '—'}</span>
-                        {/if}
-                      </td>
-                      <td class="blame-sha mono">
-                        {#if line.sha ?? line.commit_sha}
-                          <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {(line.sha ?? line.commit_sha).slice(0, 7)}">
-                            {(line.sha ?? line.commit_sha).slice(0, 7)}
-                          </button>
-                        {:else}
-                          —
-                        {/if}
-                      </td>
-                      <td class="blame-spec">
-                        {#if specRef}
-                          {@const specName = specRef.split('@')[0]?.split('/').pop()}
-                          <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
-                            {specName}
-                          </button>
-                        {:else}
-                          <span class="secondary">—</span>
-                        {/if}
-                      </td>
-                      <td class="blame-action">
-                        {#if agentId && (line.sha ?? line.commit_sha)}
-                          <button
-                            class="investigate-btn"
-                            onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
-                            disabled={investigateLoading === (line.sha ?? line.commit_sha)}
-                            title="Resume the agent conversation that produced this line to investigate decisions"
-                          >
-                            {#if investigateLoading === (line.sha ?? line.commit_sha)}
-                              <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                            {:else}
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                            {/if}
-                            <span class="investigate-label">Investigate</span>
-                          </button>
-                        {/if}
-                      </td>
-                      <td class="blame-content mono"><pre class="blame-line-pre">{line.content ?? line.text ?? ''}</pre></td>
+              <div class="blame-code-viewer">
+                <table class="blame-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" class="blame-col-marker"></th>
+                      <th scope="col" class="blame-col-line">#</th>
+                      <th scope="col" class="blame-col-agent">Agent</th>
+                      <th scope="col" class="blame-col-sha">Commit</th>
+                      <th scope="col" class="blame-col-spec">Spec</th>
+                      <th scope="col" class="blame-col-action"></th>
+                      <th scope="col" class="blame-col-content">Content</th>
                     </tr>
-                  {/each}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {#each lines as line, i}
+                      {@const agentId = line.agent_id ?? line.agent}
+                      {@const specRef = line.spec_ref ?? line.spec_path}
+                      {@const lineContent = line.content ?? line.text ?? ''}
+                      <tr class="blame-row" class:blame-agent-row={!!agentId}>
+                        <td class="blame-marker" style="border-left: 3px solid {agentColor(agentId)}" title={agentId ? `Agent: ${resolveEntityName('agent', agentId)}` : ''}></td>
+                        <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
+                        <td class="blame-agent">
+                          {#if agentId}
+                            <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title="View agent: {agentId}">
+                              <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                              {resolveEntityName('agent', agentId)}
+                            </button>
+                          {:else}
+                            <span class="secondary">{line.author ?? '—'}</span>
+                          {/if}
+                        </td>
+                        <td class="blame-sha mono">
+                          {#if line.sha ?? line.commit_sha}
+                            <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {(line.sha ?? line.commit_sha).slice(0, 7)}">
+                              {(line.sha ?? line.commit_sha).slice(0, 7)}
+                            </button>
+                          {:else}
+                            —
+                          {/if}
+                        </td>
+                        <td class="blame-spec">
+                          {#if specRef}
+                            {@const specName = specRef.split('@')[0]?.split('/').pop()}
+                            <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
+                              {specName}
+                            </button>
+                          {:else}
+                            <span class="secondary">—</span>
+                          {/if}
+                        </td>
+                        <td class="blame-action">
+                          {#if agentId && (line.sha ?? line.commit_sha)}
+                            <button
+                              class="investigate-btn-prominent"
+                              onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
+                              disabled={investigateLoading === (line.sha ?? line.commit_sha)}
+                              title="Spawn an interrogation agent to discuss why this code was written this way"
+                            >
+                              {#if investigateLoading === (line.sha ?? line.commit_sha)}
+                                <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                                <span>Spawning...</span>
+                              {:else}
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                                <span>Ask why</span>
+                              {/if}
+                            </button>
+                          {/if}
+                        </td>
+                        <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang)}</pre></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
             {:else}
               <p class="no-data">No blame data available for this file</p>
             {/if}
@@ -630,8 +653,14 @@
           </thead>
           <tbody>
             {#each fileTree.filter(matchesFilter) as file}
+              {@const pathParts = file.path.split('/')}
               <tr class="table-row" onclick={() => selectFile(file.path)} tabindex="0" role="button" aria-label="View blame for {file.path}" onkeydown={(e) => { if (e.key === 'Enter') selectFile(file.path); }}>
-                <td class="mono">{file.path}</td>
+                <td class="mono file-path-cell">
+                  {#if pathParts.length > 1}
+                    <span class="file-path-dir">{pathParts.slice(0, -1).join('/')}/</span>
+                  {/if}
+                  <span class="file-path-name">{pathParts[pathParts.length - 1]}</span>
+                </td>
                 <td>{file.change_count || '—'}</td>
                 <td class="secondary">{file.author_count || '—'}</td>
                 <td class="secondary">{relativeTime(file.last_modified)}</td>
@@ -819,8 +848,14 @@
           <tbody>
             {#each hotFiles as file}
               {@const filePath = file.path ?? file.file ?? null}
+              {@const hotParts = filePath ? filePath.split('/') : []}
               <tr class="table-row" onclick={() => { if (filePath) { subTab = 'files'; selectFile(filePath); } }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter' && filePath) { subTab = 'files'; selectFile(filePath); } }} title={filePath ? `View blame for ${filePath}` : ''}>
-                <td class="mono">{filePath ?? '—'}</td>
+                <td class="mono file-path-cell">
+                  {#if hotParts.length > 1}
+                    <span class="file-path-dir">{hotParts.slice(0, -1).join('/')}/</span>
+                  {/if}
+                  <span class="file-path-name">{hotParts.length > 0 ? hotParts[hotParts.length - 1] : '—'}</span>
+                </td>
                 <td>{file.change_count ?? file.commits ?? file.count ?? 0}</td>
                 <td class="secondary">{file.author_count ?? file.authors ?? '—'}</td>
                 <td class="secondary">{relativeTime(file.last_modified ?? file.updated_at)}</td>
@@ -1508,10 +1543,6 @@
     color: var(--color-text-muted);
   }
 
-  .investigate-label {
-    font-size: var(--text-xs);
-  }
-
   .review-routing-bar {
     display: flex;
     align-items: center;
@@ -1573,6 +1604,7 @@
     border-bottom: 1px solid var(--color-border);
   }
 
+  .blame-col-marker { width: 4px; padding: 0 !important; }
   .blame-col-line { width: 40px; text-align: right; }
   .blame-col-agent { width: 120px; }
   .blame-col-sha { width: 70px; }
@@ -1614,37 +1646,54 @@
     font-size: var(--text-xs);
   }
 
-  .blame-action {
-    width: 24px;
-    padding: 0 2px !important;
+  .blame-marker {
+    width: 4px;
+    padding: 0 !important;
   }
 
-  .blame-col-action { width: 24px; }
-
-  .investigate-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    padding: 2px var(--space-2);
-    background: transparent;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    color: var(--color-text-muted);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    font-weight: 600;
-    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+  .blame-action {
+    width: 80px;
+    padding: 0 2px !important;
     white-space: nowrap;
   }
 
-  .investigate-btn:hover:not(:disabled) {
-    color: var(--color-primary);
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  .blame-col-action { width: 80px; }
+
+  .blame-code-viewer {
+    flex: 1;
+    overflow: auto;
   }
 
-  .investigate-btn:disabled {
-    opacity: 0.5;
+  .investigate-btn-prominent {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--space-2);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-body);
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+    white-space: nowrap;
+    opacity: 0;
+  }
+
+  .blame-row:hover .investigate-btn-prominent {
+    opacity: 1;
+  }
+
+  .investigate-btn-prominent:hover:not(:disabled) {
+    color: var(--color-text);
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+  }
+
+  .investigate-btn-prominent:disabled {
+    opacity: 0.5 !important;
     cursor: not-allowed;
   }
 
@@ -1669,6 +1718,24 @@
     font-size: var(--text-sm);
     text-align: center;
   }
+
+  .file-path-cell {
+    white-space: nowrap;
+  }
+
+  .file-path-dir {
+    color: var(--color-text-muted);
+  }
+
+  .file-path-name {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .blame-line-pre :global(.hl-kw) { color: #c678dd; }
+  .blame-line-pre :global(.hl-str) { color: #98c379; }
+  .blame-line-pre :global(.hl-cmt) { color: #5c6370; font-style: italic; }
+  .blame-line-pre :global(.hl-num) { color: #d19a66; }
 
   @media (prefers-reduced-motion: reduce) {
     .subtab-btn, .sort-btn, .table-row { transition: none; }
