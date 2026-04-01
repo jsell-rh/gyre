@@ -180,6 +180,10 @@
   let workspaceMetaSpecs = $state([]);
   let globalMetaSpecs = $state([]);
 
+  // ── Audit Log state ─────────────────────────────────────────────────
+  let auditLoading = $state(false);
+  let auditEvents = $state([]);
+
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
 
@@ -417,6 +421,19 @@
       costData = null;
     } finally {
       budgetLoading = false;
+    }
+  }
+
+  // ── Audit Log: load ─────────────────────────────────────────────────
+  async function loadAudit() {
+    auditLoading = true;
+    try {
+      const data = await api.adminAudit({ limit: '10' });
+      auditEvents = Array.isArray(data) ? data : (data?.items ?? []);
+    } catch {
+      auditEvents = [];
+    } finally {
+      auditLoading = false;
     }
   }
 
@@ -918,6 +935,7 @@
     loadAgents();
     loadActivity();
     loadBudget();
+    loadAudit();
     loadArchGraph();
     loadMergeQueue();
   });
@@ -1891,6 +1909,40 @@
           {/if}
         </div>
       </section>
+
+      <!-- ── Audit Log ──────────────────────────────────────────────────── -->
+      {#if !auditLoading && auditEvents.length > 0}
+        <section class="home-section" aria-labelledby="section-audit" data-testid="section-audit">
+          <div class="section-header">
+            <h2 class="section-title" id="section-audit">Audit Log
+              <span class="section-badge">{auditEvents.length}</span>
+            </h2>
+          </div>
+          <div class="section-body">
+            <div class="activity-timeline">
+              {#each auditEvents.slice(0, 8) as event}
+                {@const eventType = event.event_type ?? event.action ?? event.type ?? 'event'}
+                {@const actor = event.actor ?? event.user_id ?? event.agent_id ?? '—'}
+                {@const target = event.target ?? event.entity_type ?? ''}
+                {@const targetId = event.target_id ?? event.entity_id ?? ''}
+                <div class="activity-item">
+                  <div class="activity-dot activity-dot-info"></div>
+                  <div class="activity-content">
+                    <span class="activity-label">{eventType.replace(/_/g, ' ')}</span>
+                    {#if target}
+                      <span class="activity-detail">{target}{targetId ? `: ${targetId.slice(0, 8)}...` : ''}</span>
+                    {/if}
+                    <span class="activity-entity-name mono">{actor.length > 12 ? actor.slice(0, 8) + '...' : actor}</span>
+                    {#if event.timestamp ?? event.created_at}
+                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        </section>
+      {/if}
 
       <!-- ── Agent Rules ───────────────────────────────────────────────── -->
       <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
