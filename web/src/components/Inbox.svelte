@@ -65,6 +65,18 @@
     trust_suggestion: 'default',
     spec_assertion_failure: 'danger',
     suggested_link: 'default',
+    // PascalCase variants from the server
+    AgentCompleted: 'success',
+    AgentFailed: 'danger',
+    SpecPendingApproval: 'warning',
+    SpecApproved: 'success',
+    SpecRejected: 'danger',
+    MrMerged: 'success',
+    MrCreated: 'info',
+    GateFailure: 'danger',
+    SuggestedSpecLink: 'default',
+    TaskCreated: 'info',
+    BudgetWarning: 'warning',
   };
 
   // Human-readable type labels — derived from i18n
@@ -91,9 +103,29 @@
     try {
       if (!isBackground) loading = true;
       error = null;
-      let data = await api.myNotifications();
-
-      if (!Array.isArray(data)) data = [];
+      let raw = await api.myNotifications();
+      let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
+      // Normalize PascalCase notification types from the server to snake_case
+      const typeNormMap = {
+        AgentCompleted: 'agent_completed',
+        AgentFailed: 'agent_failed',
+        SpecPendingApproval: 'spec_approval',
+        SpecApproved: 'spec_approved',
+        SpecRejected: 'spec_rejected',
+        MrMerged: 'mr_merged',
+        MrCreated: 'mr_created',
+        MrNeedsReview: 'mr_needs_review',
+        GateFailure: 'gate_failure',
+        SuggestedSpecLink: 'suggested_link',
+        TaskCreated: 'task_created',
+        BudgetWarning: 'budget_warning',
+        SpecChanged: 'spec_changed',
+        MetaSpecDrift: 'meta_spec_drift',
+      };
+      data = data.map(n => ({
+        ...n,
+        notification_type: typeNormMap[n.notification_type] ?? n.notification_type,
+      }));
 
       // Client-side scope filtering
       if (repoId) {
@@ -654,6 +686,42 @@
                       >
                         {$t('common.dismiss')}
                       </Button>
+                    {:else if n.notification_type === 'agent_completed' || n.notification_type === 'mr_needs_review'}
+                      {@const b = getBody(n)}
+                      {#if b.mr_id}
+                        <Button variant="primary" size="sm" onclick={() => openDetail({ type: 'mr', id: b.mr_id, data: { repository_id: n.repo_id } })}>
+                          Review MR
+                        </Button>
+                      {/if}
+                      {#if b.agent_id}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'agent', id: b.agent_id, data: { repo_id: n.repo_id } })}>
+                          View Agent
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'mr_merged' || n.notification_type === 'spec_approved' || n.notification_type === 'spec_rejected' || n.notification_type === 'task_created' || n.notification_type === 'spec_changed' || n.notification_type === 'agent_failed'}
+                      {@const b = getBody(n)}
+                      {#if b.mr_id}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'mr', id: b.mr_id, data: { repository_id: n.repo_id } })}>
+                          View MR
+                        </Button>
+                      {/if}
+                      {#if b.spec_path}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'spec', id: normalizeSpecPath(b.spec_path), data: { path: normalizeSpecPath(b.spec_path), repo_id: n.repo_id } })}>
+                          View Spec
+                        </Button>
+                      {/if}
+                      {#if b.agent_id}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'agent', id: b.agent_id, data: { repo_id: n.repo_id } })}>
+                          View Agent
+                        </Button>
+                      {/if}
+                      {#if b.task_id}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'task', id: b.task_id, data: { repo_id: n.repo_id } })}>
+                          View Task
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {/if}
                   </div>
                 {/if}

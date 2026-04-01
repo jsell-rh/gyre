@@ -49,8 +49,8 @@
   $effect(() => {
     const rId = repo?.id;
     if (rId) {
-      api.myNotifications().then(data => {
-        const arr = Array.isArray(data) ? data : [];
+      api.myNotifications().then(raw => {
+        const arr = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
         decisionsCount = arr.filter(n => n.repo_id === rId && !n.dismissed_at).length;
       }).catch(() => {});
     }
