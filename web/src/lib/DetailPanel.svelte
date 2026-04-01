@@ -1212,6 +1212,38 @@
     }
   }
 
+  // ── Spawn agent for task ──────────────────────────────────────────────
+  let spawnAgentLoading = $state(false);
+
+  async function spawnAgentForTask() {
+    if (!entity || spawnAgentLoading) return;
+    const tk = taskDetail ?? entity.data ?? {};
+    const repoId = tk.repo_id ?? tk.repository_id;
+    if (!repoId) { toastError('Task has no repository — cannot spawn agent'); return; }
+    spawnAgentLoading = true;
+    try {
+      const branchSlug = (tk.title ?? 'task').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30);
+      const result = await api.spawnAgent({
+        name: `agent-${branchSlug}`,
+        repo_id: repoId,
+        task_id: entity.id,
+        branch: `feat/${branchSlug}`,
+      });
+      const agentId = result?.agent?.id;
+      toastSuccess('Agent spawned for this task');
+      // Update task to show the new agent
+      if (agentId) {
+        taskDetail = { ...tk, assigned_to: agentId };
+        // Navigate to the new agent
+        navigateTo('agent', agentId, result.agent);
+      }
+    } catch (e) {
+      toastError('Failed to spawn agent: ' + (e.message ?? e));
+    } finally {
+      spawnAgentLoading = false;
+    }
+  }
+
   /** Explain spec approval status in human terms */
   function specStatusExplain(spec) {
     if (!spec?.approval_status) return '';
@@ -2119,6 +2151,15 @@
                       </button>
                     {/if}
                   </div>
+                </div>
+              {/if}
+
+              <!-- Spawn agent action for unassigned tasks -->
+              {#if !tk.assigned_to && tk.repo_id && (tk.status === 'backlog' || tk.status === 'in_progress')}
+                <div class="mr-actions">
+                  <Button variant="primary" onclick={spawnAgentForTask} disabled={spawnAgentLoading}>
+                    {spawnAgentLoading ? 'Spawning...' : 'Spawn Agent'}
+                  </Button>
                 </div>
               {/if}
 
