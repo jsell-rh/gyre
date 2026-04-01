@@ -212,6 +212,23 @@
   let briefingError = $state(null);
   let briefingSummaries = $state([]); // [{ workspaceName, summary }]
 
+  // ── Aggregate stat cards state ────────────────────────────────────────────
+  let statsLoading = $state(true);
+  let totalRepos = $state(0);
+  let totalSpecs = $state(0);
+  let activeAgents = $state(0);
+  let openMrs = $state(0);
+
+  // ── Recent Activity state ───────────────────────────────────────────────
+  let activityLoading = $state(true);
+  let activityEvents = $state([]);
+  let showAllActivity = $state(false);
+
+  // ── Per-workspace enrichment data ───────────────────────────────────────
+  let allRepos = $state([]);
+  let allAgents = $state([]);
+  let allMrs = $state([]);
+
   // ── Budget summary state ─────────────────────────────────────────────────
   let budgetSummary = $state(null);
   let budgetSummaryLoading = $state(true);
@@ -223,14 +240,15 @@
 
   // ── Load all sections ────────────────────────────────────────────────────
   $effect(() => {
-    // Load workspaces first so workspace name map is available for decisions
     loadWorkspaces().then(() => {
       loadDecisions();
       loadBriefings();
+      loadActivity();
     });
     loadSpecs();
     loadAgentRules();
     loadBudgetSummary();
+    loadStats();
   });
 
   async function loadDecisions() {
@@ -332,6 +350,105 @@
     }
   }
 
+  async function loadStats() {
+    statsLoading = true;
+    try {
+      const [reposData, specsData, agentsData, mrsData] = await Promise.allSettled([
+        api.allRepos(),
+        api.getSpecs(),
+        api.agents({ status: 'active' }),
+        api.mergeRequests({ status: 'open' }),
+      ]);
+      const reposList = reposData.status === 'fulfilled' ? (Array.isArray(reposData.value) ? reposData.value : []) : [];
+      const specsList = specsData.status === 'fulfilled' ? (Array.isArray(specsData.value) ? specsData.value : (specsData.value?.items ?? [])) : [];
+      const agentsList = agentsData.status === 'fulfilled' ? (Array.isArray(agentsData.value) ? agentsData.value : []) : [];
+      const mrsList = mrsData.status === 'fulfilled' ? (Array.isArray(mrsData.value) ? mrsData.value : []) : [];
+      allRepos = reposList;
+      allAgents = agentsList;
+      allMrs = mrsList;
+      totalRepos = reposList.length;
+      totalSpecs = specsList.length;
+      activeAgents = agentsList.length;
+      openMrs = mrsList.length;
+    } catch {
+      // leave at 0
+    } finally {
+      statsLoading = false;
+    }
+  }
+
+  async function loadActivity() {
+    activityLoading = true;
+    try {
+      const data = await api.activity(20);
+      activityEvents = Array.isArray(data) ? data : [];
+    } catch {
+      activityEvents = [];
+    } finally {
+      activityLoading = false;
+    }
+  }
+
+  function activityIcon(event) {
+    const t = event.event_type ?? event.event ?? event.type ?? '';
+    if (t.includes('spec') && t.includes('approv')) return '✓';
+    if (t.includes('spec') && t.includes('reject')) return '✗';
+    if (t.includes('spec')) return '📋';
+    if (t.includes('task')) return '☑';
+    if (t.includes('agent') && t.includes('spawn')) return '▶';
+    if (t.includes('agent') && t.includes('complet')) return '⬛';
+    if (t.includes('mr') && t.includes('merg')) return '🔀';
+    if (t.includes('mr') && t.includes('creat')) return '📝';
+    if (t.includes('gate')) return '🚦';
+    if (t.includes('push')) return '⬆';
+    if (t.includes('graph')) return '🔗';
+    return '•';
+  }
+
+  const ACTIVITY_LABELS = {
+    'MrCreated': 'MR created',
+    'MrMerged': 'MR merged',
+    'MrClosed': 'MR closed',
+    'TaskCreated': 'Task created',
+    'TaskCompleted': 'Task completed',
+    'GatePass': 'Gate passed',
+    'GateFail': 'Gate failed',
+    'SpecApproved': 'Spec approved',
+    'SpecRejected': 'Spec rejected',
+    'GraphDelta': 'Architecture updated',
+    'GitPush': 'Code pushed',
+    'agent_spawned': 'Agent spawned',
+    'agent_completed': 'Agent completed',
+    'agent_failed': 'Agent failed',
+    'spec_approved': 'Spec approved',
+    'spec_rejected': 'Spec rejected',
+    'spec_created': 'Spec created',
+    'spec_updated': 'Spec updated',
+    'task_created': 'Task created',
+    'task_completed': 'Task completed',
+    'task_assigned': 'Task assigned',
+  };
+
+  function activityLabel(event) {
+    const t = event.event_type ?? event.event ?? event.type ?? '';
+    return ACTIVITY_LABELS[t] ?? t.replace(/_/g, ' ').replace(/\./g, ' ');
+  }
+
+  function activityVariant(event) {
+    const t = event.event_type ?? event.event ?? event.type ?? '';
+    if (t.includes('fail') || t.includes('reject')) return 'danger';
+    if (t.includes('merg') || t.includes('approv') || t.includes('complet') || t.includes('pass')) return 'success';
+    if (t.includes('spawn') || t.includes('enqueue') || t.includes('running')) return 'warning';
+    return 'info';
+  }
+
+  function activityWorkspaceName(event) {
+    if (event.workspace_id && workspaceNameMap[event.workspace_id]) {
+      return workspaceNameMap[event.workspace_id];
+    }
+    return null;
+  }
+
   // ── Derived ──────────────────────────────────────────────────────────────
   let specsByKind = $derived.by(() => {
     const groups = {};
@@ -364,6 +481,26 @@
         </svg>
       </button>
     {/if}
+  </div>
+
+  <!-- ── Aggregate Stat Cards ───────────────────────────────────────────── -->
+  <div class="cwh-stat-cards" data-testid="stat-cards">
+    <div class="cwh-stat-card">
+      <span class="cwh-stat-value">{statsLoading ? '...' : totalRepos}</span>
+      <span class="cwh-stat-label">Total Repos</span>
+    </div>
+    <div class="cwh-stat-card">
+      <span class="cwh-stat-value">{statsLoading ? '...' : totalSpecs}</span>
+      <span class="cwh-stat-label">Total Specs</span>
+    </div>
+    <div class="cwh-stat-card">
+      <span class="cwh-stat-value">{statsLoading ? '...' : activeAgents}</span>
+      <span class="cwh-stat-label">Active Agents</span>
+    </div>
+    <div class="cwh-stat-card">
+      <span class="cwh-stat-value">{statsLoading ? '...' : openMrs}</span>
+      <span class="cwh-stat-label">Open MRs</span>
+    </div>
   </div>
 
   <!-- ── Decisions ─────────────────────────────────────────────────────── -->
@@ -453,6 +590,12 @@
           {@const wsNotifs = notifications.filter(n => n.workspace_id === ws.id)}
           {@const wsPendingSpecs = wsSpecs.filter(s => (s.approval_status ?? s.status) === 'pending').length}
           {@const wsApprovedSpecs = wsSpecs.filter(s => (s.approval_status ?? s.status) === 'approved').length}
+          {@const wsRepos = allRepos.filter(r => r.workspace_id === ws.id)}
+          {@const wsActiveAgents = allAgents.filter(a => a.workspace_id === ws.id)}
+          {@const wsOpenMrs = allMrs.filter(m => m.workspace_id === ws.id)}
+          {@const wsGateFailures = wsNotifs.filter(n => n.notification_type === 'gate_failure')}
+          {@const wsPendingDecisions = wsNotifs.filter(n => n.notification_type === 'spec_approval' || n.notification_type === 'agent_clarification')}
+          {@const wsRecentEvents = activityEvents.filter(e => e.workspace_id === ws.id).slice(0, 3)}
           <li class="workspace-row">
             <button
               class="workspace-btn"
@@ -461,16 +604,27 @@
             >
               <div class="workspace-btn-top">
                 <span class="workspace-name">{ws.name}</span>
-                {#if ws.health}
-                  <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
-                    {ws.health === 'healthy' ? '●' : '⚠'} {ws.health}
-                  </span>
-                {/if}
+                <div class="workspace-indicators">
+                  {#if wsGateFailures.length > 0}
+                    <span class="ws-indicator ws-indicator-danger" title="{wsGateFailures.length} failing gates">⚠ {wsGateFailures.length} gate failures</span>
+                  {/if}
+                  {#if wsPendingDecisions.length > 0}
+                    <span class="ws-indicator ws-indicator-warning" title="{wsPendingDecisions.length} pending decisions">⏳ {wsPendingDecisions.length} pending</span>
+                  {/if}
+                  {#if ws.health}
+                    <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
+                      {ws.health === 'healthy' ? '●' : '⚠'} {ws.health}
+                    </span>
+                  {/if}
+                </div>
               </div>
               {#if ws.description}
                 <span class="workspace-description">{ws.description}</span>
               {/if}
               <div class="workspace-stats-row">
+                <span class="ws-stat-chip" title="{wsRepos.length} repos">
+                  📦 {wsRepos.length} {wsRepos.length === 1 ? 'repo' : 'repos'}
+                </span>
                 {#if wsSpecs.length > 0}
                   <span class="ws-stat-chip" title="{wsSpecs.length} specs">
                     📋 {wsSpecs.length} specs
@@ -478,25 +632,106 @@
                     {#if wsApprovedSpecs > 0}<span class="ws-stat-active">{wsApprovedSpecs} approved</span>{/if}
                   </span>
                 {/if}
+                {#if wsActiveAgents.length > 0}
+                  <span class="ws-stat-chip ws-stat-agents" title="{wsActiveAgents.length} active agents">
+                    ▶ {wsActiveAgents.length} active {wsActiveAgents.length === 1 ? 'agent' : 'agents'}
+                  </span>
+                {:else if ws.agent_count != null && ws.agent_count > 0}
+                  <span class="ws-stat-chip">▶ {ws.agent_count} agents</span>
+                {/if}
+                {#if wsOpenMrs.length > 0}
+                  <span class="ws-stat-chip" title="{wsOpenMrs.length} open MRs">
+                    🔀 {wsOpenMrs.length} open MRs
+                  </span>
+                {/if}
                 {#if wsNotifs.length > 0}
                   <span class="ws-stat-chip ws-stat-decisions" title="{wsNotifs.length} decisions pending">
                     ⚡ {wsNotifs.length} decisions
                   </span>
                 {/if}
-                {#if ws.agent_count != null && ws.agent_count > 0}
-                  <span class="ws-stat-chip">▶ {ws.agent_count} agents</span>
-                {/if}
                 {#if ws.budget_pct != null}
                   <span class="ws-stat-chip">💰 {ws.budget_pct}% budget</span>
                 {/if}
-                {#if wsSpecs.length === 0 && wsNotifs.length === 0 && !ws.agent_count}
+                {#if wsRepos.length === 0 && wsSpecs.length === 0 && wsNotifs.length === 0 && wsActiveAgents.length === 0 && !ws.agent_count}
                   <span class="ws-stat-chip ws-stat-empty">No activity</span>
                 {/if}
               </div>
+              {#if wsRecentEvents.length > 0}
+                <div class="ws-recent-activity">
+                  {#each wsRecentEvents as evt}
+                    <span class="ws-recent-event">
+                      <span class="ws-recent-icon">{activityIcon(evt)}</span>
+                      <span class="ws-recent-label">{activityLabel(evt)}</span>
+                      <span class="ws-recent-time">{relTime(evt.timestamp ?? evt.created_at)}</span>
+                    </span>
+                  {/each}
+                </div>
+              {/if}
             </button>
           </li>
         {/each}
       </ul>
+    {/if}
+  </section>
+
+  <!-- ── Recent Activity ───────────────────────────────────────────────── -->
+  <section class="cwh-section" data-testid="section-activity" aria-labelledby="activity-heading">
+    <div class="section-header">
+      <h2 class="section-title" id="activity-heading">Recent Activity
+        {#if !activityLoading && activityEvents.length > 0}
+          <span class="section-badge">{activityEvents.length}</span>
+        {/if}
+      </h2>
+    </div>
+
+    {#if activityLoading}
+      <div class="section-loading" aria-live="polite">Loading activity...</div>
+    {:else if activityEvents.length === 0}
+      <p class="section-empty">No recent activity across workspaces.</p>
+    {:else}
+      <div class="cwh-activity-timeline">
+        {#each (showAllActivity ? activityEvents : activityEvents.slice(0, 10)) as event, i}
+          {@const variant = activityVariant(event)}
+          {@const wsName = activityWorkspaceName(event)}
+          <div class="cwh-activity-item">
+            <div class="cwh-activity-dot cwh-activity-dot-{variant}"></div>
+            {#if i < Math.min(showAllActivity ? activityEvents.length : 10, activityEvents.length) - 1}<div class="cwh-activity-line"></div>{/if}
+            <div class="cwh-activity-content">
+              <span class="cwh-activity-icon">{activityIcon(event)}</span>
+              <span class="cwh-activity-label">{activityLabel(event)}</span>
+              {#if event.entity_name ?? event.title ?? event.description}
+                <span class="cwh-activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
+              {/if}
+              {#if event.entity_id && event.entity_type}
+                <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: event.entity_type, id: event.entity_id, data: event })} title="View {event.entity_type}">{event.entity_id.length > 12 ? event.entity_id.slice(0, 8) + '...' : event.entity_id}</button>
+              {:else}
+                {#if event.agent_id}
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'agent', id: event.agent_id, data: {} })} title="View agent">{event.agent_id.length > 12 ? event.agent_id.slice(0, 8) + '...' : event.agent_id}</button>
+                {/if}
+                {#if event.mr_id}
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'mr', id: event.mr_id, data: {} })} title="View MR">{event.mr_id.length > 12 ? event.mr_id.slice(0, 8) + '...' : event.mr_id}</button>
+                {/if}
+                {#if event.spec_path && !event.agent_id && !event.mr_id}
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => openDetailPanel?.({ type: 'spec', id: event.spec_path, data: { path: event.spec_path, repo_id: event.repo_id } })} title="View spec">{event.spec_path.split('/').pop()}</button>
+                {/if}
+              {/if}
+              {#if wsName}
+                <span class="cwh-activity-ws-badge">{wsName}</span>
+              {/if}
+              {#if event.timestamp ?? event.created_at}
+                <span class="cwh-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+      {#if activityEvents.length > 10}
+        <div class="section-footer">
+          <button class="view-all-btn" onclick={() => { showAllActivity = !showAllActivity; }}>
+            {showAllActivity ? $t('cross_workspace.show_fewer') : `View all ${activityEvents.length} events`}
+          </button>
+        </div>
+      {/if}
     {/if}
   </section>
 
@@ -1553,5 +1788,210 @@
     padding: var(--space-2);
     color: var(--color-text-muted);
     font-size: var(--text-sm);
+  }
+
+  /* ── Aggregate Stat Cards ──────────────────────────────────────────── */
+  .cwh-stat-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+  }
+
+  .cwh-stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: var(--space-4) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+  }
+
+  .cwh-stat-value {
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    line-height: 1;
+  }
+
+  .cwh-stat-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-top: var(--space-1);
+  }
+
+  @media (max-width: 768px) {
+    .cwh-stat-cards {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  /* ── Workspace card enhancements ───────────────────────────────────── */
+  .workspace-indicators {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .ws-indicator {
+    font-size: var(--text-xs);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  .ws-indicator-danger {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .ws-indicator-warning {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  }
+
+  .ws-stat-agents {
+    color: var(--color-success);
+    border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+  }
+
+  .ws-recent-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: var(--space-1);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .ws-recent-event {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .ws-recent-icon {
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+  }
+
+  .ws-recent-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ws-recent-time {
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+  }
+
+  /* ── Activity Timeline ─────────────────────────────────────────────── */
+  .cwh-activity-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: var(--space-2) 0;
+  }
+
+  .cwh-activity-item {
+    display: flex;
+    position: relative;
+    padding-left: 24px;
+    min-height: 32px;
+  }
+
+  .cwh-activity-dot {
+    position: absolute;
+    left: 8px;
+    top: 6px;
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-full);
+    background: var(--color-border-strong);
+    z-index: 1;
+  }
+
+  .cwh-activity-dot-success { background: var(--color-success); }
+  .cwh-activity-dot-danger { background: var(--color-danger); }
+  .cwh-activity-dot-warning { background: var(--color-warning); }
+  .cwh-activity-dot-info { background: var(--color-info); }
+
+  .cwh-activity-line {
+    position: absolute;
+    left: 11px;
+    top: 16px;
+    bottom: -2px;
+    width: 2px;
+    background: var(--color-border);
+  }
+
+  .cwh-activity-content {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    padding: var(--space-1) var(--space-4) var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+    min-height: 28px;
+  }
+
+  .cwh-activity-icon {
+    flex-shrink: 0;
+    font-size: var(--text-sm);
+  }
+
+  .cwh-activity-label {
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+  }
+
+  .cwh-activity-detail {
+    color: var(--color-text);
+    font-weight: 500;
+    font-size: var(--text-sm);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cwh-activity-entity-link {
+    font-size: var(--text-xs);
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    padding: 0;
+    font-family: var(--font-mono);
+  }
+
+  .cwh-activity-entity-link:hover { text-decoration: underline; }
+
+  .cwh-activity-ws-badge {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+    white-space: nowrap;
+  }
+
+  .cwh-activity-time {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    margin-left: auto;
   }
 </style>
