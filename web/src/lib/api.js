@@ -600,6 +600,33 @@ export const api = {
     const qs = capability ? `?capability=${encodeURIComponent(capability)}` : '';
     return request(`/agents/discover${qs}`);
   },
+  // ── LLM Configuration (per-workspace overrides) ────────────────────
+  llmConfigList: (workspaceId) =>
+    request(`/workspaces/${workspaceId}/llm/config`),
+  llmConfigGet: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`),
+  llmConfigSet: (workspaceId, feature, data) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  llmConfigDelete: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`, { method: 'DELETE' }),
+  llmPromptGet: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`),
+  llmPromptSet: (workspaceId, feature, data) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  llmPromptDelete: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`, { method: 'DELETE' }),
+  // Admin LLM defaults
+  adminLlmConfigGet: (feature) =>
+    request(`/admin/llm/config/${encodeURIComponent(feature)}`),
+  adminLlmConfigSet: (feature, data) =>
+    request(`/admin/llm/config/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  adminLlmPromptGet: (feature) =>
+    request(`/admin/llm/prompts/${encodeURIComponent(feature)}`),
+  adminLlmPromptSet: (feature, data) =>
+    request(`/admin/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Activity feed
+  activityFeed: (limit = 20) =>
+    request(`/activity?limit=${limit}`),
   // Graph predict — LLM-powered structural predictions (TASK-358)
   graphPredict: async (repoId, body) => {
     try {
