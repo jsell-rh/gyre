@@ -228,6 +228,9 @@ impl GoExtractionContext {
         // --- Pass 2: walk for call expressions and emit Calls edges ---
         self.extract_calls(root, source, &pkg_qname);
 
+        // --- Pass 3: extract Implements edges from struct embeddings ---
+        self.extract_struct_implements(root, source, &pkg_qname);
+
         Ok(())
     }
 
@@ -330,6 +333,107 @@ impl GoExtractionContext {
             }
         }
         None
+    }
+
+    // -----------------------------------------------------------------------
+    // Implements edge extraction (struct embedding)
+    // -----------------------------------------------------------------------
+
+    fn extract_struct_implements(
+        &mut self,
+        root: tree_sitter::Node,
+        source: &[u8],
+        pkg_qname: &str,
+    ) {
+        let mut implements: Vec<(Id, Id)> = Vec::new();
+        self.collect_struct_implements(root, source, pkg_qname, &mut implements);
+
+        let mut seen = HashSet::new();
+        for (from_id, to_id) in implements {
+            if from_id != to_id {
+                let key = (from_id.to_string(), to_id.to_string());
+                if seen.insert(key) {
+                    let edge = self.make_edge(EdgeType::Implements, from_id, to_id);
+                    self.edges.push(edge);
+                }
+            }
+        }
+    }
+
+    fn collect_struct_implements(
+        &self,
+        node: tree_sitter::Node,
+        source: &[u8],
+        pkg_qname: &str,
+        results: &mut Vec<(Id, Id)>,
+    ) {
+        if node.kind() == "type_declaration" {
+            for i in 0..node.child_count() {
+                let child = node.child(i).unwrap();
+                if child.kind() != "type_spec" {
+                    continue;
+                }
+                let type_name = find_child_text(&child, "type_identifier", source);
+                if type_name.is_empty() {
+                    continue;
+                }
+                let type_qname = format!("{pkg_qname}.{type_name}");
+                let type_id = match self.name_to_id.get(&type_qname) {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
+                for j in 0..child.child_count() {
+                    let struct_node = child.child(j).unwrap();
+                    if struct_node.kind() != "struct_type" {
+                        continue;
+                    }
+                    for k in 0..struct_node.child_count() {
+                        let fdl = struct_node.child(k).unwrap();
+                        if fdl.kind() != "field_declaration_list" {
+                            continue;
+                        }
+                        for f in 0..fdl.child_count() {
+                            let field = fdl.child(f).unwrap();
+                            if field.kind() != "field_declaration" {
+                                continue;
+                            }
+                            let has_name = (0..field.child_count())
+                                .any(|fi| field.child(fi).unwrap().kind() == "field_identifier");
+                            if has_name {
+                                continue;
+                            }
+                            let mut embedded = String::new();
+                            for ei in 0..field.child_count() {
+                                let ec = field.child(ei).unwrap();
+                                match ec.kind() {
+                                    "type_identifier" => {
+                                        embedded = ec.utf8_text(source).unwrap_or("").to_string();
+                                        break;
+                                    }
+                                    "pointer_type" => {
+                                        embedded = find_child_text(&ec, "type_identifier", source);
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if embedded.is_empty() {
+                                continue;
+                            }
+                            let embedded_qname = format!("{pkg_qname}.{embedded}");
+                            if let Some(target_id) = self.name_to_id.get(&embedded_qname) {
+                                results.push((type_id.clone(), target_id.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.collect_struct_implements(child, source, pkg_qname, results);
+            }
+        }
     }
 
     /// Get existing package node or create a new one.
@@ -864,7 +968,28 @@ func NewHandler() *Handler { return nil }
             .count();
         assert!(
             contains_count >= 2,
-            "should have Contains edges: package→Handler, package→NewHandler"
+            "should have Contains edges: package->Handler, package->NewHandler"
+        );
+    }
+
+    #[test]
+    fn extract_implements_from_struct_embedding() {
+        let src = "package storage\n\ntype Repository interface {\n\tFind(id string) error\n}\n\ntype SQLRepo struct {\n\tRepository\n}\n";
+        let dir = make_repo(GO_MOD, &[("storage/repo.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let impl_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .collect();
+        assert!(
+            !impl_edges.is_empty(),
+            "should have Implements edge from SQLRepo embedding Repository"
         );
     }
 }

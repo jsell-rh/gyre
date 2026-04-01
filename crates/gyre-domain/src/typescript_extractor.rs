@@ -411,9 +411,82 @@ impl ExtractionContext {
         );
         let node_id = graph_node.id.clone();
         self.name_to_id.insert(qname, node_id.clone());
-        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
+        let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
         self.nodes.push(graph_node);
         self.edges.push(edge);
+
+        // Implements edges from implements/extends clauses.
+        for i in 0..node.child_count() {
+            let Some(child) = node.child(i) else {
+                continue;
+            };
+            let is_heritage = child.kind() == "class_heritage"
+                || child.kind() == "implements_clause"
+                || child.kind() == "extends_clause";
+            if !is_heritage {
+                continue;
+            }
+            self.extract_heritage_types(content, child, module_qname, &node_id);
+        }
+    }
+
+    fn extract_heritage_types(
+        &mut self,
+        content: &str,
+        node: tree_sitter::Node,
+        module_qname: &str,
+        class_id: &Id,
+    ) {
+        for i in 0..node.child_count() {
+            let Some(child) = node.child(i) else {
+                continue;
+            };
+            match child.kind() {
+                "implements_clause" | "extends_clause" => {
+                    self.extract_heritage_types(content, child, module_qname, class_id);
+                }
+                "type_identifier" | "identifier" => {
+                    let type_name = content[child.byte_range()].to_string();
+                    self.try_emit_implements(module_qname, class_id, &type_name);
+                }
+                "generic_type" => {
+                    if let Some(first) = child.child(0) {
+                        if first.kind() == "type_identifier" || first.kind() == "identifier" {
+                            let type_name = content[first.byte_range()].to_string();
+                            self.try_emit_implements(module_qname, class_id, &type_name);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn try_emit_implements(&mut self, module_qname: &str, class_id: &Id, type_name: &str) {
+        if type_name.is_empty() {
+            return;
+        }
+        let target_id =
+            if let Some(id) = self.name_to_id.get(&format!("{module_qname}.{type_name}")) {
+                id.clone()
+            } else if let Some(id) = self.name_to_id.get(type_name) {
+                id.clone()
+            } else {
+                let suffix = format!(".{type_name}");
+                match self
+                    .name_to_id
+                    .iter()
+                    .find(|(qn, _)| qn.ends_with(&suffix))
+                    .map(|(_, id)| id.clone())
+                {
+                    Some(id) => id,
+                    None => return,
+                }
+            };
+        if *class_id != target_id {
+            let edge = self.make_edge(EdgeType::Implements, class_id.clone(), target_id);
+            self.edges.push(edge);
+        }
     }
 
     fn emit_interface(
@@ -836,6 +909,48 @@ mod tests {
         assert!(
             func.is_some(),
             "should extract exported arrow function getUser"
+        );
+    }
+
+    #[test]
+    fn extract_implements_clause() {
+        let dir = make_tempdir();
+        let code = "interface Repository {\n  find(id: string): void;\n}\n\nclass SqlRepository implements Repository {\n  find(id: string) {}\n}\n";
+        let result = extract_ts(&dir, "repo.ts", code);
+        assert!(
+            result.errors.is_empty(),
+            "errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let impl_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .collect();
+        assert!(
+            !impl_edges.is_empty(),
+            "should have Implements edge from SqlRepository to Repository"
+        );
+    }
+
+    #[test]
+    fn extract_extends_clause() {
+        let dir = make_tempdir();
+        let code = "class Base {\n  greet() {}\n}\n\nclass Child extends Base {\n  greet() {}\n}\n";
+        let result = extract_ts(&dir, "inherit.ts", code);
+        assert!(
+            result.errors.is_empty(),
+            "errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let impl_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .collect();
+        assert!(
+            !impl_edges.is_empty(),
+            "should have Implements edge from Child to Base via extends"
         );
     }
 }

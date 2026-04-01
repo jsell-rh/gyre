@@ -26,6 +26,28 @@ const ROUTE_METHODS: &[&str] = &[
     "route", "get", "post", "put", "delete", "patch", "options", "head",
 ];
 
+/// Common Python base classes that are not domain interfaces — skip for Implements edges.
+const PYTHON_SKIP_BASES: &[&str] = &[
+    "object",
+    "ABC",
+    "ABCMeta",
+    "BaseModel",
+    "Enum",
+    "IntEnum",
+    "StrEnum",
+    "Exception",
+    "ValueError",
+    "TypeError",
+    "RuntimeError",
+    "dict",
+    "list",
+    "tuple",
+    "set",
+    "str",
+    "int",
+    "float",
+];
+
 /// Python language extractor.
 ///
 /// Detects repositories with `pyproject.toml`, `setup.py`, or `requirements.txt`
@@ -112,7 +134,7 @@ struct ExtractionContext {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
     errors: Vec<ExtractionError>,
-    /// Map qualified name → node Id for edge resolution.
+    /// Map qualified name -> node Id for edge resolution.
     name_to_id: HashMap<String, Id>,
 }
 
@@ -434,9 +456,50 @@ impl ExtractionContext {
             .insert(class_qname.clone(), class_id.clone());
         self.nodes.push(class_node_graph);
 
-        // Contains edge: module → class.
+        // Contains edge: module -> class.
         let edge = self.make_edge(EdgeType::Contains, module_id.clone(), class_id.clone());
         self.edges.push(edge);
+
+        // Implements edges from superclass declarations.
+        if let Some(superclasses) = class_node.child_by_field_name("superclasses") {
+            let mut sc_cursor = superclasses.walk();
+            for sc_child in superclasses.named_children(&mut sc_cursor) {
+                let base_name = match sc_child.kind() {
+                    "identifier" => sc_child.utf8_text(source).unwrap_or("").to_string(),
+                    "attribute" => sc_child
+                        .child_by_field_name("attribute")
+                        .and_then(|a| a.utf8_text(source).ok())
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => continue,
+                };
+                if base_name.is_empty() || PYTHON_SKIP_BASES.contains(&base_name.as_str()) {
+                    continue;
+                }
+                let target_id =
+                    if let Some(id) = self.name_to_id.get(&format!("{module_qname}.{base_name}")) {
+                        id.clone()
+                    } else if let Some(id) = self.name_to_id.get(&base_name) {
+                        id.clone()
+                    } else {
+                        let suffix = format!(".{base_name}");
+                        match self
+                            .name_to_id
+                            .iter()
+                            .find(|(qn, _)| qn.ends_with(&suffix))
+                            .map(|(_, id)| id.clone())
+                        {
+                            Some(id) => id,
+                            None => continue,
+                        }
+                    };
+                if class_id != target_id {
+                    let impl_edge =
+                        self.make_edge(EdgeType::Implements, class_id.clone(), target_id);
+                    self.edges.push(impl_edge);
+                }
+            }
+        }
 
         // Walk class body for methods.
         if let Some(body) = class_node.child_by_field_name("body") {
@@ -511,7 +574,7 @@ impl ExtractionContext {
                         return;
                     }
 
-                    // Check if any decorator is a route decorator → Endpoint.
+                    // Check if any decorator is a route decorator -> Endpoint.
                     let route_info = decorators
                         .iter()
                         .find_map(|d| parse_route_decorator(*d, source));
@@ -644,36 +707,24 @@ impl ExtractionContext {
 // ---------------------------------------------------------------------------
 
 /// Derive Python dotted module name from a relative file path.
-/// e.g. `src/api/handlers.py` → `src.api.handlers`
+/// e.g. `src/api/handlers.py` -> `src.api.handlers`
 fn path_to_module_qname(rel_path: &str) -> String {
     rel_path.trim_end_matches(".py").replace(['/', '\\'], ".")
 }
 
 /// Get the `name` field identifier text from a `class_definition` or `function_definition`.
-fn get_identifier_name<'a>(node: tree_sitter::Node<'a>, source: &[u8]) -> Option<String> {
+fn get_identifier_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
     node.child_by_field_name("name")
         .and_then(|n| n.utf8_text(source).ok())
         .map(|s| s.to_string())
 }
 
 /// Parse a `decorator` node to determine if it is a route decorator.
-///
-/// Returns `Some((path, method))` for:
-/// - `@app.route("/path")` or `@blueprint.route("/path")`
-/// - `@app.get("/path")`, `@router.post("/path")`, etc.
-///
-/// Returns `None` for any other decorator.
 fn parse_route_decorator(decorator: tree_sitter::Node, source: &[u8]) -> Option<(String, String)> {
-    // A decorator node's named children (after `@`) can be:
-    // - `call` → `@app.route(...)` or `@app.get(...)`
-    // - `attribute` → `@app.route` (no parens)
-    // - `identifier` → `@route`
-
     let mut cursor = decorator.walk();
     for child in decorator.named_children(&mut cursor) {
         match child.kind() {
             "call" => {
-                // call → function: attribute, arguments
                 if let Some(func) = child.child_by_field_name("function") {
                     if let Some((method, path)) = extract_attribute_route(func, child, source) {
                         return Some((path, method));
@@ -681,7 +732,6 @@ fn parse_route_decorator(decorator: tree_sitter::Node, source: &[u8]) -> Option<
                 }
             }
             "attribute" => {
-                // No-parens form: just check if attribute name is a route method.
                 if let Some(attr) = child.child_by_field_name("attribute") {
                     if let Ok(attr_name) = attr.utf8_text(source) {
                         if ROUTE_METHODS.contains(&attr_name) {
@@ -696,8 +746,6 @@ fn parse_route_decorator(decorator: tree_sitter::Node, source: &[u8]) -> Option<
     None
 }
 
-/// Given an `attribute` node (`app.route` / `router.get`) and the surrounding
-/// `call` node, return `Some((method, path))` if the attribute is a route method.
 fn extract_attribute_route(
     func_node: tree_sitter::Node,
     call_node: tree_sitter::Node,
@@ -714,24 +762,20 @@ fn extract_attribute_route(
         return None;
     }
 
-    // Try to extract the path string from the first positional argument.
     let path = extract_first_string_arg(call_node, source).unwrap_or_default();
     Some((method.to_string(), path))
 }
 
-/// Extract the first string literal argument from a `call` node's `argument_list`.
 fn extract_first_string_arg(call_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     let args = call_node.child_by_field_name("arguments")?;
     let mut cursor = args.walk();
     for child in args.named_children(&mut cursor) {
         match child.kind() {
             "string" => {
-                // Strip quotes from the string node text.
                 let raw = child.utf8_text(source).ok()?;
                 return Some(strip_string_quotes(raw));
             }
             "keyword_argument" => {
-                // `path="/foo"` — check if keyword is empty / skip named args before positionals.
                 continue;
             }
             _ => {}
@@ -740,10 +784,8 @@ fn extract_first_string_arg(call_node: tree_sitter::Node, source: &[u8]) -> Opti
     None
 }
 
-/// Strip surrounding quotes from a Python string literal.
 fn strip_string_quotes(s: &str) -> String {
     let s = s.trim();
-    // Handle triple-quoted strings first.
     for q in &[r#"""""#, "'''", r#"""#, r#"'"#] {
         if s.starts_with(q) && s.ends_with(q) && s.len() >= 2 * q.len() {
             return s[q.len()..s.len() - q.len()].to_string();
@@ -882,13 +924,7 @@ mod tests {
     fn extract_flask_route_as_endpoint() {
         let dir = make_tempdir();
         write_requirements(&dir);
-        let code = r#"from flask import Flask
-app = Flask(__name__)
-
-@app.route("/api/users")
-def get_users():
-    return []
-"#;
+        let code = "from flask import Flask\napp = Flask(__name__)\n\n@app.route(\"/api/users\")\ndef get_users():\n    return []\n";
         fs::write(dir.path().join("app.py"), code).unwrap();
 
         let result = PythonExtractor.extract(dir.path(), "abc123");
@@ -905,13 +941,7 @@ def get_users():
     fn extract_fastapi_route_as_endpoint() {
         let dir = make_tempdir();
         write_requirements(&dir);
-        let code = r#"from fastapi import APIRouter
-router = APIRouter()
-
-@router.get("/users")
-def list_users():
-    return []
-"#;
+        let code = "from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get(\"/users\")\ndef list_users():\n    return []\n";
         fs::write(dir.path().join("routes.py"), code).unwrap();
 
         let result = PythonExtractor.extract(dir.path(), "abc123");
@@ -954,7 +984,7 @@ def list_users():
         let result = PythonExtractor.extract(dir.path(), "abc123");
         assert!(
             result.errors.is_empty(),
-            "unexpected errors: {:?}",
+            "errors: {:?}",
             result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
         let calls_edges: Vec<_> = result
@@ -963,6 +993,61 @@ def list_users():
             .filter(|e| e.edge_type == EdgeType::Calls)
             .collect();
         assert!(!calls_edges.is_empty(), "should have Calls edges");
+    }
+
+    #[test]
+    fn extract_implements_from_superclass() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code =
+            "class Repository:\n    def find(self, id):\n        pass\n\nclass SQLRepository(Repository):\n    def find(self, id):\n        return None\n";
+        fs::write(dir.path().join("domain.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let impl_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .collect();
+        assert!(
+            !impl_edges.is_empty(),
+            "should have Implements edge from SQLRepository to Repository"
+        );
+        let sql_id = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "SQLRepository")
+            .map(|n| &n.id);
+        let repo_id = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "Repository")
+            .map(|n| &n.id);
+        assert!(sql_id.is_some() && repo_id.is_some());
+        assert!(impl_edges
+            .iter()
+            .any(|e| &e.source_id == sql_id.unwrap() && &e.target_id == repo_id.unwrap()));
+    }
+
+    #[test]
+    fn skip_common_base_classes() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = "from enum import Enum\n\nclass Status(Enum):\n    ACTIVE = 1\n";
+        fs::write(dir.path().join("enums.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        let impl_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .collect();
+        assert!(impl_edges.is_empty(), "should NOT emit Implements for Enum");
     }
 
     #[test]
