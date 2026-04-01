@@ -368,6 +368,16 @@
                 </div>
               </div>
               <div class="card-header-right">
+                <!-- Quick entity jump buttons (visible without expanding) -->
+                {#if body.spec_path}
+                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋</button>
+                {/if}
+                {#if body.mr_id}
+                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'mr', id: body.mr_id, data: {} }); }} title="View merge request">🔀</button>
+                {/if}
+                {#if body.agent_id}
+                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'agent', id: body.agent_id, data: {} }); }} title="View agent">▶</button>
+                {/if}
                 {#if isResolved}
                   <Badge value={$t('decisions.status_resolved')} variant="success" />
                 {/if}
@@ -835,6 +845,27 @@
     align-items: center;
     gap: var(--space-3);
     flex-shrink: 0;
+  }
+
+  .card-quick-link {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .card-quick-link:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+  }
+
+  .card-quick-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
   }
 
   .card-age {
