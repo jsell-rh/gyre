@@ -66,15 +66,14 @@
   let fileLang = $derived(selectedFile ? detectLang(selectedFile) : 'text');
 
   // Agent color assignment for attribution markers
+  // Uses a plain Map (not $state) to avoid state_unsafe_mutation when called from templates.
   const AGENT_COLORS = ['#c678dd','#61afef','#e5c07b','#56b6c2','#e06c75','#98c379','#d19a66','#be5046'];
-  let agentColorMap = $state({});
-  let agentColorIdx = 0;
+  const agentColorMap = new Map();
   function agentColor(agentId) {
     if (!agentId) return 'transparent';
-    if (agentColorMap[agentId]) return agentColorMap[agentId];
-    const color = AGENT_COLORS[agentColorIdx % AGENT_COLORS.length];
-    agentColorIdx++;
-    agentColorMap = { ...agentColorMap, [agentId]: color };
+    if (agentColorMap.has(agentId)) return agentColorMap.get(agentId);
+    const color = AGENT_COLORS[agentColorMap.size % AGENT_COLORS.length];
+    agentColorMap.set(agentId, color);
     return color;
   }
 
@@ -425,8 +424,7 @@
     blameData = null;
     blameLoading = true;
     reviewRouting = [];
-    agentColorMap = {};
-    agentColorIdx = 0;
+    agentColorMap.clear();
     try {
       const [blame, routing] = await Promise.all([
         api.repoBlame(repoId, path).catch(() => null),
