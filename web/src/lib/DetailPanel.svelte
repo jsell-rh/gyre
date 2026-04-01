@@ -466,8 +466,16 @@
         if (d?.status === 'merged') {
           api.mrAttestation(id).then(att => {
             if (att) {
+              // Enrich attestation gate results with names from repo gate definitions
+              const attData = att.attestation ?? att;
+              if (attData.gate_results?.length > 0 && gateDefMap) {
+                attData.gate_results = attData.gate_results.map(g => {
+                  const def = gateDefMap[g.gate_id] ?? {};
+                  return { ...g, gate_name: g.gate_name ?? def.name, gate_type: g.gate_type ?? def.gate_type, required: g.required ?? def.required };
+                });
+              }
               mrAttestation = att;
-              const convSha = att.attestation?.conversation_sha ?? att.conversation_sha;
+              const convSha = attData.conversation_sha ?? att.conversation_sha;
               if (convSha) mrDetail = { ...mrDetail, conversation_sha: convSha };
             }
           }).catch(() => {});
@@ -527,8 +535,31 @@
     }
     if (activeTab === 'attestation' && !mrAttestation && !mrAttestationLoading) {
       mrAttestationLoading = true;
-      api.mrAttestation(id)
-        .then((d) => { mrAttestation = d; })
+      const mr = mrDetail ?? entity.data ?? {};
+      const repoId = mr.repository_id ?? mr.repo_id ?? entity.data?.repository_id ?? entity.data?.repo_id;
+      Promise.all([
+        api.mrAttestation(id),
+        repoId ? api.repoGates(repoId).catch(() => []) : Promise.resolve([]),
+      ]).then(([d, defs]) => {
+        if (d) {
+          // Enrich attestation gate results with names from repo gate definitions
+          const defMap = Object.fromEntries((Array.isArray(defs) ? defs : []).map(g => [g.id, g]));
+          const att = d.attestation ?? d;
+          if (att.gate_results?.length > 0) {
+            att.gate_results = att.gate_results.map(g => {
+              const def = defMap[g.gate_id] ?? {};
+              return {
+                ...g,
+                gate_name: g.gate_name ?? def.name,
+                gate_type: g.gate_type ?? def.gate_type,
+                required: g.required ?? def.required,
+                command: g.command ?? def.command,
+              };
+            });
+          }
+        }
+        mrAttestation = d;
+      })
         .catch(() => { mrAttestation = null; })
         .finally(() => { mrAttestationLoading = false; });
     }
