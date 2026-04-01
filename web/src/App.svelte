@@ -156,6 +156,26 @@
   // { type: 'mr'|'task'|'agent'|'spec', id: string }
   let entityDetail = $state(null);
 
+  // ── Entity name cache for breadcrumbs ─────────────────────────────
+  let breadcrumbNameCache = $state({});
+
+  function resolveEntityName(type, id) {
+    if (!id) return '';
+    if (type === 'spec') return id.split('/').pop();
+    const key = `${type}:${id}`;
+    if (breadcrumbNameCache[key]) return breadcrumbNameCache[key];
+    // Start async resolution
+    const fetcher = type === 'mr' ? api.mergeRequest(id).then(m => m?.title)
+      : type === 'task' ? api.task(id).then(t => t?.title)
+      : type === 'agent' ? api.agent(id).then(a => a?.name)
+      : Promise.resolve(null);
+    fetcher.then(name => {
+      if (name) breadcrumbNameCache = { ...breadcrumbNameCache, [key]: name };
+    }).catch(() => {});
+    // Return short ID while resolving
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
+
   export function parseUrl(pathname) {
     const raw = pathname.split('/').filter(Boolean).map(p => {
       try { return decodeURIComponent(p); } catch { return p; }
@@ -310,6 +330,11 @@
     const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
     repoTab = parentTab;
     entityDetail = { type: entityType, id: entityId, data: data ?? {} };
+    // Pre-cache entity name for breadcrumb from provided data
+    const name = data?.title ?? data?.name;
+    if (name && entityType !== 'spec') {
+      breadcrumbNameCache = { ...breadcrumbNameCache, [`${entityType}:${entityId}`]: name };
+    }
     fadeContent();
     const parsed = {
       mode: 'repo',
@@ -1039,8 +1064,8 @@
                 {repoTab === 'mrs' ? 'Merge Requests' : repoTab === 'tasks' ? 'Tasks' : repoTab === 'agents' ? 'Agents' : 'Specs'}
               </button>
               <span class="breadcrumb-sep" aria-hidden="true">/</span>
-              <span class="breadcrumb-repo" aria-current="page">
-                {entityDetail.type === 'spec' ? entityDetail.id.split('/').pop() : (entityDetail.id?.length > 12 ? entityDetail.id.slice(0, 8) + '...' : entityDetail.id)}
+              <span class="breadcrumb-repo" aria-current="page" title={entityDetail.id}>
+                {resolveEntityName(entityDetail.type, entityDetail.id)}
               </span>
             {:else}
               <span class="breadcrumb-repo" aria-current="page">{currentRepo?.name ?? ''}</span>
