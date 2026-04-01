@@ -520,10 +520,22 @@
   // ── Notification inline actions ────────────────────────────────────────
   async function handleApproveSpec(n) {
     const body = getBody(n);
-    if (!body.spec_path || !body.spec_sha) return;
+    // Extract spec path from body, or parse from title like "Spec pending approval: system/foo.md"
+    let specPath = body.spec_path ?? (n.title?.match(/:\s*(.+\.md)\s*$/)?.[1]);
+    if (!specPath) return;
+    specPath = normalizeSpecPath(specPath);
+    // Get SHA: from body, or fetch from spec ledger
+    let sha = body.spec_sha;
+    if (!sha) {
+      try {
+        const spec = await api.getSpec(specPath);
+        sha = spec?.current_sha ?? spec?.sha;
+      } catch { /* best effort */ }
+    }
+    if (!sha) return;
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
     try {
-      await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
+      await api.approveSpec(specPath, sha);
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
@@ -535,10 +547,12 @@
 
   async function handleRejectSpec(n) {
     const body = getBody(n);
-    if (!body.spec_path) return;
+    let specPath = body.spec_path ?? (n.title?.match(/:\s*(.+\.md)\s*$/)?.[1]);
+    if (!specPath) return;
+    specPath = normalizeSpecPath(specPath);
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
     try {
-      await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected');
+      await api.revokeSpec(specPath, 'Rejected');
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
@@ -1137,6 +1151,7 @@
               {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as n (n.id)}
                 {@const body = getBody(n)}
                 {@const state = actionStates[n.id] ?? {}}
+                {@const titleSpecPath = !body.spec_path && n.title ? n.title.match(/:\s*(.+\.md)\s*$/)?.[1] : null}
                 <li class="decision-item" data-testid="decision-item">
                   <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[n.notification_type] ?? '•'}</span>
                   <div class="decision-content">
@@ -1144,7 +1159,9 @@
                     <span class="decision-desc">{n.title ?? n.message ?? n.description ?? body.description ?? ''}</span>
                     <div class="decision-refs">
                       {#if body.spec_path}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', normalizeSpecPath(body.spec_path), { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()}</button>
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', normalizeSpecPath(body.spec_path), { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()?.replace(/\.md$/, '')}</button>
+                      {:else if titleSpecPath}
+                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', normalizeSpecPath(titleSpecPath), { path: normalizeSpecPath(titleSpecPath), repo_id: n.repo_id }); }} title="View spec: {titleSpecPath}">📋 {normalizeSpecPath(titleSpecPath).split('/').pop()?.replace(/\.md$/, '')}</button>
                       {/if}
                       {#if body.mr_id}
                         <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', body.mr_id, { repository_id: n.repo_id }); }} title="View merge request">🔀 {entityName('mr', body.mr_id)}</button>
@@ -1170,7 +1187,7 @@
                     {:else if state.loading}
                       <span class="action-feedback">…</span>
                     {:else}
-                      {#if n.notification_type === 'spec_approval' && body.spec_path && body.spec_sha}
+                      {#if n.notification_type === 'spec_approval' && (body.spec_path || n.title?.includes(':'))}
                         <button
                           class="inline-btn approve"
                           onclick={() => handleApproveSpec(n)}
