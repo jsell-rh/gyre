@@ -856,19 +856,24 @@ pub async fn get_workspace_briefing(
         let since_str = {
             let now = now_secs();
             let diff = now.saturating_sub(since);
-            if diff < 3600 {
-                format!("{} minute(s) ago", diff / 60)
+            if diff < 60 {
+                "just now".to_string()
+            } else if diff < 3600 {
+                let m = diff / 60;
+                format!("{m} minute{} ago", if m == 1 { "" } else { "s" })
             } else if diff < 86400 {
-                format!("{} hour(s) ago", diff / 3600)
+                let h = diff / 3600;
+                format!("{h} hour{} ago", if h == 1 { "" } else { "s" })
             } else {
-                format!("{} day(s) ago", diff / 86400)
+                let d = diff / 86400;
+                format!("{d} day{} ago", if d == 1 { "" } else { "s" })
             }
         };
+        let mr_word = if mrs_merged == 1 { "MR" } else { "MRs" };
+        let task_count = in_progress.len();
+        let task_word = if task_count == 1 { "task" } else { "tasks" };
         format!(
-            "{} MR(s) merged, {} task(s) in progress since {}",
-            mrs_merged,
-            in_progress.len(),
-            since_str,
+            "{mrs_merged} {mr_word} merged, {task_count} {task_word} in progress since {since_str}",
         )
     };
 
