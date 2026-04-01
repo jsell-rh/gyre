@@ -102,11 +102,10 @@
       if (data.status === 'merged') {
         result.push({ id: 'attestation', label: $t('detail_panel.tabs.attestation') });
       }
+      // Always show ask-why for MRs — conversation_sha is loaded async from attestation
       result.push({
         id: 'ask-why',
         label: $t('detail_panel.tabs.ask_why'),
-        disabled: !data.conversation_sha && !data.author_agent_id,
-        title: (data.conversation_sha || data.author_agent_id) ? undefined : $t('detail_panel.conversation_unavailable'),
       });
       return result;
     }
@@ -638,9 +637,12 @@
   });
 
   // Load conversation provenance for ask-why tab
+  // Use enriched mrDetail or agentDetail as source, since conversation_sha is loaded asynchronously
   $effect(() => {
     if (activeTab !== 'ask-why') return;
-    const convSha = entity?.data?.conversation_sha;
+    const convSha = entity?.data?.conversation_sha
+      ?? mrDetail?.conversation_sha
+      ?? agentDetail?.conversation_sha;
     if (!convSha || conversationData || conversationLoading) return;
     conversationLoading = true;
     api.conversationProvenance(convSha)
@@ -3364,7 +3366,8 @@
 
       {:else if activeTab === 'ask-why'}
         <div class="tab-pane ask-why">
-          {#if entity.data?.conversation_sha}
+          {@const convSha = entity.data?.conversation_sha ?? mrDetail?.conversation_sha ?? agentDetail?.conversation_sha}
+          {#if convSha}
             <!-- Conversation History -->
             {#if conversationLoading}
               <div class="spec-skeleton">
@@ -3419,6 +3422,29 @@
               {#if interrogationAgentId}
                 <button class="entity-link" onclick={() => navigateTo('agent', interrogationAgentId)}>{$t('detail_panel.ask_why_view_agent')}</button>
               {/if}
+            </div>
+          {:else if mrDetailLoading || agentDetailLoading}
+            <div class="spec-skeleton">
+              {#each Array(3) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+              <p class="no-data no-data-sm">Loading conversation provenance...</p>
+            </div>
+          {:else if entity.data?.author_agent_id || mrDetail?.author_agent_id}
+            {@const agId = entity.data?.author_agent_id ?? mrDetail?.author_agent_id}
+            <div class="ask-why-no-conv">
+              <p class="no-data">No recorded conversation for this agent session.</p>
+              <p class="ask-why-hint">The agent may not have stored conversation provenance. You can still spawn an investigation agent to explore the context.</p>
+              <div class="ask-why-actions">
+                <button
+                  class="start-interrogation"
+                  onclick={startInterrogation}
+                  disabled={interrogationLoading}
+                >
+                  {interrogationLoading ? $t('detail_panel.ask_why_starting') : $t('detail_panel.ask_why_spawn')}
+                </button>
+                {#if interrogationAgentId}
+                  <button class="entity-link" onclick={() => navigateTo('agent', interrogationAgentId)}>{$t('detail_panel.ask_why_view_agent')}</button>
+                {/if}
+              </div>
             </div>
           {:else}
             <p class="ask-why-unavailable">{$t('detail_panel.ask_why_unavailable')}</p>
