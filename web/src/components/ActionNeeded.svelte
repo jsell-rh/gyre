@@ -107,6 +107,8 @@
     <div class="action-items">
       {#each visible as item}
         {@const urgency = getUrgency(item)}
+        {@const body = parseBody(item)}
+        {@const nt = normType(item.notification_type)}
         <button
           class="action-item"
           style="border-left-color: {urgency.color}"
@@ -119,8 +121,6 @@
             <span class="action-title">{getTitle(item)}</span>
           </div>
           <div class="action-buttons">
-            {@const body = parseBody(item)}
-            {@const nt = normType(item.notification_type)}
             {#if nt === 'spec_approval' && onApproveSpec}
               <button class="action-btn action-btn-approve" onclick={(e) => { e.stopPropagation(); onApproveSpec(item); }} title="Approve this spec">Approve</button>
               {#if onRejectSpec}
