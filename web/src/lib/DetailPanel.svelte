@@ -2357,44 +2357,6 @@
                 </div>
               {/if}
 
-              <!-- Provenance chain for agent -->
-              {#if ag.spec_path || ag.task_id || ag.mr_id}
-                <div class="provenance-chain">
-                  <span class="provenance-label">Provenance</span>
-                  <div class="provenance-flow">
-                    {#if ag.spec_path}
-                      <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', ag.spec_path, { path: ag.spec_path, repo_id: ag.repo_id })} title={ag.spec_path}>
-                        <span class="provenance-icon prov-icon-spec"></span>
-                        <span class="provenance-type">Spec</span>
-                        <span class="provenance-name">{ag.spec_path.split('/').pop()}</span>
-                      </button>
-                      <span class="provenance-arrow">&#x2192;</span>
-                    {/if}
-                    {#if ag.task_id}
-                      <button class="provenance-node provenance-task" onclick={() => navigateTo('task', ag.task_id)} title={ag.task_id}>
-                        <span class="provenance-icon prov-icon-task"></span>
-                        <span class="provenance-type">Task</span>
-                        <span class="provenance-name">{ag._taskTitle ?? entityName('task', ag.task_id)}</span>
-                      </button>
-                      <span class="provenance-arrow">&#x2192;</span>
-                    {/if}
-                    <span class="provenance-node provenance-agent provenance-current">
-                      <span class="provenance-icon prov-icon-agent"></span>
-                      <span class="provenance-type">Agent</span>
-                      <span class="provenance-name">{ag.status ?? 'active'}</span>
-                    </span>
-                    {#if ag.mr_id}
-                      <span class="provenance-arrow">&#x2192;</span>
-                      <button class="provenance-node provenance-mr" onclick={() => navigateTo('mr', ag.mr_id)} title={ag.mr_id}>
-                        <span class="provenance-icon prov-icon-mr"></span>
-                        <span class="provenance-type">MR</span>
-                        <span class="provenance-name">{entityName('mr', ag.mr_id)}</span>
-                      </button>
-                    {/if}
-                  </div>
-                </div>
-              {/if}
-
               <!-- Agent Quick Actions -->
               <div class="mr-quick-links">
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'chat'; }} title="Send messages to this agent">Chat</button>
