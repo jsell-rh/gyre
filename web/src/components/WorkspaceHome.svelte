@@ -121,11 +121,11 @@
 
   function specStatusTooltip(status) {
     switch (status) {
-      case 'draft': return 'Spec has been synced from the repo but not yet submitted for approval';
-      case 'pending': return 'Spec is awaiting human approval before agents can implement it';
-      case 'approved': return 'Spec has been approved — agents can create tasks and begin implementation';
-      case 'rejected': return 'Spec was rejected — no further work should proceed on this spec';
-      case 'implemented': return 'All tasks linked to this spec have been completed';
+      case 'draft': return 'Synced from repo — not yet submitted for approval';
+      case 'pending': return 'Awaiting YOUR approval before agents can work on it';
+      case 'approved': return 'Approved — agents can create tasks and implement';
+      case 'rejected': return 'Rejected — implementation blocked';
+      case 'implemented': return 'All linked tasks completed';
       default: return '';
     }
   }
@@ -713,7 +713,7 @@
     total: wsMrs.length,
     open: wsMrs.filter(m => m.status === 'open').length,
     merged: wsMrs.filter(m => m.status === 'merged').length,
-    failed_gates: 0,
+    failed_gates: wsMrs.filter(m => m._gates?.failed > 0).length,
   });
 
   // ── Secondary tab bar ────────────────────────────────────────────────
@@ -1334,7 +1334,7 @@
                     aria-label={$t('workspace_home.open_spec', { values: { path: spec.path } })}
                   >
                     <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }} title="Go to repo">{repoMap[spec.repo_id].name}</button>{:else if spec.repo_id}<span class="mono" title={spec.repo_id}>{entityName('repo', spec.repo_id)}</span>{:else}—{/if}</td>
-                    <td class="spec-path">{spec.path}</td>
+                    <td class="spec-path" title={spec.path}>{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</td>
                     <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
                       <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
                       {spec.approval_status ?? spec.status ?? '—'}
@@ -1535,7 +1535,7 @@
                   {@const taskId = agent.task_id ?? agent.current_task_id}
                   {@const spawnedAt = agent.created_at ?? agent.spawned_at}
                   <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', agent.id, agent); }}>
-                    <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span></td>
+                    <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span>{#if agent.status === 'active' && spawnedAt}{@const elapsed = Math.round((Date.now() / 1000 - spawnedAt) / 60)}<span class="agent-elapsed" title="Running for {elapsed} minutes">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h${elapsed%60}m`}</span>{/if}</td>
                     <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }} title={agent.spec_path}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
@@ -2838,6 +2838,13 @@
   .status-backlog, .status-review, .status-pending {
     background: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
     color: var(--color-text-muted);
+  }
+
+  .agent-elapsed {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-left: var(--space-1);
+    font-family: var(--font-mono);
   }
 
   .priority-badge {
