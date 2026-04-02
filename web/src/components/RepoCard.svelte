@@ -12,6 +12,8 @@
     repo = null,
     health = 'idle',
     stats = {},
+    activeAgentNames = [],
+    specBreakdown = null,
     onclick = undefined,
   } = $props();
 
@@ -35,7 +37,15 @@
       <p class="repo-card-desc">{repo.description}</p>
     {/if}
     <div class="repo-card-stats">
-      {#if stats.specs != null}
+      {#if specBreakdown}
+        <span class="stat-chip" title="{specBreakdown.pending > 0 ? specBreakdown.pending + ' pending approval' : specBreakdown.approved + ' approved'}">
+          <span class="stat-icon" aria-hidden="true">S</span>
+          <span>{stats.specs ?? 0}</span>
+          {#if specBreakdown.pending > 0}
+            <span class="stat-alert">{specBreakdown.pending} pending</span>
+          {/if}
+        </span>
+      {:else if stats.specs != null}
         <span class="stat-chip" title="Specs">
           <span class="stat-icon" aria-hidden="true">S</span>
           <span>{stats.specs}</span>
@@ -48,13 +58,13 @@
         </span>
       {/if}
       {#if stats.agents != null && stats.agents > 0}
-        <span class="stat-chip stat-active" title="{stats.agents} agent{stats.agents !== 1 ? 's' : ''} actively implementing code">
+        <span class="stat-chip stat-active" class:stat-pulse={stats.agents > 0} title="{activeAgentNames.length > 0 ? activeAgentNames.join(', ') : stats.agents + ' agent' + (stats.agents !== 1 ? 's' : '')} actively implementing code">
           <span class="stat-icon" aria-hidden="true">A</span>
-          <span>{stats.agents} running</span>
+          <span>{activeAgentNames.length > 0 && activeAgentNames.length <= 2 ? activeAgentNames.join(', ') : stats.agents + ' running'}</span>
         </span>
       {/if}
       {#if stats.openMrs != null && stats.openMrs > 0}
-        <span class="stat-chip stat-open-mrs" title="{stats.openMrs} open merge request{stats.openMrs !== 1 ? 's' : ''} awaiting review or merge">
+        <span class="stat-chip stat-open-mrs" title="{stats.openMrs} open MR{stats.openMrs !== 1 ? 's' : ''}">
           <span class="stat-icon" aria-hidden="true">M</span>
           <span>{stats.openMrs} open</span>
         </span>
@@ -151,6 +161,22 @@
   .stat-active {
     color: var(--color-success);
     font-weight: 600;
+  }
+
+  .stat-pulse {
+    animation: agent-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  .stat-alert {
+    color: var(--color-warning);
+    font-weight: 500;
+    font-size: 10px;
+    margin-left: 2px;
   }
 
   .stat-open-mrs {
