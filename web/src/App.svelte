@@ -578,6 +578,8 @@
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
       if (mode === 'repo' && entityDetail) { window.history.back(); gKeyPending = false; return; }
       if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
+      if (mode === 'workspace_settings' || mode === 'agent_rules') { window.history.back(); gKeyPending = false; return; }
+      if (mode === 'cross_workspace' && crossWorkspaceTab) { window.history.back(); gKeyPending = false; return; }
       gKeyPending = false;
       return;
     }
